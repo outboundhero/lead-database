@@ -64,7 +64,7 @@ export function SidebarNav({ email, fullName, role }: SidebarNavProps) {
       <div className="flex items-center gap-2 h-14 px-4 border-b shrink-0">
         <Database className="h-5 w-5 shrink-0" />
         {!collapsed && (
-          <span className="font-semibold text-sm truncate">Renaissance DB</span>
+          <span className="font-semibold text-sm truncate">OutboundHero</span>
         )}
       </div>
 

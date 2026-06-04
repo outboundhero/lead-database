@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Email and role required" }, { status: 400 });
   }
 
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://database-renaissance-production.up.railway.app";
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || request.nextUrl.origin;
 
   let data: { user: { id: string } | null };
 

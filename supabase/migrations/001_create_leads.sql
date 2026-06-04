@@ -1,4 +1,4 @@
--- Renaissance Database: Core leads table
+-- OutboundHero Database: Core leads table
 -- This is the primary table (~10-20M rows)
 
 CREATE TABLE leads (

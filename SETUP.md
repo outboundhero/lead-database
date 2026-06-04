@@ -28,7 +28,7 @@ Decide ahead of time:
 
 ## Phase 1 — Rename / sanitize the codebase
 
-The repo was built for one client (Renaissance Database). Strip identifying details.
+The repo was originally built for one client (Renaissance Database) and re-forked for OutboundHero. Most identifying details have already been stripped; this section documents the work for future re-forks.
 
 ### 1.1 Find-and-replace hardcoded URLs
 
@@ -59,7 +59,7 @@ Change the `"name"` field if you want a different project name.
 cd /path/to/this/folder
 git init
 git add .
-git commit -m "Initial commit (based on opslab-database snapshot)"
+git commit -m "Initial commit (based on outboundhero-database snapshot)"
 # Then push to a new GitHub repo for the new client
 ```
 

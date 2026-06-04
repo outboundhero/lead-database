@@ -1,4 +1,4 @@
--- Renaissance Database: Dashboard snapshots
+-- OutboundHero Database: Dashboard snapshots
 -- Pre-aggregated data refreshed by pg_cron — never query leads table directly for dashboard
 
 CREATE TABLE dashboard_snapshots (

@@ -16,8 +16,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Renaissance Database",
-  description: "Internal lead management and filtering system",
+  title: "OutboundHero Database",
+  description: "OutboundHero lead database — filter, validate, and export contacts",
 };
 
 export default function RootLayout({

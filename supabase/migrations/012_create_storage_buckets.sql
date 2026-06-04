@@ -1,4 +1,4 @@
--- Renaissance Database: Storage buckets for exports and uploads
+-- OutboundHero Database: Storage buckets for exports and uploads
 
 INSERT INTO storage.buckets (id, name, public)
 VALUES

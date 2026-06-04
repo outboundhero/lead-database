@@ -1,4 +1,4 @@
--- Renaissance Database: Row Level Security policies
+-- OutboundHero Database: Row Level Security policies
 -- RLS is always on — no service role key on the frontend
 
 -- Helper function to get current user's role

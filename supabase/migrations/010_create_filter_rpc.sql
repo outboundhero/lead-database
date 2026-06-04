@@ -1,4 +1,4 @@
--- Renaissance Database: Server-side filtering RPC function
+-- OutboundHero Database: Server-side filtering RPC function
 -- All filtering goes through this function — server-side, indexed, sub-1-second
 
 CREATE OR REPLACE FUNCTION fn_filter_leads(

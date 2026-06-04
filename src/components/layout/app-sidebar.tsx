@@ -38,7 +38,7 @@ export function AppSidebar() {
       <SidebarHeader className="border-b px-4 py-3">
         <Link href="/leads" className="flex items-center gap-2">
           <Database className="h-5 w-5" />
-          <span className="font-semibold text-lg">Renaissance DB</span>
+          <span className="font-semibold text-lg">OutboundHero</span>
         </Link>
       </SidebarHeader>
       <SidebarContent>

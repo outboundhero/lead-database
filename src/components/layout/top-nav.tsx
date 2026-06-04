@@ -40,7 +40,7 @@ export function TopNav({ email, fullName, role }: TopNavProps) {
     <header className="flex h-14 shrink-0 items-center border-b px-4 gap-6">
       <Link href="/leads" className="flex items-center gap-2 shrink-0">
         <Database className="h-5 w-5" />
-        <span className="font-semibold text-lg hidden sm:inline">Renaissance DB</span>
+        <span className="font-semibold text-lg hidden sm:inline">OutboundHero</span>
       </Link>
 
       <nav className="flex items-center gap-1 flex-1 overflow-x-auto">

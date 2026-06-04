@@ -10,7 +10,7 @@ export async function GET(request: NextRequest) {
   // Use the public domain, not the internal container origin (localhost:8080)
   const origin = request.headers.get("x-forwarded-host")
     ? `${request.headers.get("x-forwarded-proto") || "https"}://${request.headers.get("x-forwarded-host")}`
-    : "https://database-renaissance-production.up.railway.app";
+    : process.env.NEXT_PUBLIC_SITE_URL || new URL(request.url).origin;
 
   const supabase = await createClient();
 

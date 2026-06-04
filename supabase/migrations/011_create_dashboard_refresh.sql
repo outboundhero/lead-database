@@ -1,4 +1,4 @@
--- Renaissance Database: Dashboard refresh function
+-- OutboundHero Database: Dashboard refresh function
 -- Called by pg_cron to pre-aggregate dashboard data
 
 CREATE OR REPLACE FUNCTION fn_refresh_dashboard()

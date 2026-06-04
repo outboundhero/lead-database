@@ -65,7 +65,7 @@ function AcceptInviteForm() {
     <Card>
       <CardHeader className="text-center">
         <CardTitle className="text-2xl font-bold">
-          Welcome to Renaissance Database
+          Welcome to OutboundHero
         </CardTitle>
         <p className="text-sm text-muted-foreground">
           Set up your account to get started

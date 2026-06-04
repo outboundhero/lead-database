@@ -1,4 +1,4 @@
--- Renaissance Database: Upload batches
+-- OutboundHero Database: Upload batches
 -- Tracks every CSV upload with progress and results
 
 CREATE TABLE upload_batches (

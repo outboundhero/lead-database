@@ -1,4 +1,4 @@
--- Renaissance Database: Companies table (normalized entity)
+-- OutboundHero Database: Companies table (normalized entity)
 
 CREATE TABLE companies (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

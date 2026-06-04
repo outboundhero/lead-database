@@ -1,4 +1,4 @@
--- Renaissance Database: Export jobs
+-- OutboundHero Database: Export jobs
 -- Tracks every export with filters, columns, status, and file path
 
 CREATE TABLE export_jobs (

@@ -1,4 +1,4 @@
--- Renaissance Database: Indexes
+-- OutboundHero Database: Indexes
 -- Critical for sub-1-second filtering at 10M+ rows
 
 -- Enable pg_trgm for fuzzy text search

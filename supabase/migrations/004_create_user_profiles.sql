@@ -1,4 +1,4 @@
--- Renaissance Database: User profiles (extends Supabase auth.users)
+-- OutboundHero Database: User profiles (extends Supabase auth.users)
 -- Roles: owner, admin, manager, viewer
 
 CREATE TABLE user_profiles (

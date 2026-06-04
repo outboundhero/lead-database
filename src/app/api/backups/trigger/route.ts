@@ -7,7 +7,7 @@ export async function POST(request: NextRequest) {
   try {
     // Generate a CSV backup of the leads table
     const timestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "_");
-    const fileName = `RenaissanceDB_Backup_${timestamp}.csv`;
+    const fileName = `OutboundHeroDB_Backup_${timestamp}.csv`;
 
     // Fetch all leads in chunks
     const allRows: string[] = [];

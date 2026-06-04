@@ -1,4 +1,4 @@
--- Renaissance Database: Lead history (audit log)
+-- OutboundHero Database: Lead history (audit log)
 -- Tracks every change, scrape, upload, and export event per lead
 
 CREATE TABLE lead_history (
