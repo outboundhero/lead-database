@@ -59,7 +59,15 @@ export function buildRpcFilters(filters: FilterState) {
     revenue: { buckets: filters.revenue?.buckets || [], includeUnknown: filters.revenue?.includeUnknown || false },
     fullName: filters.fullName || "",
     companyName: filters.companyName || "",
-    keyword: filters.keyword || "",
+    keyword: {
+      include: filters.keyword?.include ?? [],
+      exclude: filters.keyword?.exclude ?? [],
+    },
+    emailType: {
+      personal: filters.emailType?.personal ?? true,
+      general: filters.emailType?.general ?? true,
+    },
+    includeBounced: !!filters.includeBounced,
     excludeEmptyName: filters.excludeEmptyName || false,
     excludeEmptyCompany: filters.excludeEmptyCompany || false,
     excludeEmptyOverview: filters.excludeEmptyOverview || false,

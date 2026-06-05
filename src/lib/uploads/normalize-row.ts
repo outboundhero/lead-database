@@ -1,3 +1,6 @@
+import { detectEmailType } from "./detect-email-type";
+import { normalizeStateValue } from "./geography";
+
 export interface FieldMapping {
   [csvIndex: number]: string; // maps CSV column index → DB field key
 }
@@ -18,6 +21,12 @@ export function normalizeRow(
       case "email":
         lead.email = rawValue.toLowerCase().trim();
         break;
+      case "state": {
+        // Normalize US states + Canadian provinces to 2-letter codes
+        const normalized = normalizeStateValue(rawValue);
+        lead.state = normalized ?? rawValue;
+        break;
+      }
       case "company_size": {
         // Column is BIGINT — store raw number
         const n = parseInt(rawValue.replace(/[,$\s]/g, ""), 10);
@@ -53,6 +62,16 @@ export function normalizeRow(
         lead[dbField] = rawValue;
         break;
     }
+  }
+
+  // Auto-classify email type from name/title/email signals (Phase 3)
+  if (lead.email || lead.first_name || lead.last_name || lead.job_title) {
+    lead.email_type = detectEmailType({
+      email: lead.email as string | undefined,
+      first_name: lead.first_name as string | undefined,
+      last_name: lead.last_name as string | undefined,
+      job_title: lead.job_title as string | undefined,
+    });
   }
 
   return lead;

@@ -7,6 +7,8 @@ import type { Lead } from "@/types/database";
 import { buildRpcFilters } from "@/lib/filters/build-rpc-filters";
 import { findCursorForRangeStart } from "@/lib/exports/skip-cursor";
 import { getPool } from "@/lib/db/pool";
+import { validateLeads, isValidationEnabled } from "@/lib/validation/validate-leads";
+import { getTtlDays } from "@/lib/validation/cache-policy";
 
 // Kept for the auth/markJobError path. The actual export RPC calls go through
 // the direct pg pool below to bypass the Supabase HTTP gateway (~60s timeout).
@@ -143,6 +145,71 @@ export async function POST(request: NextRequest) {
       });
 
       try {
+        // ─── Pre-export validation pass ─────────────────────────────────
+        // For every lead matching the user's filters that hasn't been validated in
+        // the last VALIDATION_REVALIDATE_DAYS (default 45), run Reoon → FindEmail
+        // and write the result back. fn_export_leads then naturally excludes
+        // anything still invalid via its hard validation_status gate.
+        if (isValidationEnabled() && jobId) {
+          try {
+            const adminDb = createAdminClient();
+            const ttl = getTtlDays();
+            const cutoff = new Date(Date.now() - ttl * 24 * 60 * 60 * 1000).toISOString();
+            const pool = getPool();
+            const preScan = await pool.query(
+              `SELECT l.id, l.email
+               FROM leads l
+               WHERE (l.validation_status IS NULL OR l.validated_at < $1::timestamptz)
+                 AND l.is_bounced = false
+               LIMIT 200000`,
+              [cutoff],
+            );
+            const candidates = preScan.rows as { id: string; email: string }[];
+            if (candidates.length > 0) {
+              // Create the validation_jobs row so the UI can poll progress.
+              const { data: vjob } = await adminDb
+                .from("validation_jobs")
+                .insert({
+                  export_job_id: jobId,
+                  total: candidates.length,
+                  status: "running",
+                  started_at: new Date().toISOString(),
+                })
+                .select("id")
+                .single();
+              const vjobId = vjob?.id as string | undefined;
+
+              const outcome = await validateLeads(candidates, {
+                signal: request.signal,
+                onProgress: async (done, creditsUsed) => {
+                  if (!vjobId) return;
+                  await adminDb
+                    .from("validation_jobs")
+                    .update({ completed: done, credits_used: creditsUsed })
+                    .eq("id", vjobId);
+                },
+              });
+              if (vjobId) {
+                await adminDb
+                  .from("validation_jobs")
+                  .update({
+                    status: outcome.errors > 0 && outcome.errors === outcome.total ? "error" : "complete",
+                    completed: outcome.validated,
+                    credits_used: outcome.creditsUsed,
+                    completed_at: new Date().toISOString(),
+                  })
+                  .eq("id", vjobId);
+              }
+            }
+          } catch (vErr) {
+            // Don't fail the whole export if validation breaks — log and proceed.
+            // The export RPC's hard gate will still filter out anything that
+            // remained NULL, so the user will get fewer rows but not bad data.
+            console.error("Pre-export validation pass failed:", vErr);
+          }
+        }
+        // ────────────────────────────────────────────────────────────────
+
         // CSV header
         safeEnqueue(encoder.encode(columnSelection.join(",") + "\n"));
 

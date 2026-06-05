@@ -4,12 +4,14 @@ import { useCallback, useMemo, useReducer } from "react";
 import {
   type FilterState,
   type IncludeExclude,
+  type KeywordFilter,
+  type EmailTypeFilter,
   type RangeFilter,
   DEFAULT_FILTER_STATE,
 } from "@/types/filters";
 
 type FilterAction =
-  | { type: "SET_TEXT"; field: "fullName" | "companyName" | "keyword"; value: string }
+  | { type: "SET_TEXT"; field: "fullName" | "companyName"; value: string }
   | { type: "SET_INCLUDE_EXCLUDE"; field: string; value: IncludeExclude }
   | { type: "SET_RANGE"; field: "companySize" | "revenue"; value: RangeFilter }
   | { type: "SET_LOCATION_COUNTRY"; value: IncludeExclude }
@@ -17,6 +19,9 @@ type FilterAction =
   | { type: "SET_LOCATION_CITY"; value: string }
   | { type: "SET_FILTER_OPERATOR"; value: "AND" | "OR" }
   | { type: "TOGGLE_FLAG"; field: "excludeEmptyName" | "excludeEmptyCompany" | "excludeEmptyOverview"; value: boolean }
+  | { type: "SET_KEYWORD"; value: KeywordFilter }
+  | { type: "SET_EMAIL_TYPE"; value: EmailTypeFilter }
+  | { type: "SET_INCLUDE_BOUNCED"; value: boolean }
   | { type: "SET_PAGE"; value: number }
   | { type: "SET_PAGE_SIZE"; value: number }
   | { type: "SET_SORT"; sortBy: string; sortDir: "asc" | "desc" }
@@ -41,6 +46,12 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
       return { ...state, filterOperator: action.value, page: 1 };
     case "TOGGLE_FLAG":
       return { ...state, [action.field]: action.value, page: 1 };
+    case "SET_KEYWORD":
+      return { ...state, keyword: action.value, page: 1 };
+    case "SET_EMAIL_TYPE":
+      return { ...state, emailType: action.value, page: 1 };
+    case "SET_INCLUDE_BOUNCED":
+      return { ...state, includeBounced: action.value, page: 1 };
     case "SET_PAGE":
       return { ...state, page: action.value };
     case "SET_PAGE_SIZE":
@@ -60,7 +71,7 @@ export function useFilters() {
   const [filters, dispatch] = useReducer(filterReducer, DEFAULT_FILTER_STATE);
 
   const setText = useCallback(
-    (field: "fullName" | "companyName" | "keyword", value: string) => {
+    (field: "fullName" | "companyName", value: string) => {
       dispatch({ type: "SET_TEXT", field, value });
     },
     []
@@ -112,6 +123,18 @@ export function useFilters() {
     dispatch({ type: "TOGGLE_FLAG", field, value });
   }, []);
 
+  const setKeyword = useCallback((value: KeywordFilter) => {
+    dispatch({ type: "SET_KEYWORD", value });
+  }, []);
+
+  const setEmailType = useCallback((value: EmailTypeFilter) => {
+    dispatch({ type: "SET_EMAIL_TYPE", value });
+  }, []);
+
+  const setIncludeBounced = useCallback((value: boolean) => {
+    dispatch({ type: "SET_INCLUDE_BOUNCED", value });
+  }, []);
+
   const loadPreset = useCallback((filters: FilterState) => {
     dispatch({ type: "LOAD_PRESET", filters });
   }, []);
@@ -131,6 +154,9 @@ export function useFilters() {
       setLocationCity,
       setFilterOperator,
       toggleFlag,
+      setKeyword,
+      setEmailType,
+      setIncludeBounced,
       setPage,
       setPageSize,
       setSort,
@@ -147,6 +173,9 @@ export function useFilters() {
       setLocationCity,
       setFilterOperator,
       toggleFlag,
+      setKeyword,
+      setEmailType,
+      setIncludeBounced,
       setPage,
       setPageSize,
       setSort,

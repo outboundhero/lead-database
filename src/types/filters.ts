@@ -18,6 +18,18 @@ export interface LocationFilter {
   city: string;
 }
 
+// New for OutboundHero — IncludeExclude shape for the keyword filter (was a plain string).
+export interface KeywordFilter {
+  include: string[];
+  exclude: string[];
+}
+
+// New for OutboundHero — email type segmented control. Default: both true.
+export interface EmailTypeFilter {
+  personal: boolean;
+  general: boolean;
+}
+
 export interface FilterState {
   // Global logic between fields
   filterOperator: "AND" | "OR";
@@ -44,8 +56,13 @@ export interface FilterState {
   companySize: RangeFilter;
   revenue: RangeFilter;
 
-  // Keyword
-  keyword: string;
+  // Keyword (now include + exclude, multi-field ILIKE across company_name,
+  // general_industry, specific_industry, company_overview)
+  keyword: KeywordFilter;
+
+  // OutboundHero additions
+  emailType: EmailTypeFilter;          // default both true → no filter
+  includeBounced?: boolean;             // admin-only override; default false → hide bounced
 
   // Pagination
   page: number;
@@ -78,7 +95,9 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   },
   companySize: { buckets: [], includeUnknown: false },
   revenue: { buckets: [], includeUnknown: false },
-  keyword: "",
+  keyword: { include: [], exclude: [] },
+  emailType: { personal: true, general: true },
+  includeBounced: false,
   page: 1,
   pageSize: 50,
   sortBy: "created_at",
@@ -101,6 +120,9 @@ export function countActiveFilters(filters: FilterState): number {
   if (filters.location.city) count++;
   if (filters.companySize.buckets.length || filters.companySize.includeUnknown || filters.companySize.customMin || filters.companySize.customMax) count++;
   if (filters.revenue.buckets.length || filters.revenue.includeUnknown) count++;
-  if (filters.keyword) count++;
+  if (filters.keyword.include.length || filters.keyword.exclude.length) count++;
+  // emailType counts as active only when not both selected (i.e. user has restricted)
+  if (!(filters.emailType.personal && filters.emailType.general)) count++;
+  if (filters.includeBounced) count++;
   return count;
 }

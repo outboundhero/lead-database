@@ -13,8 +13,18 @@ import { FilterText } from "./filter-text";
 import { FilterMultiSelect } from "./filter-multi-select";
 import { FilterRange } from "./filter-range";
 import { FilterPresets } from "./filter-presets";
-import type { FilterState, IncludeExclude, RangeFilter } from "@/types/filters";
+import type {
+  FilterState,
+  IncludeExclude,
+  RangeFilter,
+  KeywordFilter,
+  EmailTypeFilter,
+} from "@/types/filters";
 import { countActiveFilters } from "@/types/filters";
+import { IosSegmentedControl } from "@/components/ui/ios/ios-segmented-control";
+import { IosToggle } from "@/components/ui/ios/ios-toggle";
+import { TagInput } from "@/components/ui/ios/tag-input";
+import { useHasPermission } from "@/lib/context/role-context";
 import {
   COMPANY_SIZE_BUCKETS,
   REVENUE_BUCKETS,
@@ -24,7 +34,7 @@ import { createClient } from "@/lib/supabase/client";
 
 interface FilterBarProps {
   filters: FilterState;
-  onTextChange: (field: "fullName" | "companyName" | "keyword", value: string) => void;
+  onTextChange: (field: "fullName" | "companyName", value: string) => void;
   onIncludeExcludeChange: (field: string, value: IncludeExclude) => void;
   onRangeChange: (field: "companySize" | "revenue", value: RangeFilter) => void;
   onLocationCountryChange: (value: IncludeExclude) => void;
@@ -32,6 +42,9 @@ interface FilterBarProps {
   onLocationCityChange: (value: string) => void;
   onFilterOperatorChange: (value: "AND" | "OR") => void;
   onToggleFlag: (field: "excludeEmptyName" | "excludeEmptyCompany" | "excludeEmptyOverview", value: boolean) => void;
+  onKeywordChange: (value: KeywordFilter) => void;
+  onEmailTypeChange: (value: EmailTypeFilter) => void;
+  onIncludeBouncedChange: (value: boolean) => void;
   onLoadPreset?: (filters: FilterState) => void;
   onReset: () => void;
 }
@@ -84,9 +97,28 @@ export function FilterBar({
   onLocationCityChange,
   onFilterOperatorChange,
   onToggleFlag,
+  onKeywordChange,
+  onEmailTypeChange,
+  onIncludeBouncedChange,
   onLoadPreset,
   onReset,
 }: FilterBarProps) {
+  const isAdmin = useHasPermission("admin");
+
+  // Derive 3-way segmented control value from the {personal, general} pair
+  const emailTypeValue: "personal" | "general" | "both" =
+    filters.emailType.personal && filters.emailType.general
+      ? "both"
+      : filters.emailType.personal
+      ? "personal"
+      : "general";
+
+  const handleEmailTypeChange = (v: "personal" | "general" | "both") => {
+    if (v === "both") onEmailTypeChange({ personal: true, general: true });
+    else if (v === "personal") onEmailTypeChange({ personal: true, general: false });
+    else onEmailTypeChange({ personal: false, general: true });
+  };
+
   const activeCount = countActiveFilters(filters);
   const op = filters.filterOperator ?? "AND";
 
@@ -379,14 +411,85 @@ export function FilterBar({
           />
         </FilterChip>
 
-        {/* Keywords */}
-        <FilterChip label="Keywords" activeCount={filters.keyword ? 1 : 0}>
-          <FilterText
-            placeholder="Search keywords..."
-            value={filters.keyword}
-            onChange={(v) => onTextChange("keyword", v)}
-          />
+        {/* Keywords — include + exclude, multi-field across company name / industries / overview */}
+        <FilterChip
+          label="Keywords"
+          activeCount={filters.keyword.include.length + filters.keyword.exclude.length}
+        >
+          <div className="space-y-3">
+            <div>
+              <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Include
+              </label>
+              <TagInput
+                values={filters.keyword.include}
+                placeholder="e.g. cleaning, plumbing"
+                onChange={(arr) =>
+                  onKeywordChange({ ...filters.keyword, include: arr })
+                }
+              />
+            </div>
+            <div>
+              <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Exclude
+              </label>
+              <TagInput
+                values={filters.keyword.exclude}
+                placeholder="e.g. restaurant"
+                onChange={(arr) =>
+                  onKeywordChange({ ...filters.keyword, exclude: arr })
+                }
+              />
+            </div>
+            <p className="px-1 text-[11px] text-muted-foreground">
+              Matched against company name, general & specific industry, and company overview.
+            </p>
+          </div>
         </FilterChip>
+
+        {/* Email type — Personal vs General vs Both (segmented control) */}
+        <FilterChip
+          label="Email Type"
+          activeCount={filters.emailType.personal && filters.emailType.general ? 0 : 1}
+        >
+          <div className="space-y-3">
+            <IosSegmentedControl
+              fullWidth
+              value={emailTypeValue}
+              onChange={handleEmailTypeChange}
+              options={[
+                { value: "personal", label: "Personal" },
+                { value: "general", label: "General" },
+                { value: "both", label: "Both" },
+              ]}
+            />
+            <p className="px-1 text-[11px] text-muted-foreground">
+              <span className="font-medium text-foreground">Personal</span> = decision-maker;{" "}
+              <span className="font-medium text-foreground">General</span> = role-based / shared inbox.
+            </p>
+          </div>
+        </FilterChip>
+
+        {/* Admin-only: include bounced rows in the filter view */}
+        {isAdmin && (
+          <FilterChip
+            label="Bounced"
+            activeCount={filters.includeBounced ? 1 : 0}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="text-[14px] font-medium">Include bounced</p>
+                <p className="text-[12px] text-muted-foreground">
+                  Show contacts that bounced from past campaigns. Exports always exclude them.
+                </p>
+              </div>
+              <IosToggle
+                checked={!!filters.includeBounced}
+                onCheckedChange={onIncludeBouncedChange}
+              />
+            </div>
+          </FilterChip>
+        )}
 
         {/* ESP — dynamic from DB */}
         <FilterChip

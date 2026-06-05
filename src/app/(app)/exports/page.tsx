@@ -24,7 +24,13 @@ function formatFilterSummary(filtersUsed: Record<string, unknown> | null): strin
   const parts: string[] = [];
   if (filtersUsed.fullName) parts.push(`Name: "${filtersUsed.fullName}"`);
   if (filtersUsed.companyName) parts.push(`Company: "${filtersUsed.companyName}"`);
-  if (filtersUsed.keyword) parts.push(`Keyword: "${filtersUsed.keyword}"`);
+  const keyword = filtersUsed.keyword as { include?: string[]; exclude?: string[] } | string | undefined;
+  if (typeof keyword === "string" && keyword) {
+    parts.push(`Keyword: "${keyword}"`);
+  } else if (keyword && typeof keyword === "object") {
+    if (keyword.include?.length) parts.push(`Keyword: ${keyword.include.join(", ")}`);
+    if (keyword.exclude?.length) parts.push(`Excl: ${keyword.exclude.join(", ")}`);
+  }
   const source = filtersUsed.source as { include?: string[] } | undefined;
   if (source?.include?.length) parts.push(`Source: ${source.include.join(", ")}`);
   const seniority = filtersUsed.seniority as { include?: string[] } | undefined;

@@ -20,7 +20,7 @@ import {
 
 interface FilterSidebarProps {
   filters: FilterState;
-  onTextChange: (field: "fullName" | "companyName" | "keyword", value: string) => void;
+  onTextChange: (field: "fullName" | "companyName", value: string) => void;
   onIncludeExcludeChange: (field: string, value: IncludeExclude) => void;
   onRangeChange: (field: "companySize" | "revenue", value: RangeFilter) => void;
   onLocationCountryChange: (value: IncludeExclude) => void;
@@ -238,13 +238,14 @@ export function FilterSidebar({
         </div>
       </FilterGroup>
 
-      {/* Keywords */}
-      <FilterGroup title="Keywords" activeCount={filters.keyword ? 1 : 0}>
-        <FilterText
-          placeholder="Search keywords..."
-          value={filters.keyword}
-          onChange={(v) => onTextChange("keyword", v)}
-        />
+      {/* Keywords — legacy sidebar input. Use FilterBar for include/exclude support. */}
+      <FilterGroup
+        title="Keywords"
+        activeCount={filters.keyword.include.length + filters.keyword.exclude.length}
+      >
+        <p className="text-xs text-muted-foreground">
+          Keyword filtering moved to the chip bar above.
+        </p>
       </FilterGroup>
     </div>
   );

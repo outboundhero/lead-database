@@ -34,6 +34,9 @@ export default function LeadsPage() {
     setLocationCity,
     setFilterOperator,
     toggleFlag,
+    setKeyword,
+    setEmailType,
+    setIncludeBounced,
     setPage,
     setPageSize,
     setSort,
@@ -104,6 +107,9 @@ export default function LeadsPage() {
           onLocationCityChange={setLocationCity}
           onFilterOperatorChange={setFilterOperator}
           onToggleFlag={toggleFlag}
+          onKeywordChange={setKeyword}
+          onEmailTypeChange={setEmailType}
+          onIncludeBouncedChange={setIncludeBounced}
           onLoadPreset={loadPreset}
           onReset={resetFilters}
         />
