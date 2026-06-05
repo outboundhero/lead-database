@@ -1,6 +1,6 @@
 "use client";
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { Users, Briefcase, Building2, Factory } from "lucide-react";
 import type { DashboardSnapshot } from "@/types/database";
 
@@ -14,39 +14,49 @@ export function StatCards({ snapshot }: StatCardsProps) {
       label: "Total Leads",
       value: snapshot?.total_leads,
       icon: Users,
+      tint: "text-[oklch(0.586_0.214_263)]",
+      bg: "bg-[oklch(0.586_0.214_263)]/12",
     },
     {
       label: "Job Titles",
       value: snapshot?.total_job_titles,
       icon: Briefcase,
+      tint: "text-[oklch(0.745_0.183_145)]",
+      bg: "bg-[oklch(0.745_0.183_145)]/12",
     },
     {
       label: "General Industries",
       value: snapshot?.total_general_industries,
       icon: Building2,
+      tint: "text-[oklch(0.78_0.175_65)]",
+      bg: "bg-[oklch(0.78_0.175_65)]/12",
     },
     {
       label: "Specific Industries",
       value: snapshot?.total_specific_industries,
       icon: Factory,
+      tint: "text-[oklch(0.52_0.21_290)]",
+      bg: "bg-[oklch(0.52_0.21_290)]/12",
     },
   ];
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       {stats.map((stat) => (
-        <Card key={stat.label}>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">
+        <Card key={stat.label} className="gap-3 p-5">
+          <div className="flex items-center justify-between">
+            <p className="text-[13px] font-medium text-muted-foreground">
               {stat.label}
-            </CardTitle>
-            <stat.icon className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-bold">
-              {stat.value != null ? stat.value.toLocaleString() : "—"}
             </p>
-          </CardContent>
+            <div
+              className={`flex size-9 items-center justify-center rounded-xl ${stat.bg}`}
+            >
+              <stat.icon className={`size-[18px] ${stat.tint}`} strokeWidth={1.75} />
+            </div>
+          </div>
+          <p className="text-[32px] font-semibold leading-none tracking-tight">
+            {stat.value != null ? stat.value.toLocaleString() : "—"}
+          </p>
         </Card>
       ))}
     </div>

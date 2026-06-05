@@ -47,26 +47,27 @@ function FilterChip({
   children: React.ReactNode;
   onOpen?: () => void;
 }) {
+  const active = activeCount > 0;
   return (
     <Popover onOpenChange={(open) => { if (open && onOpen) onOpen(); }}>
       <PopoverTrigger asChild>
         <button
-          className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm transition-colors hover:bg-muted/50 ${
-            activeCount > 0
-              ? "border-primary/40 bg-primary/5 text-foreground"
-              : "border-border text-muted-foreground"
+          className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3.5 text-[13px] font-medium transition-all active:scale-[0.97] ${
+            active
+              ? "bg-primary/12 text-primary"
+              : "bg-muted text-foreground hover:bg-accent"
           }`}
         >
           {label}
-          {activeCount > 0 && (
-            <Badge variant="secondary" className="h-4 min-w-4 px-1 text-[10px] rounded-full">
+          {active && (
+            <Badge variant="tinted" className="h-4 min-w-4 rounded-full px-1.5 text-[10px]">
               {activeCount}
             </Badge>
           )}
-          <ChevronDown className="h-3 w-3 opacity-50" />
+          <ChevronDown className="size-3 opacity-60" strokeWidth={2.25} />
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-64 p-3">
+      <PopoverContent align="start" className="w-64">
         {children}
       </PopoverContent>
     </Popover>
@@ -172,33 +173,25 @@ export function FilterBar({
   }, [loadDistinctFor]);
 
   return (
-    <div className="border-b bg-background px-4 py-3 space-y-2">
+    <div className="ios-frost sticky top-0 z-20 space-y-2 border-b border-border/40 px-6 py-3">
       {/* Chips row */}
       <div className="flex flex-wrap items-center gap-2">
-        {/* AND/OR toggle */}
-        <div className="flex items-center border rounded-full overflow-hidden mr-1">
-          <button
-            type="button"
-            onClick={() => onFilterOperatorChange("AND")}
-            className={`px-2.5 py-1 text-xs font-semibold transition-colors ${
-              op === "AND"
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-muted"
-            }`}
-          >
-            AND
-          </button>
-          <button
-            type="button"
-            onClick={() => onFilterOperatorChange("OR")}
-            className={`px-2.5 py-1 text-xs font-semibold transition-colors ${
-              op === "OR"
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-muted"
-            }`}
-          >
-            OR
-          </button>
+        {/* AND/OR — iOS segmented control */}
+        <div className="mr-1 inline-flex h-8 items-center rounded-full bg-muted p-0.5">
+          {(["AND", "OR"] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => onFilterOperatorChange(value)}
+              className={`rounded-full px-3 text-[12px] font-semibold transition-all ${
+                op === value
+                  ? "bg-card text-foreground shadow-[0_2px_6px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.06)]"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {value}
+            </button>
+          ))}
         </div>
 
         {/* Enter Name */}
@@ -418,10 +411,10 @@ export function FilterBar({
           <Button
             variant="ghost"
             size="sm"
-            className="h-8 text-xs gap-1 text-muted-foreground"
+            className="h-8 text-destructive hover:bg-destructive/10"
             onClick={onReset}
           >
-            <RotateCcw className="h-3 w-3" />
+            <RotateCcw className="size-3.5" strokeWidth={2} />
             Reset
           </Button>
         )}

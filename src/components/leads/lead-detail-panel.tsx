@@ -1,16 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { X, ExternalLink, Mail, Phone, Building2, MapPin, Trash2 } from "lucide-react";
+import { ExternalLink, MapPin, Trash2 } from "lucide-react";
 import {
   Sheet,
   SheetContent,
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import { LeadHistory } from "./lead-history";
 import { useRole } from "@/lib/context/role-context";
 import { createClient } from "@/lib/supabase/client";
@@ -35,22 +33,35 @@ function DetailRow({
 }) {
   if (!value) return null;
   return (
-    <div className="flex justify-between items-start gap-2 py-1">
-      <span className="text-xs text-muted-foreground shrink-0">{label}</span>
+    <div className="flex items-start justify-between gap-2 px-4 py-2.5 transition-colors hover:bg-muted/40">
+      <span className="shrink-0 text-[13px] text-muted-foreground">{label}</span>
       {href ? (
         <a
           href={href}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-xs text-right truncate hover:underline flex items-center gap-1"
+          className="flex items-center gap-1 truncate text-right text-[13px] font-medium text-primary hover:opacity-80"
         >
           {value}
-          <ExternalLink className="h-3 w-3 shrink-0" />
+          <ExternalLink className="size-3 shrink-0" strokeWidth={2} />
         </a>
       ) : (
-        <span className="text-xs text-right truncate">{value}</span>
+        <span className="truncate text-right text-[13px] font-medium">{value}</span>
       )}
     </div>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="space-y-2">
+      <h4 className="px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {title}
+      </h4>
+      <div className="overflow-hidden rounded-2xl bg-muted/40 [&>*:not(:first-child)]:border-t [&>*:not(:first-child)]:border-border/40">
+        {children}
+      </div>
+    </section>
   );
 }
 
@@ -136,144 +147,107 @@ export function LeadDetailPanel({
           </div>
         </SheetHeader>
 
-        <div className="mt-4 space-y-4">
-          {/* Contact */}
-          <section>
-            <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">
-              Contact
-            </h4>
-            <div className="space-y-0.5">
-              <DetailRow
-                label="Email"
-                value={lead.email}
-                href={`mailto:${lead.email}`}
-              />
-              <DetailRow label="Phone" value={lead.phone} />
-              <DetailRow
-                label="LinkedIn"
-                value={lead.person_linkedin ? "Profile" : null}
-                href={lead.person_linkedin ?? undefined}
-              />
-            </div>
-          </section>
+        <div className="mt-4 space-y-5">
+          <Section title="Contact">
+            <DetailRow label="Email" value={lead.email} href={`mailto:${lead.email}`} />
+            <DetailRow label="Phone" value={lead.phone} />
+            <DetailRow
+              label="LinkedIn"
+              value={lead.person_linkedin ? "Profile" : null}
+              href={lead.person_linkedin ?? undefined}
+            />
+          </Section>
 
-          <Separator />
+          <Section title="Company">
+            <DetailRow label="Company" value={lead.company_name_raw} />
+            <DetailRow
+              label="Website"
+              value={lead.website}
+              href={
+                lead.website
+                  ? lead.website.startsWith("http")
+                    ? lead.website
+                    : `https://${lead.website}`
+                  : undefined
+              }
+            />
+            <DetailRow
+              label="Size"
+              value={lead.company_size != null ? lead.company_size.toLocaleString() : null}
+            />
+            <DetailRow
+              label="Revenue"
+              value={
+                lead.annual_revenue != null
+                  ? lead.annual_revenue >= 1e9
+                    ? `$${(lead.annual_revenue / 1e9).toFixed(1)}B`
+                    : lead.annual_revenue >= 1e6
+                    ? `$${(lead.annual_revenue / 1e6).toFixed(1)}M`
+                    : `$${lead.annual_revenue.toLocaleString()}`
+                  : null
+              }
+            />
+            <DetailRow
+              label="Company LinkedIn"
+              value={lead.company_linkedin ? "Profile" : null}
+              href={lead.company_linkedin ?? undefined}
+            />
+            <DetailRow label="Domain" value={lead.domain} />
+          </Section>
 
-          {/* Company */}
-          <section>
-            <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">
-              Company
-            </h4>
-            <div className="space-y-0.5">
-              <DetailRow label="Company" value={lead.company_name_raw} />
-              <DetailRow
-                label="Website"
-                value={lead.website}
-                href={
-                  lead.website
-                    ? lead.website.startsWith("http")
-                      ? lead.website
-                      : `https://${lead.website}`
-                    : undefined
-                }
-              />
-              <DetailRow label="Size" value={lead.company_size != null ? lead.company_size.toLocaleString() : null} />
-              <DetailRow label="Revenue" value={lead.annual_revenue != null ? (lead.annual_revenue >= 1e9 ? `$${(lead.annual_revenue / 1e9).toFixed(1)}B` : lead.annual_revenue >= 1e6 ? `$${(lead.annual_revenue / 1e6).toFixed(1)}M` : `$${lead.annual_revenue.toLocaleString()}`) : null} />
-              <DetailRow
-                label="Company LinkedIn"
-                value={lead.company_linkedin ? "Profile" : null}
-                href={lead.company_linkedin ?? undefined}
-              />
-              <DetailRow label="Domain" value={lead.domain} />
-            </div>
-          </section>
+          <Section title="Classification">
+            <DetailRow label="Seniority" value={lead.seniority} />
+            <DetailRow label="General industry" value={lead.general_industry} />
+            <DetailRow label="Specific industry" value={lead.specific_industry} />
+            <DetailRow label="ESP" value={lead.esp} />
+            <DetailRow label="Source" value={lead.source} />
+            <DetailRow label="Status" value={lead.status} />
+          </Section>
 
-          <Separator />
-
-          {/* Classification */}
-          <section>
-            <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">
-              Classification
-            </h4>
-            <div className="space-y-0.5">
-              <DetailRow label="Seniority" value={lead.seniority} />
-              <DetailRow label="General Industry" value={lead.general_industry} />
-              <DetailRow label="Specific Industry" value={lead.specific_industry} />
-              <DetailRow label="ESP" value={lead.esp} />
-              <DetailRow label="Source" value={lead.source} />
-              <DetailRow label="Status" value={lead.status} />
-            </div>
-          </section>
-
-          {/* Keywords */}
           {lead.keywords && (
-            <>
-              <Separator />
-              <section>
-                <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">
-                  Keywords
-                </h4>
-                <p className="text-xs text-muted-foreground">{lead.keywords}</p>
-              </section>
-            </>
+            <Section title="Keywords">
+              <p className="px-4 py-3 text-[13px] leading-relaxed text-foreground">
+                {lead.keywords}
+              </p>
+            </Section>
           )}
 
-          {/* Company Overview */}
           {lead.company_overview && (
-            <>
-              <Separator />
-              <section>
-                <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">
-                  Company Overview
-                </h4>
-                <p className="text-xs text-muted-foreground leading-relaxed">
-                  {lead.company_overview}
-                </p>
-              </section>
-            </>
+            <Section title="Company overview">
+              <p className="px-4 py-3 text-[13px] leading-relaxed text-foreground">
+                {lead.company_overview}
+              </p>
+            </Section>
           )}
 
-          {/* Location */}
           {location && (
-            <>
-              <Separator />
-              <section>
-                <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">
-                  Location
-                </h4>
-                <div className="flex items-center gap-1.5 text-xs">
-                  <MapPin className="h-3.5 w-3.5 text-muted-foreground" />
-                  {location}
-                </div>
-              </section>
-            </>
+            <Section title="Location">
+              <div className="flex items-center gap-2 px-4 py-3 text-[13px]">
+                <MapPin className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
+                {location}
+              </div>
+            </Section>
           )}
 
-          <Separator />
-
-          {/* History */}
-          <section>
-            <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">
-              History
-            </h4>
-            <LeadHistory leadId={lead.id} />
-          </section>
-
-          {/* Metadata */}
-          <Separator />
-          <section className="pb-4">
-            <div className="space-y-0.5">
-              <DetailRow label="ID" value={lead.id} />
-              <DetailRow
-                label="Created"
-                value={new Date(lead.created_at).toLocaleDateString()}
-              />
-              <DetailRow
-                label="Updated"
-                value={new Date(lead.updated_at).toLocaleDateString()}
-              />
+          <Section title="History">
+            <div className="px-4 py-3">
+              <LeadHistory leadId={lead.id} />
             </div>
-          </section>
+          </Section>
+
+          <Section title="Metadata">
+            <DetailRow label="ID" value={lead.id} />
+            <DetailRow
+              label="Created"
+              value={new Date(lead.created_at).toLocaleDateString()}
+            />
+            <DetailRow
+              label="Updated"
+              value={new Date(lead.updated_at).toLocaleDateString()}
+            />
+          </Section>
+
+          <div className="h-4" />
         </div>
       </SheetContent>
     </Sheet>

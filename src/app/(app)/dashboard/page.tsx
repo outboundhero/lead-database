@@ -84,14 +84,18 @@ export default function DashboardPage() {
   if (!canView) return <AccessDenied />;
 
   return (
-    <div className="space-y-6 p-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Dashboard</h1>
-        <div className="flex items-center gap-1">
+    <div className="space-y-6">
+      <div className="flex items-end justify-between">
+        <div>
+          <h1 className="text-[28px] font-semibold tracking-tight">Dashboard</h1>
+          <p className="mt-0.5 text-[13px] text-muted-foreground">
+            Snapshot of your lead database
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
           <Button
-            variant="outline"
+            variant="tinted"
             size="sm"
-            className="text-xs h-7 gap-1"
             disabled={refreshing}
             onClick={async () => {
               setRefreshing(true);
@@ -105,55 +109,57 @@ export default function DashboardPage() {
               }
             }}
           >
-            <RefreshCw className={`h-3 w-3 ${refreshing ? "animate-spin" : ""}`} />
-            {refreshing ? "Refreshing..." : "Refresh"}
+            <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} strokeWidth={2} />
+            {refreshing ? "Refreshing…" : "Refresh"}
           </Button>
-          {(["all", "7d", "30d"] as TimeRange[]).map((range) => (
-            <Button
-              key={range}
-              variant={timeRange === range ? "default" : "outline"}
-              size="sm"
-              className="text-xs h-7"
-              onClick={() => setTimeRange(range)}
-            >
-              {range === "all" ? "All Time" : range === "7d" ? "7 Days" : "30 Days"}
-            </Button>
-          ))}
+          <div className="inline-flex h-9 items-center rounded-full bg-muted p-0.5">
+            {(["all", "7d", "30d"] as TimeRange[]).map((range) => (
+              <button
+                key={range}
+                onClick={() => setTimeRange(range)}
+                className={`rounded-full px-3 text-[13px] font-medium transition-all ${
+                  timeRange === range
+                    ? "bg-card text-foreground shadow-[0_2px_6px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.06)]"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {range === "all" ? "All time" : range === "7d" ? "7 days" : "30 days"}
+              </button>
+            ))}
+          </div>
           <Popover>
             <PopoverTrigger asChild>
-              <Button
-                variant={timeRange === "custom" ? "default" : "outline"}
-                size="sm"
-                className="text-xs h-7 gap-1"
-              >
-                <CalendarDays className="h-3 w-3" />
+              <Button variant={timeRange === "custom" ? "default" : "tinted"} size="sm">
+                <CalendarDays className="size-3.5" strokeWidth={2} />
                 {timeRange === "custom" && customFrom
                   ? `${customFrom}${customTo ? ` — ${customTo}` : ""}`
-                  : "Custom Range"}
+                  : "Custom"}
               </Button>
             </PopoverTrigger>
-            <PopoverContent align="end" className="w-64 p-3 space-y-3">
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">From</label>
+            <PopoverContent align="end" className="w-72 space-y-3">
+              <div className="space-y-1.5">
+                <label className="block px-1 text-[12px] font-medium text-muted-foreground">
+                  From
+                </label>
                 <Input
                   type="date"
                   value={customFrom}
                   onChange={(e) => setCustomFrom(e.target.value)}
-                  className="h-8 text-xs"
                 />
               </div>
-              <div>
-                <label className="text-xs text-muted-foreground mb-1 block">To</label>
+              <div className="space-y-1.5">
+                <label className="block px-1 text-[12px] font-medium text-muted-foreground">
+                  To
+                </label>
                 <Input
                   type="date"
                   value={customTo}
                   onChange={(e) => setCustomTo(e.target.value)}
-                  className="h-8 text-xs"
                 />
               </div>
               <Button
                 size="sm"
-                className="w-full text-xs h-7"
+                className="w-full"
                 disabled={!customFrom}
                 onClick={() => setTimeRange("custom")}
               >
@@ -165,11 +171,13 @@ export default function DashboardPage() {
       </div>
 
       {loading ? (
-        <p className="text-sm text-muted-foreground">Loading dashboard...</p>
+        <p className="text-[14px] text-muted-foreground">Loading dashboard…</p>
       ) : !snapshot ? (
-        <p className="text-sm text-muted-foreground">
-          No dashboard snapshot available. Snapshots are generated periodically.
-        </p>
+        <div className="rounded-2xl bg-card p-8 text-center shadow-ios">
+          <p className="text-[14px] text-muted-foreground">
+            No dashboard snapshot available. Snapshots are generated periodically.
+          </p>
+        </div>
       ) : (
         <>
           <StatCards snapshot={snapshot} />

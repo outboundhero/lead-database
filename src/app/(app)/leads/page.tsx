@@ -91,9 +91,9 @@ export default function LeadsPage() {
   }, [debouncedFilters]);
 
   return (
-    <div className="flex flex-col h-[calc(100vh-7.5rem)]">
-      {/* Filter bar below search */}
-      <div className="-mx-4 -mt-4">
+    <div className="flex h-[calc(100vh-7.5rem)] flex-col gap-4">
+      {/* Filter bar */}
+      <div className="-mx-6 -mt-6">
         <FilterBar
           filters={filters}
           onTextChange={setText}
@@ -109,37 +109,48 @@ export default function LeadsPage() {
         />
       </div>
 
-      {/* Header */}
-      <div className="flex items-center justify-between py-3">
-        <h1 className="text-lg font-semibold">Leads</h1>
-        <div className="flex items-center gap-3">
-          <select
-            className="h-8 rounded-md border bg-background px-2 text-xs text-muted-foreground cursor-pointer"
-            value={`${filters.sortBy}:${filters.sortDir}`}
-            onChange={(e) => {
-              const [sortBy, sortDir] = e.target.value.split(":");
-              setSort(sortBy, sortDir as "asc" | "desc");
-            }}
-          >
-            <option value="created_at:desc" disabled>Sort by...</option>
-            {SORT_OPTIONS.map((opt) => (
-              <option key={`${opt.sortBy}:${opt.sortDir}`} value={`${opt.sortBy}:${opt.sortDir}`}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-          <span
-            className="text-xs text-muted-foreground"
+      {/* Header — iOS large title style */}
+      <div className="flex items-end justify-between pb-1">
+        <div>
+          <h1 className="text-[28px] font-semibold tracking-tight">Leads</h1>
+          <p
+            className="mt-0.5 text-[13px] text-muted-foreground"
             title={isApproximate ? "Approximate count (planner estimate, ±5%)" : undefined}
           >
-            {isApproximate ? "~" : ""}{totalCount.toLocaleString()} total
-          </span>
+            {isApproximate ? "~" : ""}
+            {totalCount.toLocaleString()} contacts
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <ArrowUpDown
+              className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-muted-foreground"
+              strokeWidth={1.75}
+            />
+            <select
+              className="h-9 cursor-pointer appearance-none rounded-full bg-muted pr-4 pl-8 text-[13px] font-medium text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/40"
+              value={`${filters.sortBy}:${filters.sortDir}`}
+              onChange={(e) => {
+                const [sortBy, sortDir] = e.target.value.split(":");
+                setSort(sortBy, sortDir as "asc" | "desc");
+              }}
+            >
+              <option value="created_at:desc" disabled>
+                Sort by…
+              </option>
+              {SORT_OPTIONS.map((opt) => (
+                <option key={`${opt.sortBy}:${opt.sortDir}`} value={`${opt.sortBy}:${opt.sortDir}`}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
           <ExportButton filters={filters} totalCount={totalCount} selectedIds={selectedIds} />
         </div>
       </div>
 
-      {/* Table */}
-      <div className="flex-1 min-h-0">
+      {/* Table — wrapped in iOS card */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-card shadow-ios">
         <LeadTable
           data={leads}
           totalCount={totalCount}
@@ -158,7 +169,10 @@ export default function LeadsPage() {
         lead={selectedLead}
         open={selectedLead !== null}
         onClose={() => setSelectedLead(null)}
-        onDeleted={() => { setSelectedLead(null); fetchLeads(); }}
+        onDeleted={() => {
+          setSelectedLead(null);
+          fetchLeads();
+        }}
       />
     </div>
   );

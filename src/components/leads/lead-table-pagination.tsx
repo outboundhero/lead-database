@@ -35,25 +35,25 @@ export function LeadTablePagination({
   const to = Math.min(page * pageSize, totalCount);
 
   return (
-    <div className="flex items-center justify-between px-2 py-3">
-      <div className="text-xs text-muted-foreground">
+    <div className="ios-frost flex items-center justify-between border-t border-border/40 px-4 py-3">
+      <div className="text-[13px] text-muted-foreground">
         {totalCount === 0
           ? "No results"
-          : `${from.toLocaleString()}-${to.toLocaleString()} of ${totalCount.toLocaleString()}`}
+          : `${from.toLocaleString()}–${to.toLocaleString()} of ${totalCount.toLocaleString()}`}
       </div>
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">Rows</span>
+          <span className="text-[12px] font-medium text-muted-foreground">Rows</span>
           <Select
             value={String(pageSize)}
             onValueChange={(v) => onPageSizeChange(Number(v))}
           >
-            <SelectTrigger className="h-7 w-[65px] text-xs">
+            <SelectTrigger className="h-8 w-[72px] text-[13px]" size="sm">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               {[25, 50, 100].map((size) => (
-                <SelectItem key={size} value={String(size)} className="text-xs">
+                <SelectItem key={size} value={String(size)} className="text-[13px]">
                   {size}
                 </SelectItem>
               ))}
@@ -62,43 +62,39 @@ export function LeadTablePagination({
         </div>
         <div className="flex items-center gap-1">
           <Button
-            variant="outline"
-            size="icon"
-            className="h-7 w-7"
+            variant="ghost"
+            size="icon-sm"
             onClick={() => onPageChange(1)}
             disabled={page <= 1}
           >
-            <ChevronsLeft className="h-3.5 w-3.5" />
+            <ChevronsLeft className="size-4" strokeWidth={2} />
           </Button>
           <Button
-            variant="outline"
-            size="icon"
-            className="h-7 w-7"
+            variant="ghost"
+            size="icon-sm"
             onClick={() => onPageChange(page - 1)}
             disabled={page <= 1}
           >
-            <ChevronLeft className="h-3.5 w-3.5" />
+            <ChevronLeft className="size-4" strokeWidth={2} />
           </Button>
-          <span className="text-xs px-2">
+          <span className="px-2 text-[13px] font-medium tabular-nums">
             {page} / {totalPages || 1}
           </span>
           <Button
-            variant="outline"
-            size="icon"
-            className="h-7 w-7"
+            variant="ghost"
+            size="icon-sm"
             onClick={() => onPageChange(page + 1)}
             disabled={page >= totalPages}
           >
-            <ChevronRight className="h-3.5 w-3.5" />
+            <ChevronRight className="size-4" strokeWidth={2} />
           </Button>
           <Button
-            variant="outline"
-            size="icon"
-            className="h-7 w-7"
+            variant="ghost"
+            size="icon-sm"
             onClick={() => onPageChange(totalPages)}
             disabled={page >= totalPages}
           >
-            <ChevronsRight className="h-3.5 w-3.5" />
+            <ChevronsRight className="size-4" strokeWidth={2} />
           </Button>
         </div>
       </div>

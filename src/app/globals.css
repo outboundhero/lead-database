@@ -7,8 +7,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-sans-ios);
+  --font-mono: var(--font-mono-ios);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -26,6 +26,8 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -45,82 +47,169 @@
   --radius-2xl: calc(var(--radius) + 8px);
   --radius-3xl: calc(var(--radius) + 12px);
   --radius-4xl: calc(var(--radius) + 16px);
+  --shadow-ios: var(--shadow-card);
+  --shadow-ios-lg: var(--shadow-elevated);
 }
 
+/* iOS design tokens — system colors, generous radii, soft shadows, SF system font */
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  /* iOS card radius (14px); buttons get .rounded-full or .rounded-2xl per variant */
+  --radius: 0.875rem;
+
+  /* System fonts — falls back through SF Pro → Inter → system-ui */
+  --font-sans-ios: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "Inter", system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono-ios: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+
+  /* iOS Light Mode — secondarySystemGroupedBackground as page bg, white cards on top */
+  --background: oklch(0.967 0.003 264);   /* iOS systemGray6 #F2F2F7 */
+  --foreground: oklch(0.18 0.005 264);    /* iOS label (near black) */
+  --card: oklch(1 0 0);                    /* pure white */
+  --card-foreground: oklch(0.18 0.005 264);
+  --popover: oklch(1 0 0);                 /* frosted in component via backdrop-blur */
+  --popover-foreground: oklch(0.18 0.005 264);
+
+  /* iOS Blue #007AFF as the primary accent */
+  --primary: oklch(0.586 0.214 263);
+  --primary-foreground: oklch(1 0 0);
+
+  /* Secondary = iOS systemGray5 (subtle fill) */
+  --secondary: oklch(0.92 0.004 264);
+  --secondary-foreground: oklch(0.18 0.005 264);
+
+  --muted: oklch(0.95 0.003 264);          /* iOS systemGray5/6 hybrid */
+  --muted-foreground: oklch(0.55 0.01 264); /* iOS secondaryLabel */
+
+  --accent: oklch(0.586 0.214 263 / 0.12); /* tinted iOS blue */
+  --accent-foreground: oklch(0.586 0.214 263);
+
+  /* iOS Red #FF3B30 */
+  --destructive: oklch(0.65 0.235 25);
+  /* iOS Green #34C759 */
+  --success: oklch(0.745 0.183 145);
+  /* iOS Orange #FF9500 */
+  --warning: oklch(0.78 0.175 65);
+
+  /* Hairline-style borders (iOS uses near-invisible separators) */
+  --border: oklch(0.89 0.003 264 / 0.7);
+  --input: oklch(0.89 0.003 264);
+  --ring: oklch(0.586 0.214 263 / 0.45);
+
+  /* iOS chart palette: blue, green, orange, red, indigo */
+  --chart-1: oklch(0.586 0.214 263);       /* iOS Blue */
+  --chart-2: oklch(0.745 0.183 145);       /* iOS Green */
+  --chart-3: oklch(0.78 0.175 65);         /* iOS Orange */
+  --chart-4: oklch(0.65 0.235 25);         /* iOS Red */
+  --chart-5: oklch(0.52 0.21 290);         /* iOS Indigo */
+
+  /* Sidebar takes on the grouped-bg color so cards float on it */
+  --sidebar: oklch(0.967 0.003 264);
+  --sidebar-foreground: oklch(0.18 0.005 264);
+  --sidebar-primary: oklch(0.586 0.214 263);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(1 0 0);
+  --sidebar-accent-foreground: oklch(0.18 0.005 264);
+  --sidebar-border: oklch(0.89 0.003 264 / 0.7);
+  --sidebar-ring: oklch(0.586 0.214 263 / 0.45);
+
+  /* Two-layer soft iOS shadows */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.06);
+  --shadow-elevated: 0 2px 8px rgba(0, 0, 0, 0.06), 0 16px 40px rgba(0, 0, 0, 0.10);
+
+  /* Frosted surface backdrop (use with `backdrop-blur-xl bg-popover/80`) */
+  --frosted: oklch(1 0 0 / 0.72);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  /* iOS Dark Mode — pure black grouped bg, elevated cards in systemGray6 dark */
+  --background: oklch(0 0 0);              /* iOS systemBackground (dark) */
+  --foreground: oklch(0.96 0.003 264);
+  --card: oklch(0.165 0.005 264);          /* iOS secondarySystemBackground dark #1C1C1E */
+  --card-foreground: oklch(0.96 0.003 264);
+  --popover: oklch(0.21 0.005 264);
+  --popover-foreground: oklch(0.96 0.003 264);
+
+  --primary: oklch(0.66 0.205 263);        /* slightly lighter iOS Blue for dark */
+  --primary-foreground: oklch(1 0 0);
+
+  --secondary: oklch(0.235 0.005 264);
+  --secondary-foreground: oklch(0.96 0.003 264);
+
+  --muted: oklch(0.21 0.005 264);
+  --muted-foreground: oklch(0.7 0.005 264);
+
+  --accent: oklch(0.66 0.205 263 / 0.16);
+  --accent-foreground: oklch(0.66 0.205 263);
+
+  --destructive: oklch(0.7 0.22 25);
+  --success: oklch(0.77 0.18 145);
+  --warning: oklch(0.82 0.18 65);
+
+  --border: oklch(1 0 0 / 0.09);
+  --input: oklch(1 0 0 / 0.12);
+  --ring: oklch(0.66 0.205 263 / 0.55);
+
+  --chart-1: oklch(0.66 0.205 263);
+  --chart-2: oklch(0.77 0.18 145);
+  --chart-3: oklch(0.82 0.18 65);
+  --chart-4: oklch(0.7 0.22 25);
+  --chart-5: oklch(0.62 0.2 290);
+
+  --sidebar: oklch(0 0 0);
+  --sidebar-foreground: oklch(0.96 0.003 264);
+  --sidebar-primary: oklch(0.66 0.205 263);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.165 0.005 264);
+  --sidebar-accent-foreground: oklch(0.96 0.003 264);
+  --sidebar-border: oklch(1 0 0 / 0.09);
+  --sidebar-ring: oklch(0.66 0.205 263 / 0.55);
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.5);
+  --shadow-elevated: 0 2px 8px rgba(0, 0, 0, 0.5), 0 16px 40px rgba(0, 0, 0, 0.6);
+
+  --frosted: oklch(0.165 0.005 264 / 0.78);
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    /* Tighter tracking like SF Pro */
+    letter-spacing: -0.011em;
+  }
   body {
-    @apply bg-background text-foreground;
+    font-family: var(--font-sans-ios);
+    @apply bg-background text-foreground antialiased;
+  }
+  h1, h2, h3, h4 {
+    letter-spacing: -0.022em;
+    font-weight: 600;
+  }
+}
+
+/* Frosted glass utility — for iOS-style toolbars, popovers, sheets */
+@layer utilities {
+  .ios-frost {
+    background-color: var(--frosted);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+  }
+  .ios-frost-strong {
+    background-color: var(--frosted);
+    backdrop-filter: saturate(180%) blur(40px);
+    -webkit-backdrop-filter: saturate(180%) blur(40px);
+  }
+  .shadow-ios {
+    box-shadow: var(--shadow-card);
+  }
+  .shadow-ios-lg {
+    box-shadow: var(--shadow-elevated);
+  }
+  /* iOS hairline separator — 0.5px on retina */
+  .hairline {
+    border-color: oklch(from var(--border) l c h / 1);
+    border-width: 0.5px;
   }
 }

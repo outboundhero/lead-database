@@ -52,7 +52,7 @@ export function DashboardCharts({ snapshot, timeSeries }: DashboardChartsProps) 
         {/* Leads per Job Title */}
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Leads per Job Title</CardTitle>
+            <CardTitle className="text-[15px]">Leads per Job Title</CardTitle>
           </CardHeader>
           <CardContent>
             {jobTitleData.length === 0 ? (
@@ -80,7 +80,7 @@ export function DashboardCharts({ snapshot, timeSeries }: DashboardChartsProps) 
                       formatter={(v: number) => [v.toLocaleString(), "Leads"]}
                       contentStyle={{ fontSize: 12, backgroundColor: "hsl(var(--card))", border: "1px solid hsl(var(--border))", color: "hsl(var(--foreground))" }}
                     />
-                    <Bar dataKey="count" fill="#3b82f6" radius={[0, 4, 4, 0]} maxBarSize={20} />
+                    <Bar dataKey="count" fill="#007AFF" radius={[0, 8, 8, 0]} maxBarSize={20} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -91,7 +91,7 @@ export function DashboardCharts({ snapshot, timeSeries }: DashboardChartsProps) 
         {/* Leads per General Industry */}
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Leads per General Industry</CardTitle>
+            <CardTitle className="text-[15px]">Leads per General Industry</CardTitle>
           </CardHeader>
           <CardContent>
             {industryData.length === 0 ? (
@@ -119,7 +119,7 @@ export function DashboardCharts({ snapshot, timeSeries }: DashboardChartsProps) 
                       formatter={(v: number) => [v.toLocaleString(), "Leads"]}
                       contentStyle={{ fontSize: 12, backgroundColor: "hsl(var(--card))", border: "1px solid hsl(var(--border))", color: "hsl(var(--foreground))" }}
                     />
-                    <Bar dataKey="count" fill="#10b981" radius={[0, 4, 4, 0]} maxBarSize={20} />
+                    <Bar dataKey="count" fill="#34C759" radius={[0, 8, 8, 0]} maxBarSize={20} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -131,7 +131,7 @@ export function DashboardCharts({ snapshot, timeSeries }: DashboardChartsProps) 
       {/* Row 2: Company Size (vertical bar) */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">Total Leads per Company Size</CardTitle>
+          <CardTitle className="text-[15px]">Total Leads per Company Size</CardTitle>
         </CardHeader>
         <CardContent>
           {companySizeData.length === 0 ? (
@@ -149,7 +149,7 @@ export function DashboardCharts({ snapshot, timeSeries }: DashboardChartsProps) 
                   formatter={(v: number) => [v.toLocaleString(), "Leads"]}
                   contentStyle={{ fontSize: 12, backgroundColor: "hsl(var(--card))", border: "1px solid hsl(var(--border))", color: "hsl(var(--foreground))" }}
                 />
-                <Bar dataKey="count" fill="#f59e0b" radius={[4, 4, 0, 0]} maxBarSize={60} />
+                <Bar dataKey="count" fill="#FF9500" radius={[8, 8, 0, 0]} maxBarSize={60} />
               </BarChart>
             </ResponsiveContainer>
           )}
@@ -159,7 +159,7 @@ export function DashboardCharts({ snapshot, timeSeries }: DashboardChartsProps) 
       {/* Row 3: Total Leads Over Time (line/area chart) */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">Total Leads Over Time</CardTitle>
+          <CardTitle className="text-[15px]">Total Leads Over Time</CardTitle>
         </CardHeader>
         <CardContent>
           {timeSeriesData.length < 2 ? (
@@ -180,8 +180,8 @@ export function DashboardCharts({ snapshot, timeSeries }: DashboardChartsProps) 
               <AreaChart data={timeSeriesData} margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
                 <defs>
                   <linearGradient id="leadsGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.2} />
-                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                    <stop offset="5%" stopColor="#007AFF" stopOpacity={0.2} />
+                    <stop offset="95%" stopColor="#007AFF" stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
@@ -194,7 +194,7 @@ export function DashboardCharts({ snapshot, timeSeries }: DashboardChartsProps) 
                 <Area
                   type="monotone"
                   dataKey="total"
-                  stroke="#3b82f6"
+                  stroke="#007AFF"
                   strokeWidth={2}
                   fill="url(#leadsGradient)"
                   dot={false}

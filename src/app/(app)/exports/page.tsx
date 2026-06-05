@@ -191,38 +191,43 @@ export default function ExportsPage() {
   if (!canView) return <AccessDenied />;
 
   return (
-    <div className="space-y-6 p-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Exports</h1>
-        <Button variant="outline" size="sm" onClick={loadExports} disabled={loading}>
-          <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />
+    <div className="space-y-6">
+      <div className="flex items-end justify-between">
+        <div>
+          <h1 className="text-[28px] font-semibold tracking-tight">Exports</h1>
+          <p className="mt-0.5 text-[13px] text-muted-foreground">
+            Recent exports from your filter views
+          </p>
+        </div>
+        <Button variant="tinted" size="sm" onClick={loadExports} disabled={loading}>
+          <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} strokeWidth={2} />
           Refresh
         </Button>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Export History</CardTitle>
+          <CardTitle className="text-[17px]">Export history</CardTitle>
         </CardHeader>
         <CardContent>
           {exports.length === 0 && !loading ? (
-            <p className="text-sm text-muted-foreground">
+            <p className="py-8 text-center text-[14px] text-muted-foreground">
               No exports yet. Use the Export button on the Leads page to create one.
             </p>
           ) : (
-            <div className="rounded-md border overflow-x-auto">
+            <div className="-mx-6 -mb-6 overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="text-xs">Date</TableHead>
-                    <TableHead className="text-xs">User</TableHead>
-                    <TableHead className="text-xs">Type</TableHead>
-                    <TableHead className="text-xs">Filters</TableHead>
-                    <TableHead className="text-xs">Rows</TableHead>
-                    <TableHead className="text-xs">Cols</TableHead>
-                    <TableHead className="text-xs">Duration</TableHead>
-                    <TableHead className="text-xs">Status</TableHead>
-                    <TableHead className="text-xs"></TableHead>
+                    <TableHead>Date</TableHead>
+                    <TableHead>User</TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Filters</TableHead>
+                    <TableHead>Rows</TableHead>
+                    <TableHead>Cols</TableHead>
+                    <TableHead>Duration</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -239,43 +244,42 @@ export default function ExportsPage() {
 
                     return (
                       <TableRow key={job.id}>
-                        <TableCell className="text-xs whitespace-nowrap">
+                        <TableCell className="whitespace-nowrap text-muted-foreground">
                           {new Date(job.created_at).toLocaleString()}
                         </TableCell>
-                        <TableCell className="text-xs max-w-[140px] truncate">
+                        <TableCell className="max-w-[140px] truncate">
                           {exportedBy}
                         </TableCell>
                         <TableCell>
-                          <Badge variant="outline" className="text-xs capitalize">
+                          <Badge variant="outline" className="capitalize">
                             {exportType}
                           </Badge>
                         </TableCell>
-                        <TableCell className="text-xs max-w-[240px] truncate text-muted-foreground">
+                        <TableCell className="max-w-[240px] truncate text-muted-foreground">
                           {filterSummary}
                         </TableCell>
-                        <TableCell className="text-xs">
+                        <TableCell className="tabular-nums">
                           {job.row_count?.toLocaleString() ?? "—"}
                         </TableCell>
-                        <TableCell className="text-xs">
+                        <TableCell className="tabular-nums">
                           {job.column_selection?.length ?? "—"}
                         </TableCell>
-                        <TableCell className="text-xs">
+                        <TableCell className="tabular-nums text-muted-foreground">
                           {(job as ExportJob & { duration_seconds?: number }).duration_seconds
                             ? `${Math.floor((job as ExportJob & { duration_seconds?: number }).duration_seconds! / 60)}m ${(job as ExportJob & { duration_seconds?: number }).duration_seconds! % 60}s`
                             : job.status === "processing"
-                            ? `${Math.round((Date.now() - new Date(job.created_at).getTime()) / 1000)}s...`
+                            ? `${Math.round((Date.now() - new Date(job.created_at).getTime()) / 1000)}s…`
                             : "—"}
                         </TableCell>
                         <TableCell>
                           <Badge
                             variant={
                               job.status === "complete"
-                                ? "default"
+                                ? "success"
                                 : job.status === "error" || (job.status as string) === "cancelled"
                                 ? "destructive"
-                                : "secondary"
+                                : "warning"
                             }
-                            className="text-xs"
                           >
                             {job.status}
                           </Badge>
@@ -285,7 +289,7 @@ export default function ExportsPage() {
                             <Button
                               variant="ghost"
                               size="sm"
-                              className="h-7 text-xs text-destructive"
+                              className="text-destructive hover:bg-destructive/10"
                               onClick={() => handleCancel(job)}
                             >
                               Cancel
@@ -293,23 +297,21 @@ export default function ExportsPage() {
                           )}
                           {job.status === "complete" && job.file_path && (
                             <Button
-                              variant="ghost"
+                              variant="tinted"
                               size="sm"
-                              className="h-7 text-xs"
                               onClick={() => handleDownload(job)}
                             >
-                              <Download className="h-3.5 w-3.5 mr-1" />
+                              <Download className="size-3.5" strokeWidth={2} />
                               Download
                             </Button>
                           )}
                           {job.status === "complete" && !job.file_path && job.filters_used && (
                             <Button
-                              variant="ghost"
+                              variant="tinted"
                               size="sm"
-                              className="h-7 text-xs"
                               onClick={() => handleRedownload(job)}
                             >
-                              <Download className="h-3.5 w-3.5 mr-1" />
+                              <Download className="size-3.5" strokeWidth={2} />
                               Re-export
                             </Button>
                           )}

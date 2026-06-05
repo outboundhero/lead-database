@@ -12,24 +12,23 @@ export function TopBar() {
 
   return (
     <>
-      <header className="flex items-center h-14 border-b px-4 gap-4 shrink-0 bg-background">
-        {/* Search bar */}
-        <div className="relative flex-1 max-w-md">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+      <header className="ios-frost sticky top-0 z-30 flex h-16 shrink-0 items-center gap-3 border-b border-border/40 px-5">
+        {/* iOS-style search bar */}
+        <div className="relative max-w-md flex-1">
+          <Search
+            className="pointer-events-none absolute top-1/2 left-3.5 size-4 -translate-y-1/2 text-muted-foreground"
+            strokeWidth={1.75}
+          />
           <Input
-            placeholder="Search leads..."
-            className="pl-9 h-9 text-sm"
+            placeholder="Search leads…"
+            className="h-10 rounded-full pl-10 text-[14px]"
           />
         </div>
 
-        <div className="flex items-center gap-2 ml-auto">
-          <Button
-            size="sm"
-            className="gap-1.5"
-            onClick={() => setAddLeadOpen(true)}
-          >
-            <Plus className="h-4 w-4" />
-            Add Lead
+        <div className="ml-auto flex items-center gap-2">
+          <Button size="sm" onClick={() => setAddLeadOpen(true)}>
+            <Plus className="size-4" strokeWidth={2.25} />
+            Add lead
           </Button>
           <ThemeToggle />
         </div>

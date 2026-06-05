@@ -160,103 +160,79 @@ export default function AdminPage() {
   const totalPages = Math.ceil(totalLogs / LOGS_PER_PAGE);
   const monthName = new Date().toLocaleString("en-US", { month: "long" });
 
+  const STAT_TINTS = [
+    { tint: "text-[oklch(0.586_0.214_263)]", bg: "bg-[oklch(0.586_0.214_263)]/12" },
+    { tint: "text-[oklch(0.745_0.183_145)]", bg: "bg-[oklch(0.745_0.183_145)]/12" },
+    { tint: "text-[oklch(0.78_0.175_65)]", bg: "bg-[oklch(0.78_0.175_65)]/12" },
+    { tint: "text-[oklch(0.52_0.21_290)]", bg: "bg-[oklch(0.52_0.21_290)]/12" },
+  ];
+
   return (
-    <div className="space-y-6 p-4 max-w-6xl">
+    <div className="max-w-6xl space-y-6">
       {/* Title + Action Buttons */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <h1 className="text-lg font-semibold">Admin Dashboard</h1>
-        <div className="flex items-center gap-2 flex-wrap">
-          <Button variant="outline" size="sm" className="gap-1.5 text-xs" onClick={() => setBulkDeleteOpen(true)}>
-            <Trash2 className="h-3.5 w-3.5" />
-            Bulk Delete Leads
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-[28px] font-semibold tracking-tight">Admin</h1>
+          <p className="mt-0.5 text-[13px] text-muted-foreground">
+            Manage team, view activity, run maintenance
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => setBulkDeleteOpen(true)}>
+            <Trash2 className="size-3.5" strokeWidth={2} />
+            Bulk delete
           </Button>
-          <Button variant="outline" size="sm" className="gap-1.5 text-xs" onClick={() => setEmailMatchOpen(true)}>
-            <MailCheck className="h-3.5 w-3.5" />
-            Email Match Checker
+          <Button variant="outline" size="sm" onClick={() => setEmailMatchOpen(true)}>
+            <MailCheck className="size-3.5" strokeWidth={2} />
+            Email match
           </Button>
-          <Button variant="outline" size="sm" className="gap-1.5 text-xs" onClick={() => setUnknownStatsOpen(true)}>
-            <HelpCircle className="h-3.5 w-3.5" />
-            Unknown Lead Stats
+          <Button variant="outline" size="sm" onClick={() => setUnknownStatsOpen(true)}>
+            <HelpCircle className="size-3.5" strokeWidth={2} />
+            Unknown stats
           </Button>
-          <Button size="sm" className="gap-1.5 text-xs" asChild>
+          <Button size="sm" asChild>
             <Link href="/uploads">
-              <Upload className="h-3.5 w-3.5" />
-              Upload Leads
+              <Upload className="size-3.5" strokeWidth={2} />
+              Upload leads
             </Link>
           </Button>
         </div>
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Card>
-          <CardContent className="pt-4 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-lg bg-muted flex items-center justify-center">
-                <Users className="h-5 w-5 text-muted-foreground" />
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Total Leads</p>
-                <p className="text-2xl font-bold">{stats.totalLeads.toLocaleString()}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-4 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-lg bg-muted flex items-center justify-center">
-                <TrendingUp className="h-5 w-5 text-muted-foreground" />
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">New Leads ({monthName})</p>
-                <p className="text-2xl font-bold">{stats.newLeadsMonth.toLocaleString()}</p>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {[
+          { label: "Total leads", value: stats.totalLeads.toLocaleString(), icon: Users },
+          { label: `New (${monthName})`, value: stats.newLeadsMonth.toLocaleString(), icon: TrendingUp },
+          { label: "Total users", value: stats.totalUsers.toLocaleString(), icon: UserPlus },
+          { label: "Active API", value: stats.activeApiTokens.toLocaleString(), icon: Key },
+        ].map((stat, i) => (
+          <Card key={stat.label} className="gap-3 p-5">
+            <div className="flex items-center justify-between">
+              <p className="text-[13px] font-medium text-muted-foreground">{stat.label}</p>
+              <div className={`flex size-9 items-center justify-center rounded-xl ${STAT_TINTS[i].bg}`}>
+                <stat.icon className={`size-[18px] ${STAT_TINTS[i].tint}`} strokeWidth={1.75} />
               </div>
             </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-4 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-lg bg-muted flex items-center justify-center">
-                <UserPlus className="h-5 w-5 text-muted-foreground" />
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Total Users</p>
-                <p className="text-2xl font-bold">{stats.totalUsers}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-4 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-lg bg-muted flex items-center justify-center">
-                <Key className="h-5 w-5 text-muted-foreground" />
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Active API</p>
-                <p className="text-2xl font-bold">{stats.activeApiTokens}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+            <p className="text-[32px] font-semibold leading-none tracking-tight">{stat.value}</p>
+          </Card>
+        ))}
       </div>
 
       {/* Team Manager */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle className="text-base">Team Manager</CardTitle>
+          <CardTitle className="text-[17px]">Team manager</CardTitle>
           {canManageUsers && (
-            <Button size="sm" onClick={() => setInviteOpen(true)} className="gap-1.5">
-              <UserPlus className="h-3.5 w-3.5" />
-              Add User
+            <Button size="sm" onClick={() => setInviteOpen(true)}>
+              <UserPlus className="size-3.5" strokeWidth={2} />
+              Add user
             </Button>
           )}
         </CardHeader>
         <CardContent>
           {loading ? (
-            <p className="text-sm text-muted-foreground">Loading...</p>
+            <p className="text-[14px] text-muted-foreground">Loading…</p>
           ) : (
             <UserTable
               users={users}
@@ -271,30 +247,32 @@ export default function AdminPage() {
       {/* Recent Activity Logs */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Recent Activity Logs</CardTitle>
+          <CardTitle className="text-[17px]">Recent activity</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {auditLogs.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No activity logs yet.</p>
+            <p className="py-8 text-center text-[14px] text-muted-foreground">
+              No activity logs yet.
+            </p>
           ) : (
-            <div className="rounded-md border">
+            <div className="-mx-6 overflow-hidden">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="text-xs">Action</TableHead>
-                    <TableHead className="text-xs">Performed By</TableHead>
-                    <TableHead className="text-xs">Time</TableHead>
-                    <TableHead className="text-xs">Details</TableHead>
+                    <TableHead>Action</TableHead>
+                    <TableHead>Performed by</TableHead>
+                    <TableHead>Time</TableHead>
+                    <TableHead>Details</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {auditLogs.map((log) => (
                     <TableRow key={log.id}>
-                      <TableCell className="text-xs font-medium">{log.action}</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
+                      <TableCell className="font-medium">{log.action}</TableCell>
+                      <TableCell className="text-muted-foreground">
                         {log.performed_by ?? "—"}
                       </TableCell>
-                      <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
+                      <TableCell className="whitespace-nowrap text-muted-foreground">
                         {new Date(log.created_at).toLocaleString("en-US", {
                           year: "numeric",
                           month: "2-digit",
@@ -304,7 +282,7 @@ export default function AdminPage() {
                           hour12: true,
                         })}
                       </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
+                      <TableCell className="text-muted-foreground">
                         {log.details ?? "—"}
                       </TableCell>
                     </TableRow>
@@ -316,29 +294,27 @@ export default function AdminPage() {
 
           {/* Pagination */}
           {totalLogs > 0 && (
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <div className="flex items-center justify-between text-[13px] text-muted-foreground">
               <span>
                 Showing {(logsPage - 1) * LOGS_PER_PAGE + 1} to{" "}
                 {Math.min(logsPage * LOGS_PER_PAGE, totalLogs)} of {totalLogs} results
               </span>
               <div className="flex items-center gap-1">
                 <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 w-7 p-0"
+                  variant="ghost"
+                  size="icon-sm"
                   disabled={logsPage <= 1}
                   onClick={() => handlePageChange(logsPage - 1)}
                 >
-                  <ChevronLeft className="h-3.5 w-3.5" />
+                  <ChevronLeft className="size-4" strokeWidth={2} />
                 </Button>
                 {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
                   const page = i + 1;
                   return (
                     <Button
                       key={page}
-                      variant={page === logsPage ? "default" : "outline"}
-                      size="sm"
-                      className="h-7 w-7 p-0 text-xs"
+                      variant={page === logsPage ? "default" : "ghost"}
+                      size="icon-sm"
                       onClick={() => handlePageChange(page)}
                     >
                       {page}
@@ -347,11 +323,10 @@ export default function AdminPage() {
                 })}
                 {totalPages > 5 && (
                   <>
-                    <span className="px-1">...</span>
+                    <span className="px-1">…</span>
                     <Button
-                      variant={totalPages === logsPage ? "default" : "outline"}
-                      size="sm"
-                      className="h-7 w-7 p-0 text-xs"
+                      variant={totalPages === logsPage ? "default" : "ghost"}
+                      size="icon-sm"
                       onClick={() => handlePageChange(totalPages)}
                     >
                       {totalPages}
@@ -359,13 +334,12 @@ export default function AdminPage() {
                   </>
                 )}
                 <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 w-7 p-0"
+                  variant="ghost"
+                  size="icon-sm"
                   disabled={logsPage >= totalPages}
                   onClick={() => handlePageChange(logsPage + 1)}
                 >
-                  <ChevronRight className="h-3.5 w-3.5" />
+                  <ChevronRight className="size-4" strokeWidth={2} />
                 </Button>
               </div>
             </div>

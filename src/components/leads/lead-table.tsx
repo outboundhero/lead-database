@@ -88,14 +88,17 @@ export function LeadTable({
   });
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex-1 overflow-auto border rounded-md relative">
-        <table className="w-full caption-bottom text-sm">
-          <thead className="sticky top-0 z-10 bg-background [&_tr]:border-b">
+    <div className="flex h-full flex-col">
+      <div className="relative flex-1 overflow-auto">
+        <table className="w-full caption-bottom text-[14px]">
+          <thead className="sticky top-0 z-10 ios-frost [&_tr]:border-b [&_tr]:border-border/40">
             {table.getHeaderGroups().map((headerGroup) => (
-              <tr key={headerGroup.id} className="border-b">
+              <tr key={headerGroup.id}>
                 {headerGroup.headers.map((header) => (
-                  <th key={header.id} className="h-10 px-2 text-left align-middle font-medium whitespace-nowrap text-foreground text-xs bg-background">
+                  <th
+                    key={header.id}
+                    className="h-11 px-4 text-left align-middle text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap text-muted-foreground"
+                  >
                     {header.isPlaceholder
                       ? null
                       : flexRender(
@@ -112,8 +115,8 @@ export function LeadTable({
               Array.from({ length: 10 }).map((_, i) => (
                 <TableRow key={i}>
                   {allColumns.map((_, j) => (
-                    <TableCell key={j} className="py-2">
-                      <Skeleton className="h-4 w-full" />
+                    <TableCell key={j} className="px-4 py-3">
+                      <Skeleton className="h-4 w-full rounded-md" />
                     </TableCell>
                   ))}
                 </TableRow>
@@ -122,7 +125,7 @@ export function LeadTable({
               <TableRow>
                 <TableCell
                   colSpan={allColumns.length}
-                  className="h-24 text-center text-muted-foreground"
+                  className="h-32 text-center text-[14px] text-muted-foreground"
                 >
                   No leads found.
                 </TableCell>
@@ -131,11 +134,11 @@ export function LeadTable({
               table.getRowModel().rows.map((row) => (
                 <TableRow
                   key={row.id}
-                  className="cursor-pointer hover:bg-muted/50"
+                  className="cursor-pointer"
                   onClick={() => onRowClick(row.original)}
                 >
                   {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id} className="py-2">
+                    <TableCell key={cell.id} className="px-4 py-3">
                       {flexRender(
                         cell.column.columnDef.cell,
                         cell.getContext()

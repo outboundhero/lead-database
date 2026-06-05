@@ -185,12 +185,17 @@ export default function ApiKeysPage() {
   const baseUrl = typeof window !== "undefined" ? window.location.origin : "https://your-app.com";
 
   return (
-    <div className="space-y-6 p-4 max-w-5xl">
-      <h1 className="text-lg font-semibold">API Keys & Documentation</h1>
+    <div className="max-w-5xl space-y-6">
+      <div>
+        <h1 className="text-[28px] font-semibold tracking-tight">API keys</h1>
+        <p className="mt-0.5 text-[13px] text-muted-foreground">
+          Programmatic access tokens, endpoint docs, and request logs
+        </p>
+      </div>
 
       <Tabs defaultValue="keys">
         <TabsList>
-          <TabsTrigger value="keys">API Keys</TabsTrigger>
+          <TabsTrigger value="keys">API keys</TabsTrigger>
           <TabsTrigger value="docs">Documentation</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
         </TabsList>

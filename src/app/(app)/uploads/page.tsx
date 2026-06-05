@@ -142,16 +142,21 @@ export default function UploadsPage() {
   if (!canView) return <AccessDenied />;
 
   return (
-    <div className="space-y-6 p-4">
-      <h1 className="text-lg font-semibold">Uploads</h1>
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-[28px] font-semibold tracking-tight">Uploads</h1>
+        <p className="mt-0.5 text-[13px] text-muted-foreground">
+          Import leads from CSV files
+        </p>
+      </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Upload className="h-4 w-4" />
+          <CardTitle className="flex items-center gap-2 text-[17px]">
+            <Upload className="size-5 text-primary" strokeWidth={1.75} />
             Upload CSV
             {parseResult && step !== "drop" && (
-              <Badge variant="secondary" className="text-xs ml-2">
+              <Badge variant="tinted" className="ml-2">
                 {fileLabel}
               </Badge>
             )}
@@ -202,51 +207,50 @@ export default function UploadsPage() {
       {history.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Upload History</CardTitle>
+            <CardTitle className="text-[17px]">Upload history</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="rounded-md border">
+            <div className="-mx-6 -mb-6 overflow-hidden">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="text-xs">File</TableHead>
-                    <TableHead className="text-xs">Status</TableHead>
-                    <TableHead className="text-xs">Total</TableHead>
-                    <TableHead className="text-xs">Skipped</TableHead>
-                    <TableHead className="text-xs">Merged</TableHead>
-                    <TableHead className="text-xs">Date</TableHead>
+                    <TableHead>File</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Total</TableHead>
+                    <TableHead>Skipped</TableHead>
+                    <TableHead>Merged</TableHead>
+                    <TableHead>Date</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {history.map((batch) => (
                     <TableRow key={batch.id}>
-                      <TableCell className="text-xs">
+                      <TableCell className="font-medium">
                         {batch.filename ?? "—"}
                       </TableCell>
                       <TableCell>
                         <Badge
                           variant={
                             batch.status === "complete"
-                              ? "default"
+                              ? "success"
                               : batch.status === "error"
                               ? "destructive"
-                              : "secondary"
+                              : "warning"
                           }
-                          className="text-xs"
                         >
                           {batch.status}
                         </Badge>
                       </TableCell>
-                      <TableCell className="text-xs">
+                      <TableCell className="tabular-nums">
                         {batch.total_rows?.toLocaleString() ?? "—"}
                       </TableCell>
-                      <TableCell className="text-xs">
+                      <TableCell className="tabular-nums">
                         {batch.skipped_rows.toLocaleString()}
                       </TableCell>
-                      <TableCell className="text-xs">
+                      <TableCell className="tabular-nums">
                         {batch.merged_rows.toLocaleString()}
                       </TableCell>
-                      <TableCell className="text-xs">
+                      <TableCell className="text-muted-foreground">
                         {new Date(batch.created_at).toLocaleDateString()}
                       </TableCell>
                     </TableRow>

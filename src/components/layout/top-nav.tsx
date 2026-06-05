@@ -8,7 +8,7 @@ import {
   Upload,
   Download,
   Shield,
-  Database,
+  Sparkles,
   KeyRound,
 } from "lucide-react";
 import { ThemeToggle } from "./theme-toggle";
@@ -37,36 +37,42 @@ export function TopNav({ email, fullName, role }: TopNavProps) {
   const visibleItems = navItems.filter((item) => hasPermission(role, item.minRole));
 
   return (
-    <header className="flex h-14 shrink-0 items-center border-b px-4 gap-6">
-      <Link href="/leads" className="flex items-center gap-2 shrink-0">
-        <Database className="h-5 w-5" />
-        <span className="font-semibold text-lg hidden sm:inline">OutboundHero</span>
-      </Link>
+    <header className="sticky top-0 z-40 ios-frost border-b border-border/50">
+      <div className="flex h-14 items-center gap-4 px-4">
+        <Link href="/leads" className="flex shrink-0 items-center gap-2.5">
+          <div className="flex size-8 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm">
+            <Sparkles className="size-[16px]" strokeWidth={2.2} />
+          </div>
+          <span className="hidden text-[17px] font-semibold tracking-tight sm:inline">
+            OutboundHero
+          </span>
+        </Link>
 
-      <nav className="flex items-center gap-1 flex-1 overflow-x-auto">
-        {visibleItems.map((item) => {
-          const isActive = pathname.startsWith(item.href);
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap",
-                isActive
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
-              )}
-            >
-              <item.icon className="h-4 w-4" />
-              <span>{item.title}</span>
-            </Link>
-          );
-        })}
-      </nav>
+        <nav className="flex flex-1 items-center gap-1 overflow-x-auto">
+          {visibleItems.map((item) => {
+            const isActive = pathname.startsWith(item.href);
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={cn(
+                  "flex items-center gap-1.5 whitespace-nowrap rounded-full px-3.5 py-1.5 text-[13px] font-medium transition-colors",
+                  isActive
+                    ? "bg-primary/12 text-primary"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                )}
+              >
+                <item.icon className="size-4" strokeWidth={1.75} />
+                <span>{item.title}</span>
+              </Link>
+            );
+          })}
+        </nav>
 
-      <div className="flex items-center gap-2 shrink-0">
-        <ThemeToggle />
-        <UserMenu email={email} fullName={fullName} />
+        <div className="flex shrink-0 items-center gap-1">
+          <ThemeToggle />
+          <UserMenu email={email} fullName={fullName} />
+        </div>
       </div>
     </header>
   );

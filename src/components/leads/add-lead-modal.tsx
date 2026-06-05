@@ -104,32 +104,35 @@ export function AddLeadModal({ open, onClose, onCreated }: AddLeadModalProps) {
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Add Lead</DialogTitle>
+          <DialogTitle>Add lead</DialogTitle>
         </DialogHeader>
         <div className="grid grid-cols-2 gap-3">
           {FIELDS.map((f) => (
-            <div key={f.key} className={f.key === "company_overview" ? "col-span-2" : ""}>
-              <label className="text-xs font-medium text-muted-foreground mb-1 block">
+            <div
+              key={f.key}
+              className={`space-y-1 ${f.key === "company_overview" ? "col-span-2" : ""}`}
+            >
+              <label className="block px-1 text-[12px] font-medium text-muted-foreground">
                 {f.label}
-                {f.required && <span className="text-destructive ml-0.5">*</span>}
+                {f.required && <span className="ml-0.5 text-destructive">*</span>}
               </label>
               <Input
                 placeholder={f.placeholder}
                 value={form[f.key] ?? ""}
                 onChange={(e) => update(f.key, e.target.value)}
-                className="h-8 text-sm"
+                className="h-10 text-[14px]"
               />
             </div>
           ))}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
           <Button onClick={handleSubmit} disabled={saving}>
-            {saving ? "Adding..." : "Add Lead"}
+            {saving ? "Adding…" : "Add lead"}
           </Button>
         </DialogFooter>
       </DialogContent>

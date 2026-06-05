@@ -2,8 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { LogOut, User } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { LogOut } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,7 +11,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
 interface UserMenuProps {
   email: string;
@@ -41,26 +39,34 @@ export function UserMenu({ email, fullName }: UserMenuProps) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="relative h-8 w-8 rounded-full">
-          <Avatar className="h-8 w-8">
-            <AvatarFallback className="text-xs">{initials}</AvatarFallback>
-          </Avatar>
-        </Button>
+        <button className="flex w-full items-center gap-2.5 rounded-xl p-1.5 outline-none transition-colors hover:bg-accent/60 focus-visible:ring-[3px] focus-visible:ring-ring/40">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary to-[oklch(0.52_0.21_290)] text-[13px] font-semibold text-primary-foreground">
+            {initials}
+          </div>
+          <div className="min-w-0 flex-1 text-left">
+            <p className="truncate text-[13px] font-medium leading-tight">
+              {fullName ?? email.split("@")[0]}
+            </p>
+            <p className="truncate text-[11px] leading-tight text-muted-foreground">
+              {email}
+            </p>
+          </div>
+        </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent className="w-56" align="end" forceMount>
+      <DropdownMenuContent className="w-60" align="end" forceMount>
         <DropdownMenuLabel className="font-normal">
-          <div className="flex flex-col space-y-1">
+          <div className="flex flex-col space-y-0.5">
             {fullName && (
-              <p className="text-sm font-medium leading-none">{fullName}</p>
+              <p className="text-[14px] font-semibold leading-tight">{fullName}</p>
             )}
-            <p className="text-xs leading-none text-muted-foreground">
+            <p className="text-[12px] leading-tight text-muted-foreground">
               {email}
             </p>
           </div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={handleLogout}>
-          <LogOut className="mr-2 h-4 w-4" />
+        <DropdownMenuItem onClick={handleLogout} variant="destructive">
+          <LogOut className="size-4" strokeWidth={2} />
           <span>Log out</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
