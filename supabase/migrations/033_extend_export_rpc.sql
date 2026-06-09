@@ -163,7 +163,7 @@ BEGIN
   END IF;
 
   IF p_filters ? 'companyName' AND (p_filters->>'companyName') <> '' THEN
-    conditions := array_append(conditions, format('l.company_name ILIKE %L', '%' || (p_filters->>'companyName') || '%'));
+    conditions := array_append(conditions, format('l.company_name_raw ILIKE %L', '%' || (p_filters->>'companyName') || '%'));
   END IF;
 
   IF p_filters ? 'fullName' AND (p_filters->>'fullName') <> '' THEN
@@ -235,7 +235,7 @@ BEGIN
     conditions := array_append(conditions, '(l.first_name IS NOT NULL AND l.first_name <> '''' OR l.last_name IS NOT NULL AND l.last_name <> '''')');
   END IF;
   IF (p_filters->>'excludeEmptyCompany')::boolean IS TRUE THEN
-    conditions := array_append(conditions, '(l.company_name IS NOT NULL AND l.company_name <> '''')');
+    conditions := array_append(conditions, '(l.company_name_raw IS NOT NULL AND l.company_name_raw <> '''')');
   END IF;
 
   IF p_filters ? 'companySize' THEN
@@ -278,14 +278,14 @@ BEGIN
     IF jsonb_array_length(COALESCE(p_filters->'keyword'->'include', '[]'::jsonb)) > 0 THEN
       FOR v IN SELECT jsonb_array_elements_text(p_filters->'keyword'->'include') LOOP
         conditions := array_append(conditions, format(
-          '(l.company_name ILIKE %L OR l.general_industry ILIKE %L OR l.specific_industry ILIKE %L OR l.company_overview ILIKE %L)',
+          '(l.company_name_raw ILIKE %L OR l.general_industry ILIKE %L OR l.specific_industry ILIKE %L OR l.company_overview ILIKE %L)',
           '%' || v || '%', '%' || v || '%', '%' || v || '%', '%' || v || '%'));
       END LOOP;
     END IF;
     IF jsonb_array_length(COALESCE(p_filters->'keyword'->'exclude', '[]'::jsonb)) > 0 THEN
       FOR v IN SELECT jsonb_array_elements_text(p_filters->'keyword'->'exclude') LOOP
         conditions := array_append(conditions, format(
-          '(COALESCE(l.company_name, '''') NOT ILIKE %L AND COALESCE(l.general_industry, '''') NOT ILIKE %L AND COALESCE(l.specific_industry, '''') NOT ILIKE %L AND COALESCE(l.company_overview, '''') NOT ILIKE %L)',
+          '(COALESCE(l.company_name_raw, '''') NOT ILIKE %L AND COALESCE(l.general_industry, '''') NOT ILIKE %L AND COALESCE(l.specific_industry, '''') NOT ILIKE %L AND COALESCE(l.company_overview, '''') NOT ILIKE %L)',
           '%' || v || '%', '%' || v || '%', '%' || v || '%', '%' || v || '%'));
       END LOOP;
     END IF;
@@ -321,7 +321,7 @@ BEGIN
   sql_text := format(
     'SELECT jsonb_build_object(''data'', COALESCE(jsonb_agg(row_to_json(sub)), ''[]''::jsonb)) FROM (
       SELECT l.id, l.first_name, l.last_name, l.email, l.source,
-        l.job_title, l.company_name, l.general_industry, l.specific_industry,
+        l.job_title, l.company_name_raw, l.general_industry, l.specific_industry,
         l.phone, l.company_size, l.annual_revenue, l.esp, l.seniority,
         l.country, l.state, l.city, l.website, l.person_linkedin,
         l.company_linkedin, l.company_overview, l.keywords, l.status,
