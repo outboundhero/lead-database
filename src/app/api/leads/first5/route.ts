@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
   const { data, error } = await supabase
     .from("leads")
     .select(
-      "id, email, first_name, last_name, job_title, company_name_raw, phone, website, source, country, city, state, seniority, general_industry, created_at"
+      "id, email, first_name, last_name, title, company, phone, website, source, country, city, state, seniority, general_industry, created_at"
     )
     .order("created_at", { ascending: false })
     .limit(5);

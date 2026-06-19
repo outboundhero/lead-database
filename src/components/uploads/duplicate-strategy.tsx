@@ -21,8 +21,8 @@ const PROTECTED_FIELDS = ["general_industry", "seniority", "source", "website", 
 const FIELD_LABELS: Record<string, string> = {
   first_name: "First Name",
   last_name: "Last Name",
-  job_title: "Job Title",
-  company_name_raw: "Company Name",
+  title: "Title",
+  company: "Company",
   company_size: "Company Size",
   annual_revenue: "Annual Revenue",
   general_industry: "General Industry",
@@ -39,8 +39,12 @@ const FIELD_LABELS: Record<string, string> = {
   person_linkedin: "Person LinkedIn",
   company_linkedin: "Company LinkedIn",
   technologies: "Technologies",
-  keywords: "Keywords",
+  tags: "Tags",
   company_overview: "Company Overview",
+  notes: "Notes",
+  question: "Personalization Question",
+  address: "Address",
+  company_phone: "Company Phone",
 };
 
 const STRATEGIES: { value: Strategy; label: string; description: string }[] = [

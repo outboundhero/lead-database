@@ -52,8 +52,8 @@ export const leadColumns: ColumnDef<Lead>[] = [
     },
   },
   {
-    accessorKey: "job_title",
-    header: ({ column }) => <SortHeader column={column} label="Job Title" />,
+    accessorKey: "title",
+    header: ({ column }) => <SortHeader column={column} label="Title" />,
     cell: ({ getValue }) => {
       const raw = getValue() as string | null;
       if (!raw) return <span className="text-[13px] text-muted-foreground">—</span>;
@@ -87,8 +87,8 @@ export const leadColumns: ColumnDef<Lead>[] = [
     },
   },
   {
-    accessorKey: "company_name_raw",
-    header: ({ column }) => <SortHeader column={column} label="Company Name" />,
+    accessorKey: "company",
+    header: ({ column }) => <SortHeader column={column} label="Company" />,
     cell: ({ getValue }) => (
       <span className="text-[13px]">{(getValue() as string) ?? "—"}</span>
     ),

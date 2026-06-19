@@ -32,19 +32,19 @@ export async function POST(request: NextRequest) {
   let query = supabase
     .from("leads")
     .select(
-      "id, email, first_name, last_name, job_title, company_name_raw, phone, website, source, country, city, state, seniority, general_industry, annual_revenue, company_size, created_at"
+      "id, email, first_name, last_name, title, company, phone, website, source, country, city, state, seniority, general_industry, annual_revenue, company_size, created_at"
     )
     .order("created_at", { ascending: false })
     .limit(100);
 
   if (website && company) {
     query = query.or(
-      `website.ilike.%${website.trim()}%,company_name_raw.ilike.%${company.trim()}%`
+      `website.ilike.%${website.trim()}%,company.ilike.%${company.trim()}%`
     );
   } else if (website) {
     query = query.ilike("website", `%${website.trim()}%`);
   } else if (company) {
-    query = query.ilike("company_name_raw", `%${company.trim()}%`);
+    query = query.ilike("company", `%${company.trim()}%`);
   }
 
   const { data, error } = await query;

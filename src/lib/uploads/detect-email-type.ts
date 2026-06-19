@@ -8,7 +8,8 @@
 const ROLE_PREFIXES =
   /^(info|contact|hello|sales|support|admin|team|office|marketing|noreply|no-?reply|mail|careers|hr|jobs|press|media|billing|accounts?|invoices?|enquir(?:y|ies)|inquir(?:y|ies)|hi|help|service|reception|frontdesk|orders|shop|store|web|webmaster|postmaster|abuse)@/i;
 
-const GENERAL_PAREN = /\(general\)/i;
+// Matches "(general)", "(General Email)", "(general inbox)", "(GENERAL)", etc.
+const GENERAL_PAREN = /\(\s*general[^)]*\)/i;
 
 export interface EmailTypeInput {
   email?: string | null;

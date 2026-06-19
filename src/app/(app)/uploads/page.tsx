@@ -20,6 +20,7 @@ import { DuplicateStrategy } from "@/components/uploads/duplicate-strategy";
 import { UploadProgress } from "@/components/uploads/upload-progress";
 import type { ParseResult } from "@/lib/uploads/parse-csv";
 import type { FieldMapping } from "@/lib/uploads/normalize-row";
+import { detectBisonFormat } from "@/lib/uploads/parse-bison";
 import type { UploadBatch } from "@/types/database";
 import { useHasPermission } from "@/lib/context/role-context";
 import { AccessDenied } from "@/components/layout/access-denied";
@@ -33,6 +34,7 @@ export default function UploadsPage() {
   const [csvFiles, setCsvFiles] = useState<File[]>([]);
   const [currentFileIndex, setCurrentFileIndex] = useState(0);
   const [fieldMapping, setFieldMapping] = useState<FieldMapping>({});
+  const [format, setFormat] = useState<"generic" | "bison">("generic");
   const [strategy, setStrategy] = useState<"skip" | "merge" | "replace">("skip");
   const [overrideFields, setOverrideFields] = useState<string[]>([]);
   const [batchId, setBatchId] = useState<string | null>(null);
@@ -56,7 +58,15 @@ export default function UploadsPage() {
     setParseResult(result);
     setCsvFiles(files);
     setCurrentFileIndex(0);
-    setStep("map");
+    // Email Bison exports have a fixed shape (custom_variables JSON, lead id, etc.)
+    // — auto-detect and skip the manual field-mapping step.
+    if (detectBisonFormat(result.headers)) {
+      setFormat("bison");
+      setStep("strategy");
+    } else {
+      setFormat("generic");
+      setStep("map");
+    }
   }
 
   function handleMappingConfirm(mapping: FieldMapping) {
@@ -76,6 +86,7 @@ export default function UploadsPage() {
           duplicateStrategy: strategy,
           overrideFields: strategy === "replace" ? overrideFields : [],
           filename: file.name,
+          format,
         }),
       },
       body: csvText,
@@ -127,6 +138,7 @@ export default function UploadsPage() {
     setCsvFiles([]);
     setCurrentFileIndex(0);
     setFieldMapping({});
+    setFormat("generic");
     setStrategy("skip");
     setOverrideFields([]);
     setBatchId(null);
@@ -178,15 +190,26 @@ export default function UploadsPage() {
             />
           )}
           {step === "strategy" && (
-            <DuplicateStrategy
-              value={strategy}
-              onChange={setStrategy}
-              overrideFields={overrideFields}
-              onOverrideFieldsChange={setOverrideFields}
-              mappedFields={Object.values(fieldMapping).filter(Boolean) as string[]}
-              onConfirm={handleStartUpload}
-              onBack={() => setStep("map")}
-            />
+            <div className="space-y-4">
+              {format === "bison" && (
+                <div className="flex items-start gap-3 rounded-2xl bg-primary/10 px-4 py-3">
+                  <Badge variant="tinted">Email Bison</Badge>
+                  <p className="text-[13px] text-muted-foreground">
+                    Detected an Email Bison export — fields are auto-mapped (incl. city/state/domain/question
+                    from custom variables, ESP from tags). Rows that already bounced are flagged automatically.
+                  </p>
+                </div>
+              )}
+              <DuplicateStrategy
+                value={strategy}
+                onChange={setStrategy}
+                overrideFields={overrideFields}
+                onOverrideFieldsChange={setOverrideFields}
+                mappedFields={Object.values(fieldMapping).filter(Boolean) as string[]}
+                onConfirm={handleStartUpload}
+                onBack={() => setStep(format === "bison" ? "drop" : "map")}
+              />
+            </div>
           )}
           {step === "processing" && batchId && (
             <div className="space-y-2">

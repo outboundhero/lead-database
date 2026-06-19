@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeRow, type FieldMapping } from "@/lib/uploads/normalize-row";
+import { normalizeBisonRow } from "@/lib/uploads/parse-bison";
 import Papa from "papaparse";
 
 export const maxDuration = 300;
@@ -11,6 +12,7 @@ interface UploadConfig {
   duplicateStrategy: "skip" | "merge" | "replace";
   overrideFields?: string[];
   filename: string;
+  format?: "generic" | "bison"; // bison = use the Email Bison parser, ignore fieldMapping
 }
 
 const CHUNK_SIZE = 500;
@@ -47,9 +49,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { headers, fieldMapping, duplicateStrategy, overrideFields = [], filename } = config;
+  const { headers, fieldMapping, duplicateStrategy, overrideFields = [], filename, format = "generic" } = config;
 
-  if (!fieldMapping || !duplicateStrategy) {
+  const isBison = format === "bison";
+  if ((!fieldMapping && !isBison) || !duplicateStrategy) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
   }
 
@@ -101,8 +104,10 @@ export async function POST(request: NextRequest) {
 
     for (const row of chunk) {
       try {
-        const normalized = normalizeRow(row, headers, fieldMapping);
-        if (!normalized.email) {
+        const normalized = isBison
+          ? normalizeBisonRow(row, headers)
+          : normalizeRow(row, headers, fieldMapping);
+        if (!normalized || !normalized.email) {
           skipped++;
           continue;
         }

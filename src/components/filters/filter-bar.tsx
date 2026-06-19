@@ -163,7 +163,7 @@ export function FilterBar({
       case "specific_industry": setSpecificIndustries(values); break;
       case "country": setCountries(values); break;
       case "state": setStates(values); break;
-      case "job_title": setJobTitles(values); break;
+      case "title": setJobTitles(values); break;
       case "source": setSources(values); break;
       case "seniority": setSeniorities(values); break;
       case "esp": setEspValues([...new Set(values)]); break;
@@ -196,7 +196,7 @@ export function FilterBar({
         case "specific_industry": setSpecificIndustries(values); break;
         case "country": setCountries(values); break;
         case "state": setStates(values); break;
-        case "job_title": setJobTitles(values); break;
+        case "title": setJobTitles(values); break;
         case "source": setSources(values); break;
         case "seniority": setSeniorities(values); break;
         case "esp": setEspValues([...new Set(values)]); break;
@@ -258,7 +258,7 @@ export function FilterBar({
         </FilterChip>
 
         {/* Company Name */}
-        <FilterChip label="Company Name" activeCount={(filters.companyName ? 1 : 0) + (filters.excludeEmptyCompany ? 1 : 0)}>
+        <FilterChip label="Company" activeCount={(filters.companyName ? 1 : 0) + (filters.excludeEmptyCompany ? 1 : 0)}>
           <FilterText
             placeholder="Search company..."
             value={filters.companyName}
@@ -320,16 +320,16 @@ export function FilterBar({
 
         {/* Job Title — proper multi-select with standardized titles from DB */}
         <FilterChip
-          label="Job Title"
+          label="Title"
           activeCount={filters.jobTitle.include.length + filters.jobTitle.exclude.length + (filters.jobTitle.includeUnknown ? 1 : 0)}
-          onOpen={() => loadDistinctFor("job_title")}
+          onOpen={() => loadDistinctFor("title")}
         >
           <FilterMultiSelect
             options={jobTitles}
             value={filters.jobTitle}
             onChange={(v) => onIncludeExcludeChange("jobTitle", v)}
             searchable
-            onSearch={(term) => liveSearch("job_title", term)}
+            onSearch={(term) => liveSearch("title", term)}
           />
         </FilterChip>
 

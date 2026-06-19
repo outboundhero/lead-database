@@ -55,9 +55,18 @@ export function normalizeRow(
         }
         break;
       }
-      case "keywords":
-        lead.keywords = rawValue;
+      case "emails_sent":
+      case "opens":
+      case "replies":
+      case "bounces":
+      case "unique_replies":
+      case "unique_opens":
+      case "workspace_id":
+      case "bison_lead_id": {
+        const n = parseInt(rawValue.replace(/[,\s]/g, ""), 10);
+        if (!isNaN(n)) lead[dbField] = n;
         break;
+      }
       default:
         lead[dbField] = rawValue;
         break;
@@ -65,12 +74,12 @@ export function normalizeRow(
   }
 
   // Auto-classify email type from name/title/email signals (Phase 3)
-  if (lead.email || lead.first_name || lead.last_name || lead.job_title) {
+  if (lead.email || lead.first_name || lead.last_name || lead.title) {
     lead.email_type = detectEmailType({
       email: lead.email as string | undefined,
       first_name: lead.first_name as string | undefined,
       last_name: lead.last_name as string | undefined,
-      job_title: lead.job_title as string | undefined,
+      job_title: lead.title as string | undefined,
     });
   }
 

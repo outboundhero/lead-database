@@ -17,11 +17,14 @@ export async function POST(request: NextRequest) {
 
     // CSV header
     const columns = [
-      "id", "email", "first_name", "last_name", "job_title",
-      "seniority", "company_name_raw", "company_size", "annual_revenue",
+      "id", "email", "first_name", "last_name", "title",
+      "seniority", "company", "company_size", "annual_revenue",
       "general_industry", "specific_industry", "phone", "website",
       "person_linkedin", "company_linkedin", "source", "status", "esp",
-      "keywords", "city", "state", "country", "domain", "company_overview",
+      "tags", "city", "state", "country", "domain", "company_overview",
+      "email_type", "validation_status", "is_bounced",
+      "workspace_name", "emails_sent", "opens", "replies", "bounces",
+      "address", "question", "company_phone", "google_maps_url",
       "created_at", "updated_at",
     ];
     allRows.push(columns.join(","));

@@ -3,10 +3,10 @@ export interface Lead {
   email: string;
   first_name: string | null;
   last_name: string | null;
-  job_title: string | null;
+  title: string | null;
 
   seniority: string | null;
-  company_name_raw: string | null;
+  company: string | null;
   company_size: number | null;
   annual_revenue: number | null;
   general_industry: string | null;
@@ -18,13 +18,41 @@ export interface Lead {
   source: string | null;
   status: string | null;
   esp: string | null;
-  keywords: string | null;
+  tags: string | null;
 
   city: string | null;
   state: string | null;
   country: string | null;
   domain: string | null;
   company_overview: string | null;
+
+  // Email-type + validation + bounce (OutboundHero)
+  email_type: "general" | "personal" | null;
+  validation_status: "valid" | "catch_all" | "invalid" | "pending" | null;
+  validation_provider: "reoon" | "findemail" | null;
+  validated_at: string | null;
+  is_bounced: boolean;
+  bounced_at: string | null;
+  bounce_source: string | null;
+
+  // Email Bison-native fields
+  bison_lead_id: number | null;
+  workspace_id: number | null;
+  workspace_name: string | null;
+  instance_url: string | null;
+  notes: string | null;
+  bison_status: string | null;
+  emails_sent: number | null;
+  opens: number | null;
+  replies: number | null;
+  bounces: number | null;
+  unique_replies: number | null;
+  unique_opens: number | null;
+  address: string | null;
+  question: string | null;
+  company_phone: string | null;
+  google_maps_url: string | null;
+
   created_at: string;
   updated_at: string;
 }

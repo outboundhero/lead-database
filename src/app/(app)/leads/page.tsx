@@ -15,8 +15,8 @@ import type { Lead } from "@/types/database";
 const SORT_OPTIONS = [
   { label: "Name (A → Z)", sortBy: "first_name", sortDir: "asc" as const },
   { label: "Name (Z → A)", sortBy: "first_name", sortDir: "desc" as const },
-  { label: "Company (A → Z)", sortBy: "company_name_raw", sortDir: "asc" as const },
-  { label: "Company (Z → A)", sortBy: "company_name_raw", sortDir: "desc" as const },
+  { label: "Company (A → Z)", sortBy: "company", sortDir: "asc" as const },
+  { label: "Company (Z → A)", sortBy: "company", sortDir: "desc" as const },
   { label: "Employees (Low → High)", sortBy: "company_size", sortDir: "asc" as const },
   { label: "Employees (High → Low)", sortBy: "company_size", sortDir: "desc" as const },
   { label: "Revenue (Low → High)", sortBy: "annual_revenue", sortDir: "asc" as const },

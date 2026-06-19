@@ -395,8 +395,8 @@ export default function ApiKeysPage() {
       "email": "jane@corp.com",
       "first_name": "Jane",
       "last_name": "Smith",
-      "job_title": "CEO",
-      "company_name_raw": "Corp Inc",
+      "title": "CEO",
+      "company": "Corp Inc",
       "phone": "+1 555 0100",
       "website": "corp.com",
       "source": "Apollo",
@@ -414,13 +414,13 @@ export default function ApiKeysPage() {
 
           <EndpointCard
             method="POST"
-            path="/api/leads/search/company_name_raw"
+            path="/api/leads/search/company_name"
             description="Search leads by company website URL and/or company name. Both parameters are optional but at least one must be provided. When both are given, results match either condition (OR)."
             params={[
               { name: "website", type: "string", required: false, desc: "Company website URL. Substring match against stored website values (e.g. 'acme.com' matches 'https://www.acme.com')." },
-              { name: "company", type: "string", required: false, desc: "Company name. Substring match against company_name_raw field (case-insensitive)." },
+              { name: "company", type: "string", required: false, desc: "Company name. Substring match against company field (case-insensitive)." },
             ]}
-            example={`curl -X POST ${baseUrl}/api/leads/search/company_name_raw \\
+            example={`curl -X POST ${baseUrl}/api/leads/search/company_name \\
   -H "Authorization: Bearer rdb_your_token" \\
   -H "Content-Type: application/json" \\
   -d '{"website": "acme.com", "company": "Acme"}'`}
@@ -431,8 +431,8 @@ export default function ApiKeysPage() {
       "email": "john@acme.com",
       "first_name": "John",
       "last_name": "Doe",
-      "job_title": "VP Sales",
-      "company_name_raw": "Acme Corporation",
+      "title": "VP Sales",
+      "company": "Acme Corporation",
       "website": "https://acme.com",
       "annual_revenue": "$10M-$50M",
       "company_size": "51-200",

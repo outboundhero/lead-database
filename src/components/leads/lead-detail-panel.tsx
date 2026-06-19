@@ -106,9 +106,9 @@ export function LeadDetailPanel({
           <div className="flex items-start justify-between gap-4 pr-8">
             <div>
               <SheetTitle className="text-left">{fullName}</SheetTitle>
-              {lead.job_title && (
+              {lead.title && (
                 <p className="text-sm text-muted-foreground">{(() => {
-                  const raw = lead.job_title;
+                  const raw = lead.title;
                   let titles: string[] = [];
                   const trimmed = raw.trim();
                   if (trimmed.startsWith("[")) {
@@ -159,7 +159,7 @@ export function LeadDetailPanel({
           </Section>
 
           <Section title="Company">
-            <DetailRow label="Company" value={lead.company_name_raw} />
+            <DetailRow label="Company" value={lead.company} />
             <DetailRow
               label="Website"
               value={lead.website}
@@ -192,6 +192,7 @@ export function LeadDetailPanel({
               value={lead.company_linkedin ? "Profile" : null}
               href={lead.company_linkedin ?? undefined}
             />
+            <DetailRow label="Company phone" value={lead.company_phone} />
             <DetailRow label="Domain" value={lead.domain} />
           </Section>
 
@@ -201,13 +202,45 @@ export function LeadDetailPanel({
             <DetailRow label="Specific industry" value={lead.specific_industry} />
             <DetailRow label="ESP" value={lead.esp} />
             <DetailRow label="Source" value={lead.source} />
+            <DetailRow label="Email type" value={lead.email_type} />
             <DetailRow label="Status" value={lead.status} />
           </Section>
 
-          {lead.keywords && (
-            <Section title="Keywords">
+          {(lead.validation_status || lead.is_bounced) && (
+            <Section title="Deliverability">
+              <DetailRow label="Validation" value={lead.validation_status} />
+              <DetailRow label="Validated by" value={lead.validation_provider} />
+              <DetailRow
+                label="Validated at"
+                value={lead.validated_at ? new Date(lead.validated_at).toLocaleString() : null}
+              />
+              <DetailRow label="Bounced" value={lead.is_bounced ? "Yes" : null} />
+              <DetailRow label="Bounce source" value={lead.bounce_source} />
+            </Section>
+          )}
+
+          {(lead.emails_sent || lead.opens || lead.replies || lead.bounces) ? (
+            <Section title="Engagement (Email Bison)">
+              <DetailRow label="Workspace" value={lead.workspace_name} />
+              <DetailRow label="Emails sent" value={lead.emails_sent != null ? String(lead.emails_sent) : null} />
+              <DetailRow label="Opens" value={lead.opens != null ? String(lead.opens) : null} />
+              <DetailRow label="Replies" value={lead.replies != null ? String(lead.replies) : null} />
+              <DetailRow label="Bounces" value={lead.bounces != null ? String(lead.bounces) : null} />
+            </Section>
+          ) : null}
+
+          {lead.question && (
+            <Section title="Personalization question">
               <p className="px-4 py-3 text-[13px] leading-relaxed text-foreground">
-                {lead.keywords}
+                {lead.question}
+              </p>
+            </Section>
+          )}
+
+          {lead.tags && (
+            <Section title="Tags">
+              <p className="px-4 py-3 text-[13px] leading-relaxed text-foreground">
+                {lead.tags}
               </p>
             </Section>
           )}
