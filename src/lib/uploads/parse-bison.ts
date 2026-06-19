@@ -141,15 +141,24 @@ export function normalizeBisonRow(
     }
   }
 
-  // custom_variables JSON -> flattened columns
+  // custom_variables JSON -> flattened columns. The source uses the literal
+  // placeholder "there" (and occasionally "null"/"n/a") for missing values, so
+  // filter those out rather than storing junk.
   const cv = parseCustomVariables(get("custom_variables"));
-  if (cv.city) lead.city = cv.city;
-  if (cv.state) lead.state = normalizeStateValue(cv.state) ?? cv.state;
-  if (cv.domain) lead.domain = cv.domain;
-  if (cv.address) lead.address = cv.address;
-  if (cv.question) lead.question = cv.question;
-  if (cv["company phone"]) lead.company_phone = cv["company phone"];
-  if (cv["google maps url"]) lead.google_maps_url = cv["google maps url"];
+  const clean = (v: string | undefined): string | undefined => {
+    if (!v) return undefined;
+    const t = v.trim();
+    const low = t.toLowerCase();
+    if (!t || low === "there" || low === "null" || low === "n/a" || low === "none") return undefined;
+    return t;
+  };
+  if (clean(cv.city)) lead.city = cv.city;
+  if (clean(cv.state)) lead.state = normalizeStateValue(cv.state) ?? cv.state;
+  if (clean(cv.domain)) lead.domain = cv.domain;
+  if (clean(cv.address)) lead.address = cv.address;
+  if (clean(cv.question)) lead.question = cv.question;
+  if (clean(cv["company phone"])) lead.company_phone = cv["company phone"];
+  if (clean(cv["google maps url"])) lead.google_maps_url = cv["google maps url"];
 
   // Timestamps (Bison provides them; fall back to DB defaults if absent)
   const createdAt = get("created_at");

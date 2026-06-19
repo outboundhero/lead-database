@@ -85,13 +85,15 @@ function normalizeBisonRow(row, idx) {
   const tags = get("comma separated tags");
   if (tags) { lead.tags = tags; for (const t of tags.split(",").map((s) => s.trim().toLowerCase())) { if (ESP_TAGS[t]) { lead.esp = ESP_TAGS[t]; break; } } }
   const cv = parseCV(get("custom_variables"));
-  if (cv.city) lead.city = cv.city;
-  if (cv.state) lead.state = normalizeState(cv.state) ?? cv.state;
-  if (cv.domain) lead.domain = cv.domain;
-  if (cv.address) lead.address = cv.address;
-  if (cv.question) lead.question = cv.question;
-  if (cv["company phone"]) lead.company_phone = cv["company phone"];
-  if (cv["google maps url"]) lead.google_maps_url = cv["google maps url"];
+  // Source uses "there"/"null"/"n/a" as placeholders for missing values — filter them.
+  const clean = (v) => { if(!v) return undefined; const low=v.trim().toLowerCase(); return (!v.trim()||low==="there"||low==="null"||low==="n/a"||low==="none")?undefined:v.trim(); };
+  if (clean(cv.city)) lead.city = cv.city;
+  if (clean(cv.state)) lead.state = normalizeState(cv.state) ?? cv.state;
+  if (clean(cv.domain)) lead.domain = cv.domain;
+  if (clean(cv.address)) lead.address = cv.address;
+  if (clean(cv.question)) lead.question = cv.question;
+  if (clean(cv["company phone"])) lead.company_phone = cv["company phone"];
+  if (clean(cv["google maps url"])) lead.google_maps_url = cv["google maps url"];
   const ca = get("created_at"), ua = get("updated_at");
   if (ca) lead.created_at = ca;
   if (ua) lead.updated_at = ua;
