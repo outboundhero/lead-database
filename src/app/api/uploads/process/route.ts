@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeRow, type FieldMapping } from "@/lib/uploads/normalize-row";
 import { normalizeBisonRow } from "@/lib/uploads/parse-bison";
-import Papa from "papaparse";
+import { parse } from "csv-parse/sync";
 
 export const maxDuration = 300;
 
@@ -56,9 +56,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
   }
 
-  // Parse CSV server-side
-  const parsed = Papa.parse(csvText, { skipEmptyLines: true });
-  const allRows = parsed.data as string[][];
+  // Parse CSV server-side. Use csv-parse (same as the bulk import script + bounce
+  // route) so every ingestion path treats quoting/escaping identically.
+  const allRows = parse(csvText, {
+    skip_empty_lines: true,
+    relax_quotes: true,
+    relax_column_count: true,
+  }) as string[][];
 
   // Skip header row
   const rows = allRows.slice(1);
@@ -113,6 +117,31 @@ export async function POST(request: NextRequest) {
         }
 
         const email = normalized.email as string;
+
+        // Email Bison path: full upsert so engagement/esp/validation-relevant fields
+        // are always refreshed (findings 5). Never downgrade is_bounced: once a lead
+        // has bounced it stays bounced even if a later export shows 0 bounces (finding 6).
+        if (isBison) {
+          const { data: existingBison } = await supabase
+            .from("leads")
+            .select("id, is_bounced")
+            .eq("email", email)
+            .maybeSingle();
+          if (existingBison) {
+            if (existingBison.is_bounced) {
+              normalized.is_bounced = true;
+              delete normalized.bounced_at; // keep original bounce timestamp/source
+              delete normalized.bounce_source;
+            }
+            await supabase.from("leads").update(normalized).eq("id", existingBison.id);
+            merged++;
+          } else {
+            const { error: insErr } = await supabase.from("leads").insert(normalized).select("id").single();
+            if (insErr) errors++;
+            else inserted++;
+          }
+          continue;
+        }
 
         // Check if lead exists
         const { data: existing } = await supabase

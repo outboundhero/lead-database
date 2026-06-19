@@ -150,84 +150,40 @@ export function LeadDetailPanel({
         <div className="mt-4 space-y-5">
           <Section title="Contact">
             <DetailRow label="Email" value={lead.email} href={`mailto:${lead.email}`} />
-            <DetailRow label="Phone" value={lead.phone} />
-            <DetailRow
-              label="LinkedIn"
-              value={lead.person_linkedin ? "Profile" : null}
-              href={lead.person_linkedin ?? undefined}
-            />
+            <DetailRow label="Email type" value={lead.email_type} />
+            <DetailRow label="Source" value={lead.source} />
           </Section>
 
           <Section title="Company">
             <DetailRow label="Company" value={lead.company} />
-            <DetailRow
-              label="Website"
-              value={lead.website}
-              href={
-                lead.website
-                  ? lead.website.startsWith("http")
-                    ? lead.website
-                    : `https://${lead.website}`
-                  : undefined
-              }
-            />
-            <DetailRow
-              label="Size"
-              value={lead.company_size != null ? lead.company_size.toLocaleString() : null}
-            />
-            <DetailRow
-              label="Revenue"
-              value={
-                lead.annual_revenue != null
-                  ? lead.annual_revenue >= 1e9
-                    ? `$${(lead.annual_revenue / 1e9).toFixed(1)}B`
-                    : lead.annual_revenue >= 1e6
-                    ? `$${(lead.annual_revenue / 1e6).toFixed(1)}M`
-                    : `$${lead.annual_revenue.toLocaleString()}`
-                  : null
-              }
-            />
-            <DetailRow
-              label="Company LinkedIn"
-              value={lead.company_linkedin ? "Profile" : null}
-              href={lead.company_linkedin ?? undefined}
-            />
             <DetailRow label="Company phone" value={lead.company_phone} />
             <DetailRow label="Domain" value={lead.domain} />
-          </Section>
-
-          <Section title="Classification">
-            <DetailRow label="Seniority" value={lead.seniority} />
-            <DetailRow label="General industry" value={lead.general_industry} />
-            <DetailRow label="Specific industry" value={lead.specific_industry} />
+            <DetailRow
+              label="Google Maps"
+              value={lead.google_maps_url ? "Open" : null}
+              href={lead.google_maps_url ?? undefined}
+            />
             <DetailRow label="ESP" value={lead.esp} />
-            <DetailRow label="Source" value={lead.source} />
-            <DetailRow label="Email type" value={lead.email_type} />
-            <DetailRow label="Status" value={lead.status} />
           </Section>
 
-          {(lead.validation_status || lead.is_bounced) && (
-            <Section title="Deliverability">
-              <DetailRow label="Validation" value={lead.validation_status} />
-              <DetailRow label="Validated by" value={lead.validation_provider} />
-              <DetailRow
-                label="Validated at"
-                value={lead.validated_at ? new Date(lead.validated_at).toLocaleString() : null}
-              />
-              <DetailRow label="Bounced" value={lead.is_bounced ? "Yes" : null} />
-              <DetailRow label="Bounce source" value={lead.bounce_source} />
-            </Section>
-          )}
+          <Section title="Deliverability">
+            <DetailRow label="Validation" value={lead.validation_status ?? "Not validated"} />
+            <DetailRow label="Validated by" value={lead.validation_provider} />
+            <DetailRow
+              label="Validated at"
+              value={lead.validated_at ? new Date(lead.validated_at).toLocaleString() : null}
+            />
+            <DetailRow label="Bounced" value={lead.is_bounced ? "Yes" : "No"} />
+            <DetailRow label="Bounce source" value={lead.bounce_source} />
+          </Section>
 
-          {(lead.emails_sent || lead.opens || lead.replies || lead.bounces) ? (
-            <Section title="Engagement (Email Bison)">
-              <DetailRow label="Workspace" value={lead.workspace_name} />
-              <DetailRow label="Emails sent" value={lead.emails_sent != null ? String(lead.emails_sent) : null} />
-              <DetailRow label="Opens" value={lead.opens != null ? String(lead.opens) : null} />
-              <DetailRow label="Replies" value={lead.replies != null ? String(lead.replies) : null} />
-              <DetailRow label="Bounces" value={lead.bounces != null ? String(lead.bounces) : null} />
-            </Section>
-          ) : null}
+          <Section title="Engagement (Email Bison)">
+            <DetailRow label="Workspace" value={lead.workspace_name} />
+            <DetailRow label="Emails sent" value={lead.emails_sent != null ? String(lead.emails_sent) : null} />
+            <DetailRow label="Opens" value={lead.opens != null ? String(lead.opens) : null} />
+            <DetailRow label="Replies" value={lead.replies != null ? String(lead.replies) : null} />
+            <DetailRow label="Bounces" value={lead.bounces != null ? String(lead.bounces) : null} />
+          </Section>
 
           {lead.question && (
             <Section title="Personalization question">
@@ -237,18 +193,18 @@ export function LeadDetailPanel({
             </Section>
           )}
 
-          {lead.tags && (
-            <Section title="Tags">
+          {lead.notes && (
+            <Section title="Notes">
               <p className="px-4 py-3 text-[13px] leading-relaxed text-foreground">
-                {lead.tags}
+                {lead.notes}
               </p>
             </Section>
           )}
 
-          {lead.company_overview && (
-            <Section title="Company overview">
+          {lead.tags && (
+            <Section title="Tags">
               <p className="px-4 py-3 text-[13px] leading-relaxed text-foreground">
-                {lead.company_overview}
+                {lead.tags}
               </p>
             </Section>
           )}

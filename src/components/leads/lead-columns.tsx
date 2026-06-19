@@ -90,52 +90,30 @@ export const leadColumns: ColumnDef<Lead>[] = [
     accessorKey: "company",
     header: ({ column }) => <SortHeader column={column} label="Company" />,
     cell: ({ getValue }) => (
-      <span className="text-[13px]">{(getValue() as string) ?? "—"}</span>
+      <span className="block max-w-[180px] truncate text-[13px]">{(getValue() as string) ?? "—"}</span>
     ),
   },
   {
-    accessorKey: "general_industry",
-    header: ({ column }) => <SortHeader column={column} label="General Industry" />,
-    cell: ({ getValue }) => (
-      <span className="block max-w-[140px] truncate text-[13px]">
-        {(getValue() as string) ?? "—"}
-      </span>
-    ),
-  },
-  {
-    accessorKey: "specific_industry",
-    header: ({ column }) => <SortHeader column={column} label="Specific Industry" />,
-    cell: ({ getValue }) => (
-      <span className="block max-w-[140px] truncate text-[13px]">
-        {(getValue() as string) ?? "—"}
-      </span>
-    ),
-  },
-  {
-    accessorKey: "phone",
-    header: ({ column }) => <SortHeader column={column} label="Phone" />,
+    accessorKey: "city",
+    header: ({ column }) => <SortHeader column={column} label="City" />,
     cell: ({ getValue }) => (
       <span className="text-[13px]">{(getValue() as string) ?? "—"}</span>
     ),
   },
   {
-    accessorKey: "company_size",
-    header: ({ column }) => <SortHeader column={column} label="Company Size" />,
-    cell: ({ getValue }) => {
-      const v = getValue() as number | null;
-      return <span className="text-[13px] tabular-nums">{v != null ? v.toLocaleString() : "—"}</span>;
-    },
+    accessorKey: "state",
+    header: ({ column }) => <SortHeader column={column} label="State" />,
+    cell: ({ getValue }) => (
+      <span className="text-[13px] tabular-nums">{(getValue() as string) ?? "—"}</span>
+    ),
   },
   {
-    accessorKey: "annual_revenue",
-    header: ({ column }) => <SortHeader column={column} label="Annual Revenue" />,
+    accessorKey: "email_type",
+    header: ({ column }) => <SortHeader column={column} label="Type" />,
     cell: ({ getValue }) => {
-      const v = getValue() as number | null;
-      if (v == null) return <span className="text-[13px]">—</span>;
-      if (v >= 1e9) return <span className="text-[13px] tabular-nums">${(v / 1e9).toFixed(1)}B</span>;
-      if (v >= 1e6) return <span className="text-[13px] tabular-nums">${(v / 1e6).toFixed(1)}M</span>;
-      if (v >= 1e3) return <span className="text-[13px] tabular-nums">${(v / 1e3).toFixed(0)}K</span>;
-      return <span className="text-[13px] tabular-nums">${v.toLocaleString()}</span>;
+      const v = getValue() as string | null;
+      if (!v) return <span className="text-[13px] text-muted-foreground">—</span>;
+      return <Badge variant={v === "personal" ? "tinted" : "secondary"}>{v}</Badge>;
     },
   },
   {
@@ -146,23 +124,21 @@ export const leadColumns: ColumnDef<Lead>[] = [
     ),
   },
   {
-    accessorKey: "website",
-    header: ({ column }) => <SortHeader column={column} label="Website" />,
+    accessorKey: "validation_status",
+    header: ({ column }) => <SortHeader column={column} label="Validation" />,
     cell: ({ getValue }) => {
       const v = getValue() as string | null;
       if (!v) return <span className="text-[13px] text-muted-foreground">—</span>;
-      const href = v.startsWith("http") ? v : `https://${v}`;
-      return (
-        <a
-          href={href}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="block max-w-[160px] truncate text-[13px] font-medium text-primary hover:opacity-80"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {v}
-        </a>
-      );
+      const variant = v === "valid" ? "success" : v === "catch_all" ? "warning" : "destructive";
+      return <Badge variant={variant}>{v}</Badge>;
+    },
+  },
+  {
+    accessorKey: "replies",
+    header: ({ column }) => <SortHeader column={column} label="Replies" />,
+    cell: ({ getValue }) => {
+      const v = getValue() as number | null;
+      return <span className="text-[13px] tabular-nums">{v != null ? v.toLocaleString() : "—"}</span>;
     },
   },
 ];

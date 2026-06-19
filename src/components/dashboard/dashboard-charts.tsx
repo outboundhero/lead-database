@@ -11,75 +11,88 @@ import {
   ResponsiveContainer,
   Area,
   AreaChart,
+  PieChart,
+  Pie,
+  Cell,
+  Legend,
 } from "recharts";
 import type { DashboardSnapshot } from "@/types/database";
-import { COMPANY_SIZE_BUCKETS } from "@/types/database";
-
-type TimePoint = { date: string; total: number };
 
 interface DashboardChartsProps {
   snapshot: DashboardSnapshot | null;
-  timeSeries: TimePoint[];
 }
+
+const IOS = ["#007AFF", "#34C759", "#FF9500", "#FF3B30", "#5856D6", "#AF52DE", "#5AC8FA"];
 
 function NoData() {
-  return <p className="text-xs text-muted-foreground py-8 text-center">No data available</p>;
+  return <p className="py-8 text-center text-[13px] text-muted-foreground">No data available</p>;
 }
 
-export function DashboardCharts({ snapshot, timeSeries }: DashboardChartsProps) {
-  const jobTitleData = (snapshot?.leads_by_job_title ?? [])
-    .sort((a, b) => b.count - a.count);
+const TOOLTIP_STYLE = {
+  fontSize: 12,
+  backgroundColor: "var(--card)",
+  border: "1px solid var(--border)",
+  borderRadius: 12,
+  color: "var(--foreground)",
+};
 
-  const industryData = (snapshot?.leads_by_general_industry ?? [])
-    .sort((a, b) => b.count - a.count);
+export function DashboardCharts({ snapshot }: DashboardChartsProps) {
+  const s = snapshot?.stats;
+  if (!s) return null;
 
-  // Order company size by the defined bucket order
-  const rawSizeData = snapshot?.leads_by_company_size ?? [];
-  const companySizeData = COMPANY_SIZE_BUCKETS.map((bucket) => {
-    const found = rawSizeData.find((d) => d.size === bucket);
-    return { size: bucket, count: found?.count ?? 0 };
-  }).filter((d) => d.count > 0);
-
-  const timeSeriesData = timeSeries.map((p) => ({
-    date: new Date(p.date).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-    total: p.total,
+  const byState = (s.by_state ?? []).slice(0, 15);
+  const byEsp = s.by_esp ?? [];
+  const eng = s.engagement ?? { emails_sent: 0, opens: 0, replies: 0, bounces: 0 };
+  const timeData = (s.leads_over_time ?? []).map((p) => ({
+    date: new Date(p.date + "-01").toLocaleDateString("en-US", { month: "short", year: "2-digit" }),
+    count: p.count,
   }));
+
+  const engTiles = [
+    { label: "Emails sent", value: eng.emails_sent, tint: "text-[oklch(0.586_0.214_263)]" },
+    { label: "Opens", value: eng.opens, tint: "text-[oklch(0.745_0.183_145)]" },
+    { label: "Replies", value: eng.replies, tint: "text-[oklch(0.78_0.175_65)]" },
+    { label: "Bounces", value: eng.bounces, tint: "text-[oklch(0.65_0.235_25)]" },
+  ];
 
   return (
     <div className="space-y-4 text-foreground">
-      {/* Row 1: Job Title + Industry (horizontal bars) */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Leads per Job Title */}
+      {/* Engagement summary tiles */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-[15px]">Campaign Engagement (Email Bison)</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            {engTiles.map((t) => (
+              <div key={t.label} className="rounded-2xl bg-muted/40 p-4">
+                <p className="text-[12px] font-medium text-muted-foreground">{t.label}</p>
+                <p className={`mt-1 text-[26px] font-semibold leading-none tracking-tight ${t.tint}`}>
+                  {t.value.toLocaleString()}
+                </p>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {/* Leads by State */}
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-[15px]">Leads per Job Title</CardTitle>
+            <CardTitle className="text-[15px]">Leads by State (top 15)</CardTitle>
           </CardHeader>
           <CardContent>
-            {jobTitleData.length === 0 ? (
+            {byState.length === 0 ? (
               <NoData />
             ) : (
-              <div className="max-h-[500px] overflow-y-auto">
-                <ResponsiveContainer width="100%" height={jobTitleData.length * 40 + 40}>
-                  <BarChart
-                    data={jobTitleData}
-                    layout="vertical"
-                    margin={{ left: 12, right: 24, top: 4, bottom: 4 }}
-                    barCategoryGap="24%"
-                  >
+              <div className="max-h-[460px] overflow-y-auto">
+                <ResponsiveContainer width="100%" height={byState.length * 32 + 30}>
+                  <BarChart data={byState} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }} barCategoryGap="22%">
                     <CartesianGrid strokeDasharray="3 3" className="stroke-border" horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 11, fill: "currentColor" }} tickFormatter={(v: number) => v.toLocaleString()} />
-                    <YAxis
-                      dataKey="title"
-                      type="category"
-                      width={150}
-                      tick={{ fontSize: 11, fill: "currentColor" }}
-                      tickLine={false}
-                      interval={0}
-                    />
-                    <Tooltip
-                      formatter={(v: number) => [v.toLocaleString(), "Leads"]}
-                      contentStyle={{ fontSize: 12, backgroundColor: "hsl(var(--card))", border: "1px solid hsl(var(--border))", color: "hsl(var(--foreground))" }}
-                    />
+                    <YAxis dataKey="state" type="category" width={56} tick={{ fontSize: 11, fill: "currentColor" }} tickLine={false} interval={0} />
+                    <Tooltip formatter={(v: number) => [v.toLocaleString(), "Leads"]} contentStyle={TOOLTIP_STYLE} />
                     <Bar dataKey="count" fill="#007AFF" radius={[0, 8, 8, 0]} maxBarSize={20} />
                   </BarChart>
                 </ResponsiveContainer>
@@ -88,96 +101,42 @@ export function DashboardCharts({ snapshot, timeSeries }: DashboardChartsProps) 
           </CardContent>
         </Card>
 
-        {/* Leads per General Industry */}
+        {/* Leads by ESP (pie) */}
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-[15px]">Leads per General Industry</CardTitle>
+            <CardTitle className="text-[15px]">Leads by ESP</CardTitle>
           </CardHeader>
           <CardContent>
-            {industryData.length === 0 ? (
+            {byEsp.length === 0 ? (
               <NoData />
             ) : (
-              <div className="max-h-[500px] overflow-y-auto">
-                <ResponsiveContainer width="100%" height={industryData.length * 40 + 40}>
-                  <BarChart
-                    data={industryData}
-                    layout="vertical"
-                    margin={{ left: 12, right: 24, top: 4, bottom: 4 }}
-                    barCategoryGap="24%"
-                  >
-                    <CartesianGrid strokeDasharray="3 3" className="stroke-border" horizontal={false} />
-                    <XAxis type="number" tick={{ fontSize: 11, fill: "currentColor" }} tickFormatter={(v: number) => v.toLocaleString()} />
-                    <YAxis
-                      dataKey="industry"
-                      type="category"
-                      width={160}
-                      tick={{ fontSize: 11, fill: "currentColor" }}
-                      tickLine={false}
-                      interval={0}
-                    />
-                    <Tooltip
-                      formatter={(v: number) => [v.toLocaleString(), "Leads"]}
-                      contentStyle={{ fontSize: 12, backgroundColor: "hsl(var(--card))", border: "1px solid hsl(var(--border))", color: "hsl(var(--foreground))" }}
-                    />
-                    <Bar dataKey="count" fill="#34C759" radius={[0, 8, 8, 0]} maxBarSize={20} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+              <ResponsiveContainer width="100%" height={280}>
+                <PieChart>
+                  <Pie data={byEsp} dataKey="count" nameKey="esp" cx="50%" cy="50%" outerRadius={90} label={(e) => e.esp}>
+                    {byEsp.map((_, i) => (
+                      <Cell key={i} fill={IOS[i % IOS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(v: number) => [v.toLocaleString(), "Leads"]} contentStyle={TOOLTIP_STYLE} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                </PieChart>
+              </ResponsiveContainer>
             )}
           </CardContent>
         </Card>
       </div>
 
-      {/* Row 2: Company Size (vertical bar) */}
+      {/* Leads over time */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-[15px]">Total Leads per Company Size</CardTitle>
+          <CardTitle className="text-[15px]">Leads Added Over Time</CardTitle>
         </CardHeader>
         <CardContent>
-          {companySizeData.length === 0 ? (
+          {timeData.length < 1 ? (
             <NoData />
           ) : (
             <ResponsiveContainer width="100%" height={260}>
-              <BarChart
-                data={companySizeData}
-                margin={{ left: 8, right: 24, top: 4, bottom: 4 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
-                <XAxis dataKey="size" tick={{ fontSize: 11, fill: "currentColor" }} tickLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: "currentColor" }} tickFormatter={(v: number) => v.toLocaleString()} />
-                <Tooltip
-                  formatter={(v: number) => [v.toLocaleString(), "Leads"]}
-                  contentStyle={{ fontSize: 12, backgroundColor: "hsl(var(--card))", border: "1px solid hsl(var(--border))", color: "hsl(var(--foreground))" }}
-                />
-                <Bar dataKey="count" fill="#FF9500" radius={[8, 8, 0, 0]} maxBarSize={60} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Row 3: Total Leads Over Time (line/area chart) */}
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-[15px]">Total Leads Over Time</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {timeSeriesData.length < 2 ? (
-            <div className="py-8 text-center">
-              <p className="text-xs text-muted-foreground">
-                {timeSeriesData.length === 0
-                  ? "No snapshot history yet."
-                  : "Only one snapshot recorded — more data points appear as snapshots accumulate daily."}
-              </p>
-              {timeSeriesData.length === 1 && (
-                <p className="text-sm font-semibold mt-1">
-                  {timeSeriesData[0].total.toLocaleString()} leads as of {timeSeriesData[0].date}
-                </p>
-              )}
-            </div>
-          ) : (
-            <ResponsiveContainer width="100%" height={260}>
-              <AreaChart data={timeSeriesData} margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+              <AreaChart data={timeData} margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
                 <defs>
                   <linearGradient id="leadsGradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="#007AFF" stopOpacity={0.2} />
@@ -187,19 +146,8 @@ export function DashboardCharts({ snapshot, timeSeries }: DashboardChartsProps) 
                 <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
                 <XAxis dataKey="date" tick={{ fontSize: 10, fill: "currentColor" }} tickLine={false} />
                 <YAxis tick={{ fontSize: 10, fill: "currentColor" }} tickFormatter={(v: number) => v.toLocaleString()} />
-                <Tooltip
-                  formatter={(v: number) => [v.toLocaleString(), "Total Leads"]}
-                  contentStyle={{ fontSize: 12, backgroundColor: "hsl(var(--card))", border: "1px solid hsl(var(--border))", color: "hsl(var(--foreground))" }}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="total"
-                  stroke="#007AFF"
-                  strokeWidth={2}
-                  fill="url(#leadsGradient)"
-                  dot={false}
-                  activeDot={{ r: 4 }}
-                />
+                <Tooltip formatter={(v: number) => [v.toLocaleString(), "Leads"]} contentStyle={TOOLTIP_STYLE} />
+                <Area type="monotone" dataKey="count" stroke="#007AFF" strokeWidth={2} fill="url(#leadsGradient)" dot={false} activeDot={{ r: 4 }} />
               </AreaChart>
             </ResponsiveContainer>
           )}

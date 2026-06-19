@@ -275,49 +275,6 @@ export function FilterBar({
           </label>
         </FilterChip>
 
-        {/* Company Description */}
-        <FilterChip label="Company Description" activeCount={filters.excludeEmptyOverview ? 1 : 0}>
-          <label className="flex items-center gap-2 text-xs cursor-pointer">
-            <input
-              type="checkbox"
-              checked={filters.excludeEmptyOverview}
-              onChange={() => onToggleFlag("excludeEmptyOverview", !filters.excludeEmptyOverview)}
-              className="rounded"
-            />
-            <span className="text-muted-foreground">Only leads with company description</span>
-          </label>
-        </FilterChip>
-
-        {/* General Industry — dynamic from DB */}
-        <FilterChip
-          label="General Industry"
-          activeCount={filters.generalIndustry.include.length + filters.generalIndustry.exclude.length + (filters.generalIndustry.includeUnknown ? 1 : 0)}
-          onOpen={() => loadDistinctFor("general_industry")}
-        >
-          <FilterMultiSelect
-            options={generalIndustries}
-            value={filters.generalIndustry}
-            onChange={(v) => onIncludeExcludeChange("generalIndustry", v)}
-            searchable
-            onSearch={(term) => liveSearch("general_industry", term)}
-          />
-        </FilterChip>
-
-        {/* Specific Industry — dynamic from DB */}
-        <FilterChip
-          label="Specific Industry"
-          activeCount={filters.specificIndustry.include.length + filters.specificIndustry.exclude.length + (filters.specificIndustry.includeUnknown ? 1 : 0)}
-          onOpen={() => loadDistinctFor("specific_industry")}
-        >
-          <FilterMultiSelect
-            options={specificIndustries}
-            value={filters.specificIndustry}
-            onChange={(v) => onIncludeExcludeChange("specificIndustry", v)}
-            searchable
-            onSearch={(term) => liveSearch("specific_industry", term)}
-          />
-        </FilterChip>
-
         {/* Job Title — proper multi-select with standardized titles from DB */}
         <FilterChip
           label="Title"
@@ -330,48 +287,6 @@ export function FilterBar({
             onChange={(v) => onIncludeExcludeChange("jobTitle", v)}
             searchable
             onSearch={(term) => liveSearch("title", term)}
-          />
-        </FilterChip>
-
-        {/* Seniority — dynamic from DB */}
-        <FilterChip
-          label="Seniority"
-          activeCount={filters.seniority.include.length + filters.seniority.exclude.length + (filters.seniority.includeUnknown ? 1 : 0)}
-          onOpen={() => loadDistinctFor("seniority")}
-        >
-          <FilterMultiSelect
-            options={seniorities}
-            labels={SENIORITY_LABELS}
-            value={filters.seniority}
-            onChange={(v) => onIncludeExcludeChange("seniority", v)}
-          />
-        </FilterChip>
-
-        {/* Company Size */}
-        <FilterChip
-          label="Company Size"
-          activeCount={filters.companySize.buckets.length + (filters.companySize.includeUnknown ? 1 : 0) + (filters.companySize.customMin != null || filters.companySize.customMax != null ? 1 : 0)}
-        >
-          <FilterRange
-            buckets={COMPANY_SIZE_BUCKETS}
-            value={filters.companySize}
-            onChange={(v) => onRangeChange("companySize", v)}
-            showCustomRange
-          />
-        </FilterChip>
-
-        {/* Country — dynamic from DB */}
-        <FilterChip
-          label="Country"
-          activeCount={filters.location.country.include.length + filters.location.country.exclude.length + (filters.location.country.includeUnknown ? 1 : 0)}
-          onOpen={() => loadDistinctFor("country")}
-        >
-          <FilterMultiSelect
-            options={countries}
-            value={filters.location.country}
-            onChange={onLocationCountryChange}
-            searchable
-            onSearch={(term) => liveSearch("country", term)}
           />
         </FilterChip>
 
@@ -396,18 +311,6 @@ export function FilterBar({
             onChange={onLocationStateChange}
             searchable
             onSearch={(term) => liveSearch("state", term)}
-          />
-        </FilterChip>
-
-        {/* Annual Revenue */}
-        <FilterChip
-          label="Annual Revenue"
-          activeCount={filters.revenue.buckets.length + (filters.revenue.includeUnknown ? 1 : 0)}
-        >
-          <FilterRange
-            buckets={REVENUE_BUCKETS}
-            value={filters.revenue}
-            onChange={(v) => onRangeChange("revenue", v)}
           />
         </FilterChip>
 
@@ -442,7 +345,7 @@ export function FilterBar({
               />
             </div>
             <p className="px-1 text-[11px] text-muted-foreground">
-              Matched against company name, general & specific industry, and company overview.
+              Matched against company name.
             </p>
           </div>
         </FilterChip>

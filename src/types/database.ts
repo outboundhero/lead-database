@@ -152,16 +152,26 @@ export interface FilterPreset {
   created_at: string;
 }
 
+export interface DashboardStats {
+  total_leads: number;
+  general: number;
+  personal: number;
+  bounced: number;
+  valid: number;
+  by_state: Array<{ state: string; count: number }>;
+  by_esp: Array<{ esp: string; count: number }>;
+  by_email_type: Array<{ type: string; count: number }>;
+  by_workspace: Array<{ workspace: string; count: number }>;
+  by_validation: Array<{ status: string; count: number }>;
+  engagement: { emails_sent: number; opens: number; replies: number; bounces: number };
+  leads_over_time: Array<{ date: string; count: number }>;
+}
+
 export interface DashboardSnapshot {
   id: string;
   snapshot_date: string;
   total_leads: number | null;
-  total_job_titles: number | null;
-  total_general_industries: number | null;
-  total_specific_industries: number | null;
-  leads_by_job_title: Array<{ title: string; count: number }> | null;
-  leads_by_general_industry: Array<{ industry: string; count: number }> | null;
-  leads_by_company_size: Array<{ size: string; count: number }> | null;
+  stats: DashboardStats | null;
   created_at: string;
 }
 
