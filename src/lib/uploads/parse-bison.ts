@@ -155,7 +155,15 @@ export function normalizeBisonRow(
   if (clean(cv.city)) lead.city = cv.city;
   if (clean(cv.state)) lead.state = normalizeStateValue(cv.state) ?? cv.state;
   if (clean(cv.domain)) lead.domain = cv.domain;
-  if (clean(cv.address)) lead.address = cv.address;
+  if (clean(cv.address)) {
+    lead.address = cv.address;
+    // ~43% of addresses are full street addresses ("123 Main St, City, ST 12345").
+    // Pull out ZIP + street; "City, State"-only addresses yield nothing here.
+    const addr = cv.address.trim();
+    const zip = addr.match(/\b\d{5}(?:-\d{4})?\b/);
+    if (zip) lead.postal_code = zip[0];
+    if (/^\s*\d/.test(addr)) lead.street = addr.split(",")[0].trim();
+  }
   if (clean(cv.question)) lead.question = cv.question;
   if (clean(cv["company phone"])) lead.company_phone = cv["company phone"];
   if (clean(cv["google maps url"])) lead.google_maps_url = cv["google maps url"];

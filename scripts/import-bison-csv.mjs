@@ -90,7 +90,13 @@ function normalizeBisonRow(row, idx) {
   if (clean(cv.city)) lead.city = cv.city;
   if (clean(cv.state)) lead.state = normalizeState(cv.state) ?? cv.state;
   if (clean(cv.domain)) lead.domain = cv.domain;
-  if (clean(cv.address)) lead.address = cv.address;
+  if (clean(cv.address)) {
+    lead.address = cv.address;
+    const addr = cv.address.trim();
+    const zip = addr.match(/\b\d{5}(?:-\d{4})?\b/);
+    if (zip) lead.postal_code = zip[0];
+    if (/^\s*\d/.test(addr)) lead.street = addr.split(",")[0].trim();
+  }
   if (clean(cv.question)) lead.question = cv.question;
   if (clean(cv["company phone"])) lead.company_phone = cv["company phone"];
   if (clean(cv["google maps url"])) lead.google_maps_url = cv["google maps url"];

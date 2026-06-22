@@ -20,6 +20,8 @@ export const LEAD_FIELDS: LeadField[] = [
   { key: "state", label: "State", aliases: ["state", "province", "region"] },
   { key: "domain", label: "Domain", aliases: ["domain", "company_domain", "email_domain"] },
   { key: "address", label: "Address", aliases: ["address", "full_address", "street_address"] },
+  { key: "street", label: "Street", aliases: ["street", "street_line"] },
+  { key: "postal_code", label: "ZIP / Postal Code", aliases: ["postal_code", "zip", "zipcode", "zip_code", "postcode"] },
   { key: "company_phone", label: "Company Phone", aliases: ["company_phone", "company phone", "business_phone"] },
   { key: "google_maps_url", label: "Google Maps URL", aliases: ["google_maps_url", "google maps url", "maps_url", "gmaps"] },
   { key: "question", label: "Personalization Question", aliases: ["question", "custom_question", "personalization"] },

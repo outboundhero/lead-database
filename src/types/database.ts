@@ -49,6 +49,8 @@ export interface Lead {
   unique_replies: number | null;
   unique_opens: number | null;
   address: string | null;
+  street: string | null;
+  postal_code: string | null;
   question: string | null;
   company_phone: string | null;
   google_maps_url: string | null;

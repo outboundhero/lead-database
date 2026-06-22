@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ExternalLink, MapPin, Trash2 } from "lucide-react";
+import { ExternalLink, Trash2 } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -95,10 +95,6 @@ export function LeadDetailPanel({
   const fullName =
     `${lead.first_name ?? ""} ${lead.last_name ?? ""}`.trim() || "Unknown";
 
-  const location = [lead.city, lead.state, lead.country]
-    .filter(Boolean)
-    .join(", ");
-
   return (
     <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
       <SheetContent className="w-[700px] sm:w-[800px] max-w-[90vw] sm:max-w-[800px] overflow-y-auto p-6">
@@ -166,6 +162,14 @@ export function LeadDetailPanel({
             <DetailRow label="ESP" value={lead.esp} />
           </Section>
 
+          <Section title="Location">
+            <DetailRow label="Street" value={lead.street} />
+            <DetailRow label="City" value={lead.city} />
+            <DetailRow label="State" value={lead.state} />
+            <DetailRow label="ZIP" value={lead.postal_code} />
+            <DetailRow label="Full address" value={lead.address} />
+          </Section>
+
           <Section title="Deliverability">
             <DetailRow label="Validation" value={lead.validation_status ?? "Not validated"} />
             <DetailRow label="Validated by" value={lead.validation_provider} />
@@ -206,15 +210,6 @@ export function LeadDetailPanel({
               <p className="px-4 py-3 text-[13px] leading-relaxed text-foreground">
                 {lead.tags}
               </p>
-            </Section>
-          )}
-
-          {location && (
-            <Section title="Location">
-              <div className="flex items-center gap-2 px-4 py-3 text-[13px]">
-                <MapPin className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
-                {location}
-              </div>
             </Section>
           )}
 

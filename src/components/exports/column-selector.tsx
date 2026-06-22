@@ -31,6 +31,8 @@ const VISIBLE_KEYS = new Set([
 const EXPORT_ONLY_KEYS = new Set([
   "domain",
   "address",
+  "street",
+  "postal_code",
   "company_phone",
   "google_maps_url",
   "question",
