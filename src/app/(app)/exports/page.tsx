@@ -51,6 +51,21 @@ export default function ExportsPage() {
   const loadExports = useCallback(async () => {
     setLoading(true);
     const supabase = createClient();
+    // Self-heal orphaned jobs: a Stream/Selected export marks itself complete
+    // when it finishes, but if the server process dies mid-run (restart, deploy,
+    // or exceeding the 600s maxDuration cap) the row is stuck "processing"
+    // forever. Anything still "processing" past 12 min is dead — flag it so the
+    // history resolves instead of polling a job that can never finish. Never
+    // touches a legitimately-running export (maxDuration is 10 min).
+    const staleCutoff = new Date(Date.now() - 12 * 60 * 1000).toISOString();
+    await supabase
+      .from("export_jobs")
+      .update({
+        status: "error",
+        error_message: "Timed out — export process ended before finishing.",
+      })
+      .eq("status", "processing")
+      .lt("created_at", staleCutoff);
     const { data } = await supabase
       .from("export_jobs")
       .select("*")
