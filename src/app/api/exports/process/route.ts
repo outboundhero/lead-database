@@ -68,7 +68,7 @@ async function processExport(
     // Upload CSV chunks to storage as we go (avoid memory buildup)
     async function uploadChunk(csvChunk: string) {
       const partName = `export_${jobId}_part${partIndex}.csv`;
-      await supabase.storage.from("exports").upload(partName, csvChunk, {
+      await supabase.storage.from("csv-exports").upload(partName, csvChunk, {
         contentType: "text/csv",
         upsert: true,
       });
@@ -167,7 +167,7 @@ async function processExport(
           console.log(`Export ${jobId} was cancelled`);
           // Clean up part files
           if (partFiles.length > 0) {
-            await supabase.storage.from("exports").remove(partFiles);
+            await supabase.storage.from("csv-exports").remove(partFiles);
           }
           return;
         }
@@ -194,7 +194,7 @@ async function processExport(
     const allParts: string[] = [];
     for (const partName of partFiles) {
       const { data: partData } = await supabase.storage
-        .from("exports")
+        .from("csv-exports")
         .download(partName);
       if (partData) {
         const text = await partData.text();
@@ -206,14 +206,14 @@ async function processExport(
     const fileName = `export_${jobId}.csv`;
 
     const { error: uploadError } = await supabase.storage
-      .from("exports")
+      .from("csv-exports")
       .upload(fileName, finalCsv, { contentType: "text/csv", upsert: true });
 
     if (uploadError) throw uploadError;
 
     // Clean up part files
     if (partFiles.length > 0) {
-      await supabase.storage.from("exports").remove(partFiles);
+      await supabase.storage.from("csv-exports").remove(partFiles);
     }
 
     const durationMs = Date.now() - startTime;
@@ -233,7 +233,10 @@ async function processExport(
     console.error("Export failed:", err);
     await supabase
       .from("export_jobs")
-      .update({ status: "error" })
+      .update({
+        status: "error",
+        error_message: err instanceof Error ? err.message : String(err),
+      })
       .eq("id", jobId);
   }
 }

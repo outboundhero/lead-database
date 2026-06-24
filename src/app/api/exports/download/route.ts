@@ -9,7 +9,7 @@ export async function GET(request: NextRequest) {
 
   const supabase = createAdminClient();
   const { data, error } = await supabase.storage
-    .from("exports")
+    .from("csv-exports")
     .createSignedUrl(filePath, 3600);
 
   if (error || !data?.signedUrl) {
