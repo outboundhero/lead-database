@@ -444,6 +444,44 @@ export default function ApiKeysPage() {
 }`}
           />
 
+          <EndpointCard
+            method="POST"
+            path="/api/leads/update"
+            description="Update any field(s) of a single lead, identified by its email address. Email lookup is case-insensitive. The change is recorded in the lead's history."
+            params={[
+              { name: "email", type: "string", required: true, desc: "Email of the lead to update. Matched case-insensitively against the unique email column." },
+              { name: "fields", type: "object", required: true, desc: "Object of column → value pairs to update (e.g. {\"title\":\"Owner\",\"city\":\"Austin\"}). Any lead column is allowed except id and created_at. To change the lead's email, pass a valid email under fields.email." },
+            ]}
+            example={`curl -X POST ${baseUrl}/api/leads/update \\
+  -H "Authorization: Bearer rdb_your_token" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "email": "jane@acme.com",
+    "fields": { "title": "Owner", "city": "Austin", "is_bounced": true }
+  }'`}
+            response={`{
+  "updated": true,
+  "email": "jane@acme.com",
+  "changed_fields": {
+    "title": { "old": "Manager", "new": "Owner" },
+    "city": { "old": "Dallas", "new": "Austin" },
+    "is_bounced": { "old": false, "new": true }
+  },
+  "lead": {
+    "id": "uuid",
+    "email": "jane@acme.com",
+    "first_name": "Jane",
+    "last_name": "Doe",
+    "title": "Owner",
+    "company": "Acme Corp",
+    "city": "Austin",
+    "state": "TX",
+    "is_bounced": true,
+    "updated_at": "2026-06-25T10:00:00Z"
+  }
+}`}
+          />
+
           {/* Rate limits / notes */}
           <Card>
             <CardHeader>
