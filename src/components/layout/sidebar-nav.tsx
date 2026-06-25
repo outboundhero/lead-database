@@ -55,6 +55,14 @@ export function SidebarNav({ email, fullName, role }: SidebarNavProps) {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
 
+  // Highlight exactly one item: the most specific (longest) matching href.
+  // Without this, being on /uploads/bounces lights up BOTH "Uploads" (/uploads)
+  // and "Bounces" (/uploads/bounces), since one href is a prefix of the other.
+  const activeHref =
+    NAV_SECTIONS.flatMap((s) => s.items.map((i) => i.href))
+      .filter((h) => pathname === h || pathname.startsWith(h + "/"))
+      .sort((a, b) => b.length - a.length)[0] ?? "";
+
   return (
     <aside
       className={cn(
@@ -91,7 +99,7 @@ export function SidebarNav({ email, fullName, role }: SidebarNavProps) {
               )}
               <div className="overflow-hidden rounded-2xl bg-card shadow-ios">
                 {visibleItems.map((item, idx) => {
-                  const isActive = pathname.startsWith(item.href);
+                  const isActive = item.href === activeHref;
                   const isFirst = idx === 0;
                   const isLast = idx === visibleItems.length - 1;
                   return (
