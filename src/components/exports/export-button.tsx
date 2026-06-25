@@ -35,94 +35,82 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
     setExporting(true);
 
     try {
-      if (exportType === "selected" && selectedIds.length > 0) {
-        // Use background job for selected IDs (needs ID-based query)
-        const res = await fetch("/api/exports/process", {
+      // Both Selected and Filtered exports stream directly to the browser — the
+      // old background/storage job for Selected never reliably completed.
+      const isSelected = exportType === "selected" && selectedIds.length > 0;
+      const toastId = toast.loading("Preparing export...");
+
+      // Log export start and get jobId. If the server is at capacity (429),
+      // retry every 10s while showing "Queued..." so the user just waits
+      // instead of seeing a hard error. Cap at ~10 min total so we don't
+      // retry forever on a stuck queue.
+      let logRes: Response | null = null;
+      const MAX_QUEUE_WAIT_MS = 10 * 60 * 1000;
+      const QUEUE_POLL_MS = 10000;
+      const queueStart = Date.now();
+      while (Date.now() - queueStart < MAX_QUEUE_WAIT_MS) {
+        logRes = await fetch("/api/exports/log", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ filters, columnSelection: columns, selectedIds, limit, rangeFrom, rangeTo }),
+          body: JSON.stringify({ filters, columnSelection: columns, limit, rangeFrom, rangeTo, selectedIds: isSelected ? selectedIds : undefined, action: "start" }),
         });
-        if (!res.ok) {
-          const data = await res.json();
-          throw new Error(data.error ?? "Export failed");
-        }
-        toast.success("Export started. Check the Exports page for your download.");
-      } else {
-        // Stream download directly — fast, no storage needed
-        const toastId = toast.loading("Preparing export...");
-
-        // Log export start and get jobId. If the server is at capacity (429),
-        // retry every 10s while showing "Queued..." so the user just waits
-        // instead of seeing a hard error. Cap at ~10 min total so we don't
-        // retry forever on a stuck queue.
-        let logRes: Response | null = null;
-        const MAX_QUEUE_WAIT_MS = 10 * 60 * 1000;
-        const QUEUE_POLL_MS = 10000;
-        const queueStart = Date.now();
-        while (Date.now() - queueStart < MAX_QUEUE_WAIT_MS) {
-          logRes = await fetch("/api/exports/log", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ filters, columnSelection: columns, limit, rangeFrom, rangeTo, action: "start" }),
-          });
-          if (logRes.ok) break;
-          if (logRes.status !== 429) break;
-          const waited = Math.round((Date.now() - queueStart) / 1000);
-          toast.loading(`Queued — waiting for an open slot (${waited}s)...`, { id: toastId });
-          await new Promise((r) => setTimeout(r, QUEUE_POLL_MS));
-        }
-        if (!logRes || !logRes.ok) {
-          toast.dismiss(toastId);
-          const msg = logRes?.status === 429
-            ? "Queue still full after 10 minutes. Please try again later."
-            : "Export failed to start";
-          throw new Error(msg);
-        }
-        const { jobId: exportJobId } = await logRes.json();
-
-        const res = await fetch("/api/exports/stream", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ filters, columnSelection: columns, limit, rangeFrom, rangeTo, jobId: exportJobId }),
-        });
-
-        if (!res.ok) {
-          const text = await res.text();
-          toast.dismiss(toastId);
-          throw new Error(text || "Export failed");
-        }
-
-        // Stream and track progress
-        const reader = res.body?.getReader();
-        const chunks: Uint8Array[] = [];
-        let totalBytes = 0;
-
-        if (reader) {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
-            totalBytes += value.length;
-            const mb = (totalBytes / 1024 / 1024).toFixed(1);
-            toast.loading(`Downloading... ${mb} MB`, { id: toastId });
-          }
-        }
-
-        // Combine chunks and trigger download
-        const blob = new Blob(chunks as BlobPart[], { type: "text/csv" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        const timestamp = new Date().toISOString().slice(0, 19).replace(/[:.]/g, "-");
-        a.download = `export_${timestamp}.csv`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        // Server logs the accurate row count — no client-side counting needed
-        toast.success(`Download complete! (${(totalBytes / 1024 / 1024).toFixed(1)} MB)`, { id: toastId });
+        if (logRes.ok) break;
+        if (logRes.status !== 429) break;
+        const waited = Math.round((Date.now() - queueStart) / 1000);
+        toast.loading(`Queued — waiting for an open slot (${waited}s)...`, { id: toastId });
+        await new Promise((r) => setTimeout(r, QUEUE_POLL_MS));
       }
+      if (!logRes || !logRes.ok) {
+        toast.dismiss(toastId);
+        const msg = logRes?.status === 429
+          ? "Queue still full after 10 minutes. Please try again later."
+          : "Export failed to start";
+        throw new Error(msg);
+      }
+      const { jobId: exportJobId } = await logRes.json();
+
+      const res = await fetch("/api/exports/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filters, columnSelection: columns, limit, rangeFrom, rangeTo, jobId: exportJobId, selectedIds: isSelected ? selectedIds : undefined }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        toast.dismiss(toastId);
+        throw new Error(text || "Export failed");
+      }
+
+      // Stream and track progress
+      const reader = res.body?.getReader();
+      const chunks: Uint8Array[] = [];
+      let totalBytes = 0;
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          totalBytes += value.length;
+          const mb = (totalBytes / 1024 / 1024).toFixed(1);
+          toast.loading(`Downloading... ${mb} MB`, { id: toastId });
+        }
+      }
+
+      // Combine chunks and trigger download
+      const blob = new Blob(chunks as BlobPart[], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/[:.]/g, "-");
+      a.download = `export_${timestamp}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      // Server logs the accurate row count — no client-side counting needed
+      toast.success(`Download complete! (${(totalBytes / 1024 / 1024).toFixed(1)} MB)`, { id: toastId });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Export failed");
     } finally {

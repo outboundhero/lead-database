@@ -10,7 +10,7 @@ export async function POST(request: NextRequest) {
   }
 
   const body = await request.json();
-  const { filters, columnSelection, limit, rangeFrom, rangeTo, action, jobId, rowCount } = body;
+  const { filters, columnSelection, limit, rangeFrom, rangeTo, action, jobId, rowCount, selectedIds } = body;
   const adminSupabase = createAdminClient();
 
   if (action === "start") {
@@ -55,7 +55,7 @@ export async function POST(request: NextRequest) {
         filters_used: {
           _meta: {
             exported_by: user.email ?? "unknown",
-            export_type: "stream",
+            export_type: selectedIds?.length ? "selected" : "stream",
             rangeFrom: rangeFrom ?? null,
             rangeTo: rangeTo ?? null,
             limit: limit ?? null,
@@ -63,6 +63,7 @@ export async function POST(request: NextRequest) {
           ...filters,
         } as unknown as Record<string, unknown>,
         column_selection: columnSelection,
+        selected_ids: selectedIds?.length ? selectedIds : null,
         status: "processing",
       })
       .select("id")

@@ -37,18 +37,24 @@ export async function POST(request: NextRequest) {
   }
 
   const body = await request.json();
-  const { filters, columnSelection, limit, rangeFrom, rangeTo, jobId } = body as {
+  const { filters, columnSelection, limit, rangeFrom, rangeTo, jobId, selectedIds } = body as {
     filters: FilterState;
     columnSelection: string[];
     limit?: number;
     rangeFrom?: number;
     rangeTo?: number;
     jobId?: string;
+    selectedIds?: string[];
   };
 
   if (!filters || !columnSelection?.length) {
     return new Response("Missing required fields", { status: 400 });
   }
+
+  // Selected export: the user explicitly picked these lead IDs, so we stream
+  // them directly by id (no filters, no validation/bounce gate) instead of the
+  // old fire-and-forget background job that never reliably completed.
+  const isSelectedExport = Array.isArray(selectedIds) && selectedIds.length > 0;
 
   // maxRows is the max number of rows to emit:
   //   - If rangeFrom + rangeTo set: emit (rangeTo - rangeFrom + 1) rows starting at rangeFrom
@@ -71,7 +77,7 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     );
   }
-  const maxRows = requestedMax;
+  const maxRows = isSelectedExport ? selectedIds!.length : requestedMax;
   const p_filters = buildRpcFilters(filters);
   // Larger batches = fewer round-trips to PG and fewer per-batch overhead.
   // 75K rows × ~20 cols × ~50 chars ≈ 75MB per batch in Node memory, well
@@ -150,7 +156,7 @@ export async function POST(request: NextRequest) {
         // the last VALIDATION_REVALIDATE_DAYS (default 45), run Reoon → FindEmail
         // and write the result back. fn_export_leads then naturally excludes
         // anything still invalid via its hard validation_status gate.
-        if (isValidationEnabled() && jobId) {
+        if (isValidationEnabled() && jobId && !isSelectedExport) {
           try {
             const adminDb = createAdminClient();
             const ttl = getTtlDays();
@@ -222,8 +228,10 @@ export async function POST(request: NextRequest) {
         // exports, leave cursor null and pass UUID-only cursors after the first
         // batch — the RPC then uses fast PK-index `ORDER BY l.id`. Random UUID
         // order doesn't matter when you're dumping the entire filtered set.
-        const isRangeExport = !!(rangeFrom && rangeFrom > 1);
+        const isRangeExport = !isSelectedExport && !!(rangeFrom && rangeFrom > 1);
         let cursor: string | null = null;
+        let selOffset = 0; // index into selectedIds for the selected-export path
+        const SEL_CHUNK = 1000;
         if (isRangeExport) {
           try {
             const { cursor: anchor, found } = await findCursorForRangeStart(
@@ -272,23 +280,48 @@ export async function POST(request: NextRequest) {
 
           const take = Math.min(batchSize, maxRows - totalRows);
 
-          let pgResult;
-          try {
-            pgResult = await pool.query(
-              "SELECT fn_export_leads($1::jsonb, $2, $3, $4) AS data",
-              [JSON.stringify(p_filters), cursor, take, 0]
-            );
-          } catch (err) {
-            const msg = `RPC error after ${totalRows.toLocaleString()} rows: ${err instanceof Error ? err.message : "unknown"}`;
-            console.error("Stream export RPC error:", msg);
-            await markJobError(msg);
-            safeError(msg);
-            return;
+          let leads: Lead[];
+          if (isSelectedExport) {
+            // Stream the explicitly-selected IDs directly, in chunks. No filter
+            // and no validation/bounce gate — the user picked these rows.
+            const idChunk = selectedIds!.slice(selOffset, selOffset + SEL_CHUNK);
+            if (idChunk.length === 0) break;
+            selOffset += idChunk.length;
+            try {
+              const r = await pool.query(
+                "SELECT * FROM leads WHERE id = ANY($1::uuid[])",
+                [idChunk]
+              );
+              leads = r.rows as Lead[];
+            } catch (err) {
+              const msg = `Selected-export query error after ${totalRows.toLocaleString()} rows: ${err instanceof Error ? err.message : "unknown"}`;
+              console.error("Stream export query error:", msg);
+              await markJobError(msg);
+              safeError(msg);
+              return;
+            }
+            hasMore = selOffset < selectedIds!.length;
+          } else {
+            let pgResult;
+            try {
+              pgResult = await pool.query(
+                "SELECT fn_export_leads($1::jsonb, $2, $3, $4) AS data",
+                [JSON.stringify(p_filters), cursor, take, 0]
+              );
+            } catch (err) {
+              const msg = `RPC error after ${totalRows.toLocaleString()} rows: ${err instanceof Error ? err.message : "unknown"}`;
+              console.error("Stream export RPC error:", msg);
+              await markJobError(msg);
+              safeError(msg);
+              return;
+            }
+            const data = pgResult.rows[0]?.data as { data?: Lead[] } | null;
+            leads = (data?.data ?? []) as Lead[];
           }
-
-          const data = pgResult.rows[0]?.data as { data?: Lead[] } | null;
-          const leads = (data?.data ?? []) as Lead[];
-          if (leads.length === 0) break;
+          if (leads.length === 0) {
+            if (isSelectedExport && hasMore) continue;
+            break;
+          }
 
           // Build CSV chunk and stream it
           let chunk = "";
@@ -309,11 +342,13 @@ export async function POST(request: NextRequest) {
               .eq("id", jobId);
           }
 
-          const lastLead = leads[leads.length - 1] as Lead & { created_at?: string };
-          cursor = isRangeExport && lastLead.created_at
-            ? `${lastLead.created_at}|${lastLead.id}`
-            : lastLead.id;
-          hasMore = leads.length === take && totalRows < maxRows;
+          if (!isSelectedExport) {
+            const lastLead = leads[leads.length - 1] as Lead & { created_at?: string };
+            cursor = isRangeExport && lastLead.created_at
+              ? `${lastLead.created_at}|${lastLead.id}`
+              : lastLead.id;
+            hasMore = leads.length === take && totalRows < maxRows;
+          }
         }
 
         // Final status decision:
