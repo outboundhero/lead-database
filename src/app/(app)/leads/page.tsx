@@ -9,7 +9,8 @@ import { FilterBar } from "@/components/filters/filter-bar";
 import { LeadTable } from "@/components/leads/lead-table";
 import { LeadDetailPanel } from "@/components/leads/lead-detail-panel";
 import { ExportButton } from "@/components/exports/export-button";
-import { ArrowUpDown } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { ArrowUpDown, X } from "lucide-react";
 import type { Lead } from "@/types/database";
 
 const SORT_OPTIONS = [
@@ -151,6 +152,17 @@ export default function LeadsPage() {
               ))}
             </select>
           </div>
+          {selectedIds.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground"
+              onClick={() => setRowSelection({})}
+            >
+              <X className="h-4 w-4 mr-1" />
+              Deselect {selectedIds.length}
+            </Button>
+          )}
           <ExportButton filters={filters} totalCount={totalCount} selectedIds={selectedIds} />
         </div>
       </div>
