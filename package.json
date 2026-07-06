@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start -p ${PORT:-3000}",
-    "lint": "eslint"
+    "lint": "eslint",
+    "bounce-worker": "node scripts/bounce-worker.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.9.0",

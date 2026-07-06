@@ -156,6 +156,8 @@ REOON_API_KEY                 # Email validation primary
 FINDEMAIL_API_KEY             # Email validation fallback
 VALIDATION_BATCH_SIZE         # default 100
 VALIDATION_REVALIDATE_DAYS    # default 45
+EMAILBISON_API_KEY            # Bison workspace token — bounce-classifier worker
+EMAILBISON_BASE_URL           # optional; default per-lead https://{instance_url}
 ```
 
 ---
@@ -205,9 +207,33 @@ scripts/backfill-email-type.mjs            — One-off classification backfill (
 
 ---
 
+## Bounce classification (NEW)
+
+Bounces are split into contactable vs dead by `scripts/bounce-worker.mjs`, a
+**separate Railway cron service in the same project** (same repo; start command
+`npm run bounce-worker`, schedule `*/15 * * * *`).
+
+For every lead with `bounces > 0` not yet checked (or re-bounced since last
+check), the worker calls Email Bison
+`GET /api/leads/{email}/replies?folder=bounced` (the endpoint accepts the
+lead's email as the id) and classifies the NDR text:
+
+| `bounce_type` | Meaning | Effect |
+|---|---|---|
+| `sender` | Our sending inbox's fault (auth/quota/reputation/rate-limit) | `is_bounced` flipped back to **false** — lead re-enters filters + exports |
+| `hard` | Recipient invalid / blocked / policy rejection | stays excluded, never exported |
+| `unknown` | No bounce reply found or ambiguous | treated like hard, reviewable |
+
+Columns (migration 047): `bounce_type`, `bounce_reason` (NDR snippet),
+`bounce_checked_at`. The leads-page "Bounced" chip ("Include undeliverable",
+visible to all roles) un-hides hard/unknown leads in the table; exports always
+exclude them.
+
+---
+
 ## Known issues / TODO
 
 - [ ] Reoon bulk endpoint batch size — confirm exact cap from docs before tuning `VALIDATION_BATCH_SIZE`
 - [ ] "(general)" field location — voice memo wasn't precise; current detection covers first_name/last_name/job_title. Adjust regex when a sample Email Bison export is available.
-- [ ] Email Bison webhook for live bounces — out of scope for v1; CSV upload only
+- [ ] Email Bison webhook for live bounces — out of scope for v1; CSV upload + bounce-worker polling
 - [ ] Initial validation cost — first export of imported leads will validate from scratch. Recommend opt-in per pull rather than bulk run; cap with `VALIDATION_DAILY_BUDGET` if needed.

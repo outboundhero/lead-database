@@ -24,7 +24,6 @@ import { countActiveFilters } from "@/types/filters";
 import { IosSegmentedControl } from "@/components/ui/ios/ios-segmented-control";
 import { IosToggle } from "@/components/ui/ios/ios-toggle";
 import { TagInput } from "@/components/ui/ios/tag-input";
-import { useHasPermission } from "@/lib/context/role-context";
 import {
   COMPANY_SIZE_BUCKETS,
   REVENUE_BUCKETS,
@@ -103,8 +102,6 @@ export function FilterBar({
   onLoadPreset,
   onReset,
 }: FilterBarProps) {
-  const isAdmin = useHasPermission("admin");
-
   // Derive 3-way segmented control value from the {personal, general} pair
   const emailTypeValue: "personal" | "general" | "both" =
     filters.emailType.personal && filters.emailType.general
@@ -373,26 +370,29 @@ export function FilterBar({
           </div>
         </FilterChip>
 
-        {/* Admin-only: include bounced rows in the filter view */}
-        {isAdmin && (
-          <FilterChip
-            label="Bounced"
-            activeCount={filters.includeBounced ? 1 : 0}
-          >
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <p className="text-[14px] font-medium">Include bounced</p>
-                <p className="text-[12px] text-muted-foreground">
-                  Show contacts that bounced from past campaigns. Exports always exclude them.
-                </p>
-              </div>
-              <IosToggle
-                checked={!!filters.includeBounced}
-                onCheckedChange={onIncludeBouncedChange}
-              />
+        {/* Undeliverable leads: hard/policy bounces are hidden by default.
+            Sender-side bounces (our inbox's fault) are auto-restored to
+            contactable by the bounce worker, so they aren't affected. */}
+        <FilterChip
+          label="Bounced"
+          activeCount={filters.includeBounced ? 1 : 0}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-[14px] font-medium">Include undeliverable</p>
+              <p className="text-[12px] text-muted-foreground">
+                Show leads whose email hard-bounced (invalid address or blocked
+                by the recipient&apos;s policy). Bounces caused by our own sending
+                inbox are restored automatically and stay visible. Exports always
+                exclude undeliverable leads.
+              </p>
             </div>
-          </FilterChip>
-        )}
+            <IosToggle
+              checked={!!filters.includeBounced}
+              onCheckedChange={onIncludeBouncedChange}
+            />
+          </div>
+        </FilterChip>
 
         {/* ESP — dynamic from DB */}
         <FilterChip

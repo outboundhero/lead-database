@@ -179,6 +179,19 @@ export function LeadDetailPanel({
             />
             <DetailRow label="Bounced" value={lead.is_bounced ? "Yes" : "No"} />
             <DetailRow label="Bounce source" value={lead.bounce_source} />
+            <DetailRow
+              label="Bounce type"
+              value={
+                lead.bounce_type === "sender"
+                  ? "Sender issue (still contactable)"
+                  : lead.bounce_type === "hard"
+                    ? "Hard bounce (do not contact)"
+                    : lead.bounce_type === "unknown"
+                      ? "Unknown (treated as hard)"
+                      : null
+              }
+            />
+            <DetailRow label="Bounce reason" value={lead.bounce_reason} />
           </Section>
 
           <Section title="Engagement (Email Bison)">
