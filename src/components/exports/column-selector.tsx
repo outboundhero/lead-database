@@ -24,6 +24,7 @@ const VISIBLE_KEYS = new Set([
   "city",
   "state",
   "esp",
+  "category",
   "validation_status",
 ]);
 
@@ -38,6 +39,8 @@ const EXPORT_ONLY_KEYS = new Set([
   "question",
   "notes",
   "tags",
+  "category_source",
+  "category_confidence",
   "is_bounced",
   "workspace_name",
   "emails_sent",

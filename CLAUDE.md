@@ -158,6 +158,8 @@ VALIDATION_BATCH_SIZE         # default 100
 VALIDATION_REVALIDATE_DAYS    # default 45
 EMAILBISON_API_KEY            # Bison workspace token — bounce-classifier worker
 EMAILBISON_BASE_URL           # optional; default per-lead https://{instance_url}
+ANTHROPIC_API_KEY             # Claude Haiku — categorize worker AI tier (gated)
+CATEGORIZE_MODEL              # default claude-haiku-4-5
 ```
 
 ---
@@ -230,6 +232,28 @@ visible to all roles) un-hides hard/unknown leads in the table; exports always
 exclude them.
 
 ---
+
+## Category enrichment (NEW)
+
+Leads are classified into a client-defined taxonomy (`lead_categories`: name +
+keyword list + optional description) by `scripts/categorize-worker.mjs` — a
+Railway cron service (same repo, start command `npm run categorize-worker`).
+
+Tiered cascade per uncategorized lead:
+
+| Tier | Method | Cost |
+|---|---|---|
+| 0 | Keyword match: category keywords vs `company` (weight 3) / `question` / `domain` (weight 1); single strict winner required, ties escalate | free |
+| 1 | Claude Haiku (`claude-haiku-4-5`), 25 leads per call, structured outputs (JSON schema with category enum), taxonomy in a cached system prompt. Gated on `ANTHROPIC_API_KEY` — no key = keyword-only | ~$4–8 per 32K leads |
+
+Results: `leads.category` / `category_confidence` / `category_source`
+(`keyword`/`ai`/`manual`) / `categorized_at`. Manual assignments are never
+overwritten. `Other` = AI judged no category fits. Migration 048 added the
+Category filter chip (include/exclude, mirrors ESP) to `fn_filter_leads_v2` +
+`fn_export_leads`, and the distinct-values cache to `fn_refresh_filter_cache`.
+
+Seed/replace the taxonomy: `npm run seed-categories taxonomy.json [--replace]`
+(accepts `[{name, keywords, description}]` or `{ "Name": ["kw1", ...] }`).
 
 ## Known issues / TODO
 

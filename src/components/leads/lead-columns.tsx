@@ -124,6 +124,13 @@ export const leadColumns: ColumnDef<Lead>[] = [
     ),
   },
   {
+    accessorKey: "category",
+    header: ({ column }) => <SortHeader column={column} label="Category" />,
+    cell: ({ getValue }) => (
+      <span className="text-[13px]">{(getValue() as string) ?? "—"}</span>
+    ),
+  },
+  {
     accessorKey: "validation_status",
     header: ({ column }) => <SortHeader column={column} label="Validation" />,
     cell: ({ getValue }) => {

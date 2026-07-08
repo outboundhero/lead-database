@@ -15,6 +15,7 @@ export const LEAD_FIELDS: LeadField[] = [
   { key: "company", label: "Company", aliases: ["company", "company_name", "company_name_raw", "companyname", "company name", "organization"] },
   { key: "source", label: "Source", aliases: ["source", "lead_source", "data_source"] },
   { key: "esp", label: "ESP", aliases: ["esp", "email_provider", "email_service_provider"] },
+  { key: "category", label: "Category", aliases: ["category", "business_category", "industry_category"] },
   { key: "email_type", label: "Email Type", aliases: ["email_type", "type"] },
   { key: "city", label: "City", aliases: ["city", "locality"] },
   { key: "state", label: "State", aliases: ["state", "province", "region"] },
@@ -28,6 +29,8 @@ export const LEAD_FIELDS: LeadField[] = [
   { key: "notes", label: "Notes", aliases: ["notes", "note"] },
   { key: "tags", label: "Tags", aliases: ["tags", "tag", "comma separated tags", "keywords", "keyword"] },
   // Deliverability (OutboundHero)
+  { key: "category_source", label: "Category Source", aliases: ["category_source"] },
+  { key: "category_confidence", label: "Category Confidence", aliases: ["category_confidence"] },
   { key: "validation_status", label: "Validation Status", aliases: ["validation_status"] },
   { key: "is_bounced", label: "Bounced", aliases: ["is_bounced", "bounced"] },
   // Engagement (Email Bison)

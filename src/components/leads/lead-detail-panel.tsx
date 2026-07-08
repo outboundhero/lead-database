@@ -152,6 +152,14 @@ export function LeadDetailPanel({
 
           <Section title="Company">
             <DetailRow label="Company" value={lead.company} />
+            <DetailRow
+              label="Category"
+              value={
+                lead.category
+                  ? `${lead.category}${lead.category_source ? ` (${lead.category_source}${lead.category_confidence != null ? `, ${Math.round(lead.category_confidence * 100)}%` : ""})` : ""}`
+                  : null
+              }
+            />
             <DetailRow label="Company phone" value={lead.company_phone} />
             <DetailRow label="Domain" value={lead.domain} />
             <DetailRow

@@ -128,6 +128,7 @@ export function FilterBar({
   const [sources, setSources] = useState<string[]>([]);
   const [seniorities, setSeniorities] = useState<string[]>([]);
   const [espValues, setEspValues] = useState<string[]>([]);
+  const [categoryValues, setCategoryValues] = useState<string[]>([]);
 
   // Lazy-load distinct values only when a dropdown is opened (not on page load).
   // Uses cached values from filter_options_cache table.
@@ -164,6 +165,7 @@ export function FilterBar({
       case "source": setSources(values); break;
       case "seniority": setSeniorities(values); break;
       case "esp": setEspValues([...new Set(values)]); break;
+      case "category": setCategoryValues(values); break;
     }
   }, []);
 
@@ -197,6 +199,7 @@ export function FilterBar({
         case "source": setSources(values); break;
         case "seniority": setSeniorities(values); break;
         case "esp": setEspValues([...new Set(values)]); break;
+        case "category": setCategoryValues(values); break;
       }
     }, 300);
   }, [loadDistinctFor]);
@@ -404,6 +407,19 @@ export function FilterBar({
             options={espValues}
             value={filters.esp}
             onChange={(v) => onIncludeExcludeChange("esp", v)}
+          />
+        </FilterChip>
+
+        {/* Category — populated by the categorize worker (lead_categories taxonomy) */}
+        <FilterChip
+          label="Category"
+          activeCount={filters.category.include.length + filters.category.exclude.length + (filters.category.includeUnknown ? 1 : 0)}
+          onOpen={() => loadDistinctFor("category")}
+        >
+          <FilterMultiSelect
+            options={categoryValues}
+            value={filters.category}
+            onChange={(v) => onIncludeExcludeChange("category", v)}
           />
         </FilterChip>
 

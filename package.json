@@ -7,9 +7,12 @@
     "build": "next build",
     "start": "next start -p ${PORT:-3000}",
     "lint": "eslint",
-    "bounce-worker": "node scripts/bounce-worker.mjs"
+    "bounce-worker": "node scripts/bounce-worker.mjs",
+    "categorize-worker": "node scripts/categorize-worker.mjs",
+    "seed-categories": "node scripts/seed-categories.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
     "@supabase/ssr": "^0.9.0",
     "@supabase/supabase-js": "^2.99.1",
     "@tanstack/react-table": "^8.21.3",

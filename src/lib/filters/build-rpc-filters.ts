@@ -29,6 +29,7 @@ export function buildRpcFilters(filters: FilterState) {
   const source = stripUnknown(filters.source);
   const seniority = stripUnknown(filters.seniority);
   const espRaw = stripUnknown(filters.esp);
+  const category = stripUnknown(filters.category);
   const country = stripUnknown(filters.location.country);
   const state = stripUnknown(filters.location.state);
 
@@ -50,6 +51,7 @@ export function buildRpcFilters(filters: FilterState) {
       exclude: espRaw.exclude.flatMap((v: string) => v === "Microsoft / Outlook" ? ["Microsoft", "Outlook"] : [v]),
       includeUnknown: espRaw.includeUnknown, selectUnknown: espRaw.selectUnknown,
     },
+    category: { include: category.include, exclude: category.exclude, includeUnknown: category.includeUnknown, selectUnknown: category.selectUnknown },
     location: {
       country: { include: country.include, exclude: country.exclude, includeUnknown: country.includeUnknown, selectUnknown: country.selectUnknown },
       state: { include: state.include, exclude: state.exclude, includeUnknown: state.includeUnknown, selectUnknown: state.selectUnknown },

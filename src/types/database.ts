@@ -34,6 +34,11 @@ export interface Lead {
   is_bounced: boolean;
   bounced_at: string | null;
   bounce_source: string | null;
+  // Category enrichment (scripts/categorize-worker.mjs + lead_categories taxonomy)
+  category: string | null;
+  category_confidence: number | null;
+  category_source: "keyword" | "ai" | "manual" | null;
+  categorized_at: string | null;
   // Populated by the bounce worker (scripts/bounce-worker.mjs):
   // 'sender' = our inbox's fault, still contactable; 'hard' = invalid/blocked,
   // never contact; 'unknown' = unclassified (treated like hard).
