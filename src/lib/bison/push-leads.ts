@@ -1,0 +1,176 @@
+// push-leads.ts — push OutboundHero leads into an Email Bison campaign.
+//
+// Two-step Bison flow (confirmed against docs.emailbison.com):
+//   1. POST /api/leads                              create/upsert lead in Bison
+//                                                   (returns the Bison lead id)
+//   2. POST /api/campaigns/{id}/leads/attach-leads  { lead_ids: [...] }
+//
+// Bison lead ids are per-workspace, so we always CREATE the lead in the target
+// campaign's workspace (Bison upserts by email within a workspace) and attach
+// the fresh id — this avoids attaching a stale id from another workspace even
+// for leads we originally imported from Bison. bison_lead_id reuse (when the
+// lead's workspace already matches the campaign) is a future optimization.
+//
+// ⚠️ The `/api/leads` response field carrying the new id is read defensively
+// (data.id / data.data.id / id). Confirm against a live Bison response with a
+// real EMAILBISON_API_KEY + test campaign before production use.
+
+import type { Lead } from "@/types/database";
+
+export interface BisonPushLead {
+  email: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  title?: string | null;
+  company?: string | null;
+  notes?: string | null;
+  bison_lead_id?: number | null;
+  // enrichment we send as custom variables
+  category?: string | null;
+  subcategory?: string | null;
+  city?: string | null;
+  state?: string | null;
+}
+
+export interface BisonPushResult {
+  total: number;
+  created: number;
+  attached: number;
+  failed: number;
+  errors: string[];
+}
+
+const CREATE_CONCURRENCY = 5;
+const ATTACH_BATCH = 500;
+
+function baseUrl(instanceUrl?: string | null): string {
+  if (instanceUrl) return `https://${instanceUrl.replace(/^https?:\/\//, "").replace(/\/$/, "")}`;
+  return (process.env.EMAILBISON_BASE_URL || "https://app.outboundhero.co").replace(/\/$/, "");
+}
+
+function customVars(lead: BisonPushLead) {
+  const vars: Array<{ name: string; value: string }> = [];
+  if (lead.category) vars.push({ name: "category", value: lead.category });
+  if (lead.subcategory) vars.push({ name: "subcategory", value: lead.subcategory });
+  if (lead.city) vars.push({ name: "city", value: lead.city });
+  if (lead.state) vars.push({ name: "state", value: lead.state });
+  return vars;
+}
+
+async function createLead(base: string, apiKey: string, lead: BisonPushLead): Promise<number> {
+  const res = await fetch(`${base}/api/leads`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      first_name: lead.first_name ?? "",
+      last_name: lead.last_name ?? "",
+      email: lead.email,
+      ...(lead.title ? { title: lead.title } : {}),
+      ...(lead.company ? { company: lead.company } : {}),
+      ...(lead.notes ? { notes: lead.notes } : {}),
+      custom_variables: customVars(lead),
+    }),
+  });
+  if (res.status === 401 || res.status === 403) {
+    throw Object.assign(new Error(`Bison auth failed (HTTP ${res.status}) — check EMAILBISON_API_KEY`), { fatal: true });
+  }
+  if (!res.ok) {
+    throw new Error(`create ${lead.email}: HTTP ${res.status} ${(await res.text()).slice(0, 120)}`);
+  }
+  const json = await res.json().catch(() => ({}));
+  const id = json?.data?.id ?? json?.id ?? json?.lead?.id;
+  if (typeof id !== "number") {
+    throw new Error(`create ${lead.email}: could not read Bison lead id from response`);
+  }
+  return id;
+}
+
+async function attachLeads(base: string, apiKey: string, campaignId: number | string, ids: number[]): Promise<void> {
+  const res = await fetch(`${base}/api/campaigns/${campaignId}/leads/attach-leads`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ lead_ids: ids }),
+  });
+  if (!res.ok) {
+    throw new Error(`attach ${ids.length} leads: HTTP ${res.status} ${(await res.text()).slice(0, 160)}`);
+  }
+}
+
+/**
+ * Create each lead in Bison, then attach the resulting ids to the campaign.
+ * onProgress reports (createdSoFar) so the caller can update a job row.
+ */
+export async function pushLeadsToCampaign(
+  leads: BisonPushLead[],
+  opts: {
+    apiKey: string;
+    campaignId: number | string;
+    instanceUrl?: string | null;
+    onProgress?: (created: number) => void | Promise<void>;
+    signal?: AbortSignal;
+  }
+): Promise<BisonPushResult> {
+  const base = baseUrl(opts.instanceUrl);
+  const result: BisonPushResult = { total: leads.length, created: 0, attached: 0, failed: 0, errors: [] };
+  const ids: number[] = [];
+
+  // Step 1 — create in Bison (bounded concurrency).
+  let next = 0;
+  async function worker() {
+    while (next < leads.length) {
+      if (opts.signal?.aborted) return;
+      const i = next++;
+      try {
+        const id = await createLead(base, opts.apiKey, leads[i]);
+        ids.push(id);
+        result.created++;
+        if (opts.onProgress && result.created % 25 === 0) await opts.onProgress(result.created);
+      } catch (err) {
+        if ((err as { fatal?: boolean }).fatal) throw err;
+        result.failed++;
+        if (result.errors.length < 20) result.errors.push((err as Error).message);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CREATE_CONCURRENCY, leads.length) }, worker));
+
+  // Step 2 — attach all created ids to the campaign, in batches.
+  for (let i = 0; i < ids.length; i += ATTACH_BATCH) {
+    if (opts.signal?.aborted) break;
+    const batch = ids.slice(i, i + ATTACH_BATCH);
+    try {
+      await attachLeads(base, opts.apiKey, opts.campaignId, batch);
+      result.attached += batch.length;
+    } catch (err) {
+      result.failed += batch.length;
+      if (result.errors.length < 20) result.errors.push((err as Error).message);
+    }
+  }
+
+  return result;
+}
+
+// Map a DB Lead row to the push shape.
+export function leadToPushLead(l: Partial<Lead>): BisonPushLead {
+  return {
+    email: l.email!,
+    first_name: l.first_name,
+    last_name: l.last_name,
+    title: l.title,
+    company: l.company,
+    notes: l.notes,
+    bison_lead_id: l.bison_lead_id,
+    category: l.category,
+    subcategory: l.subcategory,
+    city: l.city,
+    state: l.state,
+  };
+}

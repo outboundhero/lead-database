@@ -270,6 +270,27 @@ Filter chips: Category + Subcategory (include/exclude, mirror ESP; migrations
 visible immediately for routing/location searches. Session-authenticated;
 requires `EMAILBISON_API_KEY`.
 
+## Push leads to Bison campaign (NEW)
+
+The export popup (`column-selector.tsx`) has a destination toggle: **Download
+CSV** (existing streaming export) or **Push to Bison campaign** (live campaign
+picker). Push = `POST /api/bison/push` → `src/lib/bison/push-leads.ts`, a
+two-step flow confirmed against docs.emailbison.com:
+
+1. `POST /api/leads` — create/upsert each lead in Bison (enrichment sent as
+   custom_variables: category/subcategory/city/state). Returns the Bison lead id.
+2. `POST /api/campaigns/{id}/leads/attach-leads` `{ lead_ids: [...] }` — attach.
+
+Bison lead ids are per-workspace, so leads are always created in the target
+campaign's workspace (Bison upserts by email) rather than reusing a stored
+`bison_lead_id` from another workspace. Synchronous, capped at 5,000/push
+(client "pulls" are targeted). Gated on `EMAILBISON_API_KEY`.
+
+⚠️ **Untested against live Bison** — the `/api/leads` response field carrying
+the new id is read defensively (data.id / data.data.id / id); confirm with a
+real key + test campaign before production. Cross-workspace routing rules
+(item 6) are pending the client call.
+
 ## Known issues / TODO
 
 - [ ] Reoon bulk endpoint batch size — confirm exact cap from docs before tuning `VALIDATION_BATCH_SIZE`

@@ -123,7 +123,25 @@ function normalizeBisonRow(row, idx) {
 
 // ── run ──────────────────────────────────────────────────────────────────
 const raw = readFileSync(file, "utf8");
-const rows = parse(raw, { skip_empty_lines: true, relax_quotes: true, relax_column_count: true });
+const PARSE_OPTS = { skip_empty_lines: true, relax_quotes: true, relax_column_count: true };
+let rows;
+try {
+  rows = parse(raw, PARSE_OPTS);
+} catch (err) {
+  // Some Bison exports are truncated mid-record (cut off mid-download), which
+  // leaves an unclosed quoted field at the tail. Drop everything from the line
+  // where the dangling quote opens and parse the rest — losing the one partial
+  // row instead of failing the whole file.
+  const m = String(err.message).match(/at line (\d+)/);
+  if (err.code === "CSV_QUOTE_NOT_CLOSED" && m) {
+    const cut = parseInt(m[1], 10) - 1;
+    const lines = raw.split("\n");
+    console.warn(`WARNING: ${file} is truncated mid-record — dropping partial tail from line ${cut + 1} of ${lines.length}`);
+    rows = parse(lines.slice(0, cut).join("\n"), PARSE_OPTS);
+  } else {
+    throw err;
+  }
+}
 const headers = rows[0];
 const idx = {}; headers.forEach((h, i) => { idx[h.trim().toLowerCase()] = i; });
 console.log(`Headers: ${headers.length} cols. Data rows: ${rows.length - 1}`);

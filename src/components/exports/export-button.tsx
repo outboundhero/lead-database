@@ -10,7 +10,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ColumnSelector } from "./column-selector";
+import { ColumnSelector, type ExportDestination } from "./column-selector";
 import { toast } from "sonner";
 import type { FilterState } from "@/types/filters";
 
@@ -30,14 +30,52 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
     setSelectorOpen(true);
   }
 
-  async function handleExport(columns: string[], limit: number | null, rangeFrom?: number, rangeTo?: number) {
+  async function handleExport(
+    columns: string[],
+    limit: number | null,
+    rangeFrom: number | undefined,
+    rangeTo: number | undefined,
+    destination: ExportDestination = "csv",
+    campaign: { id: number | string; name?: string; instance_url?: string } | null = null,
+  ) {
     setSelectorOpen(false);
     setExporting(true);
+
+    const isSelected = exportType === "selected" && selectedIds.length > 0;
+
+    // ── Push straight into a Bison campaign (create in Bison -> attach) ──
+    if (destination === "bison" && campaign) {
+      const toastId = toast.loading(`Pushing to ${campaign.name ?? "campaign"}…`);
+      try {
+        const res = await fetch("/api/bison/push", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            campaignId: campaign.id,
+            campaignInstanceUrl: campaign.instance_url,
+            selectedIds: isSelected ? selectedIds : undefined,
+            filters: isSelected ? undefined : filters,
+            limit: limit ?? undefined,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Push failed");
+        toast.success(
+          `Pushed ${data.attached}/${data.total} leads to ${campaign.name ?? "campaign"}` +
+            (data.failed ? ` (${data.failed} failed)` : ""),
+          { id: toastId },
+        );
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Push failed", { id: toastId });
+      } finally {
+        setExporting(false);
+      }
+      return;
+    }
 
     try {
       // Both Selected and Filtered exports stream directly to the browser — the
       // old background/storage job for Selected never reliably completed.
-      const isSelected = exportType === "selected" && selectedIds.length > 0;
       const toastId = toast.loading("Preparing export...");
 
       // Log export start and get jobId. If the server is at capacity (429),

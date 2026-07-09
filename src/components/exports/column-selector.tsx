@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Dialog,
   DialogContent,
@@ -11,6 +11,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { LEAD_FIELDS } from "@/lib/uploads/constants";
+import { toast } from "sonner";
+
+interface BisonCampaign { id: number | string; name?: string; instance_url?: string; workspace_name?: string }
+export type ExportDestination = "csv" | "bison";
 
 /** Fields visible in the leads table UI */
 const VISIBLE_KEYS = new Set([
@@ -76,7 +80,14 @@ const DEFAULT_COLUMNS = [
 interface ColumnSelectorProps {
   open: boolean;
   onClose: () => void;
-  onConfirm: (columns: string[], limit: number | null, rangeFrom?: number, rangeTo?: number) => void;
+  onConfirm: (
+    columns: string[],
+    limit: number | null,
+    rangeFrom: number | undefined,
+    rangeTo: number | undefined,
+    destination: ExportDestination,
+    campaign: BisonCampaign | null,
+  ) => void;
   totalCount?: number;
   exportType?: "filtered" | "selected";
 }
@@ -93,6 +104,26 @@ export function ColumnSelector({
   );
   const [rangeFromStr, setRangeFromStr] = useState("");
   const [rangeToStr, setRangeToStr] = useState("");
+  const [destination, setDestination] = useState<ExportDestination>("csv");
+  const [campaigns, setCampaigns] = useState<BisonCampaign[]>([]);
+  const [campaignId, setCampaignId] = useState<string>("");
+  const [campaignsLoading, setCampaignsLoading] = useState(false);
+  const [campaignsError, setCampaignsError] = useState<string | null>(null);
+
+  // Load live Bison campaigns the first time the Bison destination is chosen.
+  useEffect(() => {
+    if (destination !== "bison" || campaigns.length > 0 || campaignsLoading) return;
+    setCampaignsLoading(true);
+    setCampaignsError(null);
+    fetch("/api/bison/campaigns")
+      .then(async (r) => {
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((d) => setCampaigns(Array.isArray(d.campaigns) ? d.campaigns : []))
+      .catch((e) => setCampaignsError(e.message))
+      .finally(() => setCampaignsLoading(false));
+  }, [destination, campaigns.length, campaignsLoading]);
 
   function toggle(key: string) {
     setSelected((prev) => {
@@ -149,6 +180,51 @@ export function ColumnSelector({
             ? `Exporting ${totalCount?.toLocaleString() ?? 0} selected leads`
             : `Exporting all ${totalCount?.toLocaleString() ?? 0} filtered leads`}
         </p>
+
+        {/* Destination — download a CSV or push straight into a Bison campaign */}
+        <div className="mb-1">
+          <div className="inline-flex w-full rounded-lg bg-muted p-0.5">
+            {(["csv", "bison"] as const).map((d) => (
+              <button
+                key={d}
+                type="button"
+                onClick={() => setDestination(d)}
+                className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+                  destination === d ? "bg-background shadow-sm" : "text-muted-foreground"
+                }`}
+              >
+                {d === "csv" ? "Download CSV" : "Push to Bison campaign"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {destination === "bison" && (
+          <div className="mb-2">
+            <label className="text-xs text-muted-foreground mb-1 block">Bison campaign</label>
+            {campaignsLoading ? (
+              <p className="text-xs text-muted-foreground">Loading campaigns…</p>
+            ) : campaignsError ? (
+              <p className="text-xs text-destructive">Couldn&apos;t load campaigns: {campaignsError}</p>
+            ) : (
+              <select
+                value={campaignId}
+                onChange={(e) => setCampaignId(e.target.value)}
+                className="h-8 w-full rounded-md border bg-background px-2 text-xs"
+              >
+                <option value="">Select a campaign…</option>
+                {campaigns.map((c) => (
+                  <option key={String(c.id)} value={String(c.id)}>
+                    {c.name ?? `Campaign ${c.id}`}{c.workspace_name ? ` — ${c.workspace_name}` : ""}
+                  </option>
+                ))}
+              </select>
+            )}
+            <p className="text-[10px] text-muted-foreground mt-1">
+              Leads are created in Bison, then attached to this campaign. Column selection below is ignored for Bison pushes.
+            </p>
+          </div>
+        )}
         <div className="flex gap-2 mb-2">
           <Button variant="outline" size="sm" className="text-xs" onClick={selectAll}>
             Select All
@@ -201,11 +277,18 @@ export function ColumnSelector({
               const from = rangeFromStr ? parseInt(rangeFromStr, 10) : undefined;
               const to = rangeToStr ? parseInt(rangeToStr, 10) : undefined;
               const limit = from && to ? to - from + 1 : to ? to : null;
-              onConfirm(Array.from(selected), limit && limit > 0 ? limit : null, from, to);
+              if (destination === "bison" && !campaignId) {
+                toast.error("Pick a Bison campaign first");
+                return;
+              }
+              const campaign = destination === "bison"
+                ? campaigns.find((c) => String(c.id) === campaignId) ?? null
+                : null;
+              onConfirm(Array.from(selected), limit && limit > 0 ? limit : null, from, to, destination, campaign);
             }}
-            disabled={selected.size === 0}
+            disabled={destination === "csv" ? selected.size === 0 : !campaignId}
           >
-            Export ({selected.size} columns)
+            {destination === "csv" ? `Export (${selected.size} columns)` : "Push to Bison"}
           </Button>
         </DialogFooter>
       </DialogContent>
