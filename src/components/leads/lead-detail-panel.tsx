@@ -160,6 +160,8 @@ export function LeadDetailPanel({
                   : null
               }
             />
+            <DetailRow label="Subcategory" value={lead.subcategory} />
+            <DetailRow label="Additional category" value={lead.additional_category} />
             <DetailRow label="Company phone" value={lead.company_phone} />
             <DetailRow label="Domain" value={lead.domain} />
             <DetailRow

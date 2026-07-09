@@ -16,6 +16,8 @@ export const LEAD_FIELDS: LeadField[] = [
   { key: "source", label: "Source", aliases: ["source", "lead_source", "data_source"] },
   { key: "esp", label: "ESP", aliases: ["esp", "email_provider", "email_service_provider"] },
   { key: "category", label: "Category", aliases: ["category", "business_category", "industry_category"] },
+  { key: "subcategory", label: "Subcategory", aliases: ["subcategory", "sub_category", "sub category"] },
+  { key: "additional_category", label: "Additional Category", aliases: ["additional_category", "additional category", "additional categories"] },
   { key: "email_type", label: "Email Type", aliases: ["email_type", "type"] },
   { key: "city", label: "City", aliases: ["city", "locality"] },
   { key: "state", label: "State", aliases: ["state", "province", "region"] },

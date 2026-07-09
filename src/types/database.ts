@@ -36,8 +36,10 @@ export interface Lead {
   bounce_source: string | null;
   // Category enrichment (scripts/categorize-worker.mjs + lead_categories taxonomy)
   category: string | null;
+  subcategory: string | null;
+  additional_category: string | null;
   category_confidence: number | null;
-  category_source: "keyword" | "ai" | "manual" | null;
+  category_source: "keyword" | "ai" | "manual" | "bison" | null;
   categorized_at: string | null;
   // Populated by the bounce worker (scripts/bounce-worker.mjs):
   // 'sender' = our inbox's fault, still contactable; 'hard' = invalid/blocked,
@@ -73,6 +75,14 @@ export interface Lead {
 export interface Company {
   id: string;
   name: string;
+  city: string | null;
+  state: string | null;
+  company_key: string;
+  category: string | null;
+  subcategory: string | null;
+  additional_category: string | null;
+  category_source: "keyword" | "ai" | "manual" | "bison" | null;
+  categorized_at: string | null;
   domain: string | null;
   size: string | null;
   annual_revenue: string | null;

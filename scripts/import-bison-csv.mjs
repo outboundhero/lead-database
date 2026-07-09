@@ -100,6 +100,14 @@ function normalizeBisonRow(row, idx) {
   if (clean(cv.question)) lead.question = cv.question;
   if (clean(cv["company phone"])) lead.company_phone = cv["company phone"];
   if (clean(cv["google maps url"])) lead.google_maps_url = cv["google maps url"];
+  // Bison-native category enrichment (mirrors src/lib/uploads/parse-bison.ts)
+  const pick = (...keys) => { for (const k of keys) { const v = clean(cv[k]); if (v) return v; } return undefined; };
+  const cvCategory = pick("category", "business category");
+  const cvSubcategory = pick("subcategory", "sub category", "sub_category");
+  const cvAdditional = pick("additional category", "additional_category", "additional categories");
+  if (cvCategory) { lead.category = cvCategory; lead.category_source = "bison"; lead.category_confidence = 1; lead.categorized_at = new Date().toISOString(); }
+  if (cvSubcategory) lead.subcategory = cvSubcategory;
+  if (cvAdditional) lead.additional_category = cvAdditional;
   const ca = get("created_at"), ua = get("updated_at");
   if (ca) lead.created_at = ca;
   if (ua) lead.updated_at = ua;
@@ -150,3 +158,9 @@ for (let i = 0; i < unique.length; i += CHUNK) {
   process.stdout.write(`\r  upserted ${upserted}/${unique.length}  (errors ${errors})`);
 }
 console.log(`\nDone. Upserted ${upserted}, errors ${errors}.`);
+
+// Keep the companies table + category cache in sync (name+city+state identity;
+// seeds company categories from Bison-provided lead categories).
+const { data: sync, error: syncErr } = await supabase.rpc("fn_sync_companies");
+if (syncErr) console.error("fn_sync_companies failed:", syncErr.message);
+else console.log(`companies sync: inserted=${sync[0].companies_inserted} seeded=${sync[0].companies_seeded} propagated=${sync[0].leads_propagated}`);

@@ -30,6 +30,7 @@ export function buildRpcFilters(filters: FilterState) {
   const seniority = stripUnknown(filters.seniority);
   const espRaw = stripUnknown(filters.esp);
   const category = stripUnknown(filters.category);
+  const subcategory = stripUnknown(filters.subcategory);
   const country = stripUnknown(filters.location.country);
   const state = stripUnknown(filters.location.state);
 
@@ -52,6 +53,7 @@ export function buildRpcFilters(filters: FilterState) {
       includeUnknown: espRaw.includeUnknown, selectUnknown: espRaw.selectUnknown,
     },
     category: { include: category.include, exclude: category.exclude, includeUnknown: category.includeUnknown, selectUnknown: category.selectUnknown },
+    subcategory: { include: subcategory.include, exclude: subcategory.exclude, includeUnknown: subcategory.includeUnknown, selectUnknown: subcategory.selectUnknown },
     location: {
       country: { include: country.include, exclude: country.exclude, includeUnknown: country.includeUnknown, selectUnknown: country.selectUnknown },
       state: { include: state.include, exclude: state.exclude, includeUnknown: state.includeUnknown, selectUnknown: state.selectUnknown },

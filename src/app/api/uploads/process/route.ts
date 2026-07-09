@@ -282,6 +282,13 @@ export async function POST(request: NextRequest) {
     })
     .eq("id", batchId);
 
+  // Keep the companies table + category cache in sync (name+city+state
+  // identity; seeds company categories from Bison-provided lead categories,
+  // propagates cached categories to new leads). Best-effort — an import
+  // shouldn't fail because the sync did.
+  const { error: syncError } = await supabase.rpc("fn_sync_companies");
+  if (syncError) console.error("fn_sync_companies failed:", syncError.message);
+
   return NextResponse.json({
     batchId,
     inserted,

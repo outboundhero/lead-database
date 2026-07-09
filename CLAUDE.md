@@ -235,25 +235,40 @@ exclude them.
 
 ## Category enrichment (NEW)
 
-Leads are classified into a client-defined taxonomy (`lead_categories`: name +
-keyword list + optional description) by `scripts/categorize-worker.mjs` — a
-Railway cron service (same repo, start command `npm run categorize-worker`).
+**Bison is the primary source.** Leads arrive with `category` / `subcategory` /
+`additional category` personalization variables (client enriches natively in
+Bison); the import ingests them (`category_source='bison'`). The AI layer is a
+FALLBACK for leads that arrive without category data, and it is **cached per
+company** — a company name categorized once (by Bison or by the worker) is
+never re-processed.
 
-Tiered cascade per uncategorized lead:
+**Companies table** (migration 049): unique identity = company name + city +
+state (normalized `company_key` generated column). `fn_sync_companies()` —
+called after every import and by the worker — (1) upserts companies from
+leads, (2) seeds company categories from categorized leads, (3) propagates
+cached company categories to uncategorized leads. Expected ≤50k companies.
+Legacy `UNIQUE(domain)` was dropped (many businesses share gmail.com).
+
+**Fallback worker** `scripts/categorize-worker.mjs` (Railway cron,
+`npm run categorize-worker`), per still-uncategorized COMPANY:
 
 | Tier | Method | Cost |
 |---|---|---|
-| 0 | Keyword match: category keywords vs `company` (weight 3) / `question` / `domain` (weight 1); single strict winner required, ties escalate | free |
-| 1 | Claude Haiku (`claude-haiku-4-5`), 25 leads per call, structured outputs (JSON schema with category enum), taxonomy in a cached system prompt. Gated on `ANTHROPIC_API_KEY` — no key = keyword-only | ~$4–8 per 32K leads |
+| 0 | Taxonomy keywords vs company name (weight 3) / domain / sample question; single strict winner | free |
+| 1 | Claude Haiku (`claude-haiku-4-5`), 25 companies/call, structured outputs (category enum). Gated on `ANTHROPIC_API_KEY` | ~$0.0003/company |
 
-Results: `leads.category` / `category_confidence` / `category_source`
-(`keyword`/`ai`/`manual`) / `categorized_at`. Manual assignments are never
-overwritten. `Other` = AI judged no category fits. Migration 048 added the
-Category filter chip (include/exclude, mirrors ESP) to `fn_filter_leads_v2` +
-`fn_export_leads`, and the distinct-values cache to `fn_refresh_filter_cache`.
+Taxonomy lives in `lead_categories` (seed: `npm run seed-categories file.json
+[--replace]`). Manual assignments never overwritten; `Other` = nothing fits.
+Filter chips: Category + Subcategory (include/exclude, mirror ESP; migrations
+048/049 wired them into `fn_filter_leads_v2` + `fn_export_leads` +
+`fn_refresh_filter_cache`).
 
-Seed/replace the taxonomy: `npm run seed-categories taxonomy.json [--replace]`
-(accepts `[{name, keywords, description}]` or `{ "Name": ["kw1", ...] }`).
+## Live Bison read (NEW)
+
+`GET /api/bison/campaigns` proxies Email Bison's campaigns API in real time
+(30s in-memory cache, `?fresh=1` bypasses) so campaigns created in Bison are
+visible immediately for routing/location searches. Session-authenticated;
+requires `EMAILBISON_API_KEY`.
 
 ## Known issues / TODO
 

@@ -25,6 +25,7 @@ const VISIBLE_KEYS = new Set([
   "state",
   "esp",
   "category",
+  "subcategory",
   "validation_status",
 ]);
 
@@ -39,6 +40,7 @@ const EXPORT_ONLY_KEYS = new Set([
   "question",
   "notes",
   "tags",
+  "additional_category",
   "category_source",
   "category_confidence",
   "is_bounced",

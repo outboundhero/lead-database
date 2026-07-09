@@ -129,6 +129,7 @@ export function FilterBar({
   const [seniorities, setSeniorities] = useState<string[]>([]);
   const [espValues, setEspValues] = useState<string[]>([]);
   const [categoryValues, setCategoryValues] = useState<string[]>([]);
+  const [subcategoryValues, setSubcategoryValues] = useState<string[]>([]);
 
   // Lazy-load distinct values only when a dropdown is opened (not on page load).
   // Uses cached values from filter_options_cache table.
@@ -166,6 +167,7 @@ export function FilterBar({
       case "seniority": setSeniorities(values); break;
       case "esp": setEspValues([...new Set(values)]); break;
       case "category": setCategoryValues(values); break;
+      case "subcategory": setSubcategoryValues(values); break;
     }
   }, []);
 
@@ -200,6 +202,8 @@ export function FilterBar({
         case "seniority": setSeniorities(values); break;
         case "esp": setEspValues([...new Set(values)]); break;
         case "category": setCategoryValues(values); break;
+        case "subcategory": setSubcategoryValues(values); break;
+      case "subcategory": setSubcategoryValues(values); break;
       }
     }, 300);
   }, [loadDistinctFor]);
@@ -420,6 +424,19 @@ export function FilterBar({
             options={categoryValues}
             value={filters.category}
             onChange={(v) => onIncludeExcludeChange("category", v)}
+          />
+        </FilterChip>
+
+        {/* Subcategory — Bison-enriched, second-level category */}
+        <FilterChip
+          label="Subcategory"
+          activeCount={filters.subcategory.include.length + filters.subcategory.exclude.length + (filters.subcategory.includeUnknown ? 1 : 0)}
+          onOpen={() => loadDistinctFor("subcategory")}
+        >
+          <FilterMultiSelect
+            options={subcategoryValues}
+            value={filters.subcategory}
+            onChange={(v) => onIncludeExcludeChange("subcategory", v)}
           />
         </FilterChip>
 

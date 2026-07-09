@@ -168,6 +168,28 @@ export function normalizeBisonRow(
   if (clean(cv["company phone"])) lead.company_phone = cv["company phone"];
   if (clean(cv["google maps url"])) lead.google_maps_url = cv["google maps url"];
 
+  // Bison-native category enrichment (client adds these as personalization
+  // variables and enriches inside Bison; we just ingest). Variable names may
+  // vary slightly per workspace, so match common spellings.
+  const pick = (...keys: string[]): string | undefined => {
+    for (const k of keys) {
+      const v = clean(cv[k]);
+      if (v) return v;
+    }
+    return undefined;
+  };
+  const cvCategory = pick("category", "business category");
+  const cvSubcategory = pick("subcategory", "sub category", "sub_category");
+  const cvAdditional = pick("additional category", "additional_category", "additional categories");
+  if (cvCategory) {
+    lead.category = cvCategory;
+    lead.category_source = "bison";
+    lead.category_confidence = 1;
+    lead.categorized_at = new Date().toISOString();
+  }
+  if (cvSubcategory) lead.subcategory = cvSubcategory;
+  if (cvAdditional) lead.additional_category = cvAdditional;
+
   // Timestamps (Bison provides them; fall back to DB defaults if absent)
   const createdAt = get("created_at");
   const updatedAt = get("updated_at");
