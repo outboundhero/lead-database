@@ -5,6 +5,7 @@ import type { FilterState } from "@/types/filters";
 import type { Lead } from "@/types/database";
 import { buildRpcFilters } from "@/lib/filters/build-rpc-filters";
 import { pushLeadsToCampaign, leadToPushLead } from "@/lib/bison/push-leads";
+import { bisonAuthFor } from "@/lib/bison/keys";
 
 // Push leads into an Email Bison campaign (two-step: create in Bison, then
 // attach to campaign — see src/lib/bison/push-leads.ts). Runs synchronously
@@ -34,10 +35,11 @@ export async function POST(request: NextRequest) {
   const { data: { user } } = await server.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const apiKey = process.env.EMAILBISON_API_KEY;
-  if (!apiKey) {
+  const auth = bisonAuthFor(undefined);
+  // resolved again below once we know the campaign's instance
+  if (!auth) {
     return NextResponse.json(
-      { error: "EMAILBISON_API_KEY is not configured — add it to enable pushing to Bison." },
+      { error: "No Bison keys configured (EMAILBISON_KEYS or EMAILBISON_API_KEY)." },
       { status: 503 }
     );
   }
@@ -92,10 +94,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: `Too many leads (${leads.length}). Narrow the filter; max ${HARD_CAP} per push.` }, { status: 400 });
   }
 
+  const campaignAuth = bisonAuthFor(body.campaignInstanceUrl);
+  if (!campaignAuth) {
+    return NextResponse.json(
+      { error: `No Bison key configured for instance ${body.campaignInstanceUrl}` },
+      { status: 503 }
+    );
+  }
   const result = await pushLeadsToCampaign(leads.map(leadToPushLead), {
-    apiKey,
+    apiKey: campaignAuth.key,
     campaignId: body.campaignId,
-    instanceUrl: body.campaignInstanceUrl,
+    instanceUrl: campaignAuth.base,
   });
 
   // Audit trail (best-effort).

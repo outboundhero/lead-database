@@ -156,8 +156,9 @@ REOON_API_KEY                 # Email validation primary
 FINDEMAIL_API_KEY             # Email validation fallback
 VALIDATION_BATCH_SIZE         # default 100
 VALIDATION_REVALIDATE_DAYS    # default 45
-EMAILBISON_API_KEY            # Bison workspace token — bounce-classifier worker
-EMAILBISON_BASE_URL           # optional; default per-lead https://{instance_url}
+EMAILBISON_KEYS               # JSON: instance domain -> token (3 separate Bison installs)
+EMAILBISON_API_KEY            # single/default Bison token (fallback for any instance)
+EMAILBISON_BASE_URL           # optional; default instance domain
 OPENAI_API_KEY                # gpt-4o-mini — categorize worker AI tier (preferred)
 ANTHROPIC_API_KEY             # claude-haiku-4-5 — alternative categorize provider
 CATEGORIZE_PROVIDER           # optional force: openai | anthropic

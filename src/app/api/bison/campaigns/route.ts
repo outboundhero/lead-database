@@ -1,13 +1,17 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { bisonInstances } from "@/lib/bison/keys";
 
-// Live Email Bison campaign read: the database reads Bison in real time so a
-// campaign created in Bison is visible here immediately (for client routing
-// and location searches). A 30-second in-memory cache keeps bursts cheap while
-// staying effectively real-time; pass ?fresh=1 to bypass it.
+// Live Email Bison campaign read across ALL configured instances: the client
+// runs three separate Bison installs (outboundhero / facilityreach /
+// outboundclean), each with its own API token (EMAILBISON_KEYS json map, or a
+// single EMAILBISON_API_KEY). Campaigns are merged and tagged with their
+// instance domain so pushes route to the right install. A 30-second in-memory
+// cache keeps bursts cheap while staying effectively real-time; ?fresh=1
+// bypasses it.
 
 const CACHE_TTL_MS = 30_000;
-let cache: { at: number; data: unknown } | null = null;
+let cache: { at: number; data: unknown; errors: string[] } | null = null;
 
 export async function GET(request: Request) {
   const supabase = await createClient();
@@ -16,32 +20,43 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const apiKey = process.env.EMAILBISON_API_KEY;
-  if (!apiKey) {
+  const instances = bisonInstances();
+  if (instances.length === 0) {
     return NextResponse.json(
-      { error: "EMAILBISON_API_KEY is not configured" },
+      { error: "No Bison keys configured (EMAILBISON_KEYS or EMAILBISON_API_KEY)" },
       { status: 503 }
     );
   }
 
   const fresh = new URL(request.url).searchParams.get("fresh") === "1";
   if (!fresh && cache && Date.now() - cache.at < CACHE_TTL_MS) {
-    return NextResponse.json({ campaigns: cache.data, cached: true });
+    return NextResponse.json({ campaigns: cache.data, errors: cache.errors, cached: true });
   }
 
-  const base = (process.env.EMAILBISON_BASE_URL || "https://app.outboundhero.co").replace(/\/$/, "");
-  const res = await fetch(`${base}/api/campaigns`, {
-    headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    return NextResponse.json(
-      { error: `Email Bison responded ${res.status}` },
-      { status: 502 }
-    );
-  }
-  const json = await res.json();
-  const campaigns = Array.isArray(json?.data) ? json.data : json;
-  cache = { at: Date.now(), data: campaigns };
-  return NextResponse.json({ campaigns, cached: false });
+  const campaigns: Array<Record<string, unknown>> = [];
+  const errors: string[] = [];
+  await Promise.all(
+    instances.map(async ({ domain, key }) => {
+      try {
+        const res = await fetch(`https://${domain}/api/campaigns`, {
+          headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+          cache: "no-store",
+        });
+        if (!res.ok) {
+          errors.push(`${domain}: HTTP ${res.status}`);
+          return;
+        }
+        const json = await res.json();
+        const list = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
+        for (const c of list) {
+          campaigns.push({ ...c, instance_url: domain });
+        }
+      } catch (err) {
+        errors.push(`${domain}: ${err instanceof Error ? err.message : "fetch failed"}`);
+      }
+    })
+  );
+
+  cache = { at: Date.now(), data: campaigns, errors };
+  return NextResponse.json({ campaigns, errors, cached: false });
 }

@@ -165,20 +165,41 @@ const REASON_MAX = 500;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function baseUrlFor(lead) {
-  if (process.env.EMAILBISON_BASE_URL) return process.env.EMAILBISON_BASE_URL.replace(/\/$/, "");
-  if (lead.instance_url) return `https://${lead.instance_url.replace(/^https?:\/\//, "").replace(/\/$/, "")}`;
-  return "https://app.outboundhero.co";
+// Multi-instance keys (mirrors src/lib/bison/keys.ts): the client runs three
+// separate Bison installs, each with its own token. EMAILBISON_KEYS is a JSON
+// map of instance domain -> token; EMAILBISON_API_KEY is the untagged default.
+const normalizeDomain = (v) => v.replace(/^https?:\/\//, "").replace(/\/.*$/, "").trim().toLowerCase();
+const KEY_MAP = (() => {
+  const out = {};
+  try {
+    if (process.env.EMAILBISON_KEYS) {
+      for (const [d, k] of Object.entries(JSON.parse(process.env.EMAILBISON_KEYS))) {
+        if (typeof k === "string" && k.trim()) out[normalizeDomain(d)] = k.trim();
+      }
+    }
+  } catch { console.error("EMAILBISON_KEYS is not valid JSON — ignoring"); }
+  return out;
+})();
+const DEFAULT_KEY = (process.env.EMAILBISON_API_KEY ?? "").trim() || null;
+const DEFAULT_DOMAIN = normalizeDomain(process.env.EMAILBISON_BASE_URL || "app.outboundhero.co");
+
+// Returns { base, key } for a lead's instance, or null when no key covers it.
+function authFor(lead) {
+  const domain = lead.instance_url ? normalizeDomain(lead.instance_url) : DEFAULT_DOMAIN;
+  const key = KEY_MAP[domain] ?? DEFAULT_KEY;
+  return key ? { base: `https://${domain}`, key } : null;
 }
 
-async function fetchBouncedReplies(lead, apiKey) {
-  const url = `${baseUrlFor(lead)}/api/leads/${encodeURIComponent(lead.email)}/replies?folder=bounced`;
+async function fetchBouncedReplies(lead, auth) {
+  const url = `${auth.base}/api/leads/${encodeURIComponent(lead.email)}/replies?folder=bounced`;
   const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+    headers: { Authorization: `Bearer ${auth.key}`, Accept: "application/json" },
   });
   if (res.status === 404) return { notFound: true, replies: [] };
   if (res.status === 401 || res.status === 403) {
-    throw Object.assign(new Error(`Bison auth failed (HTTP ${res.status}) — check EMAILBISON_API_KEY`), { fatal: true });
+    // Wrong/missing key for THIS instance — non-fatal in a multi-instance
+    // setup; the consecutive-error guard still aborts a fully-broken run.
+    throw new Error(`Bison auth failed for ${auth.base} (HTTP ${res.status})`);
   }
   if (!res.ok) {
     throw new Error(`Bison HTTP ${res.status} for ${lead.email}`);
@@ -200,9 +221,8 @@ function extractNdrText(replies) {
 }
 
 async function run({ dryRun }) {
-  const apiKey = process.env.EMAILBISON_API_KEY;
-  if (!apiKey) {
-    console.error("EMAILBISON_API_KEY is not set — nothing to do.");
+  if (!DEFAULT_KEY && Object.keys(KEY_MAP).length === 0) {
+    console.error("No Bison keys set (EMAILBISON_KEYS or EMAILBISON_API_KEY) — nothing to do.");
     process.exit(1);
   }
   if (!process.env.DATABASE_URL) {
@@ -239,8 +259,14 @@ async function run({ dryRun }) {
   let consecutiveErrors = 0;
 
   for (const lead of leads) {
+    const auth = authFor(lead);
+    if (!auth) {
+      // No key for this lead's instance yet — leave unchecked, retry when added.
+      counts.errors++;
+      continue;
+    }
     try {
-      const { notFound, replies } = await fetchBouncedReplies(lead, apiKey);
+      const { notFound, replies } = await fetchBouncedReplies(lead, auth);
       let type, reason;
 
       if (notFound) {
