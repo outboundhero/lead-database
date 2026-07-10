@@ -70,11 +70,15 @@ function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// One combined alternation regex per category (fast at 2,700+ keywords across
+// millions of companies: ~40 regex tests per field instead of ~2,700).
 function buildMatchers(categories) {
-  return categories.map((c) => ({
-    name: c.name,
-    regexes: c.keywords.map((k) => new RegExp(`\\b${escapeRegex(k)}\\b`, "i")),
-  }));
+  return categories
+    .filter((c) => c.keywords.length > 0)
+    .map((c) => ({
+      name: c.name,
+      regex: new RegExp(`\\b(?:${c.keywords.map(escapeRegex).join("|")})\\b`, "i"),
+    }));
 }
 
 // Name hits weigh 3 (a trade in the company name is a near-certain signal),
@@ -91,11 +95,9 @@ function classifyByKeywords(subject, matchers) {
   for (const m of matchers) {
     let score = 0;
     let nameHit = false;
-    for (const re of m.regexes) {
-      if (re.test(name)) { score += 3; nameHit = true; }
-      if (re.test(question)) score += 1;
-      if (re.test(domain)) score += 1;
-    }
+    if (m.regex.test(name)) { score += 3; nameHit = true; }
+    if (m.regex.test(question)) score += 1;
+    if (m.regex.test(domain)) score += 1;
     if (score > bestScore) {
       best = m.name; bestScore = score; tied = false; bestNameHit = nameHit;
     } else if (score === bestScore && score > 0) {

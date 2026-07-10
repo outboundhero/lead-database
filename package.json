@@ -9,7 +9,8 @@
     "lint": "eslint",
     "bounce-worker": "node scripts/bounce-worker.mjs",
     "categorize-worker": "node scripts/categorize-worker.mjs",
-    "seed-categories": "node scripts/seed-categories.mjs"
+    "seed-categories": "node scripts/seed-categories.mjs",
+    "sync-taxonomy": "node scripts/sync-taxonomy-from-sheet.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
