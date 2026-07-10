@@ -13,9 +13,10 @@
 //           company categories to uncategorized leads.  All free.
 //   Step 2  Companies still uncategorized -> keyword tier (taxonomy keywords
 //           vs company name / domain / sample question).  Free.
-//   Step 3  Remainder -> Claude Haiku, 25 companies per call, structured
-//           outputs restricted to the taxonomy names (or 'Other').
-//           Gated on ANTHROPIC_API_KEY (no key = keyword-only).
+//   Step 3  Remainder -> AI (gpt-4o-mini by default, or Claude Haiku), 25
+//           companies per call, strict JSON schema restricted to the taxonomy
+//           names (or 'Other'). Gated on OPENAI_API_KEY / ANTHROPIC_API_KEY
+//           (no key = keyword-only).
 //   Step 4  fn_sync_companies() again -> propagate the new company categories
 //           to all their leads; refresh the filter dropdown cache.
 //   Step 5  Leads with NO company name (rare) get classified individually.
@@ -30,8 +31,10 @@
 //
 // Env:
 //   DATABASE_URL           required — Supabase pooler URL
-//   ANTHROPIC_API_KEY      optional — enables the AI tier
-//   CATEGORIZE_MODEL       optional — default claude-haiku-4-5
+//   OPENAI_API_KEY         optional — enables the AI tier (gpt-4o-mini)
+//   ANTHROPIC_API_KEY      optional — alternative provider (claude-haiku-4-5)
+//   CATEGORIZE_PROVIDER    optional — force 'openai' or 'anthropic'
+//   CATEGORIZE_MODEL       optional — override the model id
 //   CATEGORIZE_AI_BATCH    optional — companies per AI call (default 25)
 //   CATEGORIZE_PAGE        optional — companies per DB page (default 1000)
 //
@@ -49,7 +52,14 @@ const LIMIT = (() => {
   return i >= 0 ? parseInt(args[i + 1], 10) : Infinity;
 })();
 
-const MODEL = process.env.CATEGORIZE_MODEL || "claude-haiku-4-5";
+// Provider: OpenAI (gpt-4o-mini, default when OPENAI_API_KEY is set) or
+// Anthropic (claude-haiku-4-5). Force with CATEGORIZE_PROVIDER=openai|anthropic.
+const PROVIDER =
+  process.env.CATEGORIZE_PROVIDER ||
+  (process.env.OPENAI_API_KEY ? "openai" : "anthropic");
+const MODEL =
+  process.env.CATEGORIZE_MODEL ||
+  (PROVIDER === "openai" ? "gpt-4o-mini" : "claude-haiku-4-5");
 const AI_BATCH = parseInt(process.env.CATEGORIZE_AI_BATCH ?? "25", 10);
 const PAGE = parseInt(process.env.CATEGORIZE_PAGE ?? "1000", 10);
 const OTHER = "Other";
@@ -135,13 +145,55 @@ function buildSchema(categoryNames) {
   };
 }
 
-async function classifyByAI(anthropic, subjects, systemPrompt, schema) {
-  const numbered = subjects
+function numberedList(subjects) {
+  return subjects
     .map(
       (s, i) =>
         `${i}. company: ${s.name ?? "-"} | about: ${(s.question ?? "-").slice(0, 200)} | domain: ${s.domain ?? "-"}`
     )
     .join("\n");
+}
+
+// Both providers enforce the same strict JSON schema, so the model can only
+// answer with taxonomy category names (or 'Other') — never invented labels.
+// Returns { results, usage: { input, output } }.
+async function classifyByAI(anthropic, subjects, systemPrompt, schema) {
+  const numbered = numberedList(subjects);
+
+  if (PROVIDER === "openai") {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 4096,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `Classify these businesses:\n${numbered}` },
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: { name: "classification", strict: true, schema },
+        },
+      }),
+    });
+    if (!res.ok) {
+      throw new Error(`OpenAI HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`);
+    }
+    const json = await res.json();
+    const choice = json.choices?.[0];
+    if (choice?.finish_reason === "length") {
+      throw new Error("AI response truncated (max_tokens) — lower CATEGORIZE_AI_BATCH");
+    }
+    const { results } = JSON.parse(choice?.message?.content ?? "{}");
+    return {
+      results: results ?? [],
+      usage: { input: json.usage?.prompt_tokens ?? 0, output: json.usage?.completion_tokens ?? 0 },
+    };
+  }
 
   const response = await anthropic.messages.create({
     model: MODEL,
@@ -156,7 +208,14 @@ async function classifyByAI(anthropic, subjects, systemPrompt, schema) {
   }
   const text = response.content.find((b) => b.type === "text")?.text ?? "{}";
   const { results } = JSON.parse(text);
-  return { results: results ?? [], usage: response.usage };
+  const u = response.usage;
+  return {
+    results: results ?? [],
+    usage: {
+      input: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0),
+      output: u.output_tokens ?? 0,
+    },
+  };
 }
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
@@ -230,8 +289,9 @@ async function main() {
     console.error("DATABASE_URL is not set.");
     process.exit(1);
   }
-  const aiEnabled = !KEYWORD_ONLY && !!process.env.ANTHROPIC_API_KEY;
-  const anthropic = aiEnabled ? new Anthropic() : null;
+  const aiKey = PROVIDER === "openai" ? process.env.OPENAI_API_KEY : process.env.ANTHROPIC_API_KEY;
+  const aiEnabled = !KEYWORD_ONLY && !!aiKey;
+  const anthropic = aiEnabled && PROVIDER === "anthropic" ? new Anthropic() : null;
 
   const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
@@ -250,7 +310,7 @@ async function main() {
   const schema = buildSchema(categories.map((c) => c.name));
 
   console.log(
-    `categorize-worker: ${categories.length} categories, model=${aiEnabled ? MODEL : "(keyword only)"}${DRY_RUN ? " DRY RUN" : ""}`
+    `categorize-worker: ${categories.length} categories, model=${aiEnabled ? `${PROVIDER}/${MODEL}` : "(keyword only)"}${DRY_RUN ? " DRY RUN" : ""}`
   );
 
   // Step 1 — cache pass: sync companies, seed from Bison, propagate cache hits.
@@ -297,8 +357,8 @@ async function main() {
         const chunk = aiQueue.slice(i, i + AI_BATCH);
         try {
           const { results, usage } = await classifyByAI(anthropic, chunk, systemPrompt, schema);
-          aiInputTokens += (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
-          aiOutputTokens += usage.output_tokens ?? 0;
+          aiInputTokens += usage.input;
+          aiOutputTokens += usage.output;
           const byIndex = new Map(results.map((r) => [r.index, r]));
           chunk.forEach((company, j) => {
             const r = byIndex.get(j);
@@ -349,8 +409,8 @@ async function main() {
         const chunk = aiQueue.slice(i, i + AI_BATCH);
         try {
           const { results, usage } = await classifyByAI(anthropic, chunk, systemPrompt, schema);
-          aiInputTokens += (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
-          aiOutputTokens += usage.output_tokens ?? 0;
+          aiInputTokens += usage.input;
+          aiOutputTokens += usage.output;
           const byIndex = new Map(results.map((r) => [r.index, r]));
           chunk.forEach((lead, j) => {
             const r = byIndex.get(j);
@@ -366,7 +426,8 @@ async function main() {
     console.log(`  company-less leads classified: ${resolved.length}/${orphans.length}`);
   }
 
-  const estCost = (aiInputTokens / 1e6) * 1 + (aiOutputTokens / 1e6) * 5; // Haiku 4.5 $1/$5 per MTok
+  const [inRate, outRate] = PROVIDER === "openai" ? [0.15, 0.6] : [1, 5]; // $/MTok: gpt-4o-mini vs haiku-4-5
+  const estCost = (aiInputTokens / 1e6) * inRate + (aiOutputTokens / 1e6) * outRate;
   console.log(
     `categorize-worker done: keyword=${counts.keyword} ai=${counts.ai} other=${counts.other} unresolved=${counts.unresolved} errors=${counts.errors}` +
       (aiEnabled ? ` | AI tokens in=${aiInputTokens} out=${aiOutputTokens} (~$${estCost.toFixed(2)})` : "")

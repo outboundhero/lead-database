@@ -158,8 +158,10 @@ VALIDATION_BATCH_SIZE         # default 100
 VALIDATION_REVALIDATE_DAYS    # default 45
 EMAILBISON_API_KEY            # Bison workspace token — bounce-classifier worker
 EMAILBISON_BASE_URL           # optional; default per-lead https://{instance_url}
-ANTHROPIC_API_KEY             # Claude Haiku — categorize worker AI tier (gated)
-CATEGORIZE_MODEL              # default claude-haiku-4-5
+OPENAI_API_KEY                # gpt-4o-mini — categorize worker AI tier (preferred)
+ANTHROPIC_API_KEY             # claude-haiku-4-5 — alternative categorize provider
+CATEGORIZE_PROVIDER           # optional force: openai | anthropic
+CATEGORIZE_MODEL              # optional model override
 ```
 
 ---
@@ -255,7 +257,7 @@ Legacy `UNIQUE(domain)` was dropped (many businesses share gmail.com).
 | Tier | Method | Cost |
 |---|---|---|
 | 0 | Taxonomy keywords vs company name (weight 3) / domain / sample question; single strict winner | free |
-| 1 | Claude Haiku (`claude-haiku-4-5`), 25 companies/call, structured outputs (category enum). Gated on `ANTHROPIC_API_KEY` | ~$0.0003/company |
+| 1 | AI: `gpt-4o-mini` (default, via `OPENAI_API_KEY`) or `claude-haiku-4-5` (via `ANTHROPIC_API_KEY`), 25 companies/call, strict JSON schema (category enum) | ~$0.00004/company (4o-mini) |
 
 Taxonomy lives in `lead_categories` (seed: `npm run seed-categories file.json
 [--replace]`). Manual assignments never overwritten; `Other` = nothing fits.
