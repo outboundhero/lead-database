@@ -13,6 +13,10 @@ export interface ValidationResult {
   email: string;
   status: ValidationStatus | null; // null = provider returned inconclusive, caller should fall back
   provider: ValidationProvider;
+  // Provider-native status (lowercased) the orchestrator uses to decide whether
+  // to escalate to Findymail. Reoon: valid|invalid|catch_all|disposable|
+  // spamtrap|risky|unknown|error. Findymail: verified|unverified.
+  nativeStatus?: string;
   raw: unknown;
 }
 

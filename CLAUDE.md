@@ -84,11 +84,11 @@ New indexes: `idx_leads_email_type`, `idx_leads_validation_status`, `idx_leads_v
 
 1. Pre-pass query: `SELECT id, email FROM leads WHERE <filters> AND (validation_status IS NULL OR validated_at < now() - INTERVAL '45 days')`
 2. Create a `validation_jobs` row, then call `validateLeads(ids)` in batches of ~100 with `p-limit` concurrency of 5
-3. For each batch: Reoon first. On error / inconclusive, fall back to FindEmail per-email. Persist `validation_status`, `validation_provider`, `validated_at`, `validation_response`
+3. Reoon in POWER mode (real SMTP). Findymail (verify endpoint ONLY, never the finder) is the second layer, called only when Reoon's native status is catch_all / risky / unknown / error — a clean valid/invalid spends no Findymail credit. Findymail verified:true→valid, false→invalid. Genuine double-outage rows are left unwritten to retry. Persist status/provider/validated_at/validation_response
 4. Client polls `/api/exports/validation-progress?jobId=...` for the iOS-sheet progress modal
 5. Once validation completes, run the existing streaming export — the RPC enforces `validation_status IN ('valid','catch_all') AND is_bounced = false` (admin can override `is_bounced` filter via `includeBounced` flag)
 
-**Env vars:** `REOON_API_KEY`, `FINDEMAIL_API_KEY`, `VALIDATION_BATCH_SIZE` (default 100), `VALIDATION_REVALIDATE_DAYS` (default 45).
+**Env vars:** `REOON_API_KEY`, `FINDEMAIL_API_KEY`, `REOON_MODE` (default `power`), `REOON_CONCURRENCY` (default 12), `VALIDATION_BATCH_SIZE` (default 100), `VALIDATION_REVALIDATE_DAYS` (default 45). Power mode is ~3s/email (SMTP); concurrency hides it.
 
 **Cost guard:** validation is gated by `if (process.env.REOON_API_KEY)`. If no key is set the pre-pass no-ops and export proceeds without validation (dev convenience).
 

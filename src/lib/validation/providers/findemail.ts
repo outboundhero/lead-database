@@ -1,46 +1,32 @@
 import type { ValidationResult } from "../types";
 
-// FindEmail (Findymail) — fallback provider, called only when Reoon returns
-// inconclusive / errors. Per-email API. API key from FINDEMAIL_API_KEY env.
+// Findymail — SECOND-LAYER verifier, called only when Reoon returns
+// catch_all / risky / unknown / error. API key from FINDEMAIL_API_KEY.
 //
-// Endpoint shape (Findymail public verify endpoint):
-//   POST https://app.findymail.com/api/verify
-//   Authorization: Bearer <token>
-//   Body: { email: "foo@bar" }
+// ⚠️ VERIFY ONLY — never the email FINDER. We hit exactly one endpoint:
+//     POST https://app.findymail.com/api/verify   (checks a given email)
+//   and never /api/search/* (which FINDS/appends emails and burns finder
+//   credits). This module must not call any other Findymail endpoint.
 //
-// Status mapping:
-//   valid / verified / safe          → 'valid'
-//   catch_all / accept_all / risky   → 'catch_all'
-//   invalid / disposable             → 'invalid'
-//   unknown / null                   → 'invalid'  (don't escalate further — Reoon already tried)
-//
-// Always treats network errors as 'invalid' (conservative: don't ship to a
-// possibly-bad address when both providers failed).
+// Live response shape (confirmed against the API):
+//     { "email": "...", "verified": true|false, "provider": "Google|Microsoft|..." }
+//   It's a binary deliverability check — no catch_all/risky from Findymail:
+//     verified === true  → 'valid'
+//     verified === false → 'invalid'
+//     HTTP/network error → 'invalid' (conservative — don't ship to unverified)
 
-const FINDEMAIL_URL = "https://app.findymail.com/api/verify";
+const FINDYMAIL_VERIFY_URL = "https://app.findymail.com/api/verify";
 
-interface FindEmailResponse {
-  status?: string;
-  result?: string;
-  valid?: boolean;
-  catch_all?: boolean;
+interface FindymailVerifyResponse {
+  email?: string;
+  verified?: boolean;
+  provider?: string;
   [key: string]: unknown;
-}
-
-function mapStatus(resp: FindEmailResponse): "valid" | "catch_all" | "invalid" {
-  const s = (resp.status ?? resp.result ?? "").toString().toLowerCase();
-  if (resp.catch_all === true || s === "catch_all" || s === "accept_all" || s === "risky") {
-    return "catch_all";
-  }
-  if (resp.valid === true || s === "valid" || s === "verified" || s === "safe") {
-    return "valid";
-  }
-  return "invalid";
 }
 
 async function verifyOne(email: string, apiKey: string, signal?: AbortSignal): Promise<ValidationResult> {
   try {
-    const res = await fetch(FINDEMAIL_URL, {
+    const res = await fetch(FINDYMAIL_VERIFY_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -51,20 +37,23 @@ async function verifyOne(email: string, apiKey: string, signal?: AbortSignal): P
       signal,
     });
     if (!res.ok) {
-      return {
-        email,
-        status: "invalid",
-        provider: "findemail",
-        raw: { httpStatus: res.status },
-      };
+      return { email, status: "invalid", provider: "findemail", nativeStatus: "error", raw: { httpStatus: res.status } };
     }
-    const json = (await res.json()) as FindEmailResponse;
-    return { email, status: mapStatus(json), provider: "findemail", raw: json };
+    const json = (await res.json()) as FindymailVerifyResponse;
+    const verified = json.verified === true;
+    return {
+      email,
+      status: verified ? "valid" : "invalid",
+      provider: "findemail",
+      nativeStatus: verified ? "verified" : "unverified",
+      raw: json,
+    };
   } catch (err) {
     return {
       email,
       status: "invalid",
       provider: "findemail",
+      nativeStatus: "error",
       raw: { error: err instanceof Error ? err.message : "unknown error" },
     };
   }
@@ -79,7 +68,7 @@ export async function validateBatch(
     throw new Error("FINDEMAIL_API_KEY not configured");
   }
   const apiKey: string = envKey;
-  const concurrency = options?.concurrency ?? 5;
+  const concurrency = options?.concurrency ?? 8;
   const results: ValidationResult[] = new Array(emails.length);
   let nextIdx = 0;
 

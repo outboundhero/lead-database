@@ -1,5 +1,9 @@
-// Validation orchestrator: Reoon (primary) → FindEmail (fallback) for any lead
-// whose Reoon call returned inconclusive or errored.
+// Validation orchestrator: Reoon (primary) → Findymail (second layer).
+//
+// Escalation rule (client spec): Findymail is called ONLY when Reoon's native
+// status is catch_all / risky / unknown (or Reoon errored). Reoon 'valid' and
+// 'invalid'/'disposable'/'spamtrap' are terminal — no Findymail credit spent.
+// Findymail is verify-only (never the finder). See providers/*.ts.
 //
 // Persists results into leads.validation_status / validation_provider /
 // validated_at / validation_response. Updates a validation_jobs row with live
@@ -86,10 +90,12 @@ export async function validateLeads(
     }
     totalCredits += reoonResults.filter((r) => r.raw && !(r.raw as { error?: string }).error).length;
 
-    // For each inconclusive Reoon result, try FindEmail
+    // Escalate to Findymail only for Reoon's uncertain verdicts (catch_all /
+    // risky / unknown) and Reoon errors — NOT for a clean valid/invalid.
+    const FALLBACK_STATUSES = new Set(["catch_all", "risky", "unknown", "error"]);
     const inconclusive = reoonResults
       .map((r, idx) => ({ r, idx }))
-      .filter(({ r }) => r.status === null);
+      .filter(({ r }) => FALLBACK_STATUSES.has(r.nativeStatus ?? "unknown"));
 
     const finalResults: ValidationResult[] = [...reoonResults];
 
@@ -102,7 +108,7 @@ export async function validateLeads(
           finalResults[inconclusive[j].idx] = fr;
         });
       } catch (err) {
-        console.error("FindEmail fallback failed:", err);
+        console.error("Findymail second-layer failed:", err);
         totalErrors += inconclusive.length;
       }
     }
@@ -114,6 +120,13 @@ export async function validateLeads(
     await Promise.all(
       finalResults.map((r, j) => {
         const id = batch[j].id;
+        // A genuine provider outage (both layers errored) is left UNWRITTEN so
+        // the lead keeps its prior status and is re-picked next export — a
+        // transient blip must never permanently mark a real lead invalid.
+        if (r.nativeStatus === "error") {
+          totalErrors++;
+          return Promise.resolve();
+        }
         const persistedStatus = r.status ?? "invalid"; // never leave as null
         return admin
           .from("leads")
