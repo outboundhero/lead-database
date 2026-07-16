@@ -136,7 +136,10 @@ export const leadColumns: ColumnDef<Lead>[] = [
     cell: ({ getValue }) => {
       const v = getValue() as string | null;
       if (!v) return <span className="text-[13px] text-muted-foreground">—</span>;
-      const variant = v === "valid" ? "success" : v === "catch_all" ? "warning" : "destructive";
+      // risky/unknown/pending are inconclusive, not dead — amber, not red.
+      const variant = v === "valid" ? "success"
+        : ["catch_all", "risky", "unknown", "pending"].includes(v) ? "warning"
+        : "destructive";
       return <Badge variant={variant}>{v}</Badge>;
     },
   },

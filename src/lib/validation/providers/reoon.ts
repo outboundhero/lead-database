@@ -12,6 +12,7 @@ import type { ValidationResult, ValidationStatus } from "../types";
 // Findymail only for catch_all / risky / unknown / error. This provider reports
 // the native status verbatim plus a provisional terminal status:
 //   valid                            → 'valid'
+//   role_account                     → 'valid'      (deliverable role mailbox)
 //   invalid / disposable / spamtrap  → 'invalid'
 //   catch_all / accept_all           → 'catch_all'  (native still drives escalation)
 //   risky / unknown / other          → null         (native drives escalation)
@@ -38,6 +39,11 @@ function mapStatus(resp: ReoonResponse): { status: ValidationStatus | null; nati
     case "safe":
     case "safe_to_send":
       return { status: "valid", native: "valid" };
+    case "role_account":
+      // Deliverable role mailbox (info@/sales@ etc) — a first-class segment
+      // here (email_type='general'). Terminal valid: must NOT fall to the
+      // default null path (persisted invalid) nor escalate to Findymail.
+      return { status: "valid", native: "role_account" };
     case "invalid":
       return { status: "invalid", native: "invalid" };
     case "disposable":
@@ -89,7 +95,9 @@ export async function validateBatch(
   }
   const apiKey: string = envKey;
   // Power mode is SMTP-bound (~3s/email); concurrency hides the latency.
-  const concurrency = options?.concurrency ?? parseInt(process.env.REOON_CONCURRENCY ?? "12", 10);
+  // Guard NaN/0 (bad REOON_CONCURRENCY) — zero workers would return all holes.
+  const requested = options?.concurrency ?? parseInt(process.env.REOON_CONCURRENCY ?? "12", 10);
+  const concurrency = Number.isInteger(requested) && requested > 0 ? requested : 12;
   const results: ValidationResult[] = new Array(emails.length);
   let nextIdx = 0;
 
@@ -97,7 +105,11 @@ export async function validateBatch(
     while (nextIdx < emails.length) {
       const i = nextIdx++;
       const email = emails[i];
-      if (!email) continue;
+      if (!email) {
+        // Never leave a hole — the orchestrator indexes results positionally.
+        results[i] = { email, status: null, provider: "reoon", nativeStatus: "error", raw: { error: "empty email" } };
+        continue;
+      }
       results[i] = await verifyOne(email, apiKey, options?.signal);
     }
   }

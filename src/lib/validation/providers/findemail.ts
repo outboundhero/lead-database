@@ -76,7 +76,11 @@ export async function validateBatch(
     while (nextIdx < emails.length) {
       const i = nextIdx++;
       const email = emails[i];
-      if (!email) continue;
+      if (!email) {
+        // Never leave a hole — the orchestrator indexes results positionally.
+        results[i] = { email, status: "invalid", provider: "findemail", nativeStatus: "error", raw: { error: "empty email" } };
+        continue;
+      }
       results[i] = await verifyOne(email, apiKey, options?.signal);
     }
   }

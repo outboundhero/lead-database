@@ -31,9 +31,11 @@
 import pg from "pg";
 
 // ─── Classifier ─────────────────────────────────────────────────────────────
-// Order matters: sender-side patterns are checked first (they're the more
-// specific signals), then recipient/policy (hard). NDRs are machine-generated,
-// so pattern matching covers the overwhelming majority.
+// Order matters: specific sender-side patterns are checked first, then
+// recipient/policy (hard), then BROAD sender tokens last — so a hard verdict
+// wins when an NDR carries both (e.g. quoted auth diagnostics alongside
+// "550 5.1.1 user unknown"). NDRs are machine-generated, so pattern matching
+// covers the overwhelming majority.
 
 const SENDER_PATTERNS = [
   // Our account / inbox problems
@@ -42,12 +44,8 @@ const SENDER_PATTERNS = [
   /daily (sending |user sending |)(limit|quota)/i,
   /exceeded.{0,40}(sending|message|rate) (limit|quota)/i,
   /too many (messages|emails|connections|requests)/i,
-  /rate limit/i,
-  /try again later/i,
   /temporar(y|ily) (deferred|rejected|unavailable|failure)/i,
-  /\b(421|450|451|452)[ -]/,
   // Sender authentication / reputation
-  /\b(spf|dkim|dmarc)\b/i,
   /authentication (failed|required|error)/i,
   /unable to authenticate/i,
   /sender (address |domain |)(rejected|denied|blocked|flagged)/i,
@@ -56,6 +54,18 @@ const SENDER_PATTERNS = [
   /poor (sender |ip |domain |)reputation/i,
   /message.{0,30}(identified|detected|flagged) as spam/i,
   /banned sending ip/i,
+];
+
+// Broad sender tokens, checked AFTER hard patterns so hard-bounce evidence
+// wins when both appear (F08). spf/dkim/dmarc mentions only count with
+// failure context — 'spf=pass' in quoted Authentication-Results must not
+// classify a dead mailbox as 'sender'.
+const SENDER_BROAD_PATTERNS = [
+  /\b(spf|dkim|dmarc)\b[^.\n]{0,60}\b(fail(ed|ure|s)?|softfail|permerror|invalid|missing)\b/i,
+  /\b(fail(ed|ure|s)?|softfail|permerror|(does )?not pass(ed)?)\b[^.\n]{0,60}\b(spf|dkim|dmarc)\b/i,
+  /rate limit/i,
+  /try again later/i,
+  /\b(421|450|451|452)[ -]/,
 ];
 
 const HARD_PATTERNS = [
@@ -98,27 +108,62 @@ const SOFT_OTHER_PATTERNS = [
   /auto[- ]?reply/i,
 ];
 
+// NDRs often append the returned original message (its headers, quoted body,
+// Authentication-Results table). Everything after such a boundary describes
+// OUR outbound mail, not the bounce verdict — classify only what precedes it.
+const QUOTED_BOUNDARY_RE = new RegExp(
+  [
+    "-{2,}\\s*original message", // -----Original Message----- (survives HTML stripping)
+    "begin forwarded message",
+    "^[ \\t]*original message[ \\t:]*$",
+    "^[ \\t]*from:",
+    "^[ \\t]*>",
+  ].join("|"),
+  "im"
+);
+
+function truncateAtQuotedOriginal(text) {
+  const m = text.match(QUOTED_BOUNDARY_RE);
+  return m ? text.slice(0, m.index) : text;
+}
+
+function classifyText(ndr) {
+  for (const re of SOFT_STORAGE_PATTERNS) {
+    const m = ndr.match(re);
+    if (m) return { type: "unknown", matched: m[0] };
+  }
+  for (const re of SENDER_PATTERNS) {
+    const m = ndr.match(re);
+    if (m) return { type: "sender", matched: m[0] };
+  }
+  for (const re of HARD_PATTERNS) {
+    const m = ndr.match(re);
+    if (m) return { type: "hard", matched: m[0] };
+  }
+  for (const re of SENDER_BROAD_PATTERNS) {
+    const m = ndr.match(re);
+    if (m) return { type: "sender", matched: m[0] };
+  }
+  for (const re of SOFT_OTHER_PATTERNS) {
+    const m = ndr.match(re);
+    if (m) return { type: "unknown", matched: m[0] };
+  }
+  return { type: "unknown", matched: null };
+}
+
 export function classifyBounce(text) {
   if (!text || !text.trim()) {
     return { type: "unknown", matched: null };
   }
-  for (const re of SOFT_STORAGE_PATTERNS) {
-    const m = text.match(re);
-    if (m) return { type: "unknown", matched: m[0] };
+  const ndr = truncateAtQuotedOriginal(text);
+  const verdict = classifyText(ndr);
+  // The quoted-original boundary can over-fire (any line-start "From:"/">"
+  // ahead of the diagnostic). If the truncated text matched nothing but the
+  // full text does, the diagnostic sat below the false boundary — use it.
+  if (verdict.matched === null && ndr.length < text.length) {
+    return classifyText(text);
   }
-  for (const re of SENDER_PATTERNS) {
-    const m = text.match(re);
-    if (m) return { type: "sender", matched: m[0] };
-  }
-  for (const re of HARD_PATTERNS) {
-    const m = text.match(re);
-    if (m) return { type: "hard", matched: m[0] };
-  }
-  for (const re of SOFT_OTHER_PATTERNS) {
-    const m = text.match(re);
-    if (m) return { type: "unknown", matched: m[0] };
-  }
-  return { type: "unknown", matched: null };
+  return verdict;
 }
 
 function stripHtml(html) {
@@ -155,6 +200,29 @@ const TEST_CORPUS = [
   ["452 4.2.2 The recipient's mailbox is full", "unknown"],
   ["The recipient's inbox is over quota", "unknown"],
   ["", "unknown"],
+  // F08 mixed-signal NDRs: hard verdict must win over sender tokens in the
+  // quoted original message / auth diagnostics appended below it
+  [
+    "Undeliverable: quick intro\n550 5.1.1 User unknown\n\n-----Original Message-----\nFrom: us@outboundclean.com\nAuthentication-Results: spf=pass; dkim=pass; dmarc=pass",
+    "hard",
+  ],
+  [
+    "Mail delivery failed\nRecipient address rejected: mailbox not found\n\nOriginal message\nDKIM authentication failed for outboundclean.com",
+    "hard",
+  ],
+  [
+    "550 5.1.1 <bob@x.com> does not exist. Authentication-Results: spf=pass dkim=pass",
+    "hard",
+  ],
+  [
+    "Delivery status\n550 user unknown\n> From: us@outboundclean.com\n> Subject: quick intro about SPF failures",
+    "hard",
+  ],
+  // Sender NDRs stay 'sender' even with a quoted original appended
+  [
+    "Delivery temporarily deferred, try again later\n\n-----Original Message-----\nFrom: us@outboundclean.com",
+    "sender",
+  ],
 ];
 
 // ─── Worker ──────────────────────────────────────────────────────────────────
@@ -209,6 +277,23 @@ async function fetchBouncedReplies(lead, auth) {
   return { notFound: false, replies };
 }
 
+// Failed lookups still get bounce_checked_at so ORDER BY bounce_checked_at
+// NULLS FIRST moves them to the BACK of the queue instead of head-of-line
+// blocking every run; they re-enter when bounced_at advances past it.
+// bounce_type / is_bounced are left untouched (lead stays excluded).
+async function markCheckFailed(client, lead, why) {
+  // Don't clobber a legitimate NDR snippet from an earlier classification —
+  // only fill bounce_reason when there is none yet.
+  await client.query(
+    `UPDATE leads
+     SET bounce_reason = COALESCE(bounce_reason, $1),
+         bounce_checked_at = now(),
+         updated_at = now()
+     WHERE id = $2`,
+    [`check_failed: ${why}`.slice(0, REASON_MAX), lead.id]
+  );
+}
+
 function extractNdrText(replies) {
   if (replies.length === 0) return null;
   // Most recent bounce reply carries the definitive NDR
@@ -261,8 +346,11 @@ async function run({ dryRun }) {
   for (const lead of leads) {
     const auth = authFor(lead);
     if (!auth) {
-      // No key for this lead's instance yet — leave unchecked, retry when added.
+      // No key for this lead's instance yet — defer to the back of the queue.
+      const domain = lead.instance_url ? normalizeDomain(lead.instance_url) : DEFAULT_DOMAIN;
       counts.errors++;
+      if (!dryRun) await markCheckFailed(client, lead, `no API key for instance ${domain}`);
+      console.error(`  ${lead.email} -> ERROR no API key for instance ${domain} (deferred)`);
       continue;
     }
     try {
@@ -307,7 +395,8 @@ async function run({ dryRun }) {
       }
       counts.errors++;
       consecutiveErrors++;
-      console.error(`  ${lead.email} -> ERROR ${err.message} (will retry next run)`);
+      if (!dryRun) await markCheckFailed(client, lead, err.message);
+      console.error(`  ${lead.email} -> ERROR ${err.message} (deferred to back of queue)`);
       if (consecutiveErrors >= 10) {
         console.error("10 consecutive errors — aborting run (Bison likely down).");
         break;

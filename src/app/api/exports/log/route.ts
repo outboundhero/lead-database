@@ -20,16 +20,41 @@ export async function POST(request: NextRequest) {
     // all those cases the JS catch block can't run, so the row stays
     // 'processing' forever and counts toward the concurrent limit. Without
     // this cleanup, zombies accumulate and eventually fill all 4 queue
-    // slots, blocking new exports indefinitely. Threshold of 15 min gives
-    // legitimate slow exports buffer beyond the 600s maxDuration ceiling.
-    await adminSupabase
+    // slots, blocking new exports indefinitely.
+    //
+    // Staleness is judged by lack of PROGRESS, not wall-clock since start —
+    // legitimate exports routinely run past any fixed window. The stream
+    // route heartbeats row_count every batch (refreshing export_jobs.
+    // updated_at via trigger), and the validation pre-pass — which can run
+    // for hours before the first batch — heartbeats validation_jobs the same
+    // way. A job is only a zombie when NEITHER has moved in 15 min.
+    const staleCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const { data: staleJobs } = await adminSupabase
       .from("export_jobs")
-      .update({
-        status: "error",
-        completed_at: new Date().toISOString(),
-      })
+      .select("id")
       .eq("status", "processing")
-      .lt("created_at", new Date(Date.now() - 15 * 60 * 1000).toISOString());
+      .lt("updated_at", staleCutoff);
+
+    if (staleJobs && staleJobs.length > 0) {
+      const staleIds = staleJobs.map((j) => j.id);
+      const { data: liveValidations } = await adminSupabase
+        .from("validation_jobs")
+        .select("export_job_id")
+        .in("export_job_id", staleIds)
+        .gte("updated_at", staleCutoff);
+      const liveIds = new Set((liveValidations ?? []).map((v) => v.export_job_id));
+      const zombieIds = staleIds.filter((id) => !liveIds.has(id));
+
+      if (zombieIds.length > 0) {
+        await adminSupabase
+          .from("export_jobs")
+          .update({
+            status: "error",
+            completed_at: new Date().toISOString(),
+          })
+          .in("id", zombieIds);
+      }
+    }
 
     // Cap concurrent exports — each fn_export_leads call burns CPU on the
     // shared Supabase instance. Letting too many run in parallel makes them

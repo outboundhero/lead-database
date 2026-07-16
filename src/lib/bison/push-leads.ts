@@ -36,7 +36,8 @@ export interface BisonPushResult {
   total: number;
   created: number;
   attached: number;
-  failed: number;
+  failed: number; // create failures — disjoint from created
+  attachFailed: number; // created in Bison but not attached to the campaign
   errors: string[];
 }
 
@@ -119,7 +120,7 @@ export async function pushLeadsToCampaign(
   }
 ): Promise<BisonPushResult> {
   const base = baseUrl(opts.instanceUrl);
-  const result: BisonPushResult = { total: leads.length, created: 0, attached: 0, failed: 0, errors: [] };
+  const result: BisonPushResult = { total: leads.length, created: 0, attached: 0, failed: 0, attachFailed: 0, errors: [] };
   const ids: number[] = [];
 
   // Step 1 — create in Bison (bounded concurrency).
@@ -140,7 +141,13 @@ export async function pushLeadsToCampaign(
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(CREATE_CONCURRENCY, leads.length) }, worker));
+  try {
+    await Promise.all(Array.from({ length: Math.min(CREATE_CONCURRENCY, leads.length) }, worker));
+  } catch (err) {
+    // Fatal (auth) abort — attach a snapshot of the progress so far so the
+    // caller can report how many leads were already created in Bison.
+    throw Object.assign(err as Error, { partial: { ...result } });
+  }
 
   // Step 2 — attach all created ids to the campaign, in batches.
   for (let i = 0; i < ids.length; i += ATTACH_BATCH) {
@@ -150,7 +157,9 @@ export async function pushLeadsToCampaign(
       await attachLeads(base, opts.apiKey, opts.campaignId, batch);
       result.attached += batch.length;
     } catch (err) {
-      result.failed += batch.length;
+      // These leads are already counted in `created` — track separately so
+      // created + failed never exceeds total.
+      result.attachFailed += batch.length;
       if (result.errors.length < 20) result.errors.push((err as Error).message);
     }
   }

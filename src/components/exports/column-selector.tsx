@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   Dialog,
   DialogContent,
@@ -109,10 +109,11 @@ export function ColumnSelector({
   const [campaignId, setCampaignId] = useState<string>("");
   const [campaignsLoading, setCampaignsLoading] = useState(false);
   const [campaignsError, setCampaignsError] = useState<string | null>(null);
+  // One fetch per dialog open — never auto-retry on error/empty (manual Retry instead)
+  const [campaignsAttempted, setCampaignsAttempted] = useState(false);
 
-  // Load live Bison campaigns the first time the Bison destination is chosen.
-  useEffect(() => {
-    if (destination !== "bison" || campaigns.length > 0 || campaignsLoading) return;
+  const loadCampaigns = useCallback(() => {
+    setCampaignsAttempted(true);
     setCampaignsLoading(true);
     setCampaignsError(null);
     fetch("/api/bison/campaigns")
@@ -121,9 +122,30 @@ export function ColumnSelector({
         return r.json();
       })
       .then((d) => setCampaigns(Array.isArray(d.campaigns) ? d.campaigns : []))
-      .catch((e) => setCampaignsError(e.message))
+      .catch((e) => setCampaignsError(e instanceof Error ? e.message : String(e)))
       .finally(() => setCampaignsLoading(false));
-  }, [destination, campaigns.length, campaignsLoading]);
+  }, []);
+
+  // The component stays mounted across open/close (parent only toggles the
+  // `open` prop), so reset per-export state on each open: a previous Bison
+  // destination / campaign / range must not carry into the next export.
+  // Column selection intentionally persists (same columns across chunked exports).
+  useEffect(() => {
+    if (!open) return;
+    setDestination("csv");
+    setCampaignId("");
+    setRangeFromStr("");
+    setRangeToStr("");
+    setCampaignsError(null);
+    setCampaignsAttempted(false);
+  }, [open]);
+
+  // Load live Bison campaigns when the Bison destination is chosen — refetched
+  // each dialog open (the server route has a 30s cache) so new campaigns appear.
+  useEffect(() => {
+    if (!open || destination !== "bison" || campaignsAttempted || campaignsLoading) return;
+    loadCampaigns();
+  }, [open, destination, campaignsAttempted, campaignsLoading, loadCampaigns]);
 
   function toggle(key: string) {
     setSelected((prev) => {
@@ -205,7 +227,12 @@ export function ColumnSelector({
             {campaignsLoading ? (
               <p className="text-xs text-muted-foreground">Loading campaigns…</p>
             ) : campaignsError ? (
-              <p className="text-xs text-destructive">Couldn&apos;t load campaigns: {campaignsError}</p>
+              <div className="flex items-center gap-2">
+                <p className="flex-1 text-xs text-destructive">Couldn&apos;t load campaigns: {campaignsError}</p>
+                <Button variant="outline" size="sm" className="h-7 text-xs shrink-0" onClick={loadCampaigns}>
+                  Retry
+                </Button>
+              </div>
             ) : (
               <select
                 value={campaignId}

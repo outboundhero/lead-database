@@ -15,7 +15,6 @@ import "dotenv/config";
  */
 
 import { readFileSync } from "fs";
-import { parse } from "csv-parse/sync";
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -32,6 +31,9 @@ if (!file) { console.error("Usage: node scripts/import-bison-csv.mjs <file>"); p
 const getOpt = (n, d) => { const a = args.find((x) => x.startsWith(`--${n}=`)); return a ? Number(a.split("=")[1]) : d; };
 const LIMIT = getOpt("limit", Infinity);
 const DRY = args.includes("--dry-run");
+// --fresh-table: skip the per-chunk merge reads when the leads table is known
+// empty (first import). NEVER use on a table that already has enriched rows.
+const FRESH = args.includes("--fresh-table");
 const CHUNK = 500;
 
 // ── parser (mirrors parse-bison.ts) ──────────────────────────────────────
@@ -112,38 +114,133 @@ function normalizeBisonRow(row, idx) {
   if (ca) lead.created_at = ca;
   if (ua) lead.updated_at = ua;
   lead.source = "Email Bison";
-  // Always set is_bounced explicitly — PostgREST bulk upsert unions keys across a
-  // chunk and writes NULL (not DEFAULT) for rows missing the key, which would
-  // violate the NOT NULL constraint when any row in the chunk is bounced.
   lead.is_bounced = bounces > 0;
   if (bounces > 0) { lead.bounce_source = "emailbison_csv"; lead.bounced_at = new Date().toISOString(); }
   lead.email_type = detectEmailType({ email, first_name: fn, last_name: ln, job_title: ti });
   return lead;
 }
 
+// ── merge-safe upsert shape ──────────────────────────────────────────────
+// PostgREST bulk upsert builds columns= from the UNION of keys across the
+// chunk and writes NULL for rows missing a key — so a sparse row next to a
+// rich row would NULL-out the rich columns on existing leads. Defense: every
+// row is padded to the SAME key set (template below), and values for keys the
+// CSV doesn't provide are back-filled from the existing DB row so an upsert
+// can never erase prior enrichment.
+const MERGE_COLS = [
+  "first_name", "last_name", "title", "company", "notes",
+  "bison_lead_id", "workspace_id", "workspace_name", "instance_url", "bison_status",
+  "tags", "esp", "city", "state", "domain", "address", "postal_code", "street",
+  "question", "company_phone", "google_maps_url",
+  "category", "subcategory", "additional_category",
+  "category_source", "category_confidence", "categorized_at",
+  "created_at", "updated_at", "bounce_source", "bounced_at",
+];
+// Never in the payload: bounce_type, bounce_checked_at, validation_* — the
+// importer has no business writing those, and absent keys are never touched.
+
+function mergeWithExisting(lead, existing) {
+  const out = {
+    email: lead.email,
+    emails_sent: lead.emails_sent, opens: lead.opens, replies: lead.replies,
+    unique_replies: lead.unique_replies, unique_opens: lead.unique_opens,
+    bounces: lead.bounces, source: lead.source, email_type: lead.email_type,
+  };
+  for (const k of MERGE_COLS) out[k] = lead[k] ?? existing?.[k] ?? null;
+
+  // created_at: the original row's timestamp is history — never regress it.
+  // For brand-new leads an explicit NULL would suppress the column default,
+  // so synthesize the timestamps instead.
+  if (existing?.created_at) out.created_at = existing.created_at;
+  else if (!out.created_at) out.created_at = new Date().toISOString();
+  if (!out.updated_at) out.updated_at = out.created_at;
+
+  // Category: 'manual' assignments outrank a CSV re-import; otherwise a CSV
+  // category (bison source) wins, else the existing bundle survives via ??.
+  if (existing?.category && existing.category_source === "manual") {
+    out.category = existing.category;
+    out.subcategory = existing.subcategory ?? null;
+    out.additional_category = existing.additional_category ?? null;
+    out.category_source = existing.category_source;
+    out.category_confidence = existing.category_confidence ?? null;
+    out.categorized_at = existing.categorized_at ?? null;
+  }
+
+  // is_bounced: never downgrade (mirrors src/app/api/uploads/process/route.ts).
+  // Exception: bounce-worker recoveries (bounce_type='sender', is_bounced=false)
+  // stay recovered — the CSV bounce counter is the SAME bounce the worker
+  // already classified as sender-side, not a new event.
+  const recovered = existing && existing.is_bounced === false && existing.bounce_type === "sender";
+  if (recovered) {
+    out.is_bounced = false;
+    out.bounce_source = existing.bounce_source ?? null;
+    out.bounced_at = existing.bounced_at ?? null;
+  } else {
+    out.is_bounced = (existing?.is_bounced ?? false) || lead.is_bounced;
+    // Keep the ORIGINAL bounce timestamp/source — resetting bounced_at on every
+    // re-import forces bounce-worker to re-check the entire bounced backlog.
+    if (existing?.bounced_at) { out.bounced_at = existing.bounced_at; out.bounce_source = existing.bounce_source ?? out.bounce_source; }
+  }
+  return out;
+}
+
+async function fetchExisting(emails) {
+  const found = new Map();
+  const SEL = "email,is_bounced,bounce_type," + MERGE_COLS.join(",");
+  // Sub-batch the IN() list — 500 emails in one GET query string overflows URL limits.
+  for (let i = 0; i < emails.length; i += 150) {
+    const slice = emails.slice(i, i + 150);
+    const { data, error } = await supabase.from("leads").select(SEL).in("email", slice);
+    if (error) throw new Error(`existing-rows fetch failed: ${error.message}`);
+    for (const row of data ?? []) found.set(row.email, row);
+  }
+  return found;
+}
+
 // ── run ──────────────────────────────────────────────────────────────────
 const raw = readFileSync(file, "utf8");
 const PARSE_OPTS = { skip_empty_lines: true, relax_quotes: true, relax_column_count: true };
-let rows;
-try {
-  rows = parse(raw, PARSE_OPTS);
-} catch (err) {
-  // Some Bison exports are truncated mid-record (cut off mid-download), which
-  // leaves an unclosed quoted field at the tail. Drop everything from the line
-  // where the dangling quote opens and parse the rest — losing the one partial
-  // row instead of failing the whole file.
-  const m = String(err.message).match(/at line (\d+)/);
-  if (err.code === "CSV_QUOTE_NOT_CLOSED" && m) {
-    const cut = parseInt(m[1], 10) - 1;
-    const lines = raw.split("\n");
-    console.warn(`WARNING: ${file} is truncated mid-record — dropping partial tail from line ${cut + 1} of ${lines.length}`);
-    rows = parse(lines.slice(0, cut).join("\n"), PARSE_OPTS);
-  } else {
-    throw err;
-  }
+
+// Streaming parse: emits each complete record as it goes, so a file truncated
+// mid-record (cut off mid-download) yields every record BEFORE the bad tail
+// instead of failing the whole file. The old line-number recovery was wrong:
+// csv-parse reports the line at EOF, not where the dangling quote opened, and
+// a truncated quoted field swallows every following line into one record.
+async function parseRecovering(text) {
+  const { parse: parseStream } = await import("csv-parse");
+  const records = [];
+  await new Promise((resolve, reject) => {
+    const parser = parseStream(PARSE_OPTS);
+    const drain = () => { let r; try { while ((r = parser.read()) !== null) records.push(r); } catch { /* buffer already errored */ } };
+    parser.on("readable", drain);
+    parser.on("error", (err) => {
+      drain(); // flush records parsed before the error
+      if (err.code === "CSV_QUOTE_NOT_CLOSED" || err.code === "CSV_RECORD_INCONSISTENT_FIELDS_LENGTH") {
+        console.warn(`WARNING: ${file} is truncated/corrupt at the tail (${err.code}) — keeping the ${records.length} complete records parsed before the error.`);
+        resolve();
+      } else reject(err);
+    });
+    parser.on("end", resolve);
+    parser.write(text);
+    parser.end();
+  });
+  return records;
 }
+let rows = await parseRecovering(raw);
+if (rows.length === 0) { console.error("No parseable records in file — aborting."); process.exit(1); }
 const headers = rows[0];
 const idx = {}; headers.forEach((h, i) => { idx[h.trim().toLowerCase()] = i; });
+
+// A file truncated mid-line OUTSIDE a quoted field parses without error but
+// leaves a final short/partial record — drop it rather than import a
+// truncated field value. Also drop any record shorter than the header row
+// (relax_column_count lets them through silently).
+if (!raw.endsWith("\n") && rows.length > 1 && rows[rows.length - 1].length < headers.length) {
+  console.warn(`WARNING: dropping final partial record (file does not end with a newline).`);
+  rows = rows.slice(0, -1);
+}
+const shortRows = rows.slice(1).filter((r) => r.length < headers.length).length;
+if (shortRows > 0) console.warn(`WARNING: ${shortRows} records have fewer columns than the header (damaged rows) — importing with missing fields treated as empty.`);
 console.log(`Headers: ${headers.length} cols. Data rows: ${rows.length - 1}`);
 
 const dataRows = rows.slice(1, LIMIT === Infinity ? undefined : LIMIT + 1);
@@ -167,18 +264,33 @@ console.log(`  sample:`, JSON.stringify(unique[0], null, 2));
 
 if (DRY) { console.log("\n--dry-run: no DB writes."); process.exit(0); }
 
-let upserted = 0, errors = 0;
+let upserted = 0, errors = 0, merged = 0;
 for (let i = 0; i < unique.length; i += CHUNK) {
   const chunk = unique.slice(i, i + CHUNK);
-  const { error } = await supabase.from("leads").upsert(chunk, { onConflict: "email" });
+  // Merge against existing rows so re-imports can never NULL-out enrichment
+  // (see mergeWithExisting). --fresh-table skips the reads on a known-empty table.
+  let existing = new Map();
+  if (!FRESH) {
+    try { existing = await fetchExisting(chunk.map((l) => l.email)); }
+    catch (err) { console.error(`\n  chunk ${i}: ${err.message} — SKIPPING chunk (refusing to upsert without merge data)`); errors += chunk.length; continue; }
+  }
+  merged += existing.size;
+  const payload = chunk.map((l) => mergeWithExisting(l, existing.get(l.email)));
+  const { error } = await supabase.from("leads").upsert(payload, { onConflict: "email" });
   if (error) { errors += chunk.length; console.error(`  chunk ${i}: ${error.message}`); }
   else upserted += chunk.length;
-  process.stdout.write(`\r  upserted ${upserted}/${unique.length}  (errors ${errors})`);
+  process.stdout.write(`\r  upserted ${upserted}/${unique.length}  (merged ${merged}, errors ${errors})`);
 }
-console.log(`\nDone. Upserted ${upserted}, errors ${errors}.`);
+console.log(`\nDone. Upserted ${upserted} (${merged} merged with existing rows), errors ${errors}.`);
 
 // Keep the companies table + category cache in sync (name+city+state identity;
-// seeds company categories from Bison-provided lead categories).
-const { data: sync, error: syncErr } = await supabase.rpc("fn_sync_companies");
-if (syncErr) console.error("fn_sync_companies failed:", syncErr.message);
-else console.log(`companies sync: inserted=${sync[0].companies_inserted} seeded=${sync[0].companies_seeded} propagated=${sync[0].leads_propagated}`);
+// seeds company categories from Bison-provided lead categories). Propagation is
+// batched — loop until a round propagates nothing.
+const PROPAGATE_BATCH = 200000;
+for (;;) {
+  const { data: sync, error: syncErr } = await supabase.rpc("fn_sync_companies", { p_propagate_limit: PROPAGATE_BATCH });
+  if (syncErr) { console.error("fn_sync_companies failed:", syncErr.message); break; }
+  const s = sync[0];
+  console.log(`companies sync: inserted=${s.companies_inserted} seeded=${s.companies_seeded} propagated=${s.leads_propagated}`);
+  if ((s.leads_propagated ?? 0) < PROPAGATE_BATCH) break;
+}

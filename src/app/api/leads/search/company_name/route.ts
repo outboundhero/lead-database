@@ -29,25 +29,40 @@ export async function POST(request: NextRequest) {
 
   const supabase = createAdminClient();
 
-  let query = supabase
-    .from("leads")
-    .select(
-      "id, email, first_name, last_name, title, company, phone, website, source, country, city, state, seniority, general_industry, annual_revenue, company_size, created_at"
-    )
-    .order("created_at", { ascending: false })
-    .limit(100);
+  const baseQuery = () =>
+    supabase
+      .from("leads")
+      .select(
+        "id, email, first_name, last_name, title, company, phone, website, source, country, city, state, seniority, general_industry, annual_revenue, company_size, created_at"
+      )
+      .order("created_at", { ascending: false })
+      .limit(100);
+
+  let data: Record<string, unknown>[] | null = null;
+  let error: { message: string } | null = null;
 
   if (website && company) {
-    query = query.or(
-      `website.ilike.%${website.trim()}%,company.ilike.%${company.trim()}%`
-    );
+    // Two parameterized .ilike() queries merged client-side — .or() takes a
+    // raw PostgREST filter string, so interpolating user input into it allows
+    // filter-grammar injection (a comma injects an extra predicate).
+    const [byWebsite, byCompany] = await Promise.all([
+      baseQuery().ilike("website", `%${website.trim()}%`),
+      baseQuery().ilike("company", `%${company.trim()}%`),
+    ]);
+    error = byWebsite.error ?? byCompany.error;
+    const seen = new Set<string>();
+    data = [...(byWebsite.data ?? []), ...(byCompany.data ?? [])]
+      .filter((row) => !seen.has(row.id) && (seen.add(row.id), true))
+      .sort(
+        (a, b) =>
+          new Date(String(b.created_at)).getTime() - new Date(String(a.created_at)).getTime()
+      )
+      .slice(0, 100);
   } else if (website) {
-    query = query.ilike("website", `%${website.trim()}%`);
+    ({ data, error } = await baseQuery().ilike("website", `%${website.trim()}%`));
   } else if (company) {
-    query = query.ilike("company", `%${company.trim()}%`);
+    ({ data, error } = await baseQuery().ilike("company", `%${company.trim()}%`));
   }
-
-  const { data, error } = await query;
 
   if (error) {
     await logApiRequest({ tokenId: auth.tokenId, tokenName: auth.tokenName, method: "POST", endpoint: "/api/leads/search/company_name_raw", statusCode: 500, durationMs: Date.now() - start, error: error.message });

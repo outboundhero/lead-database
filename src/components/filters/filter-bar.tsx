@@ -175,6 +175,8 @@ export function FilterBar({
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const liveSearch = useCallback(async (col: string, term: string) => {
     if (!term || term.length < 2) {
+      // Cancel any pending search so it can't overwrite the restored full list
+      clearTimeout(searchTimeoutRef.current);
       // Reset to cached values
       loadedRef.current.delete(col);
       loadDistinctFor(col);
@@ -203,7 +205,6 @@ export function FilterBar({
         case "esp": setEspValues([...new Set(values)]); break;
         case "category": setCategoryValues(values); break;
         case "subcategory": setSubcategoryValues(values); break;
-      case "subcategory": setSubcategoryValues(values); break;
       }
     }, 300);
   }, [loadDistinctFor]);

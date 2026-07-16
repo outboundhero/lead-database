@@ -66,11 +66,8 @@ async function main() {
     process.exit(1);
   }
 
-  if (args.includes("--replace")) {
-    await client.query("DELETE FROM lead_categories");
-    console.log("cleared existing taxonomy");
-  }
-
+  // Upsert first, delete stale last (--replace) — a mid-run crash leaves a
+  // superset, never an empty/partial table for a concurrent categorize-worker.
   for (const c of categories) {
     await client.query(
       `INSERT INTO lead_categories (name, keywords, description)
@@ -80,6 +77,13 @@ async function main() {
              description = COALESCE(EXCLUDED.description, lead_categories.description)`,
       [c.name, c.keywords, c.description]
     );
+  }
+  if (args.includes("--replace")) {
+    const del = await client.query(
+      "DELETE FROM lead_categories WHERE name <> ALL($1::text[])",
+      [categories.map((c) => c.name)]
+    );
+    if (del.rowCount) console.log(`removed ${del.rowCount} categories not in file`);
   }
   console.log(`seeded ${categories.length} categories`);
   await client.end();

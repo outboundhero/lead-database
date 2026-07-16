@@ -3,13 +3,14 @@ import type { Lead } from "@/types/database";
 import { getPool } from "@/lib/db/pool";
 
 /**
- * Build a stable cursor anchor so subsequent paginated queries
- * (`WHERE (created_at, id) > (cursor_created_at, cursor_id)`) start at row
- * `rangeFrom` (1-indexed, inclusive).
+ * Build a stable cursor anchor so subsequent paginated queries (`WHERE l.id >
+ * cursor_id`) start at row `rangeFrom` (1-indexed, inclusive).
  *
- * Returns a `cursor` string in the format `"<iso_timestamp>|<uuid>"` which the
- * RPC parses back into a composite tuple. Returns `null` cursor for rangeFrom
- * <= 1 (start from the beginning).
+ * The anchor is computed under the SAME ordering fn_export_leads paginates with
+ * (l.id) — this is the fix for the ranged-export ordering mismatch: previously
+ * the anchor was found by OFFSET under id-order but continuation ran under
+ * (created_at,id)-order, so a range mapped to the wrong slice. Returns the
+ * anchor row's uuid; `null` for rangeFrom <= 1 (start from the beginning).
  *
  * Why a direct pg connection: the Supabase HTTP gateway (Cloudflare → PostgREST)
  * times out at ~60s. For deeply filtered OFFSETs (e.g. 850K rows into a 12M-row
@@ -47,12 +48,6 @@ export async function findCursorForRangeStart(
     return { cursor: null, found: false };
   }
 
-  const lead = leads[0];
-  // RPC returns created_at as ISO string already (jsonb serialization).
-  const createdAt = (lead as Lead & { created_at?: string }).created_at;
-  if (!createdAt) {
-    throw new Error("Skip-to-cursor anchor row missing created_at");
-  }
-
-  return { cursor: `${createdAt}|${lead.id}`, found: true };
+  // id-only cursor: matches fn_export_leads' ORDER BY l.id pagination.
+  return { cursor: leads[0].id, found: true };
 }

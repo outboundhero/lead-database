@@ -241,11 +241,20 @@ async function processExport(
   }
 }
 
+// Legacy path: the final file is assembled from part files as ONE in-memory
+// string before upload, so an unbounded export would allocate a multi-GB
+// string (V8 caps strings at ~512MB). Cap this route and point big exports at
+// /api/exports/stream, which streams to the browser without buffering.
+const LEGACY_MAX_ROWS = 100000;
+
 export async function POST(request: NextRequest) {
   const serverSupabase = await createClient();
   const {
     data: { user },
   } = await serverSupabase.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
 
   const adminSupabase = createAdminClient();
 
@@ -259,6 +268,20 @@ export async function POST(request: NextRequest) {
   const { filters, columnSelection, selectedIds, limit, rangeFrom, rangeTo } = body;
   if (!filters || !columnSelection?.length) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+  }
+
+  const requestedRows = selectedIds && selectedIds.length > 0
+    ? selectedIds.length
+    : rangeFrom && rangeTo
+      ? rangeTo - rangeFrom + 1
+      : limit && limit > 0
+        ? limit
+        : Infinity;
+  if (requestedRows > LEGACY_MAX_ROWS) {
+    return NextResponse.json(
+      { error: `This export path is capped at ${LEGACY_MAX_ROWS.toLocaleString()} rows. Use /api/exports/stream for larger exports.` },
+      { status: 400 }
+    );
   }
 
   const exportType = selectedIds && selectedIds.length > 0 ? "selected" : "filtered";
@@ -279,9 +302,9 @@ export async function POST(request: NextRequest) {
   const { data: job, error: jobError } = await adminSupabase
     .from("export_jobs")
     .insert({
-      requested_by: user?.id ?? null,
+      requested_by: user.id,
       filters_used: {
-        _meta: { exported_by: user?.email ?? "unknown", export_type: exportType },
+        _meta: { exported_by: user.email ?? "unknown", export_type: exportType },
         ...filters,
       } as unknown as Record<string, unknown>,
       selected_ids: selectedIds ?? null,

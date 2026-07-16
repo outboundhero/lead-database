@@ -46,6 +46,11 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
     // ── Push straight into a Bison campaign (create in Bison -> attach) ──
     if (destination === "bison" && campaign) {
       const toastId = toast.loading(`Pushing to ${campaign.name ?? "campaign"}…`);
+      // Range semantics mirror the CSV path: a lone "To" is a limit, not a
+      // range, and a selected-rows push never sends the range fields (the
+      // route 400s on selectedIds+range rather than guessing intent).
+      const hasRange = !isSelected && !!rangeFrom && !!rangeTo;
+      const effectiveLimit = !isSelected && !rangeFrom && rangeTo ? rangeTo : limit ?? undefined;
       try {
         const res = await fetch("/api/bison/push", {
           method: "POST",
@@ -55,16 +60,23 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
             campaignInstanceUrl: campaign.instance_url,
             selectedIds: isSelected ? selectedIds : undefined,
             filters: isSelected ? undefined : filters,
-            limit: limit ?? undefined,
+            limit: hasRange ? undefined : effectiveLimit,
+            rangeFrom: hasRange ? rangeFrom : undefined,
+            rangeTo: hasRange ? rangeTo : undefined,
           }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? "Push failed");
-        toast.success(
-          `Pushed ${data.attached}/${data.total} leads to ${campaign.name ?? "campaign"}` +
-            (data.failed ? ` (${data.failed} failed)` : ""),
-          { id: toastId },
-        );
+        const attached = data.attached ?? 0;
+        const problems: string[] = [];
+        if (data.failed) problems.push(`${data.failed} failed to create`);
+        if (data.attachFailed) problems.push(`${data.attachFailed} created but not attached`);
+        if (data.skippedIneligible) problems.push(`${data.skippedIneligible} skipped (bounced/invalid)`);
+        const summary = `Pushed ${attached}/${data.total} leads to ${campaign.name ?? "campaign"}` +
+          (problems.length ? ` (${problems.join(", ")})` : "");
+        if (attached === 0) toast.error(summary, { id: toastId });
+        else if (problems.length) toast.warning(summary, { id: toastId });
+        else toast.success(summary, { id: toastId });
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Push failed", { id: toastId });
       } finally {
@@ -73,11 +85,11 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
       return;
     }
 
+    // Both Selected and Filtered exports stream directly to the browser — the
+    // old background/storage job for Selected never reliably completed.
+    // toastId lives outside the try so the catch can replace the loading toast.
+    const toastId = toast.loading("Preparing export...");
     try {
-      // Both Selected and Filtered exports stream directly to the browser — the
-      // old background/storage job for Selected never reliably completed.
-      const toastId = toast.loading("Preparing export...");
-
       // Log export start and get jobId. If the server is at capacity (429),
       // retry every 10s while showing "Queued..." so the user just waits
       // instead of seeing a hard error. Cap at ~10 min total so we don't
@@ -99,7 +111,6 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
         await new Promise((r) => setTimeout(r, QUEUE_POLL_MS));
       }
       if (!logRes || !logRes.ok) {
-        toast.dismiss(toastId);
         const msg = logRes?.status === 429
           ? "Queue still full after 10 minutes. Please try again later."
           : "Export failed to start";
@@ -115,7 +126,6 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
 
       if (!res.ok) {
         const text = await res.text();
-        toast.dismiss(toastId);
         throw new Error(text || "Export failed");
       }
 
@@ -150,7 +160,7 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
       // Server logs the accurate row count — no client-side counting needed
       toast.success(`Download complete! (${(totalBytes / 1024 / 1024).toFixed(1)} MB)`, { id: toastId });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Export failed");
+      toast.error(err instanceof Error ? err.message : "Export failed", { id: toastId });
     } finally {
       setExporting(false);
     }

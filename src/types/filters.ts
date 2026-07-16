@@ -108,6 +108,46 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   sortDir: "desc",
 };
 
+// Deep-merge a possibly-stale/partial FilterState (old saved presets, old
+// client payloads, URL state) onto DEFAULT_FILTER_STATE so fields added after
+// the state was saved (e.g. category/subcategory) are always present. Every
+// consumer of externally-sourced filters (preset load, /api/exports/stream,
+// /api/bison/push, /api/leads/filter) must pass through this.
+export function normalizeFilterState(partial: unknown): FilterState {
+  const p = (partial && typeof partial === "object" ? partial : {}) as Partial<FilterState>;
+  const mergeIE = (v: Partial<IncludeExclude> | undefined, d: IncludeExclude): IncludeExclude => ({
+    include: Array.isArray(v?.include) ? v.include : d.include,
+    exclude: Array.isArray(v?.exclude) ? v.exclude : d.exclude,
+    operator: v?.operator === "AND" ? "AND" : d.operator,
+    includeUnknown: typeof v?.includeUnknown === "boolean" ? v.includeUnknown : d.includeUnknown,
+  });
+  const d = DEFAULT_FILTER_STATE;
+  return {
+    ...d,
+    ...p,
+    source: mergeIE(p.source, d.source),
+    jobTitle: mergeIE(p.jobTitle, d.jobTitle),
+    seniority: mergeIE(p.seniority, d.seniority),
+    generalIndustry: mergeIE(p.generalIndustry, d.generalIndustry),
+    specificIndustry: mergeIE(p.specificIndustry, d.specificIndustry),
+    esp: mergeIE(p.esp, d.esp),
+    category: mergeIE(p.category, d.category),
+    subcategory: mergeIE(p.subcategory, d.subcategory),
+    location: {
+      country: mergeIE(p.location?.country, d.location.country),
+      state: mergeIE(p.location?.state, d.location.state),
+      city: typeof p.location?.city === "string" ? p.location.city : d.location.city,
+    },
+    companySize: { ...d.companySize, ...(p.companySize ?? {}) },
+    revenue: { ...d.revenue, ...(p.revenue ?? {}) },
+    keyword: {
+      include: Array.isArray(p.keyword?.include) ? p.keyword.include : d.keyword.include,
+      exclude: Array.isArray(p.keyword?.exclude) ? p.keyword.exclude : d.keyword.exclude,
+    },
+    emailType: { ...d.emailType, ...(p.emailType ?? {}) },
+  };
+}
+
 export function countActiveFilters(filters: FilterState): number {
   let count = 0;
   if (filters.fullName || filters.excludeEmptyName) count++;

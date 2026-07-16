@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
-import type { FilterState } from "@/types/filters";
+import { normalizeFilterState, type FilterState } from "@/types/filters";
 import type { Lead } from "@/types/database";
 import { buildRpcFilters } from "@/lib/filters/build-rpc-filters";
 import { findCursorForRangeStart } from "@/lib/exports/skip-cursor";
@@ -21,7 +21,7 @@ const supabaseAdmin = createSupabaseClient(
 function escapeCsv(val: unknown): string {
   if (val === null || val === undefined) return "";
   const str = Array.isArray(val) ? val.join("; ") : String(val);
-  if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+  if (str.includes(",") || str.includes('"') || str.includes("\n") || str.includes("\r")) {
     return `"${str.replace(/"/g, '""')}"`;
   }
   return str;
@@ -78,7 +78,9 @@ export async function POST(request: NextRequest) {
     );
   }
   const maxRows = isSelectedExport ? selectedIds!.length : requestedMax;
-  const p_filters = buildRpcFilters(filters);
+  // Old clients / saved payloads may predate newer filter fields — normalize
+  // onto DEFAULT_FILTER_STATE so buildRpcFilters never hits missing keys.
+  const p_filters = buildRpcFilters(normalizeFilterState(filters));
   // Larger batches = fewer round-trips to PG and fewer per-batch overhead.
   // 75K rows × ~20 cols × ~50 chars ≈ 75MB per batch in Node memory, well
   // within Railway's 8GB. Tested: 25K → 75K cuts ~30% off total export time.
@@ -152,25 +154,32 @@ export async function POST(request: NextRequest) {
 
       try {
         // ─── Pre-export validation pass ─────────────────────────────────
-        // For every lead matching the user's filters that hasn't been validated in
-        // the last VALIDATION_REVALIDATE_DAYS (default 45), run Reoon → FindEmail
-        // and write the result back. fn_export_leads then naturally excludes
-        // anything still invalid via its hard validation_status gate.
+        // Validate ONLY leads inside THIS export's filtered set (the RPC reuses
+        // fn_export_leads' filter builder) that are unvalidated or older than
+        // VALIDATION_REVALIDATE_DAYS. Hard-capped: Reoon power mode is a paid
+        // SMTP check (~250ms/email at pool concurrency), so the cap both bounds
+        // credit spend and keeps the pre-pass inside the route's 600s budget.
+        // Rows beyond the cap export with validation_status NULL — the export
+        // gate deliberately lets NULL through (see fn_export_leads).
         if (isValidationEnabled() && jobId && !isSelectedExport) {
           try {
             const adminDb = createAdminClient();
             const ttl = getTtlDays();
             const cutoff = new Date(Date.now() - ttl * 24 * 60 * 60 * 1000).toISOString();
             const pool = getPool();
-            const preScan = await pool.query(
-              `SELECT l.id, l.email
-               FROM leads l
-               WHERE (l.validation_status IS NULL OR l.validated_at < $1::timestamptz)
-                 AND l.is_bounced = false
-               LIMIT 200000`,
-              [cutoff],
+            const VALIDATION_CAP = Math.max(
+              1,
+              parseInt(process.env.VALIDATION_MAX_PER_EXPORT ?? "", 10) || 2000,
             );
-            const candidates = preScan.rows as { id: string; email: string }[];
+            const cap = Math.min(VALIDATION_CAP, maxRows);
+            const preScan = await pool.query(
+              "SELECT fn_leads_needing_validation($1::jsonb, $2::timestamptz, $3) AS data",
+              [JSON.stringify(p_filters), cutoff, cap],
+            );
+            const candidates = ((preScan.rows[0]?.data ?? []) as { id: string; email: string }[]);
+            if (candidates.length === cap) {
+              console.warn(`Pre-export validation capped at ${cap} leads for job ${jobId} — remainder exports unvalidated.`);
+            }
             if (candidates.length > 0) {
               // Create the validation_jobs row so the UI can poll progress.
               const { data: vjob } = await adminDb
@@ -196,10 +205,16 @@ export async function POST(request: NextRequest) {
                 },
               });
               if (vjobId) {
+                // A user abort mid-validation must not be recorded as 'complete'.
+                const finalStatus = request.signal.aborted
+                  ? "cancelled"
+                  : outcome.errors > 0 && outcome.errors === outcome.total
+                    ? "error"
+                    : "complete";
                 await adminDb
                   .from("validation_jobs")
                   .update({
-                    status: outcome.errors > 0 && outcome.errors === outcome.total ? "error" : "complete",
+                    status: finalStatus,
                     completed: outcome.validated,
                     credits_used: outcome.creditsUsed,
                     completed_at: new Date().toISOString(),
@@ -209,8 +224,9 @@ export async function POST(request: NextRequest) {
             }
           } catch (vErr) {
             // Don't fail the whole export if validation breaks — log and proceed.
-            // The export RPC's hard gate will still filter out anything that
-            // remained NULL, so the user will get fewer rows but not bad data.
+            // NOTE: the export gate excludes 'invalid'/'risky'/'unknown' and
+            // bounced rows but deliberately LETS NULL THROUGH, so anything this
+            // pass didn't reach exports unvalidated rather than silently vanishing.
             console.error("Pre-export validation pass failed:", vErr);
           }
         }
@@ -222,12 +238,10 @@ export async function POST(request: NextRequest) {
         let totalRows = 0;
         let hasMore = true;
 
-        // For range exports, use composite cursor "<iso_timestamp>|<uuid>" so the
-        // RPC paginates with stable (created_at, id) ordering — needed because
-        // OFFSET-anchored ranges depend on a deterministic order. For non-range
-        // exports, leave cursor null and pass UUID-only cursors after the first
-        // batch — the RPC then uses fast PK-index `ORDER BY l.id`. Random UUID
-        // order doesn't matter when you're dumping the entire filtered set.
+        // Every export paginates by a UUID cursor under the RPC's stable
+        // `ORDER BY l.id`. Range anchors (skip-cursor) use the same ordering, so
+        // the first and continuation batches can't disagree and duplicate/skip
+        // rows. isRangeExport only decides whether to seek to an anchor first.
         const isRangeExport = !isSelectedExport && !!(rangeFrom && rangeFrom > 1);
         let cursor: string | null = null;
         let selOffset = 0; // index into selectedIds for the selected-export path
@@ -263,10 +277,10 @@ export async function POST(request: NextRequest) {
         while (hasMore && totalRows < maxRows && !closed) {
           // Cancel-button check: the UI's Cancel writes status='cancelled'
           // to the DB. Without this poll the server-side stream never sees
-          // it and overwrites status back to 'complete' at the end. Polling
-          // every batch (~5s of work each) is cheap relative to the batch
-          // query itself.
-          if (jobId && totalRows > 0) {
+          // it and overwrites status back to 'complete' at the end. Polled
+          // before EVERY batch (including the first — a cancel during the
+          // validation pre-pass must stop the export before it streams).
+          if (jobId) {
             const { data: jobStatus } = await adminDb
               .from("export_jobs")
               .select("status")
@@ -332,21 +346,20 @@ export async function POST(request: NextRequest) {
 
           totalRows += leads.length;
 
-          // Live row_count update so the Exports page shows progress instead
-          // of a perpetual em-dash. Don't await — we don't care if a single
-          // progress write fails, and we don't want to add latency per batch.
+          // Live row_count update so the Exports page shows progress (and the
+          // zombie self-heal in /api/exports/log sees a heartbeat). Fire-and-
+          // forget, but the builder is lazy — it only executes when awaited or
+          // .then()'d, so attach a no-op handler to actually send it.
           if (jobId) {
             void adminDb
               .from("export_jobs")
               .update({ row_count: totalRows })
-              .eq("id", jobId);
+              .eq("id", jobId)
+              .then(() => {}, () => {});
           }
 
           if (!isSelectedExport) {
-            const lastLead = leads[leads.length - 1] as Lead & { created_at?: string };
-            cursor = isRangeExport && lastLead.created_at
-              ? `${lastLead.created_at}|${lastLead.id}`
-              : lastLead.id;
+            cursor = leads[leads.length - 1].id;
             hasMore = leads.length === take && totalRows < maxRows;
           }
         }
@@ -363,12 +376,14 @@ export async function POST(request: NextRequest) {
           const durationSec = startJob.data
             ? Math.round((Date.now() - new Date(startJob.data.created_at).getTime()) / 1000)
             : 0;
+          // .neq guard: a Cancel that landed during the FINAL batch (after the
+          // last poll) must not be overwritten back to 'complete'.
           await adminDb.from("export_jobs").update({
             status: aborted ? "cancelled" : "complete",
             row_count: totalRows,
             duration_seconds: durationSec,
             completed_at: new Date().toISOString(),
-          }).eq("id", jobId);
+          }).eq("id", jobId).neq("status", "cancelled");
         }
 
         safeClose();

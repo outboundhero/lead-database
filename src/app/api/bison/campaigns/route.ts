@@ -11,6 +11,7 @@ import { bisonInstances } from "@/lib/bison/keys";
 // bypasses it.
 
 const CACHE_TTL_MS = 30_000;
+const MAX_PAGES = 50; // pagination safety cap per instance
 let cache: { at: number; data: unknown; errors: string[] } | null = null;
 
 export async function GET(request: Request) {
@@ -38,18 +39,26 @@ export async function GET(request: Request) {
   await Promise.all(
     instances.map(async ({ domain, key }) => {
       try {
-        const res = await fetch(`https://${domain}/api/campaigns`, {
-          headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
-          cache: "no-store",
-        });
-        if (!res.ok) {
-          errors.push(`${domain}: HTTP ${res.status}`);
-          return;
-        }
-        const json = await res.json();
-        const list = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
-        for (const c of list) {
-          campaigns.push({ ...c, instance_url: domain });
+        // Bison paginates Laravel-style (data + links.next/meta) — follow
+        // links.next until exhausted so instances with many campaigns aren't
+        // silently truncated to the first page.
+        let url: string | null = `https://${domain}/api/campaigns`;
+        for (let page = 0; url && page < MAX_PAGES; page++) {
+          const res: Response = await fetch(url, {
+            headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+            cache: "no-store",
+          });
+          if (!res.ok) {
+            errors.push(`${domain}: HTTP ${res.status}`);
+            return;
+          }
+          const json = await res.json();
+          const list = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
+          for (const c of list) {
+            campaigns.push({ ...c, instance_url: domain });
+          }
+          if (list.length === 0) break;
+          url = typeof json?.links?.next === "string" ? json.links.next : null;
         }
       } catch (err) {
         errors.push(`${domain}: ${err instanceof Error ? err.message : "fetch failed"}`);
@@ -57,6 +66,10 @@ export async function GET(request: Request) {
     })
   );
 
-  cache = { at: Date.now(), data: campaigns, errors };
+  // Don't cache a total failure — an empty picker would replay for the full
+  // TTL even after the instances recover.
+  if (campaigns.length > 0 || errors.length === 0) {
+    cache = { at: Date.now(), data: campaigns, errors };
+  }
   return NextResponse.json({ campaigns, errors, cached: false });
 }

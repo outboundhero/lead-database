@@ -133,8 +133,14 @@ export async function POST(request: NextRequest) {
               delete normalized.bounced_at; // keep original bounce timestamp/source
               delete normalized.bounce_source;
             }
-            await supabase.from("leads").update(normalized).eq("id", existingBison.id);
-            merged++;
+            // Never regress DB timestamps on a re-upload: the Bison export
+            // carries its own created_at/updated_at (parse-bison), and the
+            // row's true creation time must survive.
+            delete normalized.created_at;
+            delete normalized.updated_at;
+            const { error: updErr } = await supabase.from("leads").update(normalized).eq("id", existingBison.id);
+            if (updErr) errors++;
+            else merged++;
           } else {
             const { error: insErr } = await supabase.from("leads").insert(normalized).select("id").single();
             if (insErr) errors++;
@@ -175,10 +181,14 @@ export async function POST(request: NextRequest) {
                 }
                 if (Object.keys(updates).length > 0) {
                   updates.updated_at = new Date().toISOString();
-                  await supabase
+                  const { error: mergeErr } = await supabase
                     .from("leads")
                     .update(updates)
                     .eq("id", existing.id);
+                  if (mergeErr) {
+                    errors++;
+                    break;
+                  }
                   historyBatch.push({
                     lead_id: existing.id,
                     event_type: "updated",
@@ -210,10 +220,14 @@ export async function POST(request: NextRequest) {
                 }
                 if (Object.keys(updates).length > 0) {
                   updates.updated_at = new Date().toISOString();
-                  await supabase
+                  const { error: replaceErr } = await supabase
                     .from("leads")
                     .update(updates)
                     .eq("id", existing.id);
+                  if (replaceErr) {
+                    errors++;
+                    break;
+                  }
                   historyBatch.push({
                     lead_id: existing.id,
                     event_type: "updated",

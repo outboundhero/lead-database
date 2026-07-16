@@ -6,7 +6,12 @@
 //   3. Persist status + provider + timestamp + raw response
 //   4. fn_export_leads enforces validation_status IN ('valid','catch_all') AND is_bounced = false
 
-export type ValidationStatus = "valid" | "catch_all" | "invalid" | "pending";
+// 'risky' | 'unknown' are inconclusive verdicts persisted when the Findymail
+// second layer can't resolve them (no FINDEMAIL_API_KEY / layer failed). The
+// export gate (validation_status IN ('valid','catch_all') OR IS NULL) excludes
+// them from exports; they re-validate after the TTL. Requires the widened
+// leads_validation_status_check constraint.
+export type ValidationStatus = "valid" | "catch_all" | "invalid" | "pending" | "risky" | "unknown";
 export type ValidationProvider = "reoon" | "findemail";
 
 export interface ValidationResult {

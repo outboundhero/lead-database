@@ -16,7 +16,7 @@ export interface BisonInstance {
   key: string;
 }
 
-function normalizeDomain(v: string): string {
+export function normalizeDomain(v: string): string {
   return v.replace(/^https?:\/\//, "").replace(/\/.*$/, "").trim().toLowerCase();
 }
 
@@ -44,9 +44,11 @@ export function bisonInstances(): BisonInstance[] {
 
 /**
  * Resolve the base URL + token for a given instance domain (a lead's
- * instance_url or a campaign's instance). Exact domain match first; otherwise
- * the untagged EMAILBISON_API_KEY (if set) is assumed valid for the requested
- * instance. Returns null when no usable key exists.
+ * instance_url or a campaign's instance). Exact domain match first. The
+ * untagged EMAILBISON_API_KEY fallback applies ONLY when EMAILBISON_KEYS is
+ * not configured at all — when a per-instance map exists, an unlisted domain
+ * throws rather than leaking a token to an unknown host. Returns null when no
+ * usable key exists.
  */
 export function bisonAuthFor(instanceUrl?: string | null): { base: string; key: string } | null {
   const instances = bisonInstances();
@@ -56,6 +58,9 @@ export function bisonAuthFor(instanceUrl?: string | null): { base: string; key: 
   if (domain) {
     const hit = instances.find((i) => i.domain === domain);
     if (hit) return { base: `https://${hit.domain}`, key: hit.key };
+    if (process.env.EMAILBISON_KEYS?.trim()) {
+      throw new Error(`No Bison key configured for instance ${domain} — add it to EMAILBISON_KEYS`);
+    }
     const fallback = process.env.EMAILBISON_API_KEY?.trim();
     if (fallback) return { base: `https://${domain}`, key: fallback };
     return null;

@@ -79,23 +79,29 @@ export async function validateLeads(
       reoonResults = await reoon.validateBatch(emails, { signal: options.signal });
     } catch (err) {
       console.error("Reoon batch failed:", err);
-      // Mark all as pending so they're not stuck NULL forever; user can retry.
+      // Synthesize per-email results with nativeStatus 'error' so they both
+      // escalate to Findymail and — if that layer is unavailable too — hit the
+      // persist-loop skip below and stay unwritten for retry. (Rows Findymail
+      // rescues aren't errors; the persist loop counts the rest.)
       reoonResults = emails.map((email) => ({
         email,
         status: null,
         provider: "reoon" as const,
+        nativeStatus: "error",
         raw: { error: err instanceof Error ? err.message : "unknown" },
       }));
-      totalErrors += emails.length;
     }
-    totalCredits += reoonResults.filter((r) => r.raw && !(r.raw as { error?: string }).error).length;
+    // Credits: count only genuinely parsed provider responses — HTTP failures
+    // (raw {httpStatus:...}) and network errors (raw {error:...}) spend nothing.
+    totalCredits += reoonResults.filter((r) => r && r.nativeStatus !== "error").length;
 
     // Escalate to Findymail only for Reoon's uncertain verdicts (catch_all /
     // risky / unknown) and Reoon errors — NOT for a clean valid/invalid.
     const FALLBACK_STATUSES = new Set(["catch_all", "risky", "unknown", "error"]);
     const inconclusive = reoonResults
       .map((r, idx) => ({ r, idx }))
-      .filter(({ r }) => FALLBACK_STATUSES.has(r.nativeStatus ?? "unknown"));
+      // `r &&` guards a hole in the provider's results array (defensive).
+      .filter(({ r }) => r && FALLBACK_STATUSES.has(r.nativeStatus ?? "unknown"));
 
     const finalResults: ValidationResult[] = [...reoonResults];
 
@@ -103,7 +109,7 @@ export async function validateLeads(
       const fallbackEmails = inconclusive.map(({ r }) => r.email);
       try {
         const findResults = await findemail.validateBatch(fallbackEmails, { signal: options.signal });
-        totalCredits += findResults.filter((r) => r.raw && !(r.raw as { error?: string }).error).length;
+        totalCredits += findResults.filter((r) => r && r.nativeStatus !== "error").length;
         findResults.forEach((fr, j) => {
           finalResults[inconclusive[j].idx] = fr;
         });
@@ -123,11 +129,18 @@ export async function validateLeads(
         // A genuine provider outage (both layers errored) is left UNWRITTEN so
         // the lead keeps its prior status and is re-picked next export — a
         // transient blip must never permanently mark a real lead invalid.
-        if (r.nativeStatus === "error") {
+        // (`!r` guards a hole in a provider's results array.)
+        if (!r || r.nativeStatus === "error") {
           totalErrors++;
           return Promise.resolve();
         }
-        const persistedStatus = r.status ?? "invalid"; // never leave as null
+        // status null = inconclusive verdict the Findymail layer never resolved
+        // (no FINDEMAIL_API_KEY, or the layer threw). Persist the native
+        // 'risky'/'unknown' rather than falsely downgrading to 'invalid'. The
+        // export gate (validation_status IN ('valid','catch_all') OR IS NULL)
+        // still keeps these rows out of exports; they re-validate after the
+        // 45-day TTL instead of being written off.
+        const persistedStatus = r.status ?? (r.nativeStatus === "risky" ? "risky" : "unknown");
         return admin
           .from("leads")
           .update({

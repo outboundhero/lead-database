@@ -31,6 +31,7 @@
 //
 // Env:
 //   DATABASE_URL           required — Supabase pooler URL
+//   CATEGORIZE_LIMIT       optional — max companies per run (default 50000)
 //   OPENAI_API_KEY         optional — enables the AI tier (gpt-4o-mini)
 //   ANTHROPIC_API_KEY      optional — alternative provider (claude-haiku-4-5)
 //   CATEGORIZE_PROVIDER    optional — force 'openai' or 'anthropic'
@@ -42,15 +43,52 @@
 // `node scripts/categorize-worker.mjs`.
 
 import pg from "pg";
+import { randomUUID } from "crypto";
 import Anthropic from "@anthropic-ai/sdk";
 
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes("--dry-run");
 const KEYWORD_ONLY = args.includes("--keyword-only");
+// Cap per run: --limit flag, else CATEGORIZE_LIMIT, else 50k companies — never
+// unbounded (the uncategorized backlog can exceed 1M companies).
 const LIMIT = (() => {
   const i = args.indexOf("--limit");
-  return i >= 0 ? parseInt(args[i + 1], 10) : Infinity;
+  const raw = i >= 0 ? args[i + 1] : process.env.CATEGORIZE_LIMIT ?? "50000";
+  const n = parseInt(raw, 10);
+  if (!Number.isInteger(n) || n < 1) {
+    console.error(`Invalid --limit / CATEGORIZE_LIMIT value: ${raw ?? "(missing)"}`);
+    process.exit(1);
+  }
+  return n;
 })();
+
+// Lease-row lock (worker_locks table) so overlapping cron runs exit cleanly.
+// Deliberately NOT a pg advisory lock: DATABASE_URL is the transaction-mode
+// pooler (port 6543), where session-scoped locks stick to arbitrary pooled
+// backends — a crashed run could poison a backend and disable the worker
+// permanently. A lease row is pooler-safe and self-expires.
+const LOCK_KEY = "categorize-worker";
+const LOCK_LEASE = "2 hours";
+const LOCK_OWNER = randomUUID();
+
+async function acquireLock(client) {
+  const { rows } = await client.query(
+    `INSERT INTO worker_locks (key, owner, locked_until)
+     VALUES ($1, $2, now() + $3::interval)
+     ON CONFLICT (key) DO UPDATE
+       SET owner = EXCLUDED.owner, locked_until = EXCLUDED.locked_until
+       WHERE worker_locks.locked_until < now()
+     RETURNING owner`,
+    [LOCK_KEY, LOCK_OWNER, LOCK_LEASE]
+  );
+  return rows.length > 0;
+}
+
+async function releaseLock(client) {
+  try {
+    await client.query("DELETE FROM worker_locks WHERE key = $1 AND owner = $2", [LOCK_KEY, LOCK_OWNER]);
+  } catch { /* lease expires on its own */ }
+}
 
 // Provider: OpenAI (gpt-4o-mini, default when OPENAI_API_KEY is set) or
 // Anthropic (claude-haiku-4-5). Force with CATEGORIZE_PROVIDER=openai|anthropic.
@@ -72,41 +110,62 @@ function escapeRegex(s) {
 
 // One combined alternation regex per category (fast at 2,700+ keywords across
 // millions of companies: ~40 regex tests per field instead of ~2,700).
+// Lookarounds instead of \b: \b silently fails when a keyword starts/ends with
+// a non-word char ('café', 'c++', '... (soy, oat, almond)'). Global flag so
+// classifyByKeywords can see WHICH keywords matched, not just that one did.
 function buildMatchers(categories) {
   return categories
     .filter((c) => c.keywords.length > 0)
     .map((c) => ({
       name: c.name,
-      regex: new RegExp(`\\b(?:${c.keywords.map(escapeRegex).join("|")})\\b`, "i"),
+      regex: new RegExp(
+        `(?<![\\w])(?:${c.keywords.map(escapeRegex).join("|")})(?![\\w])`,
+        "gi"
+      ),
     }));
 }
 
 // Name hits weigh 3 (a trade in the company name is a near-certain signal),
-// question/domain hits weigh 1. Assign only on a single strict winner.
+// question/domain hits weigh 1. Assign only on a single strict winner whose
+// evidence includes a keyword of length >= 4 or 2+ distinct keywords — a lone
+// hit on a short junk token ('cc', 's4') is left for the AI tier.
 function classifyByKeywords(subject, matchers) {
-  const name = subject.name ?? "";
-  const question = subject.question ?? "";
-  const domain = subject.domain ?? "";
+  const fields = [
+    [subject.name ?? "", 3],
+    [subject.question ?? "", 1],
+    [subject.domain ?? "", 1],
+  ];
   let best = null;
   let bestScore = 0;
   let tied = false;
-  let bestNameHit = false;
+  let bestKeywords = null;
 
   for (const m of matchers) {
     let score = 0;
-    let nameHit = false;
-    if (m.regex.test(name)) { score += 3; nameHit = true; }
-    if (m.regex.test(question)) score += 1;
-    if (m.regex.test(domain)) score += 1;
+    const hits = new Set();
+    for (const [text, weight] of fields) {
+      const found = text.match(m.regex);
+      if (found) {
+        score += weight;
+        for (const h of found) hits.add(h.toLowerCase());
+      }
+    }
     if (score > bestScore) {
-      best = m.name; bestScore = score; tied = false; bestNameHit = nameHit;
+      best = m.name; bestScore = score; tied = false; bestKeywords = hits;
     } else if (score === bestScore && score > 0) {
       tied = true;
     }
   }
 
   if (bestScore === 0 || tied) return null;
-  return { category: best, confidence: bestNameHit ? 0.9 : 0.7 };
+  const strongEvidence =
+    bestKeywords.size >= 2 || [...bestKeywords].some((k) => k.length >= 4);
+  if (!strongEvidence) return null;
+  const confidence = Math.min(
+    0.95,
+    0.6 + 0.1 * bestScore + 0.05 * (bestKeywords.size - 1)
+  );
+  return { category: best, confidence };
 }
 
 // ─── AI tier ─────────────────────────────────────────────────────────────────
@@ -220,6 +279,33 @@ async function classifyByAI(anthropic, subjects, systemPrompt, schema) {
   };
 }
 
+// Model output is untrusted: only integer indexes in [0, n) count, duplicated
+// indexes are dropped entirely (can't tell which copy is right), and mismatches
+// are logged. Subjects with no usable result stay unresolved for the next run.
+function indexResults(results, n, label) {
+  const byIndex = new Map();
+  let invalid = 0;
+  for (const r of results) {
+    if (!Number.isInteger(r.index) || r.index < 0 || r.index >= n) {
+      invalid++;
+      continue;
+    }
+    if (byIndex.has(r.index)) {
+      byIndex.set(r.index, null);
+      invalid++;
+      continue;
+    }
+    byIndex.set(r.index, r);
+  }
+  for (const [k, v] of byIndex) if (v === null) byIndex.delete(k);
+  if (invalid > 0 || byIndex.size < n) {
+    console.error(
+      `  AI index mismatch (${label}): ${byIndex.size}/${n} usable results, ${invalid} invalid/duplicate indexes`
+    );
+  }
+  return byIndex;
+}
+
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
 async function persistCompanies(client, rows) {
@@ -298,11 +384,18 @@ async function main() {
   const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
 
+  if (!(await acquireLock(client))) {
+    console.log("categorize-worker: previous run still holds the lock lease — exiting.");
+    await client.end();
+    return;
+  }
+
   const { rows: categories } = await client.query(
     "SELECT name, keywords, description FROM lead_categories ORDER BY name"
   );
   if (categories.length === 0) {
     console.error("No taxonomy in lead_categories — seed it first (npm run seed-categories).");
+    await releaseLock(client);
     await client.end();
     process.exit(1);
   }
@@ -361,7 +454,7 @@ async function main() {
           const { results, usage } = await classifyByAI(anthropic, chunk, systemPrompt, schema);
           aiInputTokens += usage.input;
           aiOutputTokens += usage.output;
-          const byIndex = new Map(results.map((r) => [r.index, r]));
+          const byIndex = indexResults(results, chunk.length, "companies");
           chunk.forEach((company, j) => {
             const r = byIndex.get(j);
             if (!r) { counts.unresolved++; return; }
@@ -413,7 +506,7 @@ async function main() {
           const { results, usage } = await classifyByAI(anthropic, chunk, systemPrompt, schema);
           aiInputTokens += usage.input;
           aiOutputTokens += usage.output;
-          const byIndex = new Map(results.map((r) => [r.index, r]));
+          const byIndex = indexResults(results, chunk.length, "leads");
           chunk.forEach((lead, j) => {
             const r = byIndex.get(j);
             if (r) resolved.push({ id: lead.id, category: r.category, confidence: Math.max(0, Math.min(1, r.confidence)), source: "ai" });
@@ -434,6 +527,8 @@ async function main() {
     `categorize-worker done: keyword=${counts.keyword} ai=${counts.ai} other=${counts.other} unresolved=${counts.unresolved} errors=${counts.errors}` +
       (aiEnabled ? ` | AI tokens in=${aiInputTokens} out=${aiOutputTokens} (~$${estCost.toFixed(2)})` : "")
   );
+  // If we die before this, the lease self-expires after LOCK_LEASE.
+  await releaseLock(client);
   await client.end();
 }
 

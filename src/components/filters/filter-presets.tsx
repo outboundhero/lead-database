@@ -10,7 +10,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { toast } from "sonner";
-import type { FilterState } from "@/types/filters";
+import { normalizeFilterState, type FilterState } from "@/types/filters";
 import type { FilterPreset } from "@/types/database";
 
 interface FilterPresetsProps {
@@ -73,7 +73,7 @@ export function FilterPresets({ currentFilters, onLoadPreset }: FilterPresetsPro
   }
 
   function handleLoad(preset: FilterPreset) {
-    onLoadPreset(preset.filters as unknown as FilterState);
+    onLoadPreset(normalizeFilterState(preset.filters));
     toast.success(`Loaded preset "${preset.name}"`);
   }
 

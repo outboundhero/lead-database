@@ -8,6 +8,7 @@ import {
   type EmailTypeFilter,
   type RangeFilter,
   DEFAULT_FILTER_STATE,
+  normalizeFilterState,
 } from "@/types/filters";
 
 type FilterAction =
@@ -59,7 +60,8 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
     case "SET_SORT":
       return { ...state, sortBy: action.sortBy, sortDir: action.sortDir, page: 1 };
     case "LOAD_PRESET":
-      return { ...action.filters, page: 1 };
+      // Stored presets may predate newer FilterState keys — merge onto defaults
+      return { ...normalizeFilterState(action.filters), page: 1 };
     case "RESET":
       return DEFAULT_FILTER_STATE;
     default:

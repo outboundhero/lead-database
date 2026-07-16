@@ -28,7 +28,7 @@ export interface Lead {
 
   // Email-type + validation + bounce (OutboundHero)
   email_type: "general" | "personal" | null;
-  validation_status: "valid" | "catch_all" | "invalid" | "pending" | null;
+  validation_status: "valid" | "catch_all" | "invalid" | "pending" | "risky" | "unknown" | null;
   validation_provider: "reoon" | "findemail" | null;
   validated_at: string | null;
   is_bounced: boolean;
