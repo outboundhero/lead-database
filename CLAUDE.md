@@ -289,9 +289,10 @@ campaign's workspace (Bison upserts by email) rather than reusing a stored
 `bison_lead_id` from another workspace. Synchronous, capped at 5,000/push
 (client "pulls" are targeted). Gated on `EMAILBISON_API_KEY`.
 
-⚠️ **Untested against live Bison** — the `/api/leads` response field carrying
-the new id is read defensively (data.id / data.data.id / id); confirm with a
-real key + test campaign before production. Cross-workspace routing rules
+Bison API semantics are aligned with the corofy enrich-worker (runs against
+live Bison in production daily): id read `data.id ?? id`, and POST /api/leads
+does NOT upsert — duplicate email errors are handled via find-by-search + PUT
+refresh in both the sync lib and push-worker. Cross-workspace routing rules
 (item 6) are pending the client call.
 
 ## Queued Bison pushes (NEW — the default push path)

@@ -11,9 +11,9 @@
 // for leads we originally imported from Bison. bison_lead_id reuse (when the
 // lead's workspace already matches the campaign) is a future optimization.
 //
-// ⚠️ The `/api/leads` response field carrying the new id is read defensively
-// (data.id / data.data.id / id). Confirm against a live Bison response with a
-// real EMAILBISON_API_KEY + test campaign before production use.
+// Live-Bison semantics proven by the corofy enrich-worker (production daily):
+// POST /api/leads does NOT upsert — a duplicate email fails with a "taken /
+// already exists" validation error, handled by find-by-search + PUT refresh.
 
 import type { Lead } from "@/types/database";
 
@@ -58,39 +58,70 @@ function customVars(lead: BisonPushLead) {
   return vars;
 }
 
-async function createLead(base: string, apiKey: string, lead: BisonPushLead): Promise<number> {
-  const res = await fetch(`${base}/api/leads`, {
-    method: "POST",
+function leadBody(lead: BisonPushLead): Record<string, unknown> {
+  return {
+    first_name: lead.first_name ?? "",
+    last_name: lead.last_name ?? "",
+    email: lead.email,
+    ...(lead.title ? { title: lead.title } : {}),
+    ...(lead.company ? { company: lead.company } : {}),
+    ...(lead.notes ? { notes: lead.notes } : {}),
+    custom_variables: customVars(lead),
+  };
+}
+
+async function bisonFetch(base: string, apiKey: string, method: string, path: string, body?: unknown): Promise<Record<string, unknown>> {
+  const res = await fetch(`${base}${path}`, {
+    method,
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body: JSON.stringify({
-      first_name: lead.first_name ?? "",
-      last_name: lead.last_name ?? "",
-      email: lead.email,
-      ...(lead.title ? { title: lead.title } : {}),
-      ...(lead.company ? { company: lead.company } : {}),
-      ...(lead.notes ? { notes: lead.notes } : {}),
-      custom_variables: customVars(lead),
-    }),
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (res.status === 401 || res.status === 403) {
     throw Object.assign(new Error(`Bison auth failed (HTTP ${res.status}) — check EMAILBISON_API_KEY`), { fatal: true });
   }
+  const text = await res.text();
+  let json: Record<string, unknown> | null = null;
+  try { json = JSON.parse(text) as Record<string, unknown>; } catch { /* non-JSON body */ }
   if (!res.ok) {
-    throw new Error(`create ${lead.email}: HTTP ${res.status} ${(await res.text()).slice(0, 120)}`);
+    const data = json?.data as { message?: string } | undefined;
+    const msg = data?.message || (json?.message as string | undefined) || text.slice(0, 160);
+    throw new Error(`${method} ${path}: HTTP ${res.status} ${msg}`);
   }
-  const json = await res.json().catch(() => ({}));
-  const id = json?.data?.id ?? json?.id ?? json?.lead?.id;
-  if (typeof id !== "number") {
-    throw new Error(`create ${lead.email}: could not read Bison lead id from response`);
-  }
-  return id;
+  return json ?? {};
 }
 
-async function attachLeads(base: string, apiKey: string, campaignId: number | string, ids: number[]): Promise<void> {
+async function createLead(base: string, apiKey: string, lead: BisonPushLead): Promise<number | string> {
+  try {
+    const json = await bisonFetch(base, apiKey, "POST", "/api/leads", leadBody(lead));
+    const data = json?.data as { id?: number | string } | undefined;
+    const id = data?.id ?? (json?.id as number | string | undefined) ?? (json?.lead as { id?: number | string } | undefined)?.id;
+    if (id != null) return id;
+    throw new Error(`create ${lead.email}: could not read Bison lead id from response`);
+  } catch (err) {
+    if ((err as { fatal?: boolean }).fatal) throw err;
+    // Only a duplicate email means "find and reuse"; other errors are real.
+    if (!/taken|already exists|duplicate/i.test((err as Error).message)) throw err;
+  }
+  // Duplicate: find the existing lead by search (retrying for indexing delay),
+  // refresh its fields with PUT, reuse its id — corofy's production pattern.
+  for (let t = 0; t < 3; t++) {
+    if (t > 0) await new Promise((r) => setTimeout(r, 2000));
+    const found = await bisonFetch(base, apiKey, "GET", `/api/leads?search=${encodeURIComponent(lead.email)}`);
+    const rows = (found?.data ?? []) as Array<{ id: number | string; email?: string }>;
+    const hit = rows.find((l) => (l.email || "").toLowerCase() === lead.email.toLowerCase());
+    if (hit) {
+      await bisonFetch(base, apiKey, "PUT", `/api/leads/${hit.id}`, leadBody(lead));
+      return hit.id;
+    }
+  }
+  throw new Error(`lead ${lead.email} exists in Bison but was not found by search`);
+}
+
+async function attachLeads(base: string, apiKey: string, campaignId: number | string, ids: Array<number | string>): Promise<void> {
   const res = await fetch(`${base}/api/campaigns/${campaignId}/leads/attach-leads`, {
     method: "POST",
     headers: {
@@ -121,7 +152,7 @@ export async function pushLeadsToCampaign(
 ): Promise<BisonPushResult> {
   const base = baseUrl(opts.instanceUrl);
   const result: BisonPushResult = { total: leads.length, created: 0, attached: 0, failed: 0, attachFailed: 0, errors: [] };
-  const ids: number[] = [];
+  const ids: Array<number | string> = [];
 
   // Step 1 — create in Bison (bounded concurrency).
   let next = 0;

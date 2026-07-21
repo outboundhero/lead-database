@@ -150,11 +150,34 @@ function leadPayload(l) {
   };
 }
 
+async function findLeadByEmail(auth, email, tries = 1) {
+  for (let t = 0; t < tries; t++) {
+    if (t > 0) await sleep(2000); // Bison search indexing delay
+    const found = await bison(auth, "GET", `/api/leads?search=${encodeURIComponent(email)}`);
+    const hit = (found?.data ?? []).find((l) => (l.email || "").toLowerCase() === email.toLowerCase());
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// Live-Bison semantics proven by the corofy enrich-worker (runs in production
+// daily): POST /api/leads does NOT upsert — a duplicate email fails with a
+// "taken / already exists" validation error. Handle it corofy's way: find the
+// existing lead by search (retrying for indexing delay), PUT to refresh its
+// fields, and reuse its id. Other 4xx are real validation errors.
 async function createLead(auth, lead) {
-  const json = await bison(auth, "POST", "/api/leads", leadPayload(lead));
-  const id = json?.data?.id ?? json?.id ?? json?.lead?.id; // defensive id read
-  if (id == null) throw new Error(`create ${lead.email}: could not read Bison lead id from response`);
-  return id;
+  try {
+    const json = await bison(auth, "POST", "/api/leads", leadPayload(lead));
+    const id = json?.data?.id ?? json?.id ?? json?.lead?.id; // defensive id read
+    if (id != null) return String(id);
+    throw new Error(`create ${lead.email}: could not read Bison lead id from response`);
+  } catch (e) {
+    if (!/taken|already exists|duplicate/i.test(e.message)) throw e;
+  }
+  const hit = await findLeadByEmail(auth, lead.email, 3);
+  if (!hit) throw new Error(`lead ${lead.email} exists in Bison but was not found by search`);
+  await bison(auth, "PUT", `/api/leads/${hit.id}`, leadPayload(lead)); // refresh fields
+  return String(hit.id);
 }
 
 // ---------------------------------------------------------------------------
