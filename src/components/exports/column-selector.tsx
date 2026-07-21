@@ -13,8 +13,14 @@ import { Input } from "@/components/ui/input";
 import { LEAD_FIELDS } from "@/lib/uploads/constants";
 import { toast } from "sonner";
 
-interface BisonCampaign { id: number | string; name?: string; instance_url?: string; workspace_name?: string }
+export interface BisonCampaign { id: number | string; name?: string; instance_url?: string; workspace_name?: string }
 export type ExportDestination = "csv" | "bison";
+
+// Campaign ids can collide across Bison instances — selection keys must
+// include the instance the campaign lives on.
+function campaignKey(c: BisonCampaign): string {
+  return `${c.instance_url ?? ""}#${c.id}`;
+}
 
 /** Fields visible in the leads table UI */
 const VISIBLE_KEYS = new Set([
@@ -86,7 +92,7 @@ interface ColumnSelectorProps {
     rangeFrom: number | undefined,
     rangeTo: number | undefined,
     destination: ExportDestination,
-    campaign: BisonCampaign | null,
+    campaigns: BisonCampaign[],
   ) => void;
   totalCount?: number;
   exportType?: "filtered" | "selected";
@@ -106,7 +112,8 @@ export function ColumnSelector({
   const [rangeToStr, setRangeToStr] = useState("");
   const [destination, setDestination] = useState<ExportDestination>("csv");
   const [campaigns, setCampaigns] = useState<BisonCampaign[]>([]);
-  const [campaignId, setCampaignId] = useState<string>("");
+  // Multi-select, keyed by `${instance_url}#${id}` (ids collide across instances)
+  const [selectedCampaignKeys, setSelectedCampaignKeys] = useState<Set<string>>(new Set());
   const [campaignsLoading, setCampaignsLoading] = useState(false);
   const [campaignsError, setCampaignsError] = useState<string | null>(null);
   // One fetch per dialog open — never auto-retry on error/empty (manual Retry instead)
@@ -133,7 +140,7 @@ export function ColumnSelector({
   useEffect(() => {
     if (!open) return;
     setDestination("csv");
-    setCampaignId("");
+    setSelectedCampaignKeys(new Set());
     setRangeFromStr("");
     setRangeToStr("");
     setCampaignsError(null);
@@ -146,6 +153,15 @@ export function ColumnSelector({
     if (!open || destination !== "bison" || campaignsAttempted || campaignsLoading) return;
     loadCampaigns();
   }, [open, destination, campaignsAttempted, campaignsLoading, loadCampaigns]);
+
+  function toggleCampaign(key: string) {
+    setSelectedCampaignKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
 
   function toggle(key: string) {
     setSelected((prev) => {
@@ -223,7 +239,9 @@ export function ColumnSelector({
 
         {destination === "bison" && (
           <div className="mb-2">
-            <label className="text-xs text-muted-foreground mb-1 block">Bison campaign</label>
+            <label className="text-xs text-muted-foreground mb-1 block">
+              Bison campaigns{selectedCampaignKeys.size > 0 ? ` (${selectedCampaignKeys.size} selected)` : ""}
+            </label>
             {campaignsLoading ? (
               <p className="text-xs text-muted-foreground">Loading campaigns…</p>
             ) : campaignsError ? (
@@ -233,33 +251,61 @@ export function ColumnSelector({
                   Retry
                 </Button>
               </div>
+            ) : campaigns.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No campaigns found.</p>
             ) : (
-              <select
-                value={campaignId}
-                onChange={(e) => setCampaignId(e.target.value)}
-                className="h-8 w-full rounded-md border bg-background px-2 text-xs"
-              >
-                <option value="">Select a campaign…</option>
-                {campaigns.map((c) => (
-                  <option key={String(c.id)} value={String(c.id)}>
-                    {c.name ?? `Campaign ${c.id}`}{c.workspace_name ? ` — ${c.workspace_name}` : ""}
-                  </option>
+              <div className="max-h-[40vh] space-y-2 overflow-y-auto rounded-md border p-2">
+                {Array.from(
+                  campaigns.reduce<Map<string, BisonCampaign[]>>((groups, c) => {
+                    const group = c.workspace_name || c.instance_url || "Unknown workspace";
+                    const list = groups.get(group);
+                    if (list) list.push(c);
+                    else groups.set(group, [c]);
+                    return groups;
+                  }, new Map())
+                ).map(([workspace, group]) => (
+                  <div key={workspace}>
+                    <p className="text-[10px] font-semibold uppercase text-muted-foreground mb-1 px-1">
+                      {workspace}
+                    </p>
+                    <div className="grid grid-cols-1 gap-1">
+                      {group.map((c) => {
+                        const key = campaignKey(c);
+                        return (
+                          <label
+                            key={key}
+                            className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted/50 cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedCampaignKeys.has(key)}
+                              onChange={() => toggleCampaign(key)}
+                              className="rounded"
+                            />
+                            {c.name ?? `Campaign ${c.id}`}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
                 ))}
-              </select>
+              </div>
             )}
             <p className="text-[10px] text-muted-foreground mt-1">
-              Leads are created in Bison, then attached to this campaign. Column selection below is ignored for Bison pushes.
+              Every selected campaign receives every lead. Leads are created in Bison, then attached — queued in the background, progress on the Exports page.
             </p>
           </div>
         )}
-        <div className="flex gap-2 mb-2">
-          <Button variant="outline" size="sm" className="text-xs" onClick={selectAll}>
-            Select All
-          </Button>
-          <Button variant="outline" size="sm" className="text-xs" onClick={deselectAll}>
-            Deselect All
-          </Button>
-        </div>
+        {destination === "csv" && (
+          <div className="flex gap-2 mb-2">
+            <Button variant="outline" size="sm" className="text-xs" onClick={selectAll}>
+              Select All
+            </Button>
+            <Button variant="outline" size="sm" className="text-xs" onClick={deselectAll}>
+              Deselect All
+            </Button>
+          </div>
+        )}
         <div className="mb-3">
           <label className="text-xs text-muted-foreground mb-1 block">
             Lead range to export
@@ -288,13 +334,15 @@ export function ColumnSelector({
             Leave blank to export all. Example: 1–20000, then 20001–40000.
           </p>
         </div>
-        <div className="space-y-3 max-h-[50vh] overflow-y-auto">
-          <FieldGroup title="Visible Fields" fields={VISIBLE_FIELDS} />
-          <FieldGroup title="Additional Fields (export only)" fields={EXPORT_ONLY_FIELDS} />
-          {OTHER_FIELDS.length > 0 && (
-            <FieldGroup title="Other" fields={OTHER_FIELDS} />
-          )}
-        </div>
+        {destination === "csv" && (
+          <div className="space-y-3 max-h-[50vh] overflow-y-auto">
+            <FieldGroup title="Visible Fields" fields={VISIBLE_FIELDS} />
+            <FieldGroup title="Additional Fields (export only)" fields={EXPORT_ONLY_FIELDS} />
+            {OTHER_FIELDS.length > 0 && (
+              <FieldGroup title="Other" fields={OTHER_FIELDS} />
+            )}
+          </div>
+        )}
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
             Cancel
@@ -304,18 +352,20 @@ export function ColumnSelector({
               const from = rangeFromStr ? parseInt(rangeFromStr, 10) : undefined;
               const to = rangeToStr ? parseInt(rangeToStr, 10) : undefined;
               const limit = from && to ? to - from + 1 : to ? to : null;
-              if (destination === "bison" && !campaignId) {
-                toast.error("Pick a Bison campaign first");
+              const chosenCampaigns = destination === "bison"
+                ? campaigns.filter((c) => selectedCampaignKeys.has(campaignKey(c)))
+                : [];
+              if (destination === "bison" && chosenCampaigns.length === 0) {
+                toast.error("Pick at least one Bison campaign first");
                 return;
               }
-              const campaign = destination === "bison"
-                ? campaigns.find((c) => String(c.id) === campaignId) ?? null
-                : null;
-              onConfirm(Array.from(selected), limit && limit > 0 ? limit : null, from, to, destination, campaign);
+              onConfirm(Array.from(selected), limit && limit > 0 ? limit : null, from, to, destination, chosenCampaigns);
             }}
-            disabled={destination === "csv" ? selected.size === 0 : !campaignId}
+            disabled={destination === "csv" ? selected.size === 0 : selectedCampaignKeys.size === 0}
           >
-            {destination === "csv" ? `Export (${selected.size} columns)` : "Push to Bison"}
+            {destination === "csv"
+              ? `Export (${selected.size} columns)`
+              : `Push to ${selectedCampaignKeys.size} campaign${selectedCampaignKeys.size === 1 ? "" : "s"}`}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -18,6 +18,7 @@ import { toast } from "sonner";
 import type { ExportJob } from "@/types/database";
 import { useHasPermission } from "@/lib/context/role-context";
 import { AccessDenied } from "@/components/layout/access-denied";
+import { PushBatchesPanel } from "@/components/exports/push-batches-panel";
 
 function formatFilterSummary(filtersUsed: Record<string, unknown> | null): string {
   if (!filtersUsed) return "—";
@@ -225,6 +226,8 @@ export default function ExportsPage() {
           Refresh
         </Button>
       </div>
+
+      <PushBatchesPanel />
 
       <Card>
         <CardHeader>

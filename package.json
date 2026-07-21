@@ -8,6 +8,7 @@
     "start": "next start -p ${PORT:-3000}",
     "lint": "eslint",
     "bounce-worker": "node scripts/bounce-worker.mjs",
+    "push-worker": "node scripts/push-worker.mjs",
     "categorize-worker": "node scripts/categorize-worker.mjs",
     "seed-categories": "node scripts/seed-categories.mjs",
     "sync-taxonomy": "node scripts/sync-taxonomy-from-sheet.mjs"

@@ -10,7 +10,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ColumnSelector, type ExportDestination } from "./column-selector";
+import { ColumnSelector, type BisonCampaign, type ExportDestination } from "./column-selector";
 import { toast } from "sonner";
 import type { FilterState } from "@/types/filters";
 
@@ -36,49 +36,61 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
     rangeFrom: number | undefined,
     rangeTo: number | undefined,
     destination: ExportDestination = "csv",
-    campaign: { id: number | string; name?: string; instance_url?: string } | null = null,
+    campaigns: BisonCampaign[] = [],
   ) {
     setSelectorOpen(false);
     setExporting(true);
 
     const isSelected = exportType === "selected" && selectedIds.length > 0;
 
-    // ── Push straight into a Bison campaign (create in Bison -> attach) ──
-    if (destination === "bison" && campaign) {
-      const toastId = toast.loading(`Pushing to ${campaign.name ?? "campaign"}…`);
-      // Range semantics mirror the CSV path: a lone "To" is a limit, not a
-      // range, and a selected-rows push never sends the range fields (the
-      // route 400s on selectedIds+range rather than guessing intent).
-      const hasRange = !isSelected && !!rangeFrom && !!rangeTo;
-      const effectiveLimit = !isSelected && !rangeFrom && rangeTo ? rangeTo : limit ?? undefined;
+    // ── Queue a background push into one or more Bison campaigns ──
+    // The push-worker gathers the leads and creates/attaches them per instance;
+    // progress lives in the "Bison pushes" panel on the Exports page.
+    if (destination === "bison" && campaigns.length > 0) {
+      const campaignLabel = campaigns.length === 1
+        ? campaigns[0].name ?? `Campaign ${campaigns[0].id}`
+        : `${campaigns.length} campaigns`;
+      const toastId = toast.loading(`Queuing push to ${campaignLabel}…`);
+      // A selected-rows push never sends the range fields (the route 400s on
+      // selectedIds+range rather than guessing intent). On the filters path a
+      // lone "To" acts as a max-leads cap server-side.
       try {
-        const res = await fetch("/api/bison/push", {
+        const res = await fetch("/api/bison/push-batch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            campaignId: campaign.id,
-            campaignInstanceUrl: campaign.instance_url,
+            campaigns: campaigns.map((c) => ({
+              id: c.id,
+              name: c.name,
+              instance_url: c.instance_url,
+              workspace_name: c.workspace_name,
+            })),
             selectedIds: isSelected ? selectedIds : undefined,
             filters: isSelected ? undefined : filters,
-            limit: hasRange ? undefined : effectiveLimit,
-            rangeFrom: hasRange ? rangeFrom : undefined,
-            rangeTo: hasRange ? rangeTo : undefined,
+            // Both bounds -> a range; a lone "To" -> a max-leads cap. Never
+            // send a lone bound as a range key — the route rejects that pair.
+            ...(!isSelected && rangeFrom && rangeTo
+              ? { rangeFrom, rangeTo }
+              : !isSelected && rangeTo
+              ? { maxLeads: rangeTo }
+              : {}),
           }),
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? "Push failed");
-        const attached = data.attached ?? 0;
-        const problems: string[] = [];
-        if (data.failed) problems.push(`${data.failed} failed to create`);
-        if (data.attachFailed) problems.push(`${data.attachFailed} created but not attached`);
-        if (data.skippedIneligible) problems.push(`${data.skippedIneligible} skipped (bounced/invalid)`);
-        const summary = `Pushed ${attached}/${data.total} leads to ${campaign.name ?? "campaign"}` +
-          (problems.length ? ` (${problems.join(", ")})` : "");
-        if (attached === 0) toast.error(summary, { id: toastId });
-        else if (problems.length) toast.warning(summary, { id: toastId });
-        else toast.success(summary, { id: toastId });
+        if (!res.ok) throw new Error(data.error ?? "Failed to queue push");
+        const leadsLabel = isSelected
+          ? `${selectedIds.length.toLocaleString()} selected leads`
+          : rangeFrom && rangeTo
+          ? `leads ${rangeFrom.toLocaleString()}–${rangeTo.toLocaleString()}`
+          : rangeTo
+          ? `up to ${rangeTo.toLocaleString()} leads`
+          : `${totalCount.toLocaleString()} filtered leads`;
+        toast.success(
+          `Queued push of ${leadsLabel} to ${campaignLabel} — progress on the Exports page`,
+          { id: toastId }
+        );
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : "Push failed", { id: toastId });
+        toast.error(err instanceof Error ? err.message : "Failed to queue push", { id: toastId });
       } finally {
         setExporting(false);
       }
