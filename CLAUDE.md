@@ -318,6 +318,42 @@ poll while active) with per-batch progress + cancel
 (`POST /api/bison/push-batches/cancel`). The synchronous `/api/bison/push`
 remains for API consumers.
 
+## Phase 1-3 (Spencer Loom, 2026-07-22)
+
+Filters (migration 053; all in the shared fn_lead_filter_conditions helper —
+fn_filter_leads_v2 now delegates to it): additionalCategory (include/exclude),
+location.city is now IncludeExclude, keyword.matchMode 'contains'|'exact'
+(exact = fn_exact_term_regex whole-phrase word-boundaried, plural-tolerant),
+emailContains (include/exclude on email — weebly/.gov purges), tags
+(substring on leads.tags), globalSearch (comma-separated OR across
+email/company/name/domain/categories), and a special p_filters.emailSide
+'b2b'|'b2c' splitting by the freemail_domains table. Hideable filter chips
+persist in localStorage (use-hidden-filters.ts). Re-validation TTL is now 90d
+(VALIDATION_REVALIDATE_DAYS).
+
+Table: drag-select + shift-select + select-all-filtered; delete-from-database
+(owner/admin) via the extended /api/admin/bulk-delete (accepts {ids} or
+{filters}, exact server count, audit-logged).
+
+Client routing: client_tags table synced from the client-groups sheet
+(CLIENTS_SHEET_ID, npm run sync-clients) — tag -> instance pair (group1:
+outboundhero/cleaningoutbound, group2: facilityreach/outboundclean).
+Send-to-Bison wizard (send-to-bison-wizard.tsx): pick client tag ->
+/api/bison/send-preview returns EXACT b2b/b2c split counts + candidate
+campaigns per side (suggested = newest TAG-prefixed non-Nurture) -> reconfirm
+-> two /api/bison/push-batch calls (one per side, emailSide + clientTag stored
+on push_batches). push-worker attaches the client tag to leads in Bison
+(leadPayload tags[], merging existing leads.tags) — UNVERIFIED against live
+Bison tag field; confirm on the first real send. Saved searches carry an
+optional client_tag (filter_presets.client_tag; PUT to update in place).
+
+Clay category import: scripts/import-clay-categories.mjs (npm run
+import-clay-categories <folder>) — one CSV per client, filename=tag, matches by
+lead id then email, sets category/subcategory/additional_category with
+category_source='clay' (never over 'manual', diff-aware), appends the client
+tag to leads.tags. Category enrichment precedence stays Bison/Clay > keyword >
+AI (AI fallback still OFF pending green-light).
+
 ## Known issues / TODO
 
 - [ ] Reoon bulk endpoint batch size — confirm exact cap from docs before tuning `VALIDATION_BATCH_SIZE`
