@@ -294,6 +294,29 @@ the new id is read defensively (data.id / data.data.id / id); confirm with a
 real key + test campaign before production. Cross-workspace routing rules
 (item 6) are pending the client call.
 
+## Queued Bison pushes (NEW — the default push path)
+
+The export popup's Bison destination is a **multi-select** (workspace-grouped;
+selections keyed `instance_url#id` since ids collide across instances) and
+queues instead of pushing synchronously: `POST /api/bison/push-batch` inserts a
+`push_batches` row (migration 052) and returns instantly — no 5k cap. Every
+selected campaign gets every lead.
+
+`scripts/push-worker.mjs` (always-on Railway service, `npm run push-worker`)
+processes batches corofy-style: keyset-paginated gather through
+`fn_lead_filter_conditions` + the eligibility gate → `push_items`; per item the
+lead is created once per DISTINCT instance (`bison_ids` persisted BEFORE any
+attach — crash recovery never duplicates), attached per campaign in chunks of
+100, `sent` only when attached to ALL targets; 3 retries (deterministic 4xx
+fail immediately), claim-token fencing, stale reclaim (items 10m / stranded
+gathers 15m), per-instance 5 req/s throttle. `PUSH_WORKER_ONCE=1` drains and
+exits (cron-style testing).
+
+Exports page shows a "Bison pushes" panel (`GET /api/bison/push-batches`, 4s
+poll while active) with per-batch progress + cancel
+(`POST /api/bison/push-batches/cancel`). The synchronous `/api/bison/push`
+remains for API consumers.
+
 ## Known issues / TODO
 
 - [ ] Reoon bulk endpoint batch size — confirm exact cap from docs before tuning `VALIDATION_BATCH_SIZE`
