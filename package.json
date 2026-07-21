@@ -11,7 +11,9 @@
     "push-worker": "node scripts/push-worker.mjs",
     "categorize-worker": "node scripts/categorize-worker.mjs",
     "seed-categories": "node scripts/seed-categories.mjs",
-    "sync-taxonomy": "node scripts/sync-taxonomy-from-sheet.mjs"
+    "import-clay-categories": "node scripts/import-clay-categories.mjs",
+    "sync-taxonomy": "node scripts/sync-taxonomy-from-sheet.mjs",
+    "sync-clients": "node scripts/sync-clients-from-sheet.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

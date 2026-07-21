@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeFilterState } from "@/types/filters";
 import { buildRpcFilters } from "@/lib/filters/build-rpc-filters";
 import { bisonInstances, normalizeDomain } from "@/lib/bison/keys";
+import { getPool } from "@/lib/db/pool";
 
 // Queue an async Bison push batch. Unlike the synchronous /api/bison/push
 // (kept for targeted client "pulls"), this only validates + inserts a
@@ -30,6 +31,11 @@ interface PushBatchPayload {
   rangeFrom?: number;
   rangeTo?: number;
   maxLeads?: number;
+  // Send-to-Bison wizard: which client this batch belongs to, and which side of
+  // the B2B/B2C split it carries. When set, emailSide narrows the batch to the
+  // matching leads so the wizard's two pushes never overlap.
+  clientTag?: string;
+  emailSide?: "b2b" | "b2c";
 }
 
 export async function POST(request: NextRequest) {
@@ -149,12 +155,69 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Provide selectedIds or filters" }, { status: 400 });
   }
 
+  // ── Send-to-Bison wizard extras: client tag + B2B/B2C side ──
+  const emailSide = body.emailSide;
+  if (emailSide !== undefined && emailSide !== "b2b" && emailSide !== "b2c") {
+    return NextResponse.json({ error: "emailSide must be 'b2b' or 'b2c'" }, { status: 400 });
+  }
+  let clientTag: string | null = null;
+  if (body.clientTag !== undefined) {
+    if (typeof body.clientTag !== "string" || !body.clientTag.trim()) {
+      return NextResponse.json({ error: "clientTag must be a non-empty string" }, { status: 400 });
+    }
+    clientTag = body.clientTag.trim();
+    const { data: tagRow, error: tagErr } = await admin
+      .from("client_tags")
+      .select("tag")
+      .eq("tag", clientTag)
+      .maybeSingle();
+    if (tagErr) {
+      return NextResponse.json({ error: `Failed to validate client tag: ${tagErr.message}` }, { status: 500 });
+    }
+    if (!tagRow) {
+      return NextResponse.json({ error: `Unknown client tag "${clientTag}"` }, { status: 400 });
+    }
+  }
+
   // Store the RPC-shaped filters (same p_filters the export stream feeds to
   // fn_export_leads / fn_lead_filter_conditions) so the worker consumes them
-  // as-is; normalize first so old client payloads never miss newer keys.
+  // as-is; normalize first so old client payloads never miss newer keys. When
+  // an emailSide is set, inject it into the stored filters jsonb so the worker's
+  // gather (fn_lead_filter_conditions) applies the freemail split.
   const p_filters = !hasSelectedIds && body.filters
-    ? buildRpcFilters(normalizeFilterState(body.filters))
+    ? { ...buildRpcFilters(normalizeFilterState(body.filters)), ...(emailSide ? { emailSide } : {}) }
     : null;
+
+  // On the selectedIds path the worker gathers by id + eligibility only (it
+  // never re-reads filters), so the split can't ride along in the jsonb.
+  // Narrow the id list to this side's leads up front instead — this keeps the
+  // wizard's two pushes disjoint without touching the worker.
+  let storedSelectedIds: string[] | null = hasSelectedIds ? selectedIds! : null;
+  if (hasSelectedIds && emailSide) {
+    const inOrNot = emailSide === "b2c" ? "in" : "not in";
+    try {
+      const { rows } = await getPool().query(
+        `select l.id from leads l
+          where l.id = any($1::uuid[])
+            and split_part(lower(l.email), '@', 2) ${inOrNot} (select domain from freemail_domains)`,
+        [selectedIds]
+      );
+      storedSelectedIds = rows.map((r) => r.id as string);
+    } catch (e) {
+      return NextResponse.json(
+        { error: `Failed to split selection by email side: ${e instanceof Error ? e.message : String(e)}` },
+        { status: 500 }
+      );
+    }
+    // An empty subset must never fall through to the worker's filters path
+    // (empty selected_ids + null filters would gather the ENTIRE table).
+    if (storedSelectedIds.length === 0) {
+      return NextResponse.json(
+        { error: `No ${emailSide} leads in the selection` },
+        { status: 400 }
+      );
+    }
+  }
 
   const { data: batch, error: insertError } = await admin
     .from("push_batches")
@@ -162,10 +225,12 @@ export async function POST(request: NextRequest) {
       created_by: user.id,
       campaigns,
       filters: p_filters,
-      selected_ids: hasSelectedIds ? selectedIds : null,
+      selected_ids: storedSelectedIds,
       range_from: rangeFrom ?? null,
       range_to: rangeTo ?? null,
       max_leads: body.maxLeads ?? null,
+      client_tag: clientTag,
+      email_side: emailSide ?? null,
       status: "pending",
     })
     .select("id")
@@ -185,11 +250,13 @@ export async function POST(request: NextRequest) {
     metadata: {
       batchId: batch.id,
       campaigns,
-      selectedCount: hasSelectedIds ? selectedIds.length : 0,
+      selectedCount: storedSelectedIds ? storedSelectedIds.length : 0,
       hasFilters: p_filters !== null,
       rangeFrom: rangeFrom ?? null,
       rangeTo: rangeTo ?? null,
       maxLeads: body.maxLeads ?? null,
+      clientTag,
+      emailSide: emailSide ?? null,
     } as Record<string, unknown>,
   }).then(() => {}, () => {});
 

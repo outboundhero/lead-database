@@ -9,8 +9,11 @@ import { FilterBar } from "@/components/filters/filter-bar";
 import { LeadTable } from "@/components/leads/lead-table";
 import { LeadDetailPanel } from "@/components/leads/lead-detail-panel";
 import { ExportButton } from "@/components/exports/export-button";
+import { DeleteLeadsDialog } from "@/components/leads/delete-leads-dialog";
 import { Button } from "@/components/ui/button";
-import { ArrowUpDown, X } from "lucide-react";
+import { ArrowUpDown, X, Trash2 } from "lucide-react";
+import { useHasPermission } from "@/lib/context/role-context";
+import { countActiveFilters } from "@/types/filters";
 import type { Lead } from "@/types/database";
 
 const SORT_OPTIONS = [
@@ -37,6 +40,8 @@ export default function LeadsPage() {
     toggleFlag,
     setKeyword,
     setEmailType,
+    setEmailContains,
+    setGlobalSearch,
     setIncludeBounced,
     setPage,
     setPageSize,
@@ -53,7 +58,37 @@ export default function LeadsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  // "Select all N filtered" mode — the whole filtered set is targeted, not just
+  // the checked visible rows. Delete/actions resolve it server-side via filters.
+  const [selectAllFiltered, setSelectAllFiltered] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const selectedIds = Object.keys(rowSelection).filter((k) => rowSelection[k]);
+
+  const canDelete = useHasPermission("admin");
+  const activeFilterCount = countActiveFilters(filters);
+  const allPageSelected = leads.length > 0 && leads.every((l) => rowSelection[l.id]);
+
+  // Any manual selection change (checkbox / drag / shift) exits "all filtered".
+  function handleSelectionChange(next: RowSelectionState) {
+    setSelectAllFiltered(false);
+    setRowSelection(next);
+  }
+  function selectAllFilteredNow() {
+    const next: RowSelectionState = {};
+    for (const l of leads) next[l.id] = true;
+    setRowSelection(next);
+    setSelectAllFiltered(true);
+  }
+  function clearSelection() {
+    setRowSelection({});
+    setSelectAllFiltered(false);
+  }
+
+  // A selection targets explicit ids; otherwise (all-filtered, or delete driven
+  // purely by an active filter) we delete the whole filtered set server-side.
+  const deleteMode: "ids" | "filtered" =
+    !selectAllFiltered && selectedIds.length > 0 ? "ids" : "filtered";
+  const deleteEnabled = selectedIds.length > 0 || selectAllFiltered || activeFilterCount > 0;
 
   const fetchLeads = useCallback(async () => {
     setIsLoading(true);
@@ -90,6 +125,7 @@ export default function LeadsPage() {
     const fingerprint = JSON.stringify(rest);
     if (prevFilterFingerprint.current && prevFilterFingerprint.current !== fingerprint) {
       setRowSelection({});
+      setSelectAllFiltered(false);
     }
     prevFilterFingerprint.current = fingerprint;
   }, [debouncedFilters]);
@@ -110,6 +146,8 @@ export default function LeadsPage() {
           onToggleFlag={toggleFlag}
           onKeywordChange={setKeyword}
           onEmailTypeChange={setEmailType}
+          onEmailContainsChange={setEmailContains}
+          onGlobalSearchChange={setGlobalSearch}
           onIncludeBouncedChange={setIncludeBounced}
           onLoadPreset={loadPreset}
           onReset={resetFilters}
@@ -152,15 +190,44 @@ export default function LeadsPage() {
               ))}
             </select>
           </div>
-          {selectedIds.length > 0 && (
+          {(selectedIds.length > 0 || selectAllFiltered) && (
+            <>
+              <span className="text-[13px] font-medium text-muted-foreground tabular-nums">
+                {selectAllFiltered
+                  ? `All ${(isApproximate ? "~" : "") + totalCount.toLocaleString()} selected`
+                  : `${selectedIds.length} selected`}
+              </span>
+              {allPageSelected && !selectAllFiltered && totalCount > leads.length && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-primary"
+                  onClick={selectAllFilteredNow}
+                >
+                  Select all {totalCount.toLocaleString()}
+                </Button>
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground"
+                onClick={clearSelection}
+              >
+                <X className="h-4 w-4 mr-1" />
+                Deselect
+              </Button>
+            </>
+          )}
+          {canDelete && (
             <Button
               variant="ghost"
               size="sm"
-              className="text-muted-foreground"
-              onClick={() => setRowSelection({})}
+              className="text-destructive hover:text-destructive disabled:opacity-40"
+              disabled={!deleteEnabled}
+              onClick={() => setDeleteOpen(true)}
             >
-              <X className="h-4 w-4 mr-1" />
-              Deselect {selectedIds.length}
+              <Trash2 className="h-4 w-4 mr-1" />
+              Delete
             </Button>
           )}
           <ExportButton filters={filters} totalCount={totalCount} selectedIds={selectedIds} />
@@ -179,9 +246,25 @@ export default function LeadsPage() {
           onPageSizeChange={setPageSize}
           onRowClick={setSelectedLead}
           rowSelection={rowSelection}
-          onRowSelectionChange={setRowSelection}
+          onRowSelectionChange={handleSelectionChange}
         />
       </div>
+
+      {canDelete && (
+        <DeleteLeadsDialog
+          open={deleteOpen}
+          onClose={() => setDeleteOpen(false)}
+          mode={deleteMode}
+          ids={selectedIds}
+          filters={filters}
+          approxCount={deleteMode === "ids" ? selectedIds.length : totalCount}
+          isApproximate={isApproximate}
+          onDeleted={() => {
+            clearSelection();
+            fetchLeads();
+          }}
+        />
+      )}
 
       <LeadDetailPanel
         lead={selectedLead}

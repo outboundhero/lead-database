@@ -15,11 +15,23 @@ export interface RangeFilter {
 export interface LocationFilter {
   country: IncludeExclude;
   state: IncludeExclude;
-  city: string;
+  city: IncludeExclude; // was a plain string — normalizeFilterState migrates old payloads
 }
 
 // New for OutboundHero — IncludeExclude shape for the keyword filter (was a plain string).
+// matchMode 'exact' = whole-term matching (word-boundaried, plural-tolerant:
+// "dry cleaner" matches only the full phrase — NOT everything containing
+// "cleaner"; "house" still catches "housecleaning" via word-start) across
+// company, domain/website, category, subcategory, additional_category.
+// 'contains' = legacy substring across company/industries/overview.
 export interface KeywordFilter {
+  include: string[];
+  exclude: string[];
+  matchMode?: "contains" | "exact";
+}
+
+// Email/domain substring search (weebly.com, .gov, walmart.com …).
+export interface EmailContainsFilter {
   include: string[];
   exclude: string[];
 }
@@ -50,6 +62,8 @@ export interface FilterState {
   esp: IncludeExclude;
   category: IncludeExclude;
   subcategory: IncludeExclude;
+  additionalCategory: IncludeExclude;
+  tags: IncludeExclude;                 // Bison tags (client tags etc.), substring match
 
   // Location
   location: LocationFilter;
@@ -61,6 +75,11 @@ export interface FilterState {
   // Keyword (now include + exclude, multi-field ILIKE across company_name,
   // general_industry, specific_industry, company_overview)
   keyword: KeywordFilter;
+  emailContains: EmailContainsFilter;
+
+  // One-box search: comma-separated terms OR'd across email, company,
+  // first/last name, domain, category, subcategory.
+  globalSearch: string;
 
   // OutboundHero additions
   emailType: EmailTypeFilter;          // default both true → no filter
@@ -92,14 +111,18 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   esp: ie(),
   category: ie(),
   subcategory: ie(),
+  additionalCategory: ie(),
+  tags: ie(),
   location: {
     country: ie(),
     state: ie(),
-    city: "",
+    city: ie(),
   },
   companySize: { buckets: [], includeUnknown: false },
   revenue: { buckets: [], includeUnknown: false },
-  keyword: { include: [], exclude: [] },
+  keyword: { include: [], exclude: [], matchMode: "contains" },
+  emailContains: { include: [], exclude: [] },
+  globalSearch: "",
   emailType: { personal: true, general: true },
   includeBounced: false,
   page: 1,
@@ -133,17 +156,28 @@ export function normalizeFilterState(partial: unknown): FilterState {
     esp: mergeIE(p.esp, d.esp),
     category: mergeIE(p.category, d.category),
     subcategory: mergeIE(p.subcategory, d.subcategory),
+    additionalCategory: mergeIE(p.additionalCategory, d.additionalCategory),
+    tags: mergeIE(p.tags, d.tags),
     location: {
       country: mergeIE(p.location?.country, d.location.country),
       state: mergeIE(p.location?.state, d.location.state),
-      city: typeof p.location?.city === "string" ? p.location.city : d.location.city,
+      // Legacy payloads stored city as a plain string — fold it into include[].
+      city: typeof (p.location as { city?: unknown } | undefined)?.city === "string"
+        ? { ...d.location.city, include: (p.location!.city as unknown as string) ? [p.location!.city as unknown as string] : [] }
+        : mergeIE(p.location?.city as Partial<IncludeExclude> | undefined, d.location.city),
     },
     companySize: { ...d.companySize, ...(p.companySize ?? {}) },
     revenue: { ...d.revenue, ...(p.revenue ?? {}) },
     keyword: {
       include: Array.isArray(p.keyword?.include) ? p.keyword.include : d.keyword.include,
       exclude: Array.isArray(p.keyword?.exclude) ? p.keyword.exclude : d.keyword.exclude,
+      matchMode: p.keyword?.matchMode === "exact" ? "exact" : "contains",
     },
+    emailContains: {
+      include: Array.isArray(p.emailContains?.include) ? p.emailContains.include : d.emailContains.include,
+      exclude: Array.isArray(p.emailContains?.exclude) ? p.emailContains.exclude : d.emailContains.exclude,
+    },
+    globalSearch: typeof p.globalSearch === "string" ? p.globalSearch : d.globalSearch,
     emailType: { ...d.emailType, ...(p.emailType ?? {}) },
   };
 }
@@ -161,12 +195,16 @@ export function countActiveFilters(filters: FilterState): number {
   if (filters.esp.include.length || filters.esp.exclude.length || filters.esp.includeUnknown) count++;
   if (filters.category.include.length || filters.category.exclude.length || filters.category.includeUnknown) count++;
   if (filters.subcategory.include.length || filters.subcategory.exclude.length || filters.subcategory.includeUnknown) count++;
+  if (filters.additionalCategory.include.length || filters.additionalCategory.exclude.length || filters.additionalCategory.includeUnknown) count++;
+  if (filters.tags.include.length || filters.tags.exclude.length) count++;
   if (filters.location.country.include.length || filters.location.country.exclude.length || filters.location.country.includeUnknown) count++;
   if (filters.location.state.include.length || filters.location.state.exclude.length || filters.location.state.includeUnknown) count++;
-  if (filters.location.city) count++;
+  if (filters.location.city.include.length || filters.location.city.exclude.length) count++;
   if (filters.companySize.buckets.length || filters.companySize.includeUnknown || filters.companySize.customMin || filters.companySize.customMax) count++;
   if (filters.revenue.buckets.length || filters.revenue.includeUnknown) count++;
   if (filters.keyword.include.length || filters.keyword.exclude.length) count++;
+  if (filters.emailContains.include.length || filters.emailContains.exclude.length) count++;
+  if (filters.globalSearch.trim()) count++;
   // emailType counts as active only when not both selected (i.e. user has restricted)
   if (!(filters.emailType.personal && filters.emailType.general)) count++;
   if (filters.includeBounced) count++;

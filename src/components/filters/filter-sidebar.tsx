@@ -25,7 +25,7 @@ interface FilterSidebarProps {
   onRangeChange: (field: "companySize" | "revenue", value: RangeFilter) => void;
   onLocationCountryChange: (value: IncludeExclude) => void;
   onLocationStateChange: (value: IncludeExclude) => void;
-  onLocationCityChange: (value: string) => void;
+  onLocationCityChange: (value: FilterState["location"]["city"]) => void;
   onFilterOperatorChange: (value: "AND" | "OR") => void;
   onReset: () => void;
 }
@@ -232,8 +232,8 @@ export function FilterSidebar({
           <label className="text-xs text-muted-foreground">City</label>
           <FilterText
             placeholder="Search city..."
-            value={filters.location.city}
-            onChange={onLocationCityChange}
+            value={filters.location.city.include[0] ?? ""}
+            onChange={(v) => onLocationCityChange({ ...filters.location.city, include: v ? [v] : [] })}
           />
         </div>
       </FilterGroup>

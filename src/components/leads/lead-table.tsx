@@ -87,6 +87,83 @@ export function LeadTable({
     rowCount: totalCount,
   });
 
+  const rows = table.getRowModel().rows;
+  const rowIds = React.useMemo(() => rows.map((r) => r.id), [rows]);
+
+  // Drag-to-select + shift-click range selection over the visible page rows.
+  // - drag: mousedown a row, move over others → selects the contiguous range
+  //   (selecting or deselecting based on the anchor row's initial state).
+  // - shift+mousedown: selects the range between the last anchor and this row.
+  // The per-row checkbox still toggles a single row on its own (it stops
+  // propagation), and a plain click (no drag) opens the detail panel.
+  const anchorRef = React.useRef<number | null>(null);
+  const dragRef = React.useRef<{ start: number; selecting: boolean; moved: boolean } | null>(null);
+  // When a drag or shift-select happens we must swallow the click that follows
+  // so it doesn't also open the detail panel.
+  const suppressClickRef = React.useRef(false);
+
+  const applyRange = React.useCallback(
+    (from: number, to: number, value: boolean) => {
+      const lo = Math.min(from, to);
+      const hi = Math.max(from, to);
+      const next: RowSelectionState = { ...rowSelection };
+      for (let i = lo; i <= hi; i++) {
+        const id = rowIds[i];
+        if (id === undefined) continue;
+        if (value) next[id] = true;
+        else delete next[id];
+      }
+      onRowSelectionChange(next);
+    },
+    [rowSelection, rowIds, onRowSelectionChange]
+  );
+
+  React.useEffect(() => {
+    function onUp() {
+      if (dragRef.current?.moved) {
+        suppressClickRef.current = true;
+        // A same-target release fires its click synchronously (consuming the
+        // flag); a cross-row drag produces NO click, so clear on the next tick
+        // to avoid swallowing the user's next genuine click.
+        setTimeout(() => { suppressClickRef.current = false; }, 0);
+      }
+      dragRef.current = null;
+    }
+    window.addEventListener("mouseup", onUp);
+    return () => window.removeEventListener("mouseup", onUp);
+  }, []);
+
+  function handleRowMouseDown(e: React.MouseEvent, index: number, isSelected: boolean) {
+    if (e.button !== 0) return; // left button only
+    if (e.shiftKey) {
+      e.preventDefault(); // avoid native text selection
+      const anchor = anchorRef.current ?? index;
+      applyRange(anchor, index, true);
+      anchorRef.current = index;
+      suppressClickRef.current = true;
+      return;
+    }
+    dragRef.current = { start: index, selecting: !isSelected, moved: false };
+    anchorRef.current = index;
+  }
+
+  function handleRowMouseEnter(index: number) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    drag.moved = true;
+    applyRange(drag.start, index, drag.selecting);
+  }
+
+  function handleRowClick(e: React.MouseEvent, lead: Lead) {
+    // A drag or shift-select already consumed this interaction.
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    if (e.shiftKey) return;
+    onRowClick(lead);
+  }
+
   return (
     <div className="flex h-full flex-col">
       <div className="relative flex-1 overflow-auto">
@@ -131,11 +208,14 @@ export function LeadTable({
                 </TableCell>
               </TableRow>
             ) : (
-              table.getRowModel().rows.map((row) => (
+              rows.map((row, index) => (
                 <TableRow
                   key={row.id}
-                  className="cursor-pointer"
-                  onClick={() => onRowClick(row.original)}
+                  data-state={row.getIsSelected() ? "selected" : undefined}
+                  className="cursor-pointer select-none"
+                  onMouseDown={(e) => handleRowMouseDown(e, index, row.getIsSelected())}
+                  onMouseEnter={() => handleRowMouseEnter(index)}
+                  onClick={(e) => handleRowClick(e, row.original)}
                 >
                   {row.getVisibleCells().map((cell) => (
                     <TableCell key={cell.id} className="px-4 py-3">

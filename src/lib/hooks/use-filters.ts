@@ -6,6 +6,7 @@ import {
   type IncludeExclude,
   type KeywordFilter,
   type EmailTypeFilter,
+  type EmailContainsFilter,
   type RangeFilter,
   DEFAULT_FILTER_STATE,
   normalizeFilterState,
@@ -17,11 +18,13 @@ type FilterAction =
   | { type: "SET_RANGE"; field: "companySize" | "revenue"; value: RangeFilter }
   | { type: "SET_LOCATION_COUNTRY"; value: IncludeExclude }
   | { type: "SET_LOCATION_STATE"; value: IncludeExclude }
-  | { type: "SET_LOCATION_CITY"; value: string }
+  | { type: "SET_LOCATION_CITY"; value: IncludeExclude }
   | { type: "SET_FILTER_OPERATOR"; value: "AND" | "OR" }
   | { type: "TOGGLE_FLAG"; field: "excludeEmptyName" | "excludeEmptyCompany" | "excludeEmptyOverview"; value: boolean }
   | { type: "SET_KEYWORD"; value: KeywordFilter }
   | { type: "SET_EMAIL_TYPE"; value: EmailTypeFilter }
+  | { type: "SET_EMAIL_CONTAINS"; value: EmailContainsFilter }
+  | { type: "SET_GLOBAL_SEARCH"; value: string }
   | { type: "SET_INCLUDE_BOUNCED"; value: boolean }
   | { type: "SET_PAGE"; value: number }
   | { type: "SET_PAGE_SIZE"; value: number }
@@ -51,6 +54,10 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
       return { ...state, keyword: action.value, page: 1 };
     case "SET_EMAIL_TYPE":
       return { ...state, emailType: action.value, page: 1 };
+    case "SET_EMAIL_CONTAINS":
+      return { ...state, emailContains: action.value, page: 1 };
+    case "SET_GLOBAL_SEARCH":
+      return { ...state, globalSearch: action.value, page: 1 };
     case "SET_INCLUDE_BOUNCED":
       return { ...state, includeBounced: action.value, page: 1 };
     case "SET_PAGE":
@@ -101,7 +108,7 @@ export function useFilters() {
     dispatch({ type: "SET_LOCATION_STATE", value });
   }, []);
 
-  const setLocationCity = useCallback((value: string) => {
+  const setLocationCity = useCallback((value: IncludeExclude) => {
     dispatch({ type: "SET_LOCATION_CITY", value });
   }, []);
 
@@ -133,6 +140,14 @@ export function useFilters() {
     dispatch({ type: "SET_EMAIL_TYPE", value });
   }, []);
 
+  const setEmailContains = useCallback((value: EmailContainsFilter) => {
+    dispatch({ type: "SET_EMAIL_CONTAINS", value });
+  }, []);
+
+  const setGlobalSearch = useCallback((value: string) => {
+    dispatch({ type: "SET_GLOBAL_SEARCH", value });
+  }, []);
+
   const setIncludeBounced = useCallback((value: boolean) => {
     dispatch({ type: "SET_INCLUDE_BOUNCED", value });
   }, []);
@@ -158,6 +173,8 @@ export function useFilters() {
       toggleFlag,
       setKeyword,
       setEmailType,
+      setEmailContains,
+      setGlobalSearch,
       setIncludeBounced,
       setPage,
       setPageSize,
@@ -177,6 +194,8 @@ export function useFilters() {
       toggleFlag,
       setKeyword,
       setEmailType,
+      setEmailContains,
+      setGlobalSearch,
       setIncludeBounced,
       setPage,
       setPageSize,

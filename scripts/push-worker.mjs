@@ -133,7 +133,7 @@ async function bison(auth, method, path, body, attempt = 1) {
 }
 
 // EXACT create payload from src/lib/bison/push-leads.ts (enrichment as custom variables).
-function leadPayload(l) {
+function leadPayload(l, tags) {
   const vars = [];
   if (l.category) vars.push({ name: "category", value: String(l.category) });
   if (l.subcategory) vars.push({ name: "subcategory", value: String(l.subcategory) });
@@ -147,7 +147,22 @@ function leadPayload(l) {
     ...(l.company ? { company: l.company } : {}),
     ...(l.notes ? { notes: l.notes } : {}),
     custom_variables: vars,
+    // Client tag(s) attached to the lead in Bison (create + PUT carry them so
+    // it's idempotent). Merges the batch's client tag with any tags the lead
+    // already carries in our DB. Sent as a `tags` string array.
+    ...(tags && tags.length ? { tags } : {}),
   };
+}
+
+// Tags to attach in Bison = the batch's client tag + the lead's existing DB tags
+// (comma-joined), de-duplicated case-insensitively.
+function tagsForLead(clientTag, leadTags) {
+  const out = [];
+  const seen = new Set();
+  const add = (t) => { const k = String(t).trim(); if (k && !seen.has(k.toLowerCase())) { seen.add(k.toLowerCase()); out.push(k); } };
+  if (clientTag) add(clientTag);
+  if (leadTags) for (const t of String(leadTags).split(",")) add(t);
+  return out;
 }
 
 async function findLeadByEmail(auth, email, tries = 1) {
@@ -165,9 +180,9 @@ async function findLeadByEmail(auth, email, tries = 1) {
 // "taken / already exists" validation error. Handle it corofy's way: find the
 // existing lead by search (retrying for indexing delay), PUT to refresh its
 // fields, and reuse its id. Other 4xx are real validation errors.
-async function createLead(auth, lead) {
+async function createLead(auth, lead, tags) {
   try {
-    const json = await bison(auth, "POST", "/api/leads", leadPayload(lead));
+    const json = await bison(auth, "POST", "/api/leads", leadPayload(lead, tags));
     const id = json?.data?.id ?? json?.id ?? json?.lead?.id; // defensive id read
     if (id != null) return String(id);
     throw new Error(`create ${lead.email}: could not read Bison lead id from response`);
@@ -176,7 +191,7 @@ async function createLead(auth, lead) {
   }
   const hit = await findLeadByEmail(auth, lead.email, 3);
   if (!hit) throw new Error(`lead ${lead.email} exists in Bison but was not found by search`);
-  await bison(auth, "PUT", `/api/leads/${hit.id}`, leadPayload(lead)); // refresh fields
+  await bison(auth, "PUT", `/api/leads/${hit.id}`, leadPayload(lead, tags)); // refresh fields + tags
   return String(hit.id);
 }
 
@@ -415,13 +430,13 @@ async function pushCycle() {
   if (items.length === 0) return false;
 
   const { rows: leadRows } = await pool.query(
-    `select id, email, first_name, last_name, title, company, notes, category, subcategory, city, state
+    `select id, email, first_name, last_name, title, company, notes, category, subcategory, city, state, tags
        from leads where id = any($1::uuid[])`,
     [[...new Set(items.map((i) => i.lead_id))]]
   );
   const leads = new Map(leadRows.map((l) => [l.id, l]));
   const { rows: batchRows } = await pool.query(
-    `select id, campaigns, status from push_batches where id = any($1::uuid[])`,
+    `select id, campaigns, status, client_tag from push_batches where id = any($1::uuid[])`,
     [[...new Set(items.map((i) => i.batch_id))]]
   );
   const batchOf = new Map(batchRows.map((b) => [b.id, b]));
@@ -468,7 +483,9 @@ async function pushCycle() {
           const domain = t.instance_url ? normalizeDomain(t.instance_url) : DEFAULT_DOMAIN;
           throw Object.assign(new Error(`no API key for instance ${domain}`), { configFatal: true });
         }
-        if (bisonIds[auth.domain] == null) bisonIds[auth.domain] = await createLead(auth, lead);
+        if (bisonIds[auth.domain] == null) {
+          bisonIds[auth.domain] = await createLead(auth, lead, tagsForLead(batch.client_tag, lead.tags));
+        }
       }
       // Persist BEFORE any attach — crash recovery must never duplicate creates.
       const ok = await setItem(item, token, { bison_ids: bisonIds, target_campaigns: targets });
