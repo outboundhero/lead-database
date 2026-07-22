@@ -606,6 +606,8 @@ export function FilterBar({
               options={categoryValues}
               value={filters.category}
               onChange={(v) => onIncludeExcludeChange("category", v)}
+              searchable
+              onSearch={(term) => liveSearch("category", term)}
             />
           </FilterChip>
         )}
@@ -621,6 +623,8 @@ export function FilterBar({
               options={subcategoryValues}
               value={filters.subcategory}
               onChange={(v) => onIncludeExcludeChange("subcategory", v)}
+              searchable
+              onSearch={(term) => liveSearch("subcategory", term)}
             />
           </FilterChip>
         )}

@@ -112,6 +112,7 @@ export function ColumnSelector({
   const [rangeToStr, setRangeToStr] = useState("");
   const [destination, setDestination] = useState<ExportDestination>("csv");
   const [campaigns, setCampaigns] = useState<BisonCampaign[]>([]);
+  const [campaignSearch, setCampaignSearch] = useState("");
   // Multi-select, keyed by `${instance_url}#${id}` (ids collide across instances)
   const [selectedCampaignKeys, setSelectedCampaignKeys] = useState<Set<string>>(new Set());
   const [campaignsLoading, setCampaignsLoading] = useState(false);
@@ -143,6 +144,7 @@ export function ColumnSelector({
     setSelectedCampaignKeys(new Set());
     setRangeFromStr("");
     setRangeToStr("");
+    setCampaignSearch("");
     setCampaignsError(null);
     setCampaignsAttempted(false);
   }, [open]);
@@ -253,10 +255,29 @@ export function ColumnSelector({
               </div>
             ) : campaigns.length === 0 ? (
               <p className="text-xs text-muted-foreground">No campaigns found.</p>
-            ) : (
-              <div className="max-h-[40vh] space-y-2 overflow-y-auto rounded-md border p-2">
-                {Array.from(
-                  campaigns.reduce<Map<string, BisonCampaign[]>>((groups, c) => {
+            ) : (() => {
+              const q = campaignSearch.trim().toLowerCase();
+              const filtered = q
+                ? campaigns.filter(
+                    (c) =>
+                      (c.name ?? "").toLowerCase().includes(q) ||
+                      (c.workspace_name ?? "").toLowerCase().includes(q) ||
+                      (c.instance_url ?? "").toLowerCase().includes(q)
+                  )
+                : campaigns;
+              return (
+              <div className="space-y-2">
+                <Input
+                  placeholder={`Search ${campaigns.length} campaigns…`}
+                  value={campaignSearch}
+                  onChange={(e) => setCampaignSearch(e.target.value)}
+                  className="h-8 text-xs"
+                />
+                <div className="max-h-[40vh] space-y-2 overflow-y-auto rounded-md border p-2">
+                {filtered.length === 0 ? (
+                  <p className="px-1 py-2 text-xs text-muted-foreground">No campaigns match “{campaignSearch}”.</p>
+                ) : Array.from(
+                  filtered.reduce<Map<string, BisonCampaign[]>>((groups, c) => {
                     const group = c.workspace_name || c.instance_url || "Unknown workspace";
                     const list = groups.get(group);
                     if (list) list.push(c);
@@ -289,8 +310,10 @@ export function ColumnSelector({
                     </div>
                   </div>
                 ))}
+                </div>
               </div>
-            )}
+              );
+            })()}
             <p className="text-[10px] text-muted-foreground mt-1">
               Every selected campaign receives every lead. Leads are created in Bison, then attached — queued in the background, progress on the Exports page.
             </p>
