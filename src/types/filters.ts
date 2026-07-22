@@ -67,6 +67,7 @@ export interface FilterState {
   generalIndustry: IncludeExclude;
   specificIndustry: IncludeExclude;
   esp: IncludeExclude;
+  company: IncludeExclude;  // searchable exact-match dropdown (include/exclude)
   category: IncludeExclude;
   subcategory: IncludeExclude;
   additionalCategory: IncludeExclude;
@@ -117,6 +118,7 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   generalIndustry: ie(),
   specificIndustry: ie(),
   esp: ie(),
+  company: ie(),
   category: ie(),
   subcategory: ie(),
   additionalCategory: ie(),
@@ -163,6 +165,7 @@ export function normalizeFilterState(partial: unknown): FilterState {
     generalIndustry: mergeIE(p.generalIndustry, d.generalIndustry),
     specificIndustry: mergeIE(p.specificIndustry, d.specificIndustry),
     esp: mergeIE(p.esp, d.esp),
+    company: mergeIE(p.company, d.company),
     category: mergeIE(p.category, d.category),
     subcategory: mergeIE(p.subcategory, d.subcategory),
     additionalCategory: mergeIE(p.additionalCategory, d.additionalCategory),
@@ -206,6 +209,7 @@ export function countActiveFilters(filters: FilterState): number {
   if (filters.generalIndustry.include.length || filters.generalIndustry.exclude.length || filters.generalIndustry.includeUnknown) count++;
   if (filters.specificIndustry.include.length || filters.specificIndustry.exclude.length || filters.specificIndustry.includeUnknown) count++;
   if (filters.esp.include.length || filters.esp.exclude.length || filters.esp.includeUnknown) count++;
+  if (filters.company.include.length || filters.company.exclude.length || filters.company.includeUnknown) count++;
   if (filters.category.include.length || filters.category.exclude.length || filters.category.includeUnknown) count++;
   if (filters.subcategory.include.length || filters.subcategory.exclude.length || filters.subcategory.includeUnknown) count++;
   if (filters.additionalCategory.include.length || filters.additionalCategory.exclude.length || filters.additionalCategory.includeUnknown) count++;

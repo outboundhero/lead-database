@@ -162,11 +162,11 @@ export function FilterMultiSelect({
                 </span>
               )}
               {value.include.map((v) => (
-                <Badge key={`inc-${v}`} variant="default" className="text-xs gap-1">
-                  {v === "__UNKNOWN__" ? "Unknown / Empty" : (labels?.[v] ?? v)}
+                <Badge key={`inc-${v}`} variant="default" className="max-w-full min-w-0 text-xs gap-1" title={v === "__UNKNOWN__" ? "Unknown / Empty" : v}>
+                  <span className="truncate">{v === "__UNKNOWN__" ? "Unknown / Empty" : (labels?.[v] ?? v)}</span>
                   <button
                     type="button"
-                    className="ml-0.5 rounded-full hover:bg-primary-foreground/20"
+                    className="ml-0.5 shrink-0 rounded-full hover:bg-primary-foreground/20"
                     onClick={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
@@ -185,12 +185,13 @@ export function FilterMultiSelect({
             <Badge
               key={`exc-${v}`}
               variant="destructive"
-              className="text-xs gap-1"
+              className="max-w-full min-w-0 text-xs gap-1"
+              title={v === "__UNKNOWN__" ? "Unknown / Empty" : v}
             >
-              {v === "__UNKNOWN__" ? "Unknown / Empty" : (labels?.[v] ?? v)}
+              <span className="truncate">{v === "__UNKNOWN__" ? "Unknown / Empty" : (labels?.[v] ?? v)}</span>
               <button
                 type="button"
-                className="ml-0.5 rounded-full hover:bg-destructive-foreground/20"
+                className="ml-0.5 shrink-0 rounded-full hover:bg-destructive-foreground/20"
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();

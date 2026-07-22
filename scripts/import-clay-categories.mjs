@@ -134,14 +134,24 @@ function buildIndex(headers, type) {
     additionalCol: first(m.additional),
   };
 }
+// Some Clay cells leak raw LLM output: markdown ```json fences, backticks, and
+// "category: <value>" key prefixes. Strip them down to the bare value.
+function sanitizeCategory(v) {
+  if (!v) return v;
+  let t = String(v).replace(/```+\s*json/gi, "").replace(/```+/g, "").replace(/`/g, "");
+  const m = t.match(/(?:additional[_ ]?category|sub[- ]?category|category)\s*:\s*([\s\S]+)/i);
+  if (m) t = m[1];
+  t = t.replace(/[{}\[\]"']/g, " ").replace(/\s+/g, " ").trim();
+  return t || undefined;
+}
 function normalizeRow(row, ix) {
   const email = ix.emailCol !== undefined ? clean(row[ix.emailCol])?.toLowerCase() : undefined;
   if (!email) return null;
   return {
     email,
-    category: ix.categoryCol !== undefined ? clean(row[ix.categoryCol]) : undefined,
-    subcategory: ix.subcategoryCol !== undefined ? clean(row[ix.subcategoryCol]) : undefined,
-    additional: ix.additionalCol !== undefined ? clean(row[ix.additionalCol]) : undefined,
+    category: ix.categoryCol !== undefined ? sanitizeCategory(clean(row[ix.categoryCol])) : undefined,
+    subcategory: ix.subcategoryCol !== undefined ? sanitizeCategory(clean(row[ix.subcategoryCol])) : undefined,
+    additional: ix.additionalCol !== undefined ? sanitizeCategory(clean(row[ix.additionalCol])) : undefined,
   };
 }
 

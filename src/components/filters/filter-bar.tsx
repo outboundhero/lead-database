@@ -183,6 +183,7 @@ export function FilterBar({
   const [subcategoryValues, setSubcategoryValues] = useState<string[]>([]);
   const [additionalCategoryValues, setAdditionalCategoryValues] = useState<string[]>([]);
   const [cityValues, setCityValues] = useState<string[]>([]);
+  const [companyValues, setCompanyValues] = useState<string[]>([]);
   const [clientTagOptions, setClientTagOptions] = useState<string[]>([]);
   void countries;
 
@@ -201,6 +202,7 @@ export function FilterBar({
       case "subcategory": setSubcategoryValues(values); break;
       case "additional_category": setAdditionalCategoryValues(values); break;
       case "city": setCityValues(values); break;
+      case "company": setCompanyValues(values); break;
     }
   }, []);
 
@@ -208,8 +210,8 @@ export function FilterBar({
     if (loadedRef.current.has(col)) return;
     loadedRef.current.add(col);
 
-    // City is unbounded (100K+ distinct) — search-only, no preload.
-    if (col === "city") return;
+    // City/Company are unbounded (100K+/1.3M distinct) — search-only, no preload.
+    if (col === "city" || col === "company") return;
 
     const supabase = createClient();
     const { data } = await supabase.rpc("distinct_values", { col_name: col });
@@ -359,13 +361,19 @@ export function FilterBar({
           </FilterChip>
         )}
 
-        {/* Company Name */}
+        {/* Company — searchable include/exclude dropdown (was a text box) */}
         {!isHidden("company") && (
-          <FilterChip label="Company" activeCount={(filters.companyName ? 1 : 0) + (filters.excludeEmptyCompany ? 1 : 0)}>
-            <FilterText
-              placeholder="Search company..."
-              value={filters.companyName}
-              onChange={(v) => onTextChange("companyName", v)}
+          <FilterChip
+            label="Company"
+            activeCount={filters.company.include.length + filters.company.exclude.length + (filters.excludeEmptyCompany ? 1 : 0)}
+            onOpen={() => loadDistinctFor("company")}
+          >
+            <FilterMultiSelect
+              options={companyValues}
+              value={filters.company}
+              onChange={(v) => onIncludeExcludeChange("company", v)}
+              searchable
+              onSearch={(term) => liveSearch("company", term)}
             />
             <label className="flex items-center gap-2 mt-2 text-xs cursor-pointer">
               <input
