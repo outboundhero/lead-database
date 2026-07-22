@@ -85,6 +85,13 @@ const ONLY = (() => {
   const a = args.find((x) => x.startsWith("--only="));
   return a ? new Set(a.slice(7).split(",").map((t) => t.trim().toUpperCase()).filter(Boolean)) : null;
 })();
+// --skip-list=<path>: skip files whose basename is listed (resume after a crash).
+const SKIP_FILES = (() => {
+  const a = args.find((x) => x.startsWith("--skip-list="));
+  if (!a) return null;
+  try { return new Set(readFileSync(a.slice(12), "utf8").split(/\r?\n/).map((x) => x.trim()).filter(Boolean)); }
+  catch { return null; }
+})();
 const CHUNK = 3000;
 const FALLBACK_SOURCE = "bison"; // used only if the CHECK still rejects 'clay'
 
@@ -256,6 +263,7 @@ async function main() {
     if (!meta) { console.warn(`  ? ${file}: unrecognized name — skipped.`); tot.skippedFiles++; continue; }
     if (!meta.tag) { tot.skippedFiles++; continue; } // Find-people-Table etc.
     if (ONLY && !ONLY.has(meta.tag)) continue;
+    if (SKIP_FILES && SKIP_FILES.has(file)) { tot.skippedFiles++; continue; }
 
     const raw = readFileSync(join(folder, file), "utf8");
     const rows = await parseRecovering(raw, file);
