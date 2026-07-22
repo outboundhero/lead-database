@@ -76,14 +76,26 @@ const clean = (v) => {
 
 // ── filename -> { type, tag } ────────────────────────────────────────────────
 const FILE_RE = /^(?:copy-of-)?(general|people|find-people)-(.+?)-default-view-export-\d+$/i;
+// Normalize the raw filename tag to the base CLIENT tag. Clay exports carry
+// variant markers that are the SAME client: "(2)-IMC", "ABM-#2", "CCGCT-(2)",
+// "FCS-(AI-ARK)", "CI-(Competitor-Clients-Pull)". SI_-<vertical> and Template
+// are not clients.
+function normalizeTag(raw) {
+  let t = raw;
+  t = t.replace(/^\(\d+\)-/, "");        // leading split marker: (2)-IMC
+  t = t.replace(/-\([^)]*\)/g, "");      // any -(...) : (2), (AI-ARK), (Competitor-Clients-Pull)
+  t = t.replace(/-#\d+/g, "");           // -#2 batch marker
+  t = t.replace(/^[-_]+|[-_]+$/g, "").trim().toUpperCase();
+  return t;
+}
 function parseFile(name) {
   const base = name.replace(/\.csv$/i, "");
   const m = base.match(FILE_RE);
   if (!m) return null;
   const type = /people/i.test(m[1]) ? "people" : "general";
-  // strip -#2 / -(2) split-export suffixes, normalize spacing/casing
-  const tag = m[2].replace(/-#\d+$/, "").replace(/-\(\d+\)$/, "").trim().toUpperCase();
-  if (!tag || tag === "TABLE") return { type, tag: null }; // Find-people-Table etc.
+  const tag = normalizeTag(m[2]);
+  // Not a client: Find-people-Table, Template, or the SI_-<vertical> pulls.
+  if (!tag || tag === "TABLE" || tag === "TEMPLATE" || tag.startsWith("SI_")) return { type, tag: null };
   return { type, tag };
 }
 
