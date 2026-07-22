@@ -53,8 +53,25 @@ const supabase = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSessio
 // Bulk updates go through the pg pool — one statement per chunk instead of one
 // HTTP round-trip per lead (the difference between hours and weeks at 2M rows).
 const pool = process.env.DATABASE_URL
-  ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
+  ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4, keepAlive: true, idleTimeoutMillis: 30000 })
   : null;
+// An idle client's connection dropping emits 'error' on the pool; without this
+// handler node-postgres crashes the whole process (this killed the first run).
+pool?.on("error", (err) => console.warn(`  pool client error (ignored, will reconnect): ${err.message}`));
+
+// Retry a query through the pool on transient connection errors.
+async function poolQuery(text, params, tries = 4) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await pool.query(text, params);
+    } catch (err) {
+      const transient = /ECONNRESET|termin|Connection terminated|timeout|socket|EPIPE|server closed/i.test(err.message || "");
+      if (!transient || attempt >= tries) throw err;
+      console.warn(`  transient DB error (attempt ${attempt}/${tries}): ${err.message} — retrying in ${attempt}s`);
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
+}
 
 const args = process.argv.slice(2);
 const folder = args.find((a) => !a.startsWith("--"));
@@ -211,7 +228,7 @@ async function fetchExistingByEmail(emails) {
   if (!pool || emails.length === 0) return byEmail;
   // One indexed ANY() lookup per chunk via the pooler — far fewer, faster
   // round-trips than the Supabase REST layer's 150-row .in() batches.
-  const { rows } = await pool.query(
+  const { rows } = await poolQuery(
     `select id, email, category, subcategory, additional_category, category_source, tags
        from leads where email = any($1::text[])`,
     [emails]
@@ -309,7 +326,7 @@ async function main() {
       if (batch.length > 0 && !DRY) {
         if (!pool) { console.error("    DATABASE_URL required for bulk updates"); process.exit(1); }
         try {
-          await pool.query(
+          await poolQuery(
             `update leads l set
                category = v.category,
                subcategory = v.subcategory,
