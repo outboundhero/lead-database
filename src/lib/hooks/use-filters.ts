@@ -8,6 +8,8 @@ import {
   type EmailTypeFilter,
   type EmailContainsFilter,
   type CategorySearchFilter,
+  type CustomTagsFilter,
+  type WebsiteFilter,
   type RangeFilter,
   DEFAULT_FILTER_STATE,
   normalizeFilterState,
@@ -26,6 +28,8 @@ type FilterAction =
   | { type: "SET_EMAIL_TYPE"; value: EmailTypeFilter }
   | { type: "SET_EMAIL_CONTAINS"; value: EmailContainsFilter }
   | { type: "SET_CATEGORY_SEARCH"; value: CategorySearchFilter }
+  | { type: "SET_CUSTOM_TAGS"; value: CustomTagsFilter }
+  | { type: "SET_WEBSITE"; value: WebsiteFilter }
   | { type: "SET_GLOBAL_SEARCH"; value: string }
   | { type: "SET_INCLUDE_BOUNCED"; value: boolean }
   | { type: "SET_PAGE"; value: number }
@@ -60,6 +64,10 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
       return { ...state, emailContains: action.value, page: 1 };
     case "SET_CATEGORY_SEARCH":
       return { ...state, categorySearch: action.value, page: 1 };
+    case "SET_CUSTOM_TAGS":
+      return { ...state, customTags: action.value, page: 1 };
+    case "SET_WEBSITE":
+      return { ...state, website: action.value, page: 1 };
     case "SET_GLOBAL_SEARCH":
       return { ...state, globalSearch: action.value, page: 1 };
     case "SET_INCLUDE_BOUNCED":
@@ -150,6 +158,12 @@ export function useFilters() {
   const setCategorySearch = useCallback((value: CategorySearchFilter) => {
     dispatch({ type: "SET_CATEGORY_SEARCH", value });
   }, []);
+  const setCustomTags = useCallback((value: CustomTagsFilter) => {
+    dispatch({ type: "SET_CUSTOM_TAGS", value });
+  }, []);
+  const setWebsite = useCallback((value: WebsiteFilter) => {
+    dispatch({ type: "SET_WEBSITE", value });
+  }, []);
 
   const setGlobalSearch = useCallback((value: string) => {
     dispatch({ type: "SET_GLOBAL_SEARCH", value });
@@ -182,6 +196,8 @@ export function useFilters() {
       setEmailType,
       setEmailContains,
       setCategorySearch,
+      setCustomTags,
+      setWebsite,
       setGlobalSearch,
       setIncludeBounced,
       setPage,
@@ -204,6 +220,8 @@ export function useFilters() {
       setEmailType,
       setEmailContains,
       setCategorySearch,
+      setCustomTags,
+      setWebsite,
       setGlobalSearch,
       setIncludeBounced,
       setPage,

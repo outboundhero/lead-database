@@ -43,6 +43,8 @@ interface FilterBarProps {
   onEmailTypeChange: (value: EmailTypeFilter) => void;
   onEmailContainsChange: (value: EmailContainsFilter) => void;
   onCategorySearchChange: (value: CategorySearchFilter) => void;
+  onCustomTagsChange: (value: { include: string[]; exclude: string[] }) => void;
+  onWebsiteChange: (value: { include: string[]; exclude: string[] }) => void;
   onGlobalSearchChange: (value: string) => void;
   onIncludeBouncedChange: (value: boolean) => void;
   onLoadPreset?: (filters: FilterState) => void;
@@ -58,9 +60,11 @@ const HIDEABLE_CHIPS: { key: string; label: string }[] = [
   { key: "title", label: "Title" },
   { key: "city", label: "City" },
   { key: "state", label: "State" },
+  { key: "categorySearch", label: "Category Search" },
   { key: "keywords", label: "Keywords" },
   { key: "emailContains", label: "Email Contains" },
-  { key: "categorySearch", label: "Category Search" },
+  { key: "website", label: "Website / Domain" },
+  { key: "customTags", label: "Custom Tags" },
   { key: "emailType", label: "Email Type" },
   { key: "bounced", label: "Bounced" },
   { key: "esp", label: "Email Service Provider" },
@@ -125,6 +129,8 @@ export function FilterBar({
   onEmailTypeChange,
   onEmailContainsChange,
   onCategorySearchChange,
+  onCustomTagsChange,
+  onWebsiteChange,
   onGlobalSearchChange,
   onIncludeBouncedChange,
   onLoadPreset,
@@ -166,6 +172,7 @@ export function FilterBar({
   const [cityValues, setCityValues] = useState<string[]>([]);
   const [companyValues, setCompanyValues] = useState<string[]>([]);
   const [clientTagOptions, setClientTagOptions] = useState<string[]>([]);
+  const [collapsed, setCollapsed] = useState(false);
   void countries;
 
   // Lazy-load distinct values only when a dropdown is opened (not on page load).
@@ -263,6 +270,25 @@ export function FilterBar({
 
   return (
     <div className="ios-frost sticky top-0 z-20 space-y-2 border-b border-border/40 px-6 py-3">
+      {/* Collapse / expand the whole filter panel to reclaim table space */}
+      <div className="flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => setCollapsed((c) => !c)}
+          className="inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[13px] font-semibold text-foreground hover:bg-muted"
+        >
+          <ChevronDown className={`size-4 transition-transform ${collapsed ? "-rotate-90" : ""}`} strokeWidth={2.25} />
+          Filters
+          {activeCount > 0 && (
+            <Badge className="h-4 min-w-4 rounded-full border-0 bg-primary px-1.5 text-[10px] text-primary-foreground">
+              {activeCount}
+            </Badge>
+          )}
+        </button>
+      </div>
+
+      {!collapsed && (
+      <>
       {/* Chips row */}
       <div className="flex flex-wrap items-center gap-2">
         {/* AND/OR — iOS segmented control */}
@@ -395,6 +421,66 @@ export function FilterBar({
           </FilterChip>
         )}
 
+        {/* Category Search — matches category/subcategory/additional; Contains or Exact */}
+        {!isHidden("categorySearch") && (
+          <FilterChip
+            label="Category Search"
+            activeCount={filters.categorySearch.include.length + filters.categorySearch.exclude.length}
+          >
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Match mode
+                </label>
+                <IosSegmentedControl
+                  fullWidth
+                  value={filters.categorySearch.matchMode === "exact" ? "exact" : "contains"}
+                  onChange={(v: "contains" | "exact") =>
+                    onCategorySearchChange({ ...filters.categorySearch, matchMode: v })
+                  }
+                  options={[
+                    { value: "contains", label: "Contains" },
+                    { value: "exact", label: "Exact terms" },
+                  ]}
+                />
+                <p className="mt-1.5 px-1 text-[11px] text-muted-foreground">
+                  <span className="font-medium text-foreground">Exact</span> = whole-term (
+                  <span className="italic">dry</span> won&apos;t match{" "}
+                  <span className="italic">laundry</span>).{" "}
+                  <span className="font-medium text-foreground">Contains</span> = loose substring.
+                </p>
+              </div>
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Include
+                </label>
+                <TagInput
+                  values={filters.categorySearch.include}
+                  placeholder="e.g. dry, school, restaurant"
+                  onChange={(arr) =>
+                    onCategorySearchChange({ ...filters.categorySearch, include: arr })
+                  }
+                />
+              </div>
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Exclude
+                </label>
+                <TagInput
+                  values={filters.categorySearch.exclude}
+                  placeholder="e.g. pre, mobile"
+                  onChange={(arr) =>
+                    onCategorySearchChange({ ...filters.categorySearch, exclude: arr })
+                  }
+                />
+              </div>
+              <p className="px-1 text-[11px] text-muted-foreground">
+                Matches anywhere in category, subcategory, or additional category.
+              </p>
+            </div>
+          </FilterChip>
+        )}
+
         {/* Keywords — include + exclude, with a Contains vs Exact match toggle */}
         {!isHidden("keywords") && (
           <FilterChip
@@ -498,44 +584,6 @@ export function FilterBar({
           </FilterChip>
         )}
 
-        {/* Category Search — type a term, Enter; matches category/subcategory/additional */}
-        {!isHidden("categorySearch") && (
-          <FilterChip
-            label="Category Search"
-            activeCount={filters.categorySearch.include.length + filters.categorySearch.exclude.length}
-          >
-            <div className="space-y-3">
-              <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Include
-                </label>
-                <TagInput
-                  values={filters.categorySearch.include}
-                  placeholder="e.g. dry, school, restaurant"
-                  onChange={(arr) =>
-                    onCategorySearchChange({ ...filters.categorySearch, include: arr })
-                  }
-                />
-              </div>
-              <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Exclude
-                </label>
-                <TagInput
-                  values={filters.categorySearch.exclude}
-                  placeholder="e.g. pre, mobile"
-                  onChange={(arr) =>
-                    onCategorySearchChange({ ...filters.categorySearch, exclude: arr })
-                  }
-                />
-              </div>
-              <p className="px-1 text-[11px] text-muted-foreground">
-                Type a term and press Enter — matches anywhere in category,
-                subcategory, or additional category (e.g. &quot;dry&quot; finds all dry cleaners).
-              </p>
-            </div>
-          </FilterChip>
-        )}
 
         {/* Email type — Personal vs General vs Both (segmented control) */}
         {!isHidden("emailType") && (
@@ -726,6 +774,75 @@ export function FilterBar({
           </FilterChip>
         )}
 
+        {/* Custom Tags — free-text search on ANY lead tag (not just client tags) */}
+        {!isHidden("customTags") && (
+          <FilterChip
+            label="Custom Tags"
+            activeCount={filters.customTags.include.length + filters.customTags.exclude.length}
+          >
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Include
+                </label>
+                <TagInput
+                  values={filters.customTags.include}
+                  placeholder="Type a tag, press Enter"
+                  onChange={(arr) => onCustomTagsChange({ ...filters.customTags, include: arr })}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Exclude
+                </label>
+                <TagInput
+                  values={filters.customTags.exclude}
+                  placeholder="Tag to exclude"
+                  onChange={(arr) => onCustomTagsChange({ ...filters.customTags, exclude: arr })}
+                />
+              </div>
+              <p className="px-1 text-[11px] text-muted-foreground">
+                Free-text match on any lead tag (client tags, ESP tags, or your own).
+              </p>
+            </div>
+          </FilterChip>
+        )}
+
+        {/* Website / Domain — matches website, domain, or the email's domain */}
+        {!isHidden("website") && (
+          <FilterChip
+            label="Website / Domain"
+            activeCount={filters.website.include.length + filters.website.exclude.length}
+          >
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Include
+                </label>
+                <TagInput
+                  values={filters.website.include}
+                  placeholder="e.g. cleaning, .org"
+                  onChange={(arr) => onWebsiteChange({ ...filters.website, include: arr })}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Exclude
+                </label>
+                <TagInput
+                  values={filters.website.exclude}
+                  placeholder="e.g. weebly, squarespace"
+                  onChange={(arr) => onWebsiteChange({ ...filters.website, exclude: arr })}
+                />
+              </div>
+              <p className="px-1 text-[11px] text-muted-foreground">
+                Matches the website, domain, or the domain from the email — works even
+                where the domain field isn&apos;t filled.
+              </p>
+            </div>
+          </FilterChip>
+        )}
+
         {/* Manage filters — hide / unhide chips */}
         <Popover>
           <PopoverTrigger asChild>
@@ -789,6 +906,8 @@ export function FilterBar({
           </Button>
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }

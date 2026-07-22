@@ -41,7 +41,12 @@ export interface EmailContainsFilter {
 export interface CategorySearchFilter {
   include: string[];
   exclude: string[];
+  matchMode?: "contains" | "exact";
 }
+
+// Free-text tag search (any lead tag) + website/domain search.
+export interface CustomTagsFilter { include: string[]; exclude: string[]; }
+export interface WebsiteFilter { include: string[]; exclude: string[]; }
 
 // New for OutboundHero — email type segmented control. Default: both true.
 export interface EmailTypeFilter {
@@ -85,6 +90,8 @@ export interface FilterState {
   keyword: KeywordFilter;
   emailContains: EmailContainsFilter;
   categorySearch: CategorySearchFilter;
+  customTags: CustomTagsFilter;
+  website: WebsiteFilter;
 
   // One-box search: comma-separated terms OR'd across email, company,
   // first/last name, domain, category, subcategory.
@@ -132,7 +139,9 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   revenue: { buckets: [], includeUnknown: false },
   keyword: { include: [], exclude: [], matchMode: "contains" },
   emailContains: { include: [], exclude: [] },
-  categorySearch: { include: [], exclude: [] },
+  categorySearch: { include: [], exclude: [], matchMode: "contains" },
+  customTags: { include: [], exclude: [] },
+  website: { include: [], exclude: [] },
   globalSearch: "",
   emailType: { personal: true, general: true },
   includeBounced: false,
@@ -192,6 +201,15 @@ export function normalizeFilterState(partial: unknown): FilterState {
     categorySearch: {
       include: Array.isArray(p.categorySearch?.include) ? p.categorySearch.include : d.categorySearch.include,
       exclude: Array.isArray(p.categorySearch?.exclude) ? p.categorySearch.exclude : d.categorySearch.exclude,
+      matchMode: p.categorySearch?.matchMode === "exact" ? "exact" : "contains",
+    },
+    customTags: {
+      include: Array.isArray(p.customTags?.include) ? p.customTags.include : d.customTags.include,
+      exclude: Array.isArray(p.customTags?.exclude) ? p.customTags.exclude : d.customTags.exclude,
+    },
+    website: {
+      include: Array.isArray(p.website?.include) ? p.website.include : d.website.include,
+      exclude: Array.isArray(p.website?.exclude) ? p.website.exclude : d.website.exclude,
     },
     globalSearch: typeof p.globalSearch === "string" ? p.globalSearch : d.globalSearch,
     emailType: { ...d.emailType, ...(p.emailType ?? {}) },
@@ -222,6 +240,8 @@ export function countActiveFilters(filters: FilterState): number {
   if (filters.keyword.include.length || filters.keyword.exclude.length) count++;
   if (filters.emailContains.include.length || filters.emailContains.exclude.length) count++;
   if (filters.categorySearch.include.length || filters.categorySearch.exclude.length) count++;
+  if (filters.customTags.include.length || filters.customTags.exclude.length) count++;
+  if (filters.website.include.length || filters.website.exclude.length) count++;
   if (filters.globalSearch.trim()) count++;
   // emailType counts as active only when not both selected (i.e. user has restricted)
   if (!(filters.emailType.personal && filters.emailType.general)) count++;
