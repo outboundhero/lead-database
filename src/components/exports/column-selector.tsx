@@ -110,7 +110,7 @@ export function ColumnSelector({
   );
   const [rangeFromStr, setRangeFromStr] = useState("");
   const [rangeToStr, setRangeToStr] = useState("");
-  const [destination, setDestination] = useState<ExportDestination>("csv");
+  const [destination, setDestination] = useState<ExportDestination>("bison");
   const [campaigns, setCampaigns] = useState<BisonCampaign[]>([]);
   const [campaignSearch, setCampaignSearch] = useState("");
   // Multi-select, keyed by `${instance_url}#${id}` (ids collide across instances)
@@ -140,7 +140,7 @@ export function ColumnSelector({
   // Column selection intentionally persists (same columns across chunked exports).
   useEffect(() => {
     if (!open) return;
-    setDestination("csv");
+    setDestination("bison");
     setSelectedCampaignKeys(new Set());
     setRangeFromStr("");
     setRangeToStr("");
