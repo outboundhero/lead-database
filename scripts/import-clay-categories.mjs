@@ -68,7 +68,7 @@ const ONLY = (() => {
   const a = args.find((x) => x.startsWith("--only="));
   return a ? new Set(a.slice(7).split(",").map((t) => t.trim().toUpperCase()).filter(Boolean)) : null;
 })();
-const CHUNK = 500;
+const CHUNK = 3000;
 const FALLBACK_SOURCE = "bison"; // used only if the CHECK still rejects 'clay'
 
 const clean = (v) => {
@@ -188,13 +188,15 @@ async function resolveSource() {
 
 async function fetchExistingByEmail(emails) {
   const byEmail = new Map();
-  const SEL = "id,email,category,subcategory,additional_category,category_source,tags";
-  for (let i = 0; i < emails.length; i += 150) {
-    const slice = emails.slice(i, i + 150);
-    const { data, error } = await supabase.from("leads").select(SEL).in("email", slice);
-    if (error) throw new Error(`existing fetch failed: ${error.message}`);
-    for (const row of data ?? []) byEmail.set(row.email, row);
-  }
+  if (!pool || emails.length === 0) return byEmail;
+  // One indexed ANY() lookup per chunk via the pooler — far fewer, faster
+  // round-trips than the Supabase REST layer's 150-row .in() batches.
+  const { rows } = await pool.query(
+    `select id, email, category, subcategory, additional_category, category_source, tags
+       from leads where email = any($1::text[])`,
+    [emails]
+  );
+  for (const row of rows) byEmail.set(row.email, row);
   return byEmail;
 }
 
