@@ -32,12 +32,13 @@ import type { FilterState } from "@/types/filters";
 
 interface ClientTagRow {
   tag: string;
-  group_no: number;
-  b2b_instance: string;
-  b2c_instance: string;
+  group_no: number | null;
+  b2b_instance: string | null;
+  b2c_instance: string | null;
   owner: string | null;
   status: string | null;
   churned: boolean;
+  sendable: boolean; // has an instance pair; roster-only churned clients don't
 }
 
 interface PreviewCampaign {
@@ -279,19 +280,28 @@ export function SendToBisonWizard({
               <div className="max-h-[45vh] space-y-1 overflow-y-auto rounded-md border p-1">
                 {filteredTags.map((t) => {
                   const active = selectedTag?.tag === t.tag;
+                  // Only clients with an instance mapping can be sent to; churned
+                  // roster-only tags have no campaigns to route to.
+                  const disabled = !t.sendable;
                   return (
                     <button
                       key={t.tag}
                       type="button"
-                      onClick={() => setSelectedTag(t)}
+                      disabled={disabled}
+                      title={disabled ? "No Bison instance mapping — add this client to the groups sheet to enable sending." : undefined}
+                      onClick={() => !disabled && setSelectedTag(t)}
                       className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors ${
-                        active ? "bg-primary/10 ring-1 ring-primary/40" : "hover:bg-muted/50"
+                        disabled
+                          ? "cursor-not-allowed opacity-45"
+                          : active
+                          ? "bg-primary/10 ring-1 ring-primary/40"
+                          : "hover:bg-muted/50"
                       }`}
                     >
                       <span className="font-medium">{t.tag}</span>
                       {t.owner && <span className="text-muted-foreground">· {t.owner}</span>}
                       <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
-                        grp {t.group_no}
+                        {t.group_no ? `grp ${t.group_no}` : "unmapped"}
                       </span>
                       {t.churned && (
                         <Badge variant="destructive" className="shrink-0">
