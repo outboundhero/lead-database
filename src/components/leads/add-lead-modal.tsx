@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -133,21 +133,25 @@ export function AddLeadModal({ open, onClose, onCreated }: AddLeadModalProps) {
         </DialogHeader>
         <div className="grid grid-cols-2 gap-3">
           {FIELDS.map((f) => (
-            <div
-              key={f.key}
-              className={`space-y-1 ${f.key === "company_overview" ? "col-span-2" : ""}`}
-            >
-              <label className="block px-1 text-[12px] font-medium text-muted-foreground">
-                {f.label}
-                {f.required && <span className="ml-0.5 text-destructive">*</span>}
-              </label>
-              <Input
-                placeholder={f.placeholder}
-                value={form[f.key] ?? ""}
-                onChange={(e) => update(f.key, e.target.value)}
-                className="h-10 text-[14px]"
-              />
-            </div>
+            <Fragment key={f.key}>
+              {f.section && (
+                <p className="col-span-2 mt-1 border-b border-border/50 px-1 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {f.section}
+                </p>
+              )}
+              <div className={`space-y-1 ${f.key === "company_overview" ? "col-span-2" : ""}`}>
+                <label className="block px-1 text-[12px] font-medium text-muted-foreground">
+                  {f.label}
+                  {f.required && <span className="ml-0.5 text-destructive">*</span>}
+                </label>
+                <Input
+                  placeholder={f.placeholder}
+                  value={form[f.key] ?? ""}
+                  onChange={(e) => update(f.key, e.target.value)}
+                  className="h-10 text-[14px]"
+                />
+              </div>
+            </Fragment>
           ))}
         </div>
         <DialogFooter>
