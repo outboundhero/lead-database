@@ -108,9 +108,19 @@ function parseFile(name) {
 
 // ── schema-aware column resolution ───────────────────────────────────────────
 // Destination fields are the SAME for both types; only the source header differs.
+// People files come in TWO schemas: newer clients (onboarded after ~2026-06-20)
+// carry literal Category/Sub-Category/Additional Category columns (same as
+// General); older People files use Industry / Company Short Description /
+// Company SEO Description. Priority order handles both — the literal category
+// columns win when present, else the older headers are used.
 const MAP = {
   general: { email: ["general email", "email"], category: ["category"], subcategory: ["sub-category", "subcategory", "sub category"], additional: ["additional category", "additional-category", "additional_category"] },
-  people: { email: ["use work email", "valid work email", "final validated email", "email"], category: ["industry"], subcategory: ["company short description"], additional: ["company seo description"] },
+  people: {
+    email: ["use work email", "valid work email", "final validated email", "email"],
+    category: ["category", "industry"],
+    subcategory: ["sub-category", "subcategory", "sub category", "company short description"],
+    additional: ["additional category", "additional-category", "additional_category", "company seo description"],
+  },
 };
 function buildIndex(headers, type) {
   const idx = {};
