@@ -11,7 +11,13 @@
 //
 // Auth reuses the taxonomy sync's service-account JWT + private_key sanitizer.
 //
-// Env: GOOGLE_SERVICE_ACCOUNT_B64, CLIENTS_SHEET_ID, DATABASE_URL
+// Also merges the "Client Tracker" tab of CLIENT_TRACKER_SHEET_ID (col A =
+// Company Name, col B = Client Abbreviation — may hold "&"-joined tags, col H =
+// Health). This adds the FULL client roster (incl. churned clients, which have
+// no instance mapping) so the send-wizard knows every tag; instance pairs still
+// come only from the groups sheet.
+//
+// Env: GOOGLE_SERVICE_ACCOUNT_B64, CLIENTS_SHEET_ID, CLIENT_TRACKER_SHEET_ID, DATABASE_URL
 // Usage:
 //   node scripts/sync-clients-from-sheet.mjs
 //   node scripts/sync-clients-from-sheet.mjs --dry-run
@@ -132,9 +138,47 @@ async function main() {
     console.warn(`  owner/status tab skipped: ${e.message}`);
   }
 
+  // Every groups-sheet client has an instance mapping.
+  for (const c of clients.values()) c.source = "groups_sheet";
+
+  // ── Client Tracker: full roster + name + health (churned clients too) ──────
+  const trackerId = process.env.CLIENT_TRACKER_SHEET_ID;
+  if (trackerId) {
+    try {
+      const tv = await sheetsGet(token, `${trackerId}/values/${encodeURIComponent("'Client Tracker'!A1:H1000")}`);
+      let added = 0;
+      for (const row of (tv.values ?? []).slice(1)) {
+        const name = (row[0] ?? "").trim();
+        const abbr = (row[1] ?? "").trim();
+        const health = (row[7] ?? "").trim();
+        if (!abbr) continue;
+        // Abbreviation cells can hold several "&"-joined tags (e.g. "CPGH & CPGA").
+        for (const raw of abbr.split(/\s*&\s*/)) {
+          const tag = cleanTag(raw);
+          if (!isTag(tag)) continue;
+          const existing = clients.get(tag);
+          if (existing) {
+            // groups-sheet client: enrich with name + health, keep instances.
+            if (name) existing.name = name;
+            if (health) existing.status = health;
+          } else {
+            // roster-only (typically churned): no instance mapping.
+            clients.set(tag, { tag, group_no: null, b2b: null, b2c: null, name: name || null, status: health || null, source: "tracker" });
+            added++;
+          }
+        }
+      }
+      console.log(`Client Tracker merged: +${added} roster-only tags.`);
+    } catch (e) {
+      console.warn(`  Client Tracker skipped: ${e.message}`);
+    }
+  } else {
+    console.warn("  CLIENT_TRACKER_SHEET_ID not set — skipping roster merge (instance-mapped tags only).");
+  }
+
   const list = [...clients.values()].sort((a, b) => a.tag.localeCompare(b.tag));
-  console.log(`${list.length} client tags (group1: ${list.filter((c) => c.group_no === 1).length}, group2: ${list.filter((c) => c.group_no === 2).length})`);
-  console.log("sample:", list.slice(0, 6).map((c) => `${c.tag}→g${c.group_no}`).join(", "));
+  const mapped = list.filter((c) => c.group_no != null).length;
+  console.log(`${list.length} client tags total — ${mapped} instance-mapped, ${list.length - mapped} roster-only (churned/unmapped).`);
 
   if (DRY) {
     console.log("--dry-run: no DB writes.");
@@ -150,17 +194,22 @@ async function main() {
   try {
     await client.query("begin");
     // Upsert all incoming FIRST, then delete stale — never leaves a hole.
+    // A groups_sheet row must never be overwritten to NULL instances by a
+    // roster-only tracker row (COALESCE preserves the mapping).
     for (const c of list) {
       await client.query(
-        `insert into client_tags (tag, group_no, b2b_instance, b2c_instance, owner, status, synced_at)
-         values ($1,$2,$3,$4,$5,$6, now())
+        `insert into client_tags (tag, group_no, b2b_instance, b2c_instance, owner, status, name, source, synced_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8, now())
          on conflict (tag) do update set
-           group_no = excluded.group_no, b2b_instance = excluded.b2b_instance,
-           b2c_instance = excluded.b2c_instance,
+           group_no = coalesce(excluded.group_no, client_tags.group_no),
+           b2b_instance = coalesce(excluded.b2b_instance, client_tags.b2b_instance),
+           b2c_instance = coalesce(excluded.b2c_instance, client_tags.b2c_instance),
            owner = coalesce(excluded.owner, client_tags.owner),
            status = coalesce(excluded.status, client_tags.status),
+           name = coalesce(excluded.name, client_tags.name),
+           source = case when excluded.group_no is not null then excluded.source else client_tags.source end,
            synced_at = now()`,
-        [c.tag, c.group_no, c.b2b, c.b2c, c.owner ?? null, c.status ?? null]
+        [c.tag, c.group_no, c.b2b, c.b2c, c.owner ?? null, c.status ?? null, c.name ?? null, c.source ?? null]
       );
     }
     const del = await client.query(`delete from client_tags where tag <> all($1::text[])`, [list.map((c) => c.tag)]);
