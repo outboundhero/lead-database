@@ -67,7 +67,7 @@ const HIDEABLE_CHIPS: { key: string; label: string }[] = [
   { key: "category", label: "Category" },
   { key: "subcategory", label: "Subcategory" },
   { key: "additionalCategory", label: "Additional Category" },
-  { key: "tags", label: "Tags" },
+  { key: "tags", label: "Client Tags" },
 ];
 
 function FilterChip({
@@ -152,26 +152,7 @@ export function FilterBar({
   const activeCount = countActiveFilters(filters);
   const op = filters.filterOperator ?? "AND";
 
-  // Global search — debounced local draft so keystrokes don't thrash the
-  // whole filter state (the page also debounces the fetch).
-  const [globalDraft, setGlobalDraft] = useState(filters.globalSearch);
-  const lastEmittedGlobal = useRef(filters.globalSearch);
-  const globalTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  useEffect(() => {
-    // Sync from external changes (reset / preset load) without clobbering typing.
-    if (filters.globalSearch !== lastEmittedGlobal.current) {
-      lastEmittedGlobal.current = filters.globalSearch;
-      setGlobalDraft(filters.globalSearch);
-    }
-  }, [filters.globalSearch]);
-  const handleGlobalChange = (v: string) => {
-    setGlobalDraft(v);
-    clearTimeout(globalTimer.current);
-    globalTimer.current = setTimeout(() => {
-      lastEmittedGlobal.current = v;
-      onGlobalSearchChange(v);
-    }, 300);
-  };
+  void onGlobalSearchChange; // global search bar removed; filter field kept for API compat
 
   // Dynamic options loaded from DB
   const [countries, setCountries] = useState<string[]>([]);
@@ -282,30 +263,6 @@ export function FilterBar({
 
   return (
     <div className="ios-frost sticky top-0 z-20 space-y-2 border-b border-border/40 px-6 py-3">
-      {/* Global search */}
-      <div className="relative">
-        <Search
-          className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
-          strokeWidth={1.75}
-        />
-        <Input
-          placeholder="Search everything — email, company, name, domain, category… (comma-separated)"
-          value={globalDraft}
-          onChange={(e) => handleGlobalChange(e.target.value)}
-          className="h-9 pl-9 pr-9"
-        />
-        {globalDraft && (
-          <button
-            type="button"
-            aria-label="Clear search"
-            onClick={() => handleGlobalChange("")}
-            className="absolute top-1/2 right-2.5 flex size-5 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground hover:bg-muted"
-          >
-            <X className="size-3.5" strokeWidth={2.25} />
-          </button>
-        )}
-      </div>
-
       {/* Chips row */}
       <div className="flex flex-wrap items-center gap-2">
         {/* AND/OR — iOS segmented control */}
@@ -697,10 +654,10 @@ export function FilterBar({
           </FilterChip>
         )}
 
-        {/* Tags — client tags (substring, server-side) + free typing */}
+        {/* Client Tags — client tags (substring, server-side) + free typing */}
         {!isHidden("tags") && (
           <FilterChip
-            label="Tags"
+            label="Client Tags"
             activeCount={filters.tags.include.length + filters.tags.exclude.length}
             onOpen={loadClientTags}
           >

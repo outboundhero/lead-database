@@ -106,18 +106,31 @@ export function FilterPresets({ currentFilters, onLoadPreset }: FilterPresetsPro
     }
   }
 
-  async function handleDelete(id: string) {
-    try {
-      const res = await fetch(`/api/filters/presets?id=${id}`, { method: "DELETE" });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error);
+  function handleDelete(id: string) {
+    const preset = presets.find((p) => p.id === id);
+    if (!preset) return;
+    // Soft-delete: hide it immediately, but only hit the API after an 8s undo
+    // window. Undo just cancels the pending timer — nothing was deleted yet.
+    setPresets((prev) => prev.filter((p) => p.id !== id));
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(`/api/filters/presets?id=${id}`, { method: "DELETE" });
+        if (!res.ok) throw new Error((await res.json()).error);
+        loadPresets();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to delete preset");
+        loadPresets(); // restore on failure
       }
-      toast.success("Preset deleted");
-      loadPresets();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to delete preset");
-    }
+    }, 8000);
+    toast(`Preset "${preset.name}" deleted`, {
+      duration: 8000,
+      action: {
+        label: "Undo",
+        onClick: () => { cancelled = true; clearTimeout(timer); setPresets((prev) => [preset, ...prev.filter((p) => p.id !== id)]); },
+      },
+    });
   }
 
   function handleLoad(preset: Preset) {
