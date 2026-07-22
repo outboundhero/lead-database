@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Users,
+  Building2,
   LayoutDashboard,
   Upload,
   Download,
@@ -26,6 +27,7 @@ const NAV_SECTIONS = [
     items: [
       { title: "Leads", href: "/leads", icon: Users, minRole: "viewer" as UserRole, tint: "text-[oklch(0.586_0.214_263)]" },
       { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard, minRole: "manager" as UserRole, tint: "text-[oklch(0.745_0.183_145)]" },
+      { title: "Clients", href: "/clients", icon: Building2, minRole: "manager" as UserRole, tint: "text-[oklch(0.62_0.19_25)]" },
       { title: "Exports", href: "/exports", icon: Download, minRole: "manager" as UserRole, tint: "text-[oklch(0.78_0.175_65)]" },
       { title: "Uploads", href: "/uploads", icon: Upload, minRole: "admin" as UserRole, tint: "text-[oklch(0.52_0.21_290)]" },
       { title: "Bounces", href: "/uploads/bounces", icon: MailX, minRole: "admin" as UserRole, tint: "text-[oklch(0.65_0.235_25)]" },
