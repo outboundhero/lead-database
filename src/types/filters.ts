@@ -36,6 +36,13 @@ export interface EmailContainsFilter {
   exclude: string[];
 }
 
+// Category contains-search: type a term -> ILIKE match across category /
+// subcategory / additional_category (include = OR, exclude removes matches).
+export interface CategorySearchFilter {
+  include: string[];
+  exclude: string[];
+}
+
 // New for OutboundHero — email type segmented control. Default: both true.
 export interface EmailTypeFilter {
   personal: boolean;
@@ -76,6 +83,7 @@ export interface FilterState {
   // general_industry, specific_industry, company_overview)
   keyword: KeywordFilter;
   emailContains: EmailContainsFilter;
+  categorySearch: CategorySearchFilter;
 
   // One-box search: comma-separated terms OR'd across email, company,
   // first/last name, domain, category, subcategory.
@@ -122,6 +130,7 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   revenue: { buckets: [], includeUnknown: false },
   keyword: { include: [], exclude: [], matchMode: "contains" },
   emailContains: { include: [], exclude: [] },
+  categorySearch: { include: [], exclude: [] },
   globalSearch: "",
   emailType: { personal: true, general: true },
   includeBounced: false,
@@ -177,6 +186,10 @@ export function normalizeFilterState(partial: unknown): FilterState {
       include: Array.isArray(p.emailContains?.include) ? p.emailContains.include : d.emailContains.include,
       exclude: Array.isArray(p.emailContains?.exclude) ? p.emailContains.exclude : d.emailContains.exclude,
     },
+    categorySearch: {
+      include: Array.isArray(p.categorySearch?.include) ? p.categorySearch.include : d.categorySearch.include,
+      exclude: Array.isArray(p.categorySearch?.exclude) ? p.categorySearch.exclude : d.categorySearch.exclude,
+    },
     globalSearch: typeof p.globalSearch === "string" ? p.globalSearch : d.globalSearch,
     emailType: { ...d.emailType, ...(p.emailType ?? {}) },
   };
@@ -204,6 +217,7 @@ export function countActiveFilters(filters: FilterState): number {
   if (filters.revenue.buckets.length || filters.revenue.includeUnknown) count++;
   if (filters.keyword.include.length || filters.keyword.exclude.length) count++;
   if (filters.emailContains.include.length || filters.emailContains.exclude.length) count++;
+  if (filters.categorySearch.include.length || filters.categorySearch.exclude.length) count++;
   if (filters.globalSearch.trim()) count++;
   // emailType counts as active only when not both selected (i.e. user has restricted)
   if (!(filters.emailType.personal && filters.emailType.general)) count++;

@@ -7,6 +7,7 @@ import {
   type KeywordFilter,
   type EmailTypeFilter,
   type EmailContainsFilter,
+  type CategorySearchFilter,
   type RangeFilter,
   DEFAULT_FILTER_STATE,
   normalizeFilterState,
@@ -24,6 +25,7 @@ type FilterAction =
   | { type: "SET_KEYWORD"; value: KeywordFilter }
   | { type: "SET_EMAIL_TYPE"; value: EmailTypeFilter }
   | { type: "SET_EMAIL_CONTAINS"; value: EmailContainsFilter }
+  | { type: "SET_CATEGORY_SEARCH"; value: CategorySearchFilter }
   | { type: "SET_GLOBAL_SEARCH"; value: string }
   | { type: "SET_INCLUDE_BOUNCED"; value: boolean }
   | { type: "SET_PAGE"; value: number }
@@ -56,6 +58,8 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
       return { ...state, emailType: action.value, page: 1 };
     case "SET_EMAIL_CONTAINS":
       return { ...state, emailContains: action.value, page: 1 };
+    case "SET_CATEGORY_SEARCH":
+      return { ...state, categorySearch: action.value, page: 1 };
     case "SET_GLOBAL_SEARCH":
       return { ...state, globalSearch: action.value, page: 1 };
     case "SET_INCLUDE_BOUNCED":
@@ -143,6 +147,9 @@ export function useFilters() {
   const setEmailContains = useCallback((value: EmailContainsFilter) => {
     dispatch({ type: "SET_EMAIL_CONTAINS", value });
   }, []);
+  const setCategorySearch = useCallback((value: CategorySearchFilter) => {
+    dispatch({ type: "SET_CATEGORY_SEARCH", value });
+  }, []);
 
   const setGlobalSearch = useCallback((value: string) => {
     dispatch({ type: "SET_GLOBAL_SEARCH", value });
@@ -174,6 +181,7 @@ export function useFilters() {
       setKeyword,
       setEmailType,
       setEmailContains,
+      setCategorySearch,
       setGlobalSearch,
       setIncludeBounced,
       setPage,
@@ -195,6 +203,7 @@ export function useFilters() {
       setKeyword,
       setEmailType,
       setEmailContains,
+      setCategorySearch,
       setGlobalSearch,
       setIncludeBounced,
       setPage,

@@ -20,6 +20,7 @@ import type {
   KeywordFilter,
   EmailTypeFilter,
   EmailContainsFilter,
+  CategorySearchFilter,
 } from "@/types/filters";
 import { countActiveFilters } from "@/types/filters";
 import { IosSegmentedControl } from "@/components/ui/ios/ios-segmented-control";
@@ -41,6 +42,7 @@ interface FilterBarProps {
   onKeywordChange: (value: KeywordFilter) => void;
   onEmailTypeChange: (value: EmailTypeFilter) => void;
   onEmailContainsChange: (value: EmailContainsFilter) => void;
+  onCategorySearchChange: (value: CategorySearchFilter) => void;
   onGlobalSearchChange: (value: string) => void;
   onIncludeBouncedChange: (value: boolean) => void;
   onLoadPreset?: (filters: FilterState) => void;
@@ -58,6 +60,7 @@ const HIDEABLE_CHIPS: { key: string; label: string }[] = [
   { key: "state", label: "State" },
   { key: "keywords", label: "Keywords" },
   { key: "emailContains", label: "Email Contains" },
+  { key: "categorySearch", label: "Category Search" },
   { key: "emailType", label: "Email Type" },
   { key: "bounced", label: "Bounced" },
   { key: "esp", label: "Email Service Provider" },
@@ -121,6 +124,7 @@ export function FilterBar({
   onKeywordChange,
   onEmailTypeChange,
   onEmailContainsChange,
+  onCategorySearchChange,
   onGlobalSearchChange,
   onIncludeBouncedChange,
   onLoadPreset,
@@ -524,6 +528,45 @@ export function FilterBar({
               </div>
               <p className="px-1 text-[11px] text-muted-foreground">
                 Substring match against the lead&apos;s email address / domain.
+              </p>
+            </div>
+          </FilterChip>
+        )}
+
+        {/* Category Search — type a term, Enter; matches category/subcategory/additional */}
+        {!isHidden("categorySearch") && (
+          <FilterChip
+            label="Category Search"
+            activeCount={filters.categorySearch.include.length + filters.categorySearch.exclude.length}
+          >
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Include
+                </label>
+                <TagInput
+                  values={filters.categorySearch.include}
+                  placeholder="e.g. dry, school, restaurant"
+                  onChange={(arr) =>
+                    onCategorySearchChange({ ...filters.categorySearch, include: arr })
+                  }
+                />
+              </div>
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Exclude
+                </label>
+                <TagInput
+                  values={filters.categorySearch.exclude}
+                  placeholder="e.g. pre, mobile"
+                  onChange={(arr) =>
+                    onCategorySearchChange({ ...filters.categorySearch, exclude: arr })
+                  }
+                />
+              </div>
+              <p className="px-1 text-[11px] text-muted-foreground">
+                Type a term and press Enter — matches anywhere in category,
+                subcategory, or additional category (e.g. &quot;dry&quot; finds all dry cleaners).
               </p>
             </div>
           </FilterChip>

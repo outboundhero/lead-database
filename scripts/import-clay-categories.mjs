@@ -50,6 +50,11 @@ if (!SUPABASE_URL || !SERVICE_KEY) {
   process.exit(1);
 }
 const supabase = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
+// Bulk updates go through the pg pool — one statement per chunk instead of one
+// HTTP round-trip per lead (the difference between hours and weeks at 2M rows).
+const pool = process.env.DATABASE_URL
+  ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
+  : null;
 
 const args = process.argv.slice(2);
 const folder = args.find((a) => !a.startsWith("--"));
@@ -241,35 +246,77 @@ async function main() {
       try { existing = await fetchExistingByEmail([...new Set(chunk.map((r) => r.email))]); }
       catch (err) { console.error(`    chunk ${i}: ${err.message} — skipping chunk.`); fErr += chunk.length; continue; }
 
+      // Compute final values client-side (we just fetched the current row), then
+      // write the whole batch in ONE statement via unnest.
+      const batch = []; // {id, category, subcategory, additional_category, category_source, category_confidence, categorized_at, tags}
       for (const rec of chunk) {
         const ex = existing.get(rec.email);
         if (!ex) { fUnmatched++; continue; }
         fMatched++;
 
-        const update = {};
+        let changed = false;
+        const fin = {
+          id: ex.id,
+          category: ex.category, subcategory: ex.subcategory,
+          additional_category: ex.additional_category,
+          category_source: ex.category_source, category_confidence: null,
+          categorized_at: null, tags: ex.tags,
+        };
         if (!TAG_ONLY && (rec.category || rec.subcategory || rec.additional)) {
           if (ex.category_source === "manual") {
             fManual++;
           } else {
-            if (rec.category && rec.category !== ex.category) update.category = rec.category;
-            if (rec.subcategory && rec.subcategory !== ex.subcategory) update.subcategory = rec.subcategory;
-            if (rec.additional && rec.additional !== ex.additional_category) update.additional_category = rec.additional;
-            // Stamp clay provenance only when the CATEGORY itself changes.
-            if (rec.category && rec.category !== ex.category) {
-              update.category_source = CATEGORY_SOURCE;
-              update.category_confidence = 1;
-              update.categorized_at = new Date().toISOString();
+            let catChanged = false;
+            if (rec.category && rec.category !== ex.category) { fin.category = rec.category; catChanged = true; }
+            if (rec.subcategory && rec.subcategory !== ex.subcategory) { fin.subcategory = rec.subcategory; changed = true; }
+            if (rec.additional && rec.additional !== ex.additional_category) { fin.additional_category = rec.additional; changed = true; }
+            if (catChanged) {
+              fin.category_source = CATEGORY_SOURCE;
+              fin.category_confidence = 1;
+              fin.categorized_at = new Date().toISOString();
+              changed = true;
             }
-            if (Object.keys(update).length > 0) fCat++;
+            if (changed) fCat++;
           }
         }
         const newTags = appendTag(ex.tags, meta.tag);
-        if (newTags !== null) { update.tags = newTags; fTag++; }
+        if (newTags !== null) { fin.tags = newTags; fTag++; changed = true; }
+        if (changed) batch.push(fin);
+      }
 
-        if (Object.keys(update).length === 0) continue;
-        if (DRY) continue;
-        const { error } = await supabase.from("leads").update(update).eq("id", ex.id);
-        if (error) { fErr++; console.error(`    update ${ex.id}: ${error.message}`); }
+      if (batch.length > 0 && !DRY) {
+        if (!pool) { console.error("    DATABASE_URL required for bulk updates"); process.exit(1); }
+        try {
+          await pool.query(
+            `update leads l set
+               category = v.category,
+               subcategory = v.subcategory,
+               additional_category = v.additional_category,
+               category_source = v.category_source,
+               category_confidence = coalesce(v.category_confidence::numeric, l.category_confidence),
+               categorized_at = coalesce(v.categorized_at::timestamptz, l.categorized_at),
+               tags = v.tags,
+               updated_at = now()
+             from (
+               select * from unnest($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::numeric[], $7::timestamptz[], $8::text[])
+                 as t(id, category, subcategory, additional_category, category_source, category_confidence, categorized_at, tags)
+             ) v
+             where l.id = v.id`,
+            [
+              batch.map((b) => b.id),
+              batch.map((b) => b.category),
+              batch.map((b) => b.subcategory),
+              batch.map((b) => b.additional_category),
+              batch.map((b) => b.category_source),
+              batch.map((b) => b.category_confidence),
+              batch.map((b) => b.categorized_at),
+              batch.map((b) => b.tags),
+            ]
+          );
+        } catch (err) {
+          fErr += batch.length;
+          console.error(`    bulk update failed (${batch.length} rows): ${err.message}`);
+        }
       }
       process.stdout.write(`\r  ${file} [${meta.type}] tag=${meta.tag}: matched ${fMatched}, unmatched ${fUnmatched}, categorized ${fCat}, tagged ${fTag}${fErr ? `, errors ${fErr}` : ""}`);
     }
@@ -302,4 +349,6 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.stack : e); process.exit(1); });
+main()
+  .then(() => pool?.end())
+  .catch((e) => { console.error(e instanceof Error ? e.stack : e); process.exit(1); });

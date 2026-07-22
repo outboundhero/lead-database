@@ -19,22 +19,45 @@ interface AddLeadModalProps {
   onCreated?: () => void;
 }
 
-const FIELDS: { key: string; label: string; placeholder: string; required?: boolean }[] = [
-  { key: "first_name", label: "First Name", placeholder: "John" },
+// Grouped to mirror the leads table's own columns. `section` starts a labeled
+// block in the form.
+const FIELDS: { key: string; label: string; placeholder: string; required?: boolean; section?: string }[] = [
+  // Person
+  { key: "first_name", label: "First Name", placeholder: "John", section: "Person" },
   { key: "last_name", label: "Last Name", placeholder: "Doe" },
   { key: "email", label: "Email", placeholder: "john@example.com", required: true },
   { key: "title", label: "Title", placeholder: "Site Manager" },
-  { key: "company", label: "Company", placeholder: "Acme Inc" },
-  { key: "company_phone", label: "Company Phone", placeholder: "+1 555 0100" },
-  { key: "esp", label: "Email Service Provider", placeholder: "Google" },
-  { key: "source", label: "Source", placeholder: "Email Bison" },
-  { key: "city", label: "City", placeholder: "Austin" },
-  { key: "state", label: "State", placeholder: "TX" },
+  { key: "seniority", label: "Seniority", placeholder: "Manager" },
+  { key: "person_linkedin", label: "Person LinkedIn", placeholder: "linkedin.com/in/…" },
+  // Company
+  { key: "company", label: "Company", placeholder: "Acme Inc", section: "Company" },
   { key: "domain", label: "Domain", placeholder: "acme.com" },
-  { key: "address", label: "Address", placeholder: "123 Main St, Austin, TX" },
+  { key: "website", label: "Website", placeholder: "https://acme.com" },
+  { key: "company_phone", label: "Company Phone", placeholder: "+1 555 0100" },
+  { key: "company_linkedin", label: "Company LinkedIn", placeholder: "linkedin.com/company/…" },
+  { key: "general_industry", label: "General Industry", placeholder: "Facilities Services" },
+  { key: "specific_industry", label: "Specific Industry", placeholder: "Commercial Cleaning" },
+  { key: "company_size", label: "Company Size", placeholder: "50" },
+  { key: "annual_revenue", label: "Annual Revenue", placeholder: "5000000" },
+  { key: "company_overview", label: "Company Overview", placeholder: "Short description…" },
+  // Category (Bison / Clay enrichment)
+  { key: "category", label: "Category", placeholder: "Janitorial", section: "Category" },
+  { key: "subcategory", label: "Subcategory", placeholder: "Commercial Cleaning" },
+  { key: "additional_category", label: "Additional Category", placeholder: "Facility Services" },
+  // Location
+  { key: "city", label: "City", placeholder: "Austin", section: "Location" },
+  { key: "state", label: "State", placeholder: "TX" },
+  { key: "country", label: "Country", placeholder: "United States" },
+  { key: "postal_code", label: "Postal Code", placeholder: "78701" },
+  { key: "street", label: "Street", placeholder: "123 Main St" },
+  { key: "address", label: "Address", placeholder: "123 Main St, Austin, TX 78701" },
+  { key: "google_maps_url", label: "Google Maps URL", placeholder: "https://maps.google.com/…" },
+  // Meta
+  { key: "esp", label: "Email Service Provider", placeholder: "Google", section: "Other" },
+  { key: "source", label: "Source", placeholder: "Email Bison" },
+  { key: "tags", label: "Tags (comma-separated)", placeholder: "OH, Outlook" },
   { key: "question", label: "Personalization Question", placeholder: "How do you keep your space clean?" },
   { key: "notes", label: "Notes", placeholder: "Any notes…" },
-  { key: "tags", label: "Tags", placeholder: "Outlook" },
 ];
 
 export function AddLeadModal({ open, onClose, onCreated }: AddLeadModalProps) {
@@ -71,6 +94,13 @@ export function AddLeadModal({ open, onClose, onCreated }: AddLeadModalProps) {
     // Auto-generate domain from email
     if (payload.email && typeof payload.email === "string" && payload.email.includes("@")) {
       payload.domain = payload.email.split("@")[1].toLowerCase();
+    }
+    // A manually-entered category is authoritative — mark it so the Clay/keyword
+    // enrichment never overwrites it.
+    if (payload.category) {
+      payload.category_source = "manual";
+      payload.category_confidence = 1;
+      payload.categorized_at = new Date().toISOString();
     }
     const { data: inserted, error } = await supabase
       .from("leads")

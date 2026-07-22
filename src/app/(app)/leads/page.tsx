@@ -41,6 +41,7 @@ export default function LeadsPage() {
     setKeyword,
     setEmailType,
     setEmailContains,
+    setCategorySearch,
     setGlobalSearch,
     setIncludeBounced,
     setPage,
@@ -147,6 +148,7 @@ export default function LeadsPage() {
           onKeywordChange={setKeyword}
           onEmailTypeChange={setEmailType}
           onEmailContainsChange={setEmailContains}
+          onCategorySearchChange={setCategorySearch}
           onGlobalSearchChange={setGlobalSearch}
           onIncludeBouncedChange={setIncludeBounced}
           onLoadPreset={loadPreset}

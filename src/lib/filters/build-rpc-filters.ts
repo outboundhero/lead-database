@@ -81,6 +81,10 @@ export function buildRpcFilters(filters: FilterState) {
       include: filters.emailContains?.include ?? [],
       exclude: filters.emailContains?.exclude ?? [],
     },
+    categorySearch: {
+      include: filters.categorySearch?.include ?? [],
+      exclude: filters.categorySearch?.exclude ?? [],
+    },
     globalSearch: (filters.globalSearch ?? "").trim(),
     emailType: {
       personal: filters.emailType?.personal ?? true,
