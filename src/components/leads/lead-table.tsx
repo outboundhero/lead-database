@@ -168,7 +168,7 @@ export function LeadTable({
     <div className="flex h-full flex-col">
       <div className="relative flex-1 overflow-auto">
         <table className="w-full caption-bottom text-[14px]">
-          <thead className="sticky top-0 z-10 ios-frost [&_tr]:border-b [&_tr]:border-border/40">
+          <thead className="sticky top-0 z-20 bg-background shadow-[0_1px_0_0_var(--border)] [&_tr]:border-b [&_tr]:border-border/40">
             {table.getHeaderGroups().map((headerGroup) => (
               <tr key={headerGroup.id}>
                 {headerGroup.headers.map((header) => (
