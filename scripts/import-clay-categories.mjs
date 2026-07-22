@@ -80,13 +80,15 @@ const FILE_RE = /^(?:copy-of-)?(general|people|find-people)-(.+?)-default-view-e
 // variant markers that are the SAME client: "(2)-IMC", "ABM-#2", "CCGCT-(2)",
 // "FCS-(AI-ARK)", "CI-(Competitor-Clients-Pull)". SI_-<vertical> and Template
 // are not clients.
+// Clay filenames can't contain "&", so "&" clients are written with "and".
+const TAG_ALIASES = { JPCANDA: "JPC&A" };
 function normalizeTag(raw) {
   let t = raw;
   t = t.replace(/^\(\d+\)-/, "");        // leading split marker: (2)-IMC
   t = t.replace(/-\([^)]*\)/g, "");      // any -(...) : (2), (AI-ARK), (Competitor-Clients-Pull)
   t = t.replace(/-#\d+/g, "");           // -#2 batch marker
   t = t.replace(/^[-_]+|[-_]+$/g, "").trim().toUpperCase();
-  return t;
+  return TAG_ALIASES[t] ?? t;
 }
 function parseFile(name) {
   const base = name.replace(/\.csv$/i, "");
