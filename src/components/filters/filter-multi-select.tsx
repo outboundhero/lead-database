@@ -10,6 +10,8 @@ import type { IncludeExclude } from "@/types/filters";
 interface FilterMultiSelectProps {
   options: readonly string[];
   labels?: Record<string, string>;
+  /** Optional per-option lead counts, rendered right-aligned ("6,394"). */
+  counts?: Record<string, number>;
   value: IncludeExclude;
   onChange: (value: IncludeExclude) => void;
   searchable?: boolean;
@@ -19,6 +21,7 @@ interface FilterMultiSelectProps {
 export function FilterMultiSelect({
   options,
   labels,
+  counts,
   value,
   onChange,
   searchable = false,
@@ -262,7 +265,7 @@ export function FilterMultiSelect({
         <span className="text-muted-foreground">Exclude Unknown / Empty</span>
       </label>
 
-      <div className="max-h-40 overflow-y-auto space-y-0.5">
+      <div className="max-h-64 overflow-y-auto space-y-0.5">
         {filteredOptions.map((option) => {
           const isIncluded = value.include.includes(option);
           const isExcluded = value.exclude.includes(option);
@@ -290,10 +293,20 @@ export function FilterMultiSelect({
                 {isActive && <Check className="h-2.5 w-2.5" />}
               </div>
               <span className="truncate">{labels?.[option] ?? option}</span>
+              {counts?.[option] != null && (
+                <span className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-muted-foreground">
+                  {counts[option].toLocaleString()}
+                </span>
+              )}
             </button>
           );
         })}
       </div>
+      {filteredOptions.length > 30 && (
+        <p className="px-2 text-[10px] text-muted-foreground">
+          {filteredOptions.length.toLocaleString()} options — scroll or search to narrow
+        </p>
+      )}
     </div>
   );
 }

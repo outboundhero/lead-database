@@ -196,6 +196,8 @@ export function FilterBar({
   const [additionalCategoryValues, setAdditionalCategoryValues] = useState<string[]>([]);
   const [cityValues, setCityValues] = useState<string[]>([]);
   const [companyValues, setCompanyValues] = useState<string[]>([]);
+  // Per-option lead counts (state/city) from the filter_option_counts RPC.
+  const [optionCounts, setOptionCounts] = useState<Record<string, Record<string, number>>>({});
   const [clientTagOptions, setClientTagOptions] = useState<string[]>([]);
   const [collapsed, setCollapsed] = useState(false);
   void countries;
@@ -229,6 +231,16 @@ export function FilterBar({
 
     const supabase = createClient();
     const { data } = await supabase.rpc("distinct_values", { col_name: col });
+
+    // State/City also carry per-option lead counts (shown in the dropdown).
+    if (col === "state" || col === "city") {
+      supabase.rpc("filter_option_counts", { col_name: col }).then(({ data: counts }) => {
+        if (counts && typeof counts === "object") {
+          setOptionCounts((prev) => ({ ...prev, [col]: counts as Record<string, number> }));
+        }
+      });
+    }
+
     if (!data) return;
     let values = data as string[];
 
@@ -422,6 +434,7 @@ export function FilterBar({
           >
             <FilterMultiSelect
               options={cityValues}
+              counts={optionCounts.city}
               value={filters.location.city}
               onChange={onLocationCityChange}
               searchable
@@ -440,6 +453,7 @@ export function FilterBar({
             <FilterMultiSelect
               options={states}
               labels={STATE_NAMES}
+              counts={optionCounts.state}
               value={filters.location.state}
               onChange={onLocationStateChange}
               searchable
