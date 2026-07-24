@@ -51,6 +51,31 @@ interface FilterBarProps {
   onReset: () => void;
 }
 
+// Full display names for the State chip — DB stores 2-letter codes (post
+// 2026-07 normalization), the dropdown shows "California (CA)".
+const STATE_NAMES: Record<string, string> = {
+  AL: "Alabama (AL)", AK: "Alaska (AK)", AZ: "Arizona (AZ)", AR: "Arkansas (AR)",
+  CA: "California (CA)", CO: "Colorado (CO)", CT: "Connecticut (CT)", DE: "Delaware (DE)",
+  FL: "Florida (FL)", GA: "Georgia (GA)", HI: "Hawaii (HI)", ID: "Idaho (ID)",
+  IL: "Illinois (IL)", IN: "Indiana (IN)", IA: "Iowa (IA)", KS: "Kansas (KS)",
+  KY: "Kentucky (KY)", LA: "Louisiana (LA)", ME: "Maine (ME)", MD: "Maryland (MD)",
+  MA: "Massachusetts (MA)", MI: "Michigan (MI)", MN: "Minnesota (MN)", MS: "Mississippi (MS)",
+  MO: "Missouri (MO)", MT: "Montana (MT)", NE: "Nebraska (NE)", NV: "Nevada (NV)",
+  NH: "New Hampshire (NH)", NJ: "New Jersey (NJ)", NM: "New Mexico (NM)", NY: "New York (NY)",
+  NC: "North Carolina (NC)", ND: "North Dakota (ND)", OH: "Ohio (OH)", OK: "Oklahoma (OK)",
+  OR: "Oregon (OR)", PA: "Pennsylvania (PA)", RI: "Rhode Island (RI)", SC: "South Carolina (SC)",
+  SD: "South Dakota (SD)", TN: "Tennessee (TN)", TX: "Texas (TX)", UT: "Utah (UT)",
+  VT: "Vermont (VT)", VA: "Virginia (VA)", WA: "Washington (WA)", WV: "West Virginia (WV)",
+  WI: "Wisconsin (WI)", WY: "Wyoming (WY)", DC: "Washington DC (DC)",
+  PR: "Puerto Rico (PR)", GU: "Guam (GU)", VI: "U.S. Virgin Islands (VI)",
+  AS: "American Samoa (AS)", MP: "Northern Mariana Islands (MP)",
+  // Canada
+  AB: "Alberta (AB)", BC: "British Columbia (BC)", MB: "Manitoba (MB)",
+  NB: "New Brunswick (NB)", NL: "Newfoundland and Labrador (NL)", NS: "Nova Scotia (NS)",
+  NT: "Northwest Territories (NT)", NU: "Nunavut (NU)", ON: "Ontario (ON)",
+  PE: "Prince Edward Island (PE)", QC: "Quebec (QC)", SK: "Saskatchewan (SK)", YT: "Yukon (YT)",
+};
+
 // Every chip that can be hidden/unhidden via the "Manage filters" control.
 // Order here is the order shown in the manage popover.
 const HIDEABLE_CHIPS: { key: string; label: string }[] = [
@@ -198,8 +223,9 @@ export function FilterBar({
     if (loadedRef.current.has(col)) return;
     loadedRef.current.add(col);
 
-    // City/Company are unbounded (100K+/1.3M distinct) — search-only, no preload.
-    if (col === "city" || col === "company") return;
+    // Company is unbounded (1.3M distinct) — search-only, no preload.
+    // City is cached since the 2026-07 normalization (~4K clean values).
+    if (col === "company") return;
 
     const supabase = createClient();
     const { data } = await supabase.rpc("distinct_values", { col_name: col });
@@ -413,11 +439,13 @@ export function FilterBar({
           >
             <FilterMultiSelect
               options={states}
+              labels={STATE_NAMES}
               value={filters.location.state}
               onChange={onLocationStateChange}
               searchable
-              onSearch={(term) => liveSearch("state", term)}
             />
+            {/* no onSearch: 60 options filter locally against full names,
+                so typing "california" or "CA" both match */}
           </FilterChip>
         )}
 
