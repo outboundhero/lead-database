@@ -9,6 +9,15 @@ export interface FilterResult {
 
 const U = "__UNKNOWN__";
 
+// Per-side match modes (migration 062) — pass through only when set so old
+// payload shapes stay byte-identical.
+function modes(f?: { includeMode?: string; excludeMode?: string }) {
+  return {
+    ...(f?.includeMode ? { includeMode: f.includeMode } : {}),
+    ...(f?.excludeMode ? { excludeMode: f.excludeMode } : {}),
+  };
+}
+
 function stripUnknown(ie: { include: string[]; exclude: string[]; includeUnknown?: boolean }) {
   const includeHas = ie.include.includes(U);
   const excludeHas = ie.exclude.includes(U);
@@ -48,6 +57,7 @@ export function buildRpcFilters(filters: FilterState) {
       exclude: expandTitleAliases(jobTitle.exclude),
       includeUnknown: jobTitle.includeUnknown,
       selectUnknown: jobTitle.selectUnknown,
+      ...modes(filters.jobTitle),
     },
     generalIndustry: { include: generalIndustry.include, exclude: generalIndustry.exclude, includeUnknown: generalIndustry.includeUnknown, selectUnknown: generalIndustry.selectUnknown },
     specificIndustry: { include: specificIndustry.include, exclude: specificIndustry.exclude, includeUnknown: specificIndustry.includeUnknown, selectUnknown: specificIndustry.selectUnknown },
@@ -58,17 +68,17 @@ export function buildRpcFilters(filters: FilterState) {
       exclude: espRaw.exclude.flatMap((v: string) => v === "Microsoft / Outlook" ? ["Microsoft", "Outlook"] : [v]),
       includeUnknown: espRaw.includeUnknown, selectUnknown: espRaw.selectUnknown,
     },
-    company: { include: company.include, exclude: company.exclude, includeUnknown: company.includeUnknown, selectUnknown: company.selectUnknown },
-    category: { include: category.include, exclude: category.exclude, includeUnknown: category.includeUnknown, selectUnknown: category.selectUnknown },
-    subcategory: { include: subcategory.include, exclude: subcategory.exclude, includeUnknown: subcategory.includeUnknown, selectUnknown: subcategory.selectUnknown },
-    additionalCategory: { include: additionalCategory.include, exclude: additionalCategory.exclude, includeUnknown: additionalCategory.includeUnknown, selectUnknown: additionalCategory.selectUnknown },
-    tags: { include: filters.tags?.include ?? [], exclude: filters.tags?.exclude ?? [] },
+    company: { include: company.include, exclude: company.exclude, includeUnknown: company.includeUnknown, selectUnknown: company.selectUnknown, ...modes(filters.company) },
+    category: { include: category.include, exclude: category.exclude, includeUnknown: category.includeUnknown, selectUnknown: category.selectUnknown, ...modes(filters.category) },
+    subcategory: { include: subcategory.include, exclude: subcategory.exclude, includeUnknown: subcategory.includeUnknown, selectUnknown: subcategory.selectUnknown, ...modes(filters.subcategory) },
+    additionalCategory: { include: additionalCategory.include, exclude: additionalCategory.exclude, includeUnknown: additionalCategory.includeUnknown, selectUnknown: additionalCategory.selectUnknown, ...modes(filters.additionalCategory) },
+    tags: { include: filters.tags?.include ?? [], exclude: filters.tags?.exclude ?? [], ...modes(filters.tags) },
     location: {
       country: { include: country.include, exclude: country.exclude, includeUnknown: country.includeUnknown, selectUnknown: country.selectUnknown },
-      state: { include: state.include, exclude: state.exclude, includeUnknown: state.includeUnknown, selectUnknown: state.selectUnknown },
+      state: { include: state.include, exclude: state.exclude, includeUnknown: state.includeUnknown, selectUnknown: state.selectUnknown, ...modes(filters.location.state) },
       // New shape: {include, exclude} arrays. The RPC also still accepts the
       // legacy plain-string form for old stored batch filters.
-      city: { include: cityInclude, exclude: cityExclude },
+      city: { include: cityInclude, exclude: cityExclude, ...(typeof city === "object" && city ? modes(city) : {}) },
     },
     companySize: { buckets: filters.companySize?.buckets || [], includeUnknown: filters.companySize?.includeUnknown || false, customMin: filters.companySize?.customMin ?? null, customMax: filters.companySize?.customMax ?? null },
     revenue: { buckets: filters.revenue?.buckets || [], includeUnknown: filters.revenue?.includeUnknown || false },
@@ -78,6 +88,7 @@ export function buildRpcFilters(filters: FilterState) {
       include: filters.keyword?.include ?? [],
       exclude: filters.keyword?.exclude ?? [],
       matchMode: filters.keyword?.matchMode === "exact" ? "exact" : "contains",
+      ...modes(filters.keyword),
     },
     emailContains: {
       include: filters.emailContains?.include ?? [],
@@ -87,14 +98,17 @@ export function buildRpcFilters(filters: FilterState) {
       include: filters.categorySearch?.include ?? [],
       exclude: filters.categorySearch?.exclude ?? [],
       matchMode: filters.categorySearch?.matchMode === "exact" ? "exact" : "contains",
+      ...modes(filters.categorySearch),
     },
     customTags: {
       include: filters.customTags?.include ?? [],
       exclude: filters.customTags?.exclude ?? [],
+      ...modes(filters.customTags),
     },
     website: {
       include: filters.website?.include ?? [],
       exclude: filters.website?.exclude ?? [],
+      ...modes(filters.website),
     },
     globalSearch: (filters.globalSearch ?? "").trim(),
     emailType: {
@@ -102,6 +116,7 @@ export function buildRpcFilters(filters: FilterState) {
       general: filters.emailType?.general ?? true,
     },
     includeBounced: !!filters.includeBounced,
+    commercialCleaning: !!filters.commercialCleaning,
     excludeEmptyName: filters.excludeEmptyName || false,
     excludeEmptyCompany: filters.excludeEmptyCompany || false,
     excludeEmptyOverview: filters.excludeEmptyOverview || false,

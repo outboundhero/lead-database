@@ -23,7 +23,7 @@ type FilterAction =
   | { type: "SET_LOCATION_STATE"; value: IncludeExclude }
   | { type: "SET_LOCATION_CITY"; value: IncludeExclude }
   | { type: "SET_FILTER_OPERATOR"; value: "AND" | "OR" }
-  | { type: "TOGGLE_FLAG"; field: "excludeEmptyName" | "excludeEmptyCompany" | "excludeEmptyOverview"; value: boolean }
+  | { type: "TOGGLE_FLAG"; field: "excludeEmptyName" | "excludeEmptyCompany" | "excludeEmptyOverview" | "commercialCleaning"; value: boolean }
   | { type: "SET_KEYWORD"; value: KeywordFilter }
   | { type: "SET_EMAIL_TYPE"; value: EmailTypeFilter }
   | { type: "SET_EMAIL_CONTAINS"; value: EmailContainsFilter }
@@ -140,7 +140,7 @@ export function useFilters() {
     dispatch({ type: "SET_FILTER_OPERATOR", value });
   }, []);
 
-  const toggleFlag = useCallback((field: "excludeEmptyName" | "excludeEmptyCompany" | "excludeEmptyOverview", value: boolean) => {
+  const toggleFlag = useCallback((field: "excludeEmptyName" | "excludeEmptyCompany" | "excludeEmptyOverview" | "commercialCleaning", value: boolean) => {
     dispatch({ type: "TOGGLE_FLAG", field, value });
   }, []);
 

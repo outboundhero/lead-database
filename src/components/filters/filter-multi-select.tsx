@@ -5,7 +5,7 @@ import { Check, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import type { IncludeExclude } from "@/types/filters";
+import type { IncludeExclude, MatchMode } from "@/types/filters";
 
 interface FilterMultiSelectProps {
   options: readonly string[];
@@ -16,6 +16,10 @@ interface FilterMultiSelectProps {
   onChange: (value: IncludeExclude) => void;
   searchable?: boolean;
   onSearch?: (term: string) => void;
+  /** Match mode used when includeMode/excludeMode is unset (field default). */
+  defaultMode?: MatchMode;
+  /** Allow typing values not in the option list (Enter / comma / pasted lines). */
+  freeText?: boolean;
 }
 
 export function FilterMultiSelect({
@@ -26,9 +30,35 @@ export function FilterMultiSelect({
   onChange,
   searchable = false,
   onSearch,
+  defaultMode = "exact",
+  freeText = true,
 }: FilterMultiSelectProps) {
   const [search, setSearch] = useState("");
   const [mode, setMode] = useState<"include" | "exclude">("include");
+
+  // Per-side match mode (migration 062): each side keeps its own setting.
+  const activeMode: MatchMode =
+    mode === "include" ? (value.includeMode ?? defaultMode) : (value.excludeMode ?? defaultMode);
+  const setActiveMode = (m: MatchMode) =>
+    onChange(mode === "include" ? { ...value, includeMode: m } : { ...value, excludeMode: m });
+
+  // Free-text entry: add typed/pasted terms to the active side (deduped).
+  function addFreeTerms(raw: string) {
+    const terms = raw.split(/[,\n]+/).map((t) => t.trim()).filter(Boolean);
+    if (!terms.length) return;
+    const cur = mode === "include" ? value.include : value.exclude;
+    const other = mode === "include" ? value.exclude : value.include;
+    const merged = [...cur];
+    for (const t of terms) if (!merged.includes(t)) merged.push(t);
+    const cleanedOther = other.filter((v) => !terms.includes(v));
+    onChange(
+      mode === "include"
+        ? { ...value, include: merged, exclude: cleanedOther }
+        : { ...value, include: cleanedOther, exclude: merged }
+    );
+    setSearch("");
+    if (onSearch) onSearch("");
+  }
 
   const filteredOptions = searchable && !onSearch
     ? options.filter((opt) =>
@@ -105,6 +135,24 @@ export function FilterMultiSelect({
         >
           Exclude
         </Button>
+
+        {/* Per-side match mode: Contains / Exact for the ACTIVE side */}
+        <div className="flex items-center gap-0.5 border rounded overflow-hidden" title={`How ${mode}d values match`}>
+          {(["contains", "exact"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setActiveMode(m)}
+              className={`h-5 px-1.5 text-[10px] font-medium capitalize transition-colors ${
+                activeMode === m
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-muted"
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
 
         {/* Per-field OR / AND for the include list */}
         {value.include.length > 0 && (
@@ -212,11 +260,26 @@ export function FilterMultiSelect({
 
       {searchable && (
         <Input
-          placeholder="Search..."
+          placeholder={freeText ? "Search or type + Enter\u2026" : "Search..."}
           value={search}
           onChange={(e) => {
             setSearch(e.target.value);
             if (onSearch) onSearch(e.target.value);
+          }}
+          onKeyDown={(e) => {
+            if (freeText && e.key === "Enter" && search.trim()) {
+              e.preventDefault();
+              addFreeTerms(search);
+            }
+          }}
+          onPaste={(e) => {
+            if (!freeText) return;
+            const text = e.clipboardData.getData("text");
+            // Comma or line-separated lists go straight in as saved values.
+            if (/[,\n]/.test(text)) {
+              e.preventDefault();
+              addFreeTerms(text);
+            }
           }}
           className="h-7 text-xs"
         />

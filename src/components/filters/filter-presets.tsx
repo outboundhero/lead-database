@@ -34,6 +34,7 @@ interface FilterPresetsProps {
 
 export function FilterPresets({ currentFilters, onLoadPreset }: FilterPresetsProps) {
   const [presets, setPresets] = useState<Preset[]>([]);
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [clientTags, setClientTags] = useState<ClientTag[]>([]);
   const [newName, setNewName] = useState("");
   const [newTag, setNewTag] = useState<string>(NO_TAG);
@@ -109,8 +110,15 @@ export function FilterPresets({ currentFilters, onLoadPreset }: FilterPresetsPro
   function handleDelete(id: string) {
     const preset = presets.find((p) => p.id === id);
     if (!preset) return;
-    // Soft-delete: hide it immediately, but only hit the API after an 8s undo
-    // window. Undo just cancels the pending timer — nothing was deleted yet.
+    // Two-step confirmation: first click arms the button ("Delete?"), second
+    // click within 4s actually deletes. Then a 5s undo window before the API
+    // call fires — undo just cancels the pending timer.
+    if (confirmingId !== id) {
+      setConfirmingId(id);
+      setTimeout(() => setConfirmingId((cur) => (cur === id ? null : cur)), 4000);
+      return;
+    }
+    setConfirmingId(null);
     setPresets((prev) => prev.filter((p) => p.id !== id));
     let cancelled = false;
     const timer = setTimeout(async () => {
@@ -123,9 +131,9 @@ export function FilterPresets({ currentFilters, onLoadPreset }: FilterPresetsPro
         toast.error(err instanceof Error ? err.message : "Failed to delete preset");
         loadPresets(); // restore on failure
       }
-    }, 8000);
+    }, 5000);
     toast(`Preset "${preset.name}" deleted`, {
-      duration: 8000,
+      duration: 5000,
       action: {
         label: "Undo",
         onClick: () => { cancelled = true; clearTimeout(timer); setPresets((prev) => [preset, ...prev.filter((p) => p.id !== id)]); },
@@ -238,11 +246,19 @@ export function FilterPresets({ currentFilters, onLoadPreset }: FilterPresetsPro
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-5 w-5 p-0 opacity-0 group-hover:opacity-100 text-destructive"
-                      title="Delete preset"
+                      className={`h-5 p-0 text-destructive ${
+                        confirmingId === preset.id
+                          ? "w-auto px-1.5 opacity-100 bg-destructive/10"
+                          : "w-5 opacity-0 group-hover:opacity-100"
+                      }`}
+                      title={confirmingId === preset.id ? "Click again to confirm" : "Delete preset"}
                       onClick={() => handleDelete(preset.id)}
                     >
-                      <Trash2 className="h-3 w-3" />
+                      {confirmingId === preset.id ? (
+                        <span className="text-[10px] font-semibold">Delete?</span>
+                      ) : (
+                        <Trash2 className="h-3 w-3" />
+                      )}
                     </Button>
                   </div>
                 ))}

@@ -54,6 +54,33 @@ const SENDER_PATTERNS = [
   /poor (sender |ip |domain |)reputation/i,
   /message.{0,30}(identified|detected|flagged) as spam/i,
   /banned sending ip/i,
+  // Standalone RBL/blocklist service mentions = OUR ip is listed = sender-side
+  /\b(spamhaus|spamcop|sorbs|barracudacentral|dnsbl)\b/i,
+];
+
+// Recipient security gateways (Proofpoint, Mimecast, Barracuda ESS, EOP, ...).
+// These block on the RECIPIENT's side — the address itself may be perfectly
+// valid, so gateway bounces are NOT permanent: is_bounced flips back to false
+// and the lead stays eligible for future outreach. Checked after
+// SENDER_PATTERNS (so ip-blacklist context keeps winning) but before
+// HARD_PATTERNS (so a named gateway beats generic "blocked by policy").
+const GATEWAY_PATTERNS = [
+  /proofpoint/i,
+  /mimecast/i,
+  /barracuda/i,
+  /ironport|cisco (email|secure email|esa)/i,
+  /messagelabs|symantec email|broadcom email/i,
+  /forcepoint|websense/i,
+  /sophos/i,
+  /trend ?micro/i,
+  /fortimail|fortinet/i,
+  /mailmarshal|trustwave/i,
+  /spamtitan|titanhq/i,
+  /exchange online protection|\beop\b/i,
+  /message .{0,30}quarantined|placed in quarantine|quarantined for review/i,
+  /content filter(ing)? (rule|policy|rejected)/i,
+  /security gateway/i,
+  /(hosted )?email security (service|appliance|gateway)/i,
 ];
 
 // Broad sender tokens, checked AFTER hard patterns so hard-bounce evidence
@@ -135,6 +162,10 @@ function classifyText(ndr) {
   for (const re of SENDER_PATTERNS) {
     const m = ndr.match(re);
     if (m) return { type: "sender", matched: m[0] };
+  }
+  for (const re of GATEWAY_PATTERNS) {
+    const m = ndr.match(re);
+    if (m) return { type: "gateway", matched: m[0] };
   }
   for (const re of HARD_PATTERNS) {
     const m = ndr.match(re);
@@ -223,6 +254,15 @@ const TEST_CORPUS = [
     "Delivery temporarily deferred, try again later\n\n-----Original Message-----\nFrom: us@outboundclean.com",
     "sender",
   ],
+  // Recipient security gateways -> 'gateway' (recoverable, not permanent)
+  ["550 5.7.1 Rejected by Proofpoint Email Protection", "gateway"],
+  ["554 Email rejected due to security policies (Mimecast)", "gateway"],
+  ["550 Blocked by Barracuda Email Security Service", "gateway"],
+  ["Your message was placed in quarantine by Exchange Online Protection", "gateway"],
+  ["550 5.7.1 Message rejected by Cisco IronPort content scanner", "gateway"],
+  // RBL listing mentions stay sender-side even without ip/host prefix
+  ["554 Service unavailable; blocked using zen.spamhaus.org", "sender"],
+  ["Listed at barracudacentral.org - delivery refused", "sender"],
 ];
 
 // ─── Worker ──────────────────────────────────────────────────────────────────
@@ -327,7 +367,7 @@ async function run({ dryRun }) {
        AND (
          bounce_checked_at IS NULL
          OR (bounced_at IS NOT NULL AND bounced_at > bounce_checked_at)
-         OR (is_bounced = true AND bounce_type = 'sender')
+         OR (is_bounced = true AND bounce_type IN ('sender', 'gateway'))
        )
      ORDER BY bounce_checked_at NULLS FIRST
      LIMIT $1`,
@@ -340,7 +380,7 @@ async function run({ dryRun }) {
     return;
   }
 
-  const counts = { sender: 0, hard: 0, unknown: 0, errors: 0 };
+  const counts = { sender: 0, gateway: 0, hard: 0, unknown: 0, errors: 0 };
   let consecutiveErrors = 0;
 
   for (const lead of leads) {
@@ -381,7 +421,7 @@ async function run({ dryRun }) {
                is_bounced = $3,
                updated_at = now()
            WHERE id = $4`,
-          [type, reason.slice(0, REASON_MAX + 60), type !== "sender", lead.id]
+          [type, reason.slice(0, REASON_MAX + 60), type !== "sender" && type !== "gateway", lead.id]
         );
       }
       counts[type]++;
@@ -406,7 +446,7 @@ async function run({ dryRun }) {
   }
 
   console.log(
-    `bounce-worker done: sender=${counts.sender} hard=${counts.hard} unknown=${counts.unknown} errors=${counts.errors}`
+    `bounce-worker done: sender=${counts.sender} gateway=${counts.gateway} hard=${counts.hard} unknown=${counts.unknown} errors=${counts.errors}`
   );
   await client.end();
 }
@@ -414,7 +454,10 @@ async function run({ dryRun }) {
 // ─── Entry ───────────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
-if (args.includes("--test-classifier")) {
+// Only run when executed directly — importing { classifyBounce } from another
+// script (e.g. reclassify-bounces.mjs) must not launch a worker run.
+const IS_MAIN = process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop());
+if (IS_MAIN && args.includes("--test-classifier")) {
   let pass = 0;
   for (const [text, expected] of TEST_CORPUS) {
     const { type } = classifyBounce(text);
@@ -424,7 +467,7 @@ if (args.includes("--test-classifier")) {
   }
   console.log(`\n${pass}/${TEST_CORPUS.length} passed`);
   process.exit(pass === TEST_CORPUS.length ? 0 : 1);
-} else {
+} else if (IS_MAIN) {
   run({ dryRun: args.includes("--dry-run") }).catch((err) => {
     console.error("bounce-worker fatal:", err);
     process.exit(1);

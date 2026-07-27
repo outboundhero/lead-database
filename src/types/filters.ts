@@ -1,8 +1,14 @@
+export type MatchMode = "contains" | "exact";
+
 export interface IncludeExclude {
   include: string[];
   exclude: string[];
   operator: "OR" | "AND"; // within the include list: OR = match any, AND = match all
   includeUnknown?: boolean; // include leads where this field is null/empty
+  // Per-side match settings (migration 062). Defaults preserve old behavior:
+  // dropdown fields = exact, city/tags/keyword-style fields = contains.
+  includeMode?: MatchMode;
+  excludeMode?: MatchMode;
 }
 
 export interface RangeFilter {
@@ -27,7 +33,9 @@ export interface LocationFilter {
 export interface KeywordFilter {
   include: string[];
   exclude: string[];
-  matchMode?: "contains" | "exact";
+  matchMode?: "contains" | "exact"; // legacy single mode (fallback for both sides)
+  includeMode?: MatchMode;
+  excludeMode?: MatchMode;
 }
 
 // Email/domain substring search (weebly.com, .gov, walmart.com …).
@@ -41,12 +49,14 @@ export interface EmailContainsFilter {
 export interface CategorySearchFilter {
   include: string[];
   exclude: string[];
-  matchMode?: "contains" | "exact";
+  matchMode?: "contains" | "exact"; // legacy single mode (fallback for both sides)
+  includeMode?: MatchMode;
+  excludeMode?: MatchMode;
 }
 
 // Free-text tag search (any lead tag) + website/domain search.
-export interface CustomTagsFilter { include: string[]; exclude: string[]; }
-export interface WebsiteFilter { include: string[]; exclude: string[]; }
+export interface CustomTagsFilter { include: string[]; exclude: string[]; includeMode?: MatchMode; excludeMode?: MatchMode; }
+export interface WebsiteFilter { include: string[]; exclude: string[]; includeMode?: MatchMode; excludeMode?: MatchMode; }
 
 // New for OutboundHero — email type segmented control. Default: both true.
 export interface EmailTypeFilter {
@@ -100,6 +110,8 @@ export interface FilterState {
   // OutboundHero additions
   emailType: EmailTypeFilter;          // default both true → no filter
   includeBounced?: boolean;             // admin-only override; default false → hide bounced
+  // Commercial cleaning client: exclude ~230 default job titles (whole-word).
+  commercialCleaning?: boolean;
 
   // Pagination
   page: number;
@@ -145,6 +157,7 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   globalSearch: "",
   emailType: { personal: true, general: true },
   includeBounced: false,
+  commercialCleaning: false,
   page: 1,
   pageSize: 50,
   sortBy: "created_at",
@@ -158,11 +171,15 @@ export const DEFAULT_FILTER_STATE: FilterState = {
 // /api/bison/push, /api/leads/filter) must pass through this.
 export function normalizeFilterState(partial: unknown): FilterState {
   const p = (partial && typeof partial === "object" ? partial : {}) as Partial<FilterState>;
+  const mode = (m: unknown): MatchMode | undefined =>
+    m === "exact" || m === "contains" ? m : undefined;
   const mergeIE = (v: Partial<IncludeExclude> | undefined, d: IncludeExclude): IncludeExclude => ({
     include: Array.isArray(v?.include) ? v.include : d.include,
     exclude: Array.isArray(v?.exclude) ? v.exclude : d.exclude,
     operator: v?.operator === "AND" ? "AND" : d.operator,
     includeUnknown: typeof v?.includeUnknown === "boolean" ? v.includeUnknown : d.includeUnknown,
+    includeMode: mode(v?.includeMode),
+    excludeMode: mode(v?.excludeMode),
   });
   const d = DEFAULT_FILTER_STATE;
   return {
@@ -193,6 +210,8 @@ export function normalizeFilterState(partial: unknown): FilterState {
       include: Array.isArray(p.keyword?.include) ? p.keyword.include : d.keyword.include,
       exclude: Array.isArray(p.keyword?.exclude) ? p.keyword.exclude : d.keyword.exclude,
       matchMode: p.keyword?.matchMode === "exact" ? "exact" : "contains",
+      includeMode: mode(p.keyword?.includeMode),
+      excludeMode: mode(p.keyword?.excludeMode),
     },
     emailContains: {
       include: Array.isArray(p.emailContains?.include) ? p.emailContains.include : d.emailContains.include,
@@ -202,17 +221,24 @@ export function normalizeFilterState(partial: unknown): FilterState {
       include: Array.isArray(p.categorySearch?.include) ? p.categorySearch.include : d.categorySearch.include,
       exclude: Array.isArray(p.categorySearch?.exclude) ? p.categorySearch.exclude : d.categorySearch.exclude,
       matchMode: p.categorySearch?.matchMode === "exact" ? "exact" : "contains",
+      includeMode: mode(p.categorySearch?.includeMode),
+      excludeMode: mode(p.categorySearch?.excludeMode),
     },
     customTags: {
       include: Array.isArray(p.customTags?.include) ? p.customTags.include : d.customTags.include,
       exclude: Array.isArray(p.customTags?.exclude) ? p.customTags.exclude : d.customTags.exclude,
+      includeMode: mode(p.customTags?.includeMode),
+      excludeMode: mode(p.customTags?.excludeMode),
     },
     website: {
       include: Array.isArray(p.website?.include) ? p.website.include : d.website.include,
       exclude: Array.isArray(p.website?.exclude) ? p.website.exclude : d.website.exclude,
+      includeMode: mode(p.website?.includeMode),
+      excludeMode: mode(p.website?.excludeMode),
     },
     globalSearch: typeof p.globalSearch === "string" ? p.globalSearch : d.globalSearch,
     emailType: { ...d.emailType, ...(p.emailType ?? {}) },
+    commercialCleaning: p.commercialCleaning === true,
   };
 }
 
@@ -246,5 +272,6 @@ export function countActiveFilters(filters: FilterState): number {
   // emailType counts as active only when not both selected (i.e. user has restricted)
   if (!(filters.emailType.personal && filters.emailType.general)) count++;
   if (filters.includeBounced) count++;
+  if (filters.commercialCleaning) count++;
   return count;
 }

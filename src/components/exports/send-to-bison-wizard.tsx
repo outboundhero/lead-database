@@ -379,7 +379,13 @@ export function SendToBisonWizard({
           <div className="space-y-3">
             <p className="text-xs text-muted-foreground">
               Confirm the push for client{" "}
-              <span className="font-medium text-foreground">{preview.clientTag}</span>:
+              <span className="font-medium text-foreground">{preview.clientTag}</span>
+              {selectedTag?.group_no ? <> · destination group {selectedTag.group_no}</> : null}
+              {" · "}
+              <span className="font-medium text-foreground">
+                {((b2bSends ? preview.b2b.count : 0) + (b2cSends ? preview.b2c.count : 0)).toLocaleString()}
+              </span>{" "}
+              leads total:
             </p>
             {b2bSends && b2bCampaign ? (
               <SummaryRow
@@ -494,22 +500,37 @@ function CampaignPicker({
           {side.error ? ` (${side.error})` : ""}.
         </p>
       ) : (
-        <Select value={value} onValueChange={onChange}>
-          <SelectTrigger className="h-9 w-full text-[13px]">
-            <SelectValue placeholder="Pick a campaign" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={SKIP} className="text-[13px]">
-              — Don&apos;t send this side —
-            </SelectItem>
-            {side.campaigns.map((c) => (
-              <SelectItem key={String(c.id)} value={String(c.id)} className="text-[13px]">
-                {c.name ?? `Campaign ${c.id}`}
-                {side.suggested && String(side.suggested.id) === String(c.id) ? "  (suggested)" : ""}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        (() => {
+          // New leads must never go to nurture — same name rule the
+          // suggestion logic uses (send-preview suggestCampaign).
+          const sendable = side.campaigns.filter((c) => !/nurture/i.test(String(c.name ?? "")));
+          const hidden = side.campaigns.length - sendable.length;
+          return (
+            <>
+              <Select value={value} onValueChange={onChange}>
+                <SelectTrigger className="h-9 w-full text-[13px]">
+                  <SelectValue placeholder="Pick a campaign" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={SKIP} className="text-[13px]">
+                    — Don&apos;t send this side —
+                  </SelectItem>
+                  {sendable.map((c) => (
+                    <SelectItem key={String(c.id)} value={String(c.id)} className="text-[13px]">
+                      {c.name ?? `Campaign ${c.id}`}
+                      {side.suggested && String(side.suggested.id) === String(c.id) ? "  (suggested)" : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {hidden > 0 && (
+                <p className="mt-1 text-[10px] text-muted-foreground">
+                  {hidden} nurture campaign{hidden === 1 ? "" : "s"} hidden — new leads never go to nurture.
+                </p>
+              )}
+            </>
+          );
+        })()
       )}
     </div>
   );

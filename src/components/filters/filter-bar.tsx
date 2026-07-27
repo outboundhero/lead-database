@@ -16,6 +16,8 @@ import { FilterPresets } from "./filter-presets";
 import type {
   FilterState,
   IncludeExclude,
+  CustomTagsFilter,
+  WebsiteFilter,
   RangeFilter,
   KeywordFilter,
   EmailTypeFilter,
@@ -38,17 +40,44 @@ interface FilterBarProps {
   onLocationStateChange: (value: IncludeExclude) => void;
   onLocationCityChange: (value: IncludeExclude) => void;
   onFilterOperatorChange: (value: "AND" | "OR") => void;
-  onToggleFlag: (field: "excludeEmptyName" | "excludeEmptyCompany" | "excludeEmptyOverview", value: boolean) => void;
+  onToggleFlag: (field: "excludeEmptyName" | "excludeEmptyCompany" | "excludeEmptyOverview" | "commercialCleaning", value: boolean) => void;
   onKeywordChange: (value: KeywordFilter) => void;
   onEmailTypeChange: (value: EmailTypeFilter) => void;
   onEmailContainsChange: (value: EmailContainsFilter) => void;
   onCategorySearchChange: (value: CategorySearchFilter) => void;
-  onCustomTagsChange: (value: { include: string[]; exclude: string[] }) => void;
-  onWebsiteChange: (value: { include: string[]; exclude: string[] }) => void;
+  onCustomTagsChange: (value: CustomTagsFilter) => void;
+  onWebsiteChange: (value: WebsiteFilter) => void;
   onGlobalSearchChange: (value: string) => void;
   onIncludeBouncedChange: (value: boolean) => void;
   onLoadPreset?: (filters: FilterState) => void;
   onReset: () => void;
+}
+
+// Tiny Contains/Exact toggle used beside Include/Exclude labels in the
+// tag-input chips (per-side match modes, migration 062).
+function SideModeToggle({
+  value,
+  onChange,
+}: {
+  value: "contains" | "exact";
+  onChange: (v: "contains" | "exact") => void;
+}) {
+  return (
+    <span className="ml-auto inline-flex items-center gap-0.5 rounded border overflow-hidden">
+      {(["contains", "exact"] as const).map((m) => (
+        <button
+          key={m}
+          type="button"
+          onClick={() => onChange(m)}
+          className={`h-4.5 px-1.5 text-[10px] font-medium capitalize transition-colors ${
+            value === m ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"
+          }`}
+        >
+          {m}
+        </button>
+      ))}
+    </span>
+  );
 }
 
 // Full display names for the State chip — DB stores 2-letter codes (post
@@ -347,6 +376,74 @@ export function FilterBar({
           ))}
         </div>
 
+        {/* Category — populated by the categorize worker (lead_categories taxonomy) */}
+        {!isHidden("category") && (
+          <FilterChip
+            label="Category"
+            activeCount={filters.category.include.length + filters.category.exclude.length + (filters.category.includeUnknown ? 1 : 0)}
+            onOpen={() => loadDistinctFor("category")}
+          >
+            <FilterMultiSelect
+              options={categoryValues}
+              value={filters.category}
+              onChange={(v) => onIncludeExcludeChange("category", v)}
+              searchable
+              onSearch={(term) => liveSearch("category", term)}
+            />
+          </FilterChip>
+        )}
+
+        {/* Subcategory — Bison-enriched, second-level category */}
+        {!isHidden("subcategory") && (
+          <FilterChip
+            label="Subcategory"
+            activeCount={filters.subcategory.include.length + filters.subcategory.exclude.length + (filters.subcategory.includeUnknown ? 1 : 0)}
+            onOpen={() => loadDistinctFor("subcategory")}
+          >
+            <FilterMultiSelect
+              options={subcategoryValues}
+              value={filters.subcategory}
+              onChange={(v) => onIncludeExcludeChange("subcategory", v)}
+              searchable
+              onSearch={(term) => liveSearch("subcategory", term)}
+            />
+          </FilterChip>
+        )}
+
+        {/* Additional / SEO — third-level category; holds Clay "Company SEO Description" text */}
+        {!isHidden("additionalCategory") && (
+          <FilterChip
+            label="Additional / SEO"
+            activeCount={filters.additionalCategory.include.length + filters.additionalCategory.exclude.length + (filters.additionalCategory.includeUnknown ? 1 : 0)}
+            onOpen={() => loadDistinctFor("additional_category")}
+          >
+            <FilterMultiSelect
+              options={additionalCategoryValues}
+              value={filters.additionalCategory}
+              onChange={(v) => onIncludeExcludeChange("additionalCategory", v)}
+              searchable
+              onSearch={(term) => liveSearch("additional_category", term)}
+            />
+          </FilterChip>
+        )}
+
+        {/* Commercial Cleaning Client — excludes ~230 default non-buyer job titles */}
+        <button
+          type="button"
+          onClick={() => onToggleFlag("commercialCleaning", !filters.commercialCleaning)}
+          title="Excludes ~230 non-buyer job titles (IT, sales reps, legal, drivers, retail…). Leads without a title are kept. List editable in the database."
+          className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3.5 text-[13px] font-medium transition-all active:scale-[0.97] ${
+            filters.commercialCleaning
+              ? "bg-primary text-primary-foreground shadow-sm"
+              : "bg-muted text-foreground hover:bg-accent"
+          }`}
+        >
+          Commercial Cleaning
+          {filters.commercialCleaning && (
+            <span className="rounded-full bg-primary-foreground/20 px-1.5 text-[10px]">~230 titles excluded</span>
+          )}
+        </button>
+
         {/* Enter Name */}
         {!isHidden("name") && (
           <FilterChip label="Enter Name" activeCount={(filters.fullName ? 1 : 0) + (filters.excludeEmptyName ? 1 : 0)}>
@@ -439,6 +536,7 @@ export function FilterBar({
               onChange={onLocationCityChange}
               searchable
               onSearch={(term) => liveSearch("city", term)}
+              defaultMode="contains"
             />
           </FilterChip>
         )}
@@ -471,30 +569,12 @@ export function FilterBar({
           >
             <div className="space-y-3">
               <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Match mode
-                </label>
-                <IosSegmentedControl
-                  fullWidth
-                  value={filters.categorySearch.matchMode === "exact" ? "exact" : "contains"}
-                  onChange={(v: "contains" | "exact") =>
-                    onCategorySearchChange({ ...filters.categorySearch, matchMode: v })
-                  }
-                  options={[
-                    { value: "contains", label: "Contains" },
-                    { value: "exact", label: "Exact terms" },
-                  ]}
-                />
-                <p className="mt-1.5 px-1 text-[11px] text-muted-foreground">
-                  <span className="font-medium text-foreground">Exact</span> = whole-term (
-                  <span className="italic">dry</span> won&apos;t match{" "}
-                  <span className="italic">laundry</span>).{" "}
-                  <span className="font-medium text-foreground">Contains</span> = loose substring.
-                </p>
-              </div>
-              <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Include
+                  <SideModeToggle
+                    value={filters.categorySearch.includeMode ?? (filters.categorySearch.matchMode === "exact" ? "exact" : "contains")}
+                    onChange={(v) => onCategorySearchChange({ ...filters.categorySearch, includeMode: v })}
+                  />
                 </label>
                 <TagInput
                   values={filters.categorySearch.include}
@@ -505,8 +585,12 @@ export function FilterBar({
                 />
               </div>
               <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Exclude
+                  <SideModeToggle
+                    value={filters.categorySearch.excludeMode ?? (filters.categorySearch.matchMode === "exact" ? "exact" : "contains")}
+                    onChange={(v) => onCategorySearchChange({ ...filters.categorySearch, excludeMode: v })}
+                  />
                 </label>
                 <TagInput
                   values={filters.categorySearch.exclude}
@@ -517,7 +601,9 @@ export function FilterBar({
                 />
               </div>
               <p className="px-1 text-[11px] text-muted-foreground">
-                Matches anywhere in category, subcategory, or additional category.
+                Matches category, subcategory, or additional category.{" "}
+                <span className="font-medium text-foreground">Exact</span> = whole-term;{" "}
+                <span className="font-medium text-foreground">Contains</span> = substring. Each side has its own setting.
               </p>
             </div>
           </FilterChip>
@@ -531,38 +617,12 @@ export function FilterBar({
           >
             <div className="space-y-3">
               <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Match mode
-                </label>
-                <IosSegmentedControl
-                  fullWidth
-                  value={keywordMode}
-                  onChange={(v: "contains" | "exact") =>
-                    onKeywordChange({ ...filters.keyword, matchMode: v })
-                  }
-                  options={[
-                    { value: "contains", label: "Contains" },
-                    { value: "exact", label: "Exact terms" },
-                  ]}
-                />
-                <p
-                  className="mt-1.5 px-1 text-[11px] text-muted-foreground"
-                  title={
-                    "Exact = whole-term matching. “dry cleaner” won’t match a bare “cleaner”, " +
-                    "but “house” still catches “housecleaning” (word-start). " +
-                    "Contains = loose substring anywhere in company / industries / overview."
-                  }
-                >
-                  <span className="font-medium text-foreground">Exact</span> = whole-term (
-                  <span className="italic">dry cleaner</span> won&apos;t match bare{" "}
-                  <span className="italic">cleaner</span>; <span className="italic">house</span> matches{" "}
-                  <span className="italic">housecleaning</span>).{" "}
-                  <span className="font-medium text-foreground">Contains</span> = loose substring.
-                </p>
-              </div>
-              <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Include
+                  <SideModeToggle
+                    value={filters.keyword.includeMode ?? keywordMode}
+                    onChange={(v) => onKeywordChange({ ...filters.keyword, includeMode: v })}
+                  />
                 </label>
                 <TagInput
                   values={filters.keyword.include}
@@ -573,8 +633,12 @@ export function FilterBar({
                 />
               </div>
               <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Exclude
+                  <SideModeToggle
+                    value={filters.keyword.excludeMode ?? keywordMode}
+                    onChange={(v) => onKeywordChange({ ...filters.keyword, excludeMode: v })}
+                  />
                 </label>
                 <TagInput
                   values={filters.keyword.exclude}
@@ -693,57 +757,6 @@ export function FilterBar({
           </FilterChip>
         )}
 
-        {/* Category — populated by the categorize worker (lead_categories taxonomy) */}
-        {!isHidden("category") && (
-          <FilterChip
-            label="Category"
-            activeCount={filters.category.include.length + filters.category.exclude.length + (filters.category.includeUnknown ? 1 : 0)}
-            onOpen={() => loadDistinctFor("category")}
-          >
-            <FilterMultiSelect
-              options={categoryValues}
-              value={filters.category}
-              onChange={(v) => onIncludeExcludeChange("category", v)}
-              searchable
-              onSearch={(term) => liveSearch("category", term)}
-            />
-          </FilterChip>
-        )}
-
-        {/* Subcategory — Bison-enriched, second-level category */}
-        {!isHidden("subcategory") && (
-          <FilterChip
-            label="Subcategory"
-            activeCount={filters.subcategory.include.length + filters.subcategory.exclude.length + (filters.subcategory.includeUnknown ? 1 : 0)}
-            onOpen={() => loadDistinctFor("subcategory")}
-          >
-            <FilterMultiSelect
-              options={subcategoryValues}
-              value={filters.subcategory}
-              onChange={(v) => onIncludeExcludeChange("subcategory", v)}
-              searchable
-              onSearch={(term) => liveSearch("subcategory", term)}
-            />
-          </FilterChip>
-        )}
-
-        {/* Additional Category — third-level Bison personalization variable */}
-        {!isHidden("additionalCategory") && (
-          <FilterChip
-            label="Additional Category"
-            activeCount={filters.additionalCategory.include.length + filters.additionalCategory.exclude.length + (filters.additionalCategory.includeUnknown ? 1 : 0)}
-            onOpen={() => loadDistinctFor("additional_category")}
-          >
-            <FilterMultiSelect
-              options={additionalCategoryValues}
-              value={filters.additionalCategory}
-              onChange={(v) => onIncludeExcludeChange("additionalCategory", v)}
-              searchable
-              onSearch={(term) => liveSearch("additional_category", term)}
-            />
-          </FilterChip>
-        )}
-
         {/* Client Tags — client tags (substring, server-side) + free typing */}
         {!isHidden("tags") && (
           <FilterChip
@@ -753,8 +766,12 @@ export function FilterBar({
           >
             <div className="space-y-3">
               <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Include
+                  <SideModeToggle
+                    value={filters.tags.includeMode ?? "contains"}
+                    onChange={(v) => onIncludeExcludeChange("tags", { ...filters.tags, includeMode: v })}
+                  />
                 </label>
                 <TagInput
                   values={filters.tags.include}
@@ -765,8 +782,12 @@ export function FilterBar({
                 />
               </div>
               <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Exclude
+                  <SideModeToggle
+                    value={filters.tags.excludeMode ?? "contains"}
+                    onChange={(v) => onIncludeExcludeChange("tags", { ...filters.tags, excludeMode: v })}
+                  />
                 </label>
                 <TagInput
                   values={filters.tags.exclude}
@@ -810,7 +831,8 @@ export function FilterBar({
                 </div>
               )}
               <p className="px-1 text-[11px] text-muted-foreground">
-                Substring match against the lead&apos;s tags.
+                <span className="font-medium text-foreground">Contains</span> = substring;{" "}
+                <span className="font-medium text-foreground">Exact</span> = whole tag only.
               </p>
             </div>
           </FilterChip>
@@ -824,8 +846,12 @@ export function FilterBar({
           >
             <div className="space-y-3">
               <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Include
+                  <SideModeToggle
+                    value={filters.customTags.includeMode ?? "contains"}
+                    onChange={(v) => onCustomTagsChange({ ...filters.customTags, includeMode: v })}
+                  />
                 </label>
                 <TagInput
                   values={filters.customTags.include}
@@ -834,8 +860,12 @@ export function FilterBar({
                 />
               </div>
               <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Exclude
+                  <SideModeToggle
+                    value={filters.customTags.excludeMode ?? "contains"}
+                    onChange={(v) => onCustomTagsChange({ ...filters.customTags, excludeMode: v })}
+                  />
                 </label>
                 <TagInput
                   values={filters.customTags.exclude}
@@ -858,8 +888,12 @@ export function FilterBar({
           >
             <div className="space-y-3">
               <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Include
+                  <SideModeToggle
+                    value={filters.website.includeMode ?? "contains"}
+                    onChange={(v) => onWebsiteChange({ ...filters.website, includeMode: v })}
+                  />
                 </label>
                 <TagInput
                   values={filters.website.include}
@@ -868,8 +902,12 @@ export function FilterBar({
                 />
               </div>
               <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Exclude
+                  <SideModeToggle
+                    value={filters.website.excludeMode ?? "contains"}
+                    onChange={(v) => onWebsiteChange({ ...filters.website, excludeMode: v })}
+                  />
                 </label>
                 <TagInput
                   values={filters.website.exclude}
