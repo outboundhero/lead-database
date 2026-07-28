@@ -10,6 +10,7 @@ import {
   Shield,
   Sparkles,
   KeyRound,
+  MapPin,
 } from "lucide-react";
 import { ThemeToggle } from "./theme-toggle";
 import { UserMenu } from "./user-menu";
@@ -21,6 +22,7 @@ const navItems = [
   { title: "Leads", href: "/leads", icon: Users, minRole: "viewer" as UserRole },
   { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard, minRole: "manager" as UserRole },
   { title: "Exports", href: "/exports", icon: Download, minRole: "manager" as UserRole },
+  { title: "Locations", href: "/locations", icon: MapPin, minRole: "manager" as UserRole },
   { title: "Uploads", href: "/uploads", icon: Upload, minRole: "admin" as UserRole },
   { title: "API Keys", href: "/api-keys", icon: KeyRound, minRole: "admin" as UserRole },
   { title: "Admin", href: "/admin", icon: Shield, minRole: "admin" as UserRole },

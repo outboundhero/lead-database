@@ -13,7 +13,9 @@
     "seed-categories": "node scripts/seed-categories.mjs",
     "import-clay-categories": "node scripts/import-clay-categories.mjs",
     "sync-taxonomy": "node scripts/sync-taxonomy-from-sheet.mjs",
-    "sync-clients": "node scripts/sync-clients-from-sheet.mjs"
+    "sync-clients": "node scripts/sync-clients-from-sheet.mjs",
+    "location-worker": "node scripts/backfill-lead-locations.mjs && node scripts/infer-company-locations.mjs",
+    "load-geo": "node scripts/load-geo-reference.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

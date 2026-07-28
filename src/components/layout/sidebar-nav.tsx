@@ -14,6 +14,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Sparkles,
+  MapPin,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { hasPermission } from "@/types/auth";
@@ -29,6 +30,7 @@ const NAV_SECTIONS = [
       { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard, minRole: "manager" as UserRole, tint: "text-[oklch(0.745_0.183_145)]" },
       { title: "Clients", href: "/clients", icon: Building2, minRole: "manager" as UserRole, tint: "text-[oklch(0.62_0.19_25)]" },
       { title: "Exports", href: "/exports", icon: Download, minRole: "manager" as UserRole, tint: "text-[oklch(0.78_0.175_65)]" },
+      { title: "Locations", href: "/locations", icon: MapPin, minRole: "manager" as UserRole, tint: "text-[oklch(0.7_0.17_160)]" },
       { title: "Uploads", href: "/uploads", icon: Upload, minRole: "admin" as UserRole, tint: "text-[oklch(0.52_0.21_290)]" },
       { title: "Bounces", href: "/uploads/bounces", icon: MailX, minRole: "admin" as UserRole, tint: "text-[oklch(0.65_0.235_25)]" },
     ],
