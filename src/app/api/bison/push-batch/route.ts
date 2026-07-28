@@ -184,9 +184,27 @@ export async function POST(request: NextRequest) {
   // as-is; normalize first so old client payloads never miss newer keys. When
   // an emailSide is set, inject it into the stored filters jsonb so the worker's
   // gather (fn_lead_filter_conditions) applies the freemail split.
+  // clientTag also rides along as applyClientTargeting so the worker's gather
+  // (fn_lead_filter_conditions) enforces the client's targeting rules.
   const p_filters = !hasSelectedIds && body.filters
-    ? { ...buildRpcFilters(normalizeFilterState(body.filters)), ...(emailSide ? { emailSide } : {}) }
+    ? {
+        ...buildRpcFilters(normalizeFilterState(body.filters)),
+        ...(emailSide ? { emailSide } : {}),
+        ...(clientTag ? { applyClientTargeting: clientTag } : {}),
+      }
     : null;
+
+  // Provenance snapshot: which targeting rules were active when this batch was
+  // queued (kept on the batch even if the client's config changes later).
+  let targetMarket: Record<string, unknown> | null = null;
+  if (clientTag) {
+    const { data: targeting } = await admin
+      .from("client_targeting")
+      .select("countries, include_locations, exclude_locations, exclude_industries, exclude_keywords, require_location, allow_inferred_location, commercial_cleaning")
+      .eq("client_tag", clientTag)
+      .maybeSingle();
+    targetMarket = targeting ?? null;
+  }
 
   // On the selectedIds path the worker gathers by id + eligibility only (it
   // never re-reads filters), so the split can't ride along in the jsonb.
@@ -225,6 +243,7 @@ export async function POST(request: NextRequest) {
       created_by: user.id,
       campaigns,
       filters: p_filters,
+      target_market: targetMarket,
       selected_ids: storedSelectedIds,
       range_from: rangeFrom ?? null,
       range_to: rangeTo ?? null,

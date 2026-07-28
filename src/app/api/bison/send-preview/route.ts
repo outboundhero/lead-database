@@ -172,16 +172,21 @@ export async function POST(request: NextRequest) {
   async function countSide(side: "b2b" | "b2c"): Promise<number> {
     if (hasSelectedIds) {
       const domainCond = side === "b2c" ? B2C_DOMAIN : B2B_DOMAIN;
+      const { rows: eligRows } = await pool.query(
+        `select fn_client_eligibility_conditions($1) as conds`, [clientTag]
+      );
+      const clientConds: string[] = eligRows[0]?.conds ?? [];
       const { rows } = await pool.query(
         `select count(*)::bigint as n from leads l
-          where l.id = any($1::uuid[]) and ${ELIGIBLE} and ${domainCond}`,
+          where l.id = any($1::uuid[]) and ${ELIGIBLE} and ${domainCond}
+            ${clientConds.length ? "and " + clientConds.join(" and ") : ""}`,
         [selectedIds]
       );
       return Number(rows[0]?.n ?? 0);
     }
     // Filters path: fn_lead_filter_conditions with emailSide injected returns
     // the full trusted WHERE (including the freemail split); AND the gate.
-    const pf = { ...buildRpcFilters(normalizeFilterState(body.filters)), emailSide: side };
+    const pf = { ...buildRpcFilters(normalizeFilterState(body.filters)), emailSide: side, applyClientTargeting: clientTag };
     const { rows: condRows } = await pool.query(
       `select fn_lead_filter_conditions($1::jsonb) as conds`,
       [JSON.stringify(pf)]

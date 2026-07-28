@@ -501,7 +501,9 @@ BEGIN
   DECLARE su BOOLEAN := COALESCE((p_filters->'location'->'state'->>'selectUnknown')::boolean, false); BEGIN
     IF p_filters ? 'location' AND p_filters->'location' ? 'state' AND jsonb_array_length(COALESCE(p_filters->'location'->'state'->'include', '[]'::jsonb)) > 0 THEN
       SELECT array_agg(x) INTO vals FROM jsonb_array_elements_text(p_filters->'location'->'state'->'include') x;
-      DECLARE mst TEXT := fn_sided_match('l.state', vals, COALESCE(p_filters->'location'->'state'->>'includeMode', 'exact'), false); BEGIN
+      DECLARE mst TEXT := CASE WHEN COALESCE(p_filters->'location'->'state'->>'includeMode', 'exact') = 'exact'
+                          THEN fn_state_match(vals, false)
+                          ELSE fn_sided_match('l.state', vals, 'contains', false) END; BEGIN
       IF su THEN
         conditions := array_append(conditions, '(' || mst || ' OR l.state IS NULL OR TRIM(l.state) = '''')');
       ELSE
@@ -597,7 +599,11 @@ BEGIN
   END IF;
   IF p_filters ? 'location' AND p_filters->'location' ? 'state' AND jsonb_array_length(COALESCE(p_filters->'location'->'state'->'exclude', '[]'::jsonb)) > 0 THEN
     SELECT array_agg(x) INTO vals FROM jsonb_array_elements_text(p_filters->'location'->'state'->'exclude') x;
-    conditions := array_append(conditions, fn_sided_match('l.state', vals, COALESCE(p_filters->'location'->'state'->>'excludeMode', 'exact'), true));
+    IF COALESCE(p_filters->'location'->'state'->>'excludeMode', 'exact') = 'exact' THEN
+      conditions := array_append(conditions, fn_state_match(vals, true));
+    ELSE
+      conditions := array_append(conditions, fn_sided_match('l.state', vals, 'contains', true));
+    END IF;
   END IF;
 
   IF p_filters ? 'jobTitle' AND COALESCE((p_filters->'jobTitle'->>'includeUnknown')::boolean, false) THEN
@@ -922,6 +928,44 @@ BEGIN
         conditions := array_append(conditions, format('(l.title IS NULL OR TRIM(l.title) = '''' OR l.title !~* %L)', cc_rx));
       END IF;
     END;
+  END IF;
+
+  -- LOCATION TARGETS: entity-based hierarchy targeting (migration 066).
+  -- {include:[{country,state,city}], exclude:[...]} — exact normalized
+  -- matching, exclusions override inclusions.
+  IF p_filters ? 'locationTargets' THEN
+    DECLARE lt_inc TEXT[] := '{}'; lt_c TEXT; lt_e JSONB; BEGIN
+      IF jsonb_array_length(COALESCE(p_filters->'locationTargets'->'include', '[]'::jsonb)) > 0 THEN
+        FOR lt_e IN SELECT jsonb_array_elements(p_filters->'locationTargets'->'include') LOOP
+          lt_c := fn_location_entry_condition(lt_e, false);
+          IF lt_c IS NOT NULL THEN lt_inc := array_append(lt_inc, lt_c); END IF;
+        END LOOP;
+        IF array_length(lt_inc, 1) > 0 THEN
+          conditions := array_append(conditions, '(' || array_to_string(lt_inc, ' OR ') || ')');
+        END IF;
+      END IF;
+      IF jsonb_array_length(COALESCE(p_filters->'locationTargets'->'exclude', '[]'::jsonb)) > 0 THEN
+        FOR lt_e IN SELECT jsonb_array_elements(p_filters->'locationTargets'->'exclude') LOOP
+          lt_c := fn_location_entry_condition(lt_e, true);
+          IF lt_c IS NOT NULL THEN conditions := array_append(conditions, lt_c); END IF;
+        END LOOP;
+      END IF;
+    END;
+  END IF;
+
+  -- CLIENT TARGETING: full per-client rule set (send-preview / push-worker)
+  IF COALESCE(p_filters->>'applyClientTargeting', '') <> '' THEN
+    conditions := conditions || fn_client_eligibility_conditions(p_filters->>'applyClientTargeting');
+  END IF;
+
+  -- SILENT GATES: leads confidently outside supported countries, and leads in
+  -- the unresolved-location review queue, are hidden from search + campaigns
+  -- unless explicitly overridden.
+  IF NOT COALESCE((p_filters->>'includeUnsupported')::boolean, false) THEN
+    conditions := array_append(conditions, '(l.location_status IS DISTINCT FROM ''unsupported'')');
+  END IF;
+  IF NOT COALESCE((p_filters->>'includeUnresolved')::boolean, false) THEN
+    conditions := array_append(conditions, '(l.location_status IS DISTINCT FROM ''unresolved'')');
   END IF;
 
   RETURN conditions;

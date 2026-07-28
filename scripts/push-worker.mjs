@@ -446,6 +446,19 @@ async function pushCycle() {
   const finals = [];              // items that reached the attach phase
   const keyOf = (i) => `${i.batch_id}|${i.lead_id}`;
 
+  // Per-cycle cache of each client tag's eligibility WHERE clause. Rebuilt
+  // every cycle so targeting-config edits apply to in-flight batches.
+  const eligWhereCache = new Map();
+  async function eligibilityWhere(tag) {
+    if (!tag) return null;
+    if (eligWhereCache.has(tag)) return eligWhereCache.get(tag);
+    const { rows } = await pool.query(`select fn_client_eligibility_conditions($1) as conds`, [tag]);
+    const conds = rows[0]?.conds ?? [];
+    const where = conds.length ? conds.join(" and ") : null;
+    eligWhereCache.set(tag, where);
+    return where;
+  }
+
   for (let n = 0; n < items.length; n++) {
     const item = items[n];
     if (shuttingDown) {
@@ -464,6 +477,21 @@ async function pushCycle() {
     if (!lead || !lead.email) {
       await setItem(item, token, { status: "failed", error: !lead ? "lead no longer exists" : "lead has no email", claimed_at: null });
       continue;
+    }
+    // FINAL ELIGIBILITY GATE: immediately before any Bison write, re-validate
+    // the lead against the client's targeting rules (supported country,
+    // include/exclude locations, industry/keyword exclusions). The lead or the
+    // rules may have changed since the batch was queued — never push on stale
+    // eligibility.
+    const eligWhere = await eligibilityWhere(batch.client_tag);
+    if (eligWhere) {
+      const { rows: eligOk } = await pool.query(
+        `select 1 from leads l where l.id = $1 and ${eligWhere}`, [item.lead_id]
+      );
+      if (eligOk.length === 0) {
+        await setItem(item, token, { status: "skipped", error: "ineligible per client targeting at push time", claimed_at: null });
+        continue;
+      }
     }
     // Target campaigns are decided once and persisted — a retry reuses them.
     const targets = item.target_campaigns?.length
