@@ -48,10 +48,14 @@ async function validateEntries(entries: Array<{ country: string; state?: string;
     if (!c.rows.length) return `unsupported country "${e.country}"`;
     e.country = country;
     if (e.state) {
-      const state = e.state.trim().toUpperCase();
-      const s = await pool.query(`SELECT 1 FROM geo_admin1 WHERE country_code = $1 AND state_code = $2`, [country, state]);
+      // accept either the code ("WA") or the full name ("Washington")
+      const raw = e.state.trim();
+      const s = await pool.query(
+        `SELECT state_code FROM geo_admin1
+         WHERE country_code = $1 AND (state_code = $2 OR LOWER(name) = LOWER($3)) LIMIT 1`,
+        [country, raw.toUpperCase(), raw]);
       if (!s.rows.length) return `unknown state "${e.state}" in ${country}`;
-      e.state = state;
+      e.state = s.rows[0].state_code;
     }
     if (e.city) {
       if (!e.state) return `city "${e.city}" needs a state`;

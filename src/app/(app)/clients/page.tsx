@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/table";
 import { toast } from "sonner";
 import { useHasPermission } from "@/lib/context/role-context";
+import { ClientTargetingDialog } from "@/components/clients/client-targeting-dialog";
 import type { ClientRow } from "@/app/api/clients/route";
 
 type Filter = "all" | "active" | "churned" | "mapped" | "unmapped";
@@ -24,6 +25,7 @@ export default function ClientsPage() {
   const [savingTag, setSavingTag] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  const [targetingTag, setTargetingTag] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -144,14 +146,15 @@ export default function ClientsPage() {
               <TableHead className="text-right text-xs">Contactable</TableHead>
               <TableHead className="text-right text-xs">B2B / B2C</TableHead>
               <TableHead className="text-xs">Routing</TableHead>
+              <TableHead className="text-xs">Targeting</TableHead>
               <TableHead className="text-xs">Status</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow><TableCell colSpan={8} className="py-8 text-center text-xs text-muted-foreground">Loading…</TableCell></TableRow>
+              <TableRow><TableCell colSpan={9} className="py-8 text-center text-xs text-muted-foreground">Loading…</TableCell></TableRow>
             ) : filtered.length === 0 ? (
-              <TableRow><TableCell colSpan={8} className="py-8 text-center text-xs text-muted-foreground">No clients match.</TableCell></TableRow>
+              <TableRow><TableCell colSpan={9} className="py-8 text-center text-xs text-muted-foreground">No clients match.</TableCell></TableRow>
             ) : filtered.map((c) => {
               const pct = c.leads > 0 ? Math.round((c.categorized / c.leads) * 100) : 0;
               return (
@@ -174,6 +177,16 @@ export default function ClientsPage() {
                     {c.sendable
                       ? <Badge variant="secondary" className="text-[10px]">grp {c.group_no ?? "?"}</Badge>
                       : <Badge variant="outline" className="text-[10px] text-muted-foreground">unmapped</Badge>}
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-6 px-2 text-[11px]"
+                      onClick={() => setTargetingTag(c.tag)}
+                    >
+                      Rules
+                    </Button>
                   </TableCell>
                   <TableCell className="text-xs">
                     {canEdit ? (
@@ -200,6 +213,7 @@ export default function ClientsPage() {
           </TableBody>
         </Table>
       </div>
+      <ClientTargetingDialog tag={targetingTag} onClose={() => setTargetingTag(null)} />
     </div>
   );
 }
