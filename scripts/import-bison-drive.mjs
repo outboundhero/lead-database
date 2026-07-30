@@ -40,7 +40,10 @@ async function q(text, params, tries = 5) {
   for (let attempt = 1; ; attempt++) {
     try { return await pool.query(text, params); }
     catch (err) {
-      const transient = /ECONNRESET|termin|timeout|socket|EPIPE|server closed|ENOTFOUND|EAI_AGAIN/i.test(err.message || "");
+      // 40P01 deadlock / 40001 serialization: parallel importers touching
+      // overlapping emails — always worth retrying.
+      const transient = err.code === "40P01" || err.code === "40001" ||
+        /ECONNRESET|termin|timeout|socket|EPIPE|server closed|ENOTFOUND|EAI_AGAIN|deadlock/i.test(err.message || "");
       if (!transient || attempt >= tries) throw err;
       console.warn(`  transient DB error (${attempt}/${tries}): ${err.message}`);
       await new Promise((r) => setTimeout(r, 2000 * attempt));
@@ -120,7 +123,14 @@ function normalizeBisonRow(row, idx) {
   if (cvCategory) { lead.category = cvCategory; lead.category_source = "bison"; lead.category_confidence = 1; lead.categorized_at = new Date().toISOString(); }
   if (cvSubcategory) lead.subcategory = cvSubcategory;
   if (cvAdditional) lead.additional_category = cvAdditional;
-  const ca = get("created_at"), ua = get("updated_at");
+  // Timestamps: a single unparseable value used to abort the entire file
+  // (22007). Keep only values Postgres will accept.
+  const ts = (v) => {
+    if (!v) return undefined;
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? undefined : d.toISOString();
+  };
+  const ca = ts(get("created_at")), ua = ts(get("updated_at"));
   if (ca) lead.created_at = ca;
   if (ua) lead.updated_at = ua;
   lead.source = "Email Bison";
@@ -212,7 +222,8 @@ async function fetchExisting(emails) {
 async function upsertBatch(leads) {
   // last-in-batch wins for duplicate emails inside one file chunk
   const dedup = new Map(leads.map((l) => [l.email, l]));
-  const emails = [...dedup.keys()];
+  // Sorted so every parallel importer acquires row locks in the SAME order.
+  const emails = [...dedup.keys()].sort();
   const existing = await fetchExisting(emails);
   const merged = emails.map((e) => mergeWithExisting(dedup.get(e), existing.get(e)));
   if (DRY) return { updated: [...existing.keys()].length, inserted: emails.length - existing.size };
@@ -258,7 +269,16 @@ try {
   await flush();
 } catch (err) {
   await flush().catch(() => {});
-  console.warn(`\nWARNING: parse stopped (${err.code ?? err.message}) — keeping everything imported so far.`);
+  const csvTruncation = typeof err.code === "string" && err.code.startsWith("CSV_");
+  if (csvTruncation) {
+    console.warn(`\nWARNING: ${file} is truncated at the tail (${err.code}) — kept every complete record before it.`);
+  } else {
+    // DB/other failure: the file is NOT fully imported. Exit non-zero so the
+    // runner reports it instead of logging a false success.
+    console.error(`\nFAILED ${file} after ${seen} rows: ${err.code ?? ""} ${err.message}`);
+    await pool.end().catch(() => {});
+    process.exit(1);
+  }
 }
 console.log(`\ndone ${file}: rows=${seen} updated=${updated} inserted=${inserted} skipped=${skipped} in ${Math.round((Date.now() - t0) / 60000)}m`);
 await pool.end();

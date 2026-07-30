@@ -30,6 +30,9 @@ const KEY = process.env.OPENAI_API_KEY;
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4, keepAlive: true });
 pool.on("error", (err) => console.warn(`pool error (ignored): ${err.message}`));
+// The propagation scan groups millions of rows — the role's 30s default
+// statement_timeout kills it (57014). Lift it for every pooled connection.
+pool.on("connect", (c) => c.query("SET statement_timeout = 0").catch(() => {}));
 async function q(text, params, tries = 4) {
   for (let attempt = 1; ; attempt++) {
     try { return await pool.query(text, params); }
