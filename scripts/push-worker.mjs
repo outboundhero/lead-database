@@ -154,11 +154,21 @@ function leadPayload(l, tags, domain) {
     if (domain && isVarUnsupported(domain, name)) return;
     vars.push({ name, value: String(value) });
   };
+  // Names must match the variables defined ON THE INSTANCES exactly —
+  // they use "sub-category" / "additional category", and sending the
+  // underscore variants 422-failed entire batches. Full set mirrors the Clay
+  // "Create or update lead" mapping (sync-bison-custom-variables.mjs).
+  addVar("person linkedin url", l.person_linkedin);
   addVar("category", l.category);
-  addVar("subcategory", l.subcategory);
-  addVar("additional_category", l.additional_category);
+  addVar("sub-category", l.subcategory);
+  addVar("additional category", l.additional_category);
   addVar("city", l.city);
   addVar("state", l.state);
+  addVar("domain", l.domain);
+  addVar("address", l.address);
+  addVar("question", l.question);
+  addVar("company phone", l.company_phone);
+  addVar("google maps url", l.google_maps_url);
   return {
     first_name: l.first_name ?? "",
     last_name: l.last_name ?? "",
@@ -462,7 +472,8 @@ async function pushCycle() {
 
   const { rows: leadRows } = await pool.query(
     `select id, email, first_name, last_name, title, company, notes, category, subcategory,
-            additional_category, city, state, tags
+            additional_category, city, state, tags, person_linkedin, domain, address, question,
+            company_phone, google_maps_url
        from leads where id = any($1::uuid[])`,
     [[...new Set(items.map((i) => i.lead_id))]]
   );
