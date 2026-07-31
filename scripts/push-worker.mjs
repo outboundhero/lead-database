@@ -230,7 +230,7 @@ async function createLead(auth, lead, tags) {
       throw e;
     }
   }
-  const hit = await findLeadByEmail(auth, lead.email, 3);
+  const hit = await findLeadByEmail(auth, lead.email, 6);
   if (!hit) throw new Error(`lead ${lead.email} exists in Bison but was not found by search`);
   await bison(auth, "PUT", `/api/leads/${hit.id}`, leadPayload(lead, tags, auth.domain)); // refresh fields + tags
   return String(hit.id);
@@ -594,18 +594,30 @@ async function pushCycle() {
   }
 
   // Attach per campaign in chunks; tally per-item successes across campaigns.
-  const okByItem = new Map();  // item key -> Set of campaign ids attached this cycle
-  const errByItem = new Map(); // item key -> last attach error
+  // Bison 422s a WHOLE chunk with "No leads were added because they are either
+  // in other sequences, have previously bounced, or unsubscribed" even when
+  // only some of the chunk is blocked — so on that error we retry per lead to
+  // separate genuinely-blocked leads (a terminal Bison business rule, not a
+  // failure) from collateral chunk-mates.
+  const BISON_BLOCKED_RE = /No leads were added|other sequences|previously bounced|unsubscribed/i;
+  const okByItem = new Map();      // item key -> Set of campaign ids attached this cycle
+  const blockedByItem = new Map(); // item key -> Set of campaign ids Bison refused
+  const errByItem = new Map();     // item key -> last attach error
+  const markOk = (item, campaignId) => {
+    if (!okByItem.has(keyOf(item))) okByItem.set(keyOf(item), new Set());
+    okByItem.get(keyOf(item)).add(String(campaignId));
+  };
+  const markBlocked = (item, campaignId) => {
+    if (!blockedByItem.has(keyOf(item))) blockedByItem.set(keyOf(item), new Set());
+    blockedByItem.get(keyOf(item)).add(String(campaignId));
+  };
   for (const { auth, campaignId, entries } of toAttach.values()) {
     for (let i = 0; i < entries.length; i += ATTACH_CHUNK) {
       const chunk = entries.slice(i, i + ATTACH_CHUNK).filter((e) => !fatalBatches.has(e.item.batch_id));
       if (chunk.length === 0) continue;
       try {
         await bison(auth, "POST", `/api/campaigns/${campaignId}/leads/attach-leads`, { lead_ids: chunk.map((e) => e.leadId) });
-        for (const { item } of chunk) {
-          if (!okByItem.has(keyOf(item))) okByItem.set(keyOf(item), new Set());
-          okByItem.get(keyOf(item)).add(String(campaignId));
-        }
+        for (const { item } of chunk) markOk(item, campaignId);
       } catch (e) {
         if (e.status === 401 || e.status === 403) {
           for (const { item } of chunk) {
@@ -614,6 +626,20 @@ async function pushCycle() {
               await failBatch(item.batch_id, e.message);
             }
           }
+          continue;
+        }
+        if (e.status === 422 && BISON_BLOCKED_RE.test(e.message)) {
+          // per-lead separation: attach one at a time
+          for (const entry of chunk) {
+            try {
+              await bison(auth, "POST", `/api/campaigns/${campaignId}/leads/attach-leads`, { lead_ids: [entry.leadId] });
+              markOk(entry.item, campaignId);
+            } catch (e2) {
+              if (e2.status === 422 && BISON_BLOCKED_RE.test(e2.message)) markBlocked(entry.item, campaignId);
+              else errByItem.set(keyOf(entry.item), e2);
+            }
+          }
+          continue;
         }
         for (const { item } of chunk) errByItem.set(keyOf(item), e);
       }
@@ -629,10 +655,18 @@ async function pushCycle() {
     }
     const attached = new Set(item.attached_ids ?? []);
     for (const cid of okByItem.get(keyOf(item)) ?? []) attached.add(cid);
+    const blocked = blockedByItem.get(keyOf(item)) ?? new Set();
     const attachedArr = [...attached];
-    const done = item.target_campaigns.every((t) => attached.has(String(t.id)));
-    if (done) {
-      await setItem(item, token, { status: "sent", attempts: 0, attached_ids: attachedArr, error: null, claimed_at: null });
+    // 'done' = every target either attached or terminally refused by Bison's
+    // business rules (already in another sequence / bounced / unsubscribed
+    // THERE) — retrying a refusal never succeeds.
+    const done = item.target_campaigns.every((t) => attached.has(String(t.id)) || blocked.has(String(t.id)));
+    if (done && attached.size > 0) {
+      await setItem(item, token, { status: "sent", attempts: 0, attached_ids: attachedArr, claimed_at: null,
+        error: blocked.size ? `partial: Bison refused campaigns [${[...blocked].join(",")}] (in another sequence / bounced / unsubscribed)` : null });
+    } else if (done) {
+      await setItem(item, token, { status: "skipped", attached_ids: attachedArr, claimed_at: null,
+        error: "Bison refused all target campaigns: lead is in another sequence, previously bounced, or unsubscribed on that instance" });
     } else {
       await failOrRetry(item, token, errByItem.get(keyOf(item)) ?? new Error("attach incomplete"), { attached_ids: attachedArr });
     }
