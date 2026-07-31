@@ -201,9 +201,10 @@ async function findLeadByEmail(auth, email, tries = 1) {
 // existing lead by search (retrying for indexing delay), PUT to refresh its
 // fields, and reuse its id. Other 4xx are real validation errors.
 async function createLead(auth, lead, tags) {
-  // Up to 3 tries: each "no custom variable named X" teaches us to drop X and
-  // retry the same lead, so one undefined variable can't fail the whole push.
-  for (let pass = 0; pass < 3; pass++) {
+  // One pass per custom variable we might send (+1): an instance can be missing
+  // SEVERAL of them (a B2C instance often defines none), and each attempt only
+  // reveals the next missing name. Too few passes and the lead still fails.
+  for (let pass = 0; pass < 7; pass++) {
     try {
       const json = await bison(auth, "POST", "/api/leads", leadPayload(lead, tags, auth.domain));
       const id = json?.data?.id ?? json?.id ?? json?.lead?.id; // defensive id read
