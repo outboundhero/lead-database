@@ -210,8 +210,11 @@ async function createLead(auth, lead, tags) {
       if (id != null) return String(id);
       throw new Error(`create ${lead.email}: could not read Bison lead id from response`);
     } catch (e) {
-      const missing = e.message.match(/custom variable named ([\w .-]+?)[.\s"]*$/i);
-      if (missing) { markVarUnsupported(auth.domain, missing[1].trim()); continue; }
+      // NB the message continues after the name ("... named subcategory. Please
+      // create it first"), so capture the identifier only — anchoring to $
+      // swallowed the trailing sentence and blocked a bogus variable name.
+      const missing = e.message.match(/custom variable named\s+"?([A-Za-z0-9_-]+)/i);
+      if (missing) { markVarUnsupported(auth.domain, missing[1]); continue; }
       if (/taken|already exists|duplicate/i.test(e.message)) break; // duplicate -> find+PUT below
       throw e;
     }
