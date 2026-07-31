@@ -133,12 +133,32 @@ async function bison(auth, method, path, body, attempt = 1) {
 }
 
 // EXACT create payload from src/lib/bison/push-leads.ts (enrichment as custom variables).
-function leadPayload(l, tags) {
+// Bison rejects an ENTIRE lead with 422 when a custom variable isn't defined
+// on that instance ("You do not have a custom variable named subcategory").
+// Instances differ, so we learn per-domain which names are unsupported and
+// drop them from later payloads instead of failing every lead.
+const unsupportedVars = new Map(); // domain -> Set(varName)
+function isVarUnsupported(domain, name) {
+  return unsupportedVars.get(domain)?.has(name) ?? false;
+}
+function markVarUnsupported(domain, name) {
+  if (!unsupportedVars.has(domain)) unsupportedVars.set(domain, new Set());
+  unsupportedVars.get(domain).add(name);
+  console.warn(`  instance ${domain} has no custom variable "${name}" — dropping it from further pushes`);
+}
+
+function leadPayload(l, tags, domain) {
   const vars = [];
-  if (l.category) vars.push({ name: "category", value: String(l.category) });
-  if (l.subcategory) vars.push({ name: "subcategory", value: String(l.subcategory) });
-  if (l.city) vars.push({ name: "city", value: String(l.city) });
-  if (l.state) vars.push({ name: "state", value: String(l.state) });
+  const addVar = (name, value) => {
+    if (value == null || value === "") return;
+    if (domain && isVarUnsupported(domain, name)) return;
+    vars.push({ name, value: String(value) });
+  };
+  addVar("category", l.category);
+  addVar("subcategory", l.subcategory);
+  addVar("additional_category", l.additional_category);
+  addVar("city", l.city);
+  addVar("state", l.state);
   return {
     first_name: l.first_name ?? "",
     last_name: l.last_name ?? "",
@@ -181,17 +201,24 @@ async function findLeadByEmail(auth, email, tries = 1) {
 // existing lead by search (retrying for indexing delay), PUT to refresh its
 // fields, and reuse its id. Other 4xx are real validation errors.
 async function createLead(auth, lead, tags) {
-  try {
-    const json = await bison(auth, "POST", "/api/leads", leadPayload(lead, tags));
-    const id = json?.data?.id ?? json?.id ?? json?.lead?.id; // defensive id read
-    if (id != null) return String(id);
-    throw new Error(`create ${lead.email}: could not read Bison lead id from response`);
-  } catch (e) {
-    if (!/taken|already exists|duplicate/i.test(e.message)) throw e;
+  // Up to 3 tries: each "no custom variable named X" teaches us to drop X and
+  // retry the same lead, so one undefined variable can't fail the whole push.
+  for (let pass = 0; pass < 3; pass++) {
+    try {
+      const json = await bison(auth, "POST", "/api/leads", leadPayload(lead, tags, auth.domain));
+      const id = json?.data?.id ?? json?.id ?? json?.lead?.id; // defensive id read
+      if (id != null) return String(id);
+      throw new Error(`create ${lead.email}: could not read Bison lead id from response`);
+    } catch (e) {
+      const missing = e.message.match(/custom variable named ([\w .-]+?)[.\s"]*$/i);
+      if (missing) { markVarUnsupported(auth.domain, missing[1].trim()); continue; }
+      if (/taken|already exists|duplicate/i.test(e.message)) break; // duplicate -> find+PUT below
+      throw e;
+    }
   }
   const hit = await findLeadByEmail(auth, lead.email, 3);
   if (!hit) throw new Error(`lead ${lead.email} exists in Bison but was not found by search`);
-  await bison(auth, "PUT", `/api/leads/${hit.id}`, leadPayload(lead, tags)); // refresh fields + tags
+  await bison(auth, "PUT", `/api/leads/${hit.id}`, leadPayload(lead, tags, auth.domain)); // refresh fields + tags
   return String(hit.id);
 }
 
@@ -430,7 +457,8 @@ async function pushCycle() {
   if (items.length === 0) return false;
 
   const { rows: leadRows } = await pool.query(
-    `select id, email, first_name, last_name, title, company, notes, category, subcategory, city, state, tags
+    `select id, email, first_name, last_name, title, company, notes, category, subcategory,
+            additional_category, city, state, tags
        from leads where id = any($1::uuid[])`,
     [[...new Set(items.map((i) => i.lead_id))]]
   );
