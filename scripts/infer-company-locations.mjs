@@ -37,7 +37,9 @@ async function q(text, params, tries = 4) {
   for (let attempt = 1; ; attempt++) {
     try { return await pool.query(text, params); }
     catch (err) {
-      const transient = /ECONNRESET|termin|timeout|socket|EPIPE|server closed/i.test(err.message || "");
+      const transient = err.code === "XX000" || err.code === "40P01" ||
+        /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|termin|timeout|socket|server closed|Internal error|:closed|Connection terminated|deadlock/i.test(err.message || "") ||
+        /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|termin|timeout|socket|server closed|Internal error|:closed|Connection terminated|deadlock/i.test(String(err.code || ""));
       if (!transient || attempt >= tries) throw err;
       await new Promise((r) => setTimeout(r, 1500 * attempt));
     }

@@ -56,6 +56,12 @@ async function worker(id) {
       p.stderr.on("data", (d) => process.stderr.write(`[w${id}] ${d}`));
       p.on("close", (c) => { console.log(`[w${id}] DONE ${job.name} (${Math.round((Date.now() - t0) / 60000)}m): ${lastLine.trim()}`); resolve(c); });
     });
+    if (code !== 0 && !job.retried) {
+      // Upserts are idempotent — a failed file is safe to re-run from the top.
+      console.log(`[w${id}] RETRY queued for ${job.name}`);
+      queue.push({ ...job, retried: true });
+      continue;
+    }
     results.push({ file: job.name, code });
   }
 }

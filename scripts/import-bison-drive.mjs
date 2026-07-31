@@ -42,8 +42,12 @@ async function q(text, params, tries = 5) {
     catch (err) {
       // 40P01 deadlock / 40001 serialization: parallel importers touching
       // overlapping emails — always worth retrying.
-      const transient = err.code === "40P01" || err.code === "40001" ||
-        /ECONNRESET|termin|timeout|socket|EPIPE|server closed|ENOTFOUND|EAI_AGAIN|deadlock/i.test(err.message || "");
+      // Retry deadlocks (40P01), serialization (40001), and every pooler/network
+      // drop. NB "ETIMEDOUT" does NOT contain the substring "timeout" — that
+      // gap is what killed the first two runs.
+      const transient = err.code === "40P01" || err.code === "40001" || err.code === "XX000" ||
+        /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|termin|timeout|socket|server closed|Internal error|:closed|Connection terminated|deadlock/i.test(err.message || "") ||
+        /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|termin|timeout|socket|server closed|Internal error|:closed|Connection terminated|deadlock/i.test(String(err.code || ""));
       if (!transient || attempt >= tries) throw err;
       console.warn(`  transient DB error (${attempt}/${tries}): ${err.message}`);
       await new Promise((r) => setTimeout(r, 2000 * attempt));
