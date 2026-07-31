@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { ChevronRight, MapPin, RotateCw } from "lucide-react";
+import { ChevronRight, MapPin, RotateCw, Sparkles, X, Building2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +15,15 @@ type CountryRow = { code: string; display_name: string; leads: number };
 type StateRow = { state_code: string; name: string; leads: number };
 type CityRow = { city: string; state: string; state_code: string; country: string; country_code: string; leads: number };
 type UnresolvedRow = { variation: string; leads: number };
+type QueueLead = {
+  id: string; email: string; first_name: string | null; last_name: string | null;
+  company: string | null; title: string | null; website: string | null;
+  phone: string | null; address: string | null; postal_code: string | null;
+};
+type Suggestion = {
+  kind: string; country: string | null; state_code: string | null;
+  city: string | null; reason: string; valid: boolean;
+};
 
 export default function LocationsPage() {
   const canResolve = useHasPermission("manager");
@@ -54,6 +63,53 @@ export default function LocationsPage() {
   const [queueLoading, setQueueLoading] = useState(false);
   const [resolving, setResolving] = useState<string | null>(null);
   const [form, setForm] = useState({ city: "", state: "", country: "US" });
+  const [saving, setSaving] = useState<string | null>(null);
+  // Drill-down: the leads behind one variation, so you can SEE where it is.
+  const [detail, setDetail] = useState<string | null>(null);
+  const [detailRows, setDetailRows] = useState<QueueLead[]>([]);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
+
+  async function openDetail(variation: string) {
+    setDetail(variation); setDetailRows([]); setSuggestion(null); setDetailLoading(true);
+    try {
+      const res = await fetch(`/api/locations/unresolved/leads?variation=${encodeURIComponent(variation)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setDetailRows(data.rows ?? []);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to load leads");
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  async function askAi(variation: string) {
+    setSuggesting(true);
+    try {
+      const res = await fetch("/api/locations/unresolved/suggest", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ variation }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setSuggestion(data.suggestion);
+      // Pre-fill the resolve form with a usable proposal.
+      if (data.suggestion?.valid && (data.suggestion.kind === "city" || data.suggestion.kind === "state")) {
+        setForm({
+          city: data.suggestion.city ?? "",
+          state: data.suggestion.state_code ?? "",
+          country: data.suggestion.country ?? "US",
+        });
+        setResolving(variation);
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "AI suggestion failed");
+    } finally {
+      setSuggesting(false);
+    }
+  }
 
   const loadQueue = useCallback(async () => {
     setQueueLoading(true);
@@ -72,6 +128,7 @@ export default function LocationsPage() {
   useEffect(() => { if (tab === "unresolved") loadQueue(); }, [tab, loadQueue]);
 
   async function resolve(variation: string, discard = false) {
+    setSaving(variation);
     try {
       const res = await fetch("/api/locations/unresolved", {
         method: "POST",
@@ -85,11 +142,16 @@ export default function LocationsPage() {
       toast.success(discard
         ? `Discarded — ${data.updated} leads marked as no-location`
         : `Resolved ${data.updated} leads. Future imports with this variation resolve automatically.`);
+      // Update in place — no refetch, so the scroll position survives.
+      setQueue((prev) => prev.filter((r) => r.variation !== variation));
       setResolving(null);
+      setSuggestion(null);
+      if (detail === variation) setDetail(null);
       setForm({ city: "", state: "", country: "US" });
-      loadQueue();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Resolve failed");
+    } finally {
+      setSaving(null);
     }
   }
 
@@ -196,6 +258,80 @@ export default function LocationsPage() {
               Refresh
             </Button>
           </div>
+          {suggestion && (
+            <div className="rounded-xl border bg-muted/40 p-3 text-[13px]">
+              <div className="flex items-start gap-2">
+                <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                <div className="flex-1">
+                  <p className="font-medium">
+                    AI: {suggestion.kind}
+                    {suggestion.city ? ` — ${suggestion.city}, ${suggestion.state_code}, ${suggestion.country}` : ""}
+                    {!suggestion.city && suggestion.state_code ? ` — ${suggestion.state_code}, ${suggestion.country}` : ""}
+                    {!suggestion.valid && suggestion.kind !== "junk" && suggestion.kind !== "foreign" && (
+                      <span className="ml-2 text-destructive">(not in the geo reference — rejected)</span>
+                    )}
+                  </p>
+                  <p className="mt-0.5 text-[12px] text-muted-foreground">{suggestion.reason}</p>
+                </div>
+                <button onClick={() => setSuggestion(null)} className="text-muted-foreground hover:text-foreground">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {detail && (
+            <div className="rounded-xl border">
+              <div className="flex items-center gap-2 border-b px-3 py-2">
+                <Building2 className="h-4 w-4 text-muted-foreground" />
+                <p className="text-[13px] font-medium">
+                  Leads with location &ldquo;<span className="font-mono">{detail}</span>&rdquo;
+                  {detailRows.length > 0 && <span className="ml-1 text-muted-foreground">({detailRows.length} shown)</span>}
+                </p>
+                <button onClick={() => setDetail(null)} className="ml-auto text-muted-foreground hover:text-foreground">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="max-h-72 overflow-y-auto">
+                {detailLoading ? (
+                  <p className="py-6 text-center text-xs text-muted-foreground">Loading leads…</p>
+                ) : detailRows.length === 0 ? (
+                  <p className="py-6 text-center text-xs text-muted-foreground">No leads found.</p>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="text-xs">Company</TableHead>
+                        <TableHead className="text-xs">Website</TableHead>
+                        <TableHead className="text-xs">Phone</TableHead>
+                        <TableHead className="text-xs">Address</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {detailRows.map((l) => (
+                        <TableRow key={l.id}>
+                          <TableCell className="text-[12px]">{l.company ?? "—"}</TableCell>
+                          <TableCell className="text-[12px]">
+                            {l.website ? (
+                              <a href={`https://${l.website.replace(/^https?:\/\//, "")}`} target="_blank" rel="noreferrer"
+                                 className="text-primary underline-offset-2 hover:underline">
+                                {l.website.replace(/^https?:\/\//, "")}
+                              </a>
+                            ) : "—"}
+                          </TableCell>
+                          <TableCell className="text-[12px] text-muted-foreground">{l.phone ?? "—"}</TableCell>
+                          <TableCell className="text-[12px] text-muted-foreground">
+                            {[l.address, l.postal_code].filter(Boolean).join(", ") || "—"}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="rounded-lg border">
             <Table>
               <TableHeader>
@@ -212,7 +348,15 @@ export default function LocationsPage() {
                   <TableRow><TableCell colSpan={3} className="py-8 text-center text-xs text-muted-foreground">Queue is empty 🎉</TableCell></TableRow>
                 ) : queue.map((r) => (
                   <TableRow key={r.variation}>
-                    <TableCell className="text-[13px] font-mono">{r.variation}</TableCell>
+                    <TableCell className="text-[13px]">
+                      <button
+                        className="font-mono text-primary underline-offset-2 hover:underline"
+                        onClick={() => openDetail(r.variation)}
+                        title="Show the leads with this location"
+                      >
+                        {r.variation}
+                      </button>
+                    </TableCell>
                     <TableCell className="text-right text-[13px] tabular-nums">{r.leads.toLocaleString()}</TableCell>
                     {canResolve && (
                       <TableCell>
@@ -221,7 +365,9 @@ export default function LocationsPage() {
                             <Input placeholder="City (optional)" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} className="h-7 w-32 text-xs" />
                             <Input placeholder="State code" value={form.state} onChange={(e) => setForm({ ...form, state: e.target.value })} className="h-7 w-24 text-xs" />
                             <Input placeholder="US" value={form.country} onChange={(e) => setForm({ ...form, country: e.target.value })} className="h-7 w-14 text-xs" />
-                            <Button size="sm" className="h-7 text-xs" onClick={() => resolve(r.variation)}>Save</Button>
+                            <Button size="sm" className="h-7 text-xs" disabled={saving === r.variation} onClick={() => resolve(r.variation)}>
+                              {saving === r.variation ? "Saving…" : "Save"}
+                            </Button>
                             <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setResolving(null)}>Cancel</Button>
                           </div>
                         ) : (
@@ -229,7 +375,17 @@ export default function LocationsPage() {
                             <Button size="sm" variant="outline" className="h-7 gap-1 text-xs" onClick={() => setResolving(r.variation)}>
                               <MapPin className="h-3 w-3" /> Resolve
                             </Button>
-                            <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground" onClick={() => resolve(r.variation, true)}>
+                            <Button
+                              size="sm" variant="outline" className="h-7 gap-1 text-xs"
+                              disabled={suggesting}
+                              onClick={() => askAi(r.variation)}
+                              title="Ask AI to identify this location from the leads' companies and websites"
+                            >
+                              <Sparkles className="h-3 w-3" /> AI
+                            </Button>
+                            <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground"
+                              disabled={saving === r.variation}
+                              onClick={() => resolve(r.variation, true)}>
                               Discard
                             </Button>
                           </div>
