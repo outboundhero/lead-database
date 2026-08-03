@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RowSelectionState } from "@tanstack/react-table";
+import { toast } from "sonner";
 import type { FilterResult } from "@/lib/filters/build-rpc-filters";
-import { useFilters } from "@/lib/hooks/use-filters";
+import { useFilters, type TargetingPatch } from "@/lib/hooks/use-filters";
+import type { LocationTargetEntry } from "@/types/filters";
 import { useDebounce } from "@/lib/hooks/use-debounce";
 import { FilterBar } from "@/components/filters/filter-bar";
 import { LeadTable } from "@/components/leads/lead-table";
@@ -50,6 +52,9 @@ export default function LeadsPage() {
     setPageSize,
     setSort,
     loadPreset,
+    setLocationTargets,
+    applyClientTargeting,
+    removeClientTargeting,
     resetFilters,
   } = useFilters();
 
@@ -92,6 +97,112 @@ export default function LeadsPage() {
   const deleteMode: "ids" | "filtered" =
     !selectAllFiltered && selectedIds.length > 0 ? "ids" : "filtered";
   const deleteEnabled = selectedIds.length > 0 || selectAllFiltered || activeFilterCount > 0;
+
+  // ── Client-targeting auto-apply ────────────────────────────────────────────
+  // Selecting a client tag from the quick-pick list pulls that client's
+  // targeting rules (synced from the onboarding sheet / Rules dialog) into the
+  // other filters; deselecting removes exactly what was applied. Per-tag
+  // patches let two selected clients share values without premature removal.
+  const appliedRef = useRef<Map<string, TargetingPatch>>(new Map());
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+
+  const handleClientTagSelected = useCallback(async (tag: string) => {
+    if (appliedRef.current.has(tag)) return;
+    try {
+      const res = await fetch(`/api/clients/targeting?tag=${encodeURIComponent(tag)}`);
+      if (!res.ok) return;
+      const { targeting } = (await res.json()) as {
+        targeting: {
+          include_locations?: LocationTargetEntry[];
+          exclude_locations?: LocationTargetEntry[];
+          include_keywords?: string[];
+          exclude_keywords?: string[];
+          exclude_industries?: string[];
+        } | null;
+      };
+      if (!targeting) {
+        toast.info(`No targeting rules on file for ${tag} — filtering by tag only`);
+        return;
+      }
+      // The tag may have been deselected (or filters reset) while the fetch
+      // was in flight — applying now would orphan the patch.
+      if (!filtersRef.current.tags.include.includes(tag)) return;
+      // The patch records the client's FULL targeting (apply dedupes against
+      // current state), so two selected clients sharing a value each claim it
+      // and the removal refcount keeps it until both are deselected.
+      const patch: TargetingPatch = {
+        locations: {
+          include: targeting.include_locations ?? [],
+          exclude: targeting.exclude_locations ?? [],
+        },
+        categorySearchInclude: targeting.include_keywords ?? [],
+        keywordExclude: targeting.exclude_keywords ?? [],
+        categoryExclude: targeting.exclude_industries ?? [],
+      };
+      const n =
+        patch.locations.include.length + patch.locations.exclude.length +
+        patch.categorySearchInclude.length + patch.keywordExclude.length + patch.categoryExclude.length;
+      if (n === 0) {
+        toast.info(`${tag}: no targeting values to apply`);
+        return;
+      }
+      appliedRef.current.set(tag, patch);
+      applyClientTargeting(patch);
+      const bits = [
+        patch.locations.include.length && `${patch.locations.include.length} locations`,
+        patch.locations.exclude.length && `${patch.locations.exclude.length} excluded locations`,
+        patch.categorySearchInclude.length && `${patch.categorySearchInclude.length} category terms`,
+        patch.categoryExclude.length && `${patch.categoryExclude.length} excluded industries`,
+        patch.keywordExclude.length && `${patch.keywordExclude.length} excluded keywords`,
+      ].filter(Boolean).join(", ");
+      toast.success(`${tag} targeting applied: ${bits}`, {
+        description: patch.locations.include.length
+          ? "Leads with unknown locations are hidden while location targeting is on."
+          : undefined,
+      });
+    } catch {
+      /* targeting fetch failed — tag filter still applies */
+    }
+  }, [applyClientTargeting]);
+
+  // Preset load / reset replace the whole filter state — earlier tags' patches
+  // must be forgotten WITHOUT dispatching removals, or the observer below
+  // would strip values that legitimately belong to the loaded preset.
+  const handleLoadPreset = useCallback((f: Parameters<typeof loadPreset>[0]) => {
+    appliedRef.current.clear();
+    loadPreset(f);
+  }, [loadPreset]);
+  const handleReset = useCallback(() => {
+    appliedRef.current.clear();
+    resetFilters();
+  }, [resetFilters]);
+
+  // Removal is observed from state (covers pill re-click, TagInput ✕) rather
+  // than hooked to a click handler.
+  useEffect(() => {
+    const selected = new Set(filters.tags.include);
+    for (const [tag, patch] of appliedRef.current) {
+      if (selected.has(tag)) continue;
+      appliedRef.current.delete(tag);
+      // Keep any value another still-selected client also contributes.
+      const others = [...appliedRef.current.values()];
+      const entryKey = (e: LocationTargetEntry) => `${e.country}|${e.state ?? ""}|${e.city ?? ""}`;
+      const othersHaveEntry = (e: LocationTargetEntry, side: "include" | "exclude") =>
+        others.some((p) => p.locations[side].some((o) => entryKey(o) === entryKey(e)));
+      const othersHave = (field: "categorySearchInclude" | "keywordExclude" | "categoryExclude", v: string) =>
+        others.some((p) => p[field].some((o) => o.toLowerCase() === v.toLowerCase()));
+      removeClientTargeting({
+        locations: {
+          include: patch.locations.include.filter((e) => !othersHaveEntry(e, "include")),
+          exclude: patch.locations.exclude.filter((e) => !othersHaveEntry(e, "exclude")),
+        },
+        categorySearchInclude: patch.categorySearchInclude.filter((v) => !othersHave("categorySearchInclude", v)),
+        keywordExclude: patch.keywordExclude.filter((v) => !othersHave("keywordExclude", v)),
+        categoryExclude: patch.categoryExclude.filter((v) => !othersHave("categoryExclude", v)),
+      });
+    }
+  }, [filters.tags.include, removeClientTargeting]);
 
   const fetchLeads = useCallback(async () => {
     setIsLoading(true);
@@ -155,8 +266,10 @@ export default function LeadsPage() {
           onWebsiteChange={setWebsite}
           onGlobalSearchChange={setGlobalSearch}
           onIncludeBouncedChange={setIncludeBounced}
-          onLoadPreset={loadPreset}
-          onReset={resetFilters}
+          onLoadPreset={handleLoadPreset}
+          onClientTagSelected={handleClientTagSelected}
+          onLocationTargetsChange={setLocationTargets}
+          onReset={handleReset}
         />
       </div>
 

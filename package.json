@@ -15,7 +15,8 @@
     "sync-taxonomy": "node scripts/sync-taxonomy-from-sheet.mjs",
     "sync-clients": "node scripts/sync-clients-from-sheet.mjs",
     "location-worker": "node scripts/backfill-lead-locations.mjs && node scripts/infer-company-locations.mjs",
-    "load-geo": "node scripts/load-geo-reference.mjs"
+    "load-geo": "node scripts/load-geo-reference.mjs",
+    "sync-targeting": "node scripts/sync-client-targeting-from-sheet.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

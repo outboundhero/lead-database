@@ -23,6 +23,8 @@ import type {
   EmailTypeFilter,
   EmailContainsFilter,
   CategorySearchFilter,
+  LocationTargetEntry,
+  LocationTargetsFilter,
 } from "@/types/filters";
 import { countActiveFilters } from "@/types/filters";
 import { IosSegmentedControl } from "@/components/ui/ios/ios-segmented-control";
@@ -50,7 +52,23 @@ interface FilterBarProps {
   onGlobalSearchChange: (value: string) => void;
   onIncludeBouncedChange: (value: boolean) => void;
   onLoadPreset?: (filters: FilterState) => void;
+  // Fired when a client tag is SELECTED from the quick-pick list (not on
+  // deselect, free typing, or preset load) — the leads page uses it to
+  // auto-apply that client's targeting rules to the other filters.
+  onClientTagSelected?: (tag: string) => void;
+  onLocationTargetsChange?: (value: LocationTargetsFilter) => void;
   onReset: () => void;
+}
+
+const TARGET_COUNTRY_LABELS: Record<string, string> = {
+  US: "USA", CA: "Canada", AU: "Australia", NZ: "New Zealand", GB: "United Kingdom", IE: "Ireland",
+};
+
+function targetEntryLabel(e: LocationTargetEntry): string {
+  const country = TARGET_COUNTRY_LABELS[e.country] ?? e.country;
+  if (e.city) return e.country === "US" ? `${e.city}, ${e.state}` : `${e.city}, ${e.state}, ${country}`;
+  if (e.state) return e.country === "US" ? (STATE_NAMES[e.state] ?? e.state) : `${e.state}, ${country}`;
+  return country;
 }
 
 // Tiny Contains/Exact toggle used beside Include/Exclude labels in the
@@ -188,6 +206,8 @@ export function FilterBar({
   onGlobalSearchChange,
   onIncludeBouncedChange,
   onLoadPreset,
+  onClientTagSelected,
+  onLocationTargetsChange,
   onReset,
 }: FilterBarProps) {
   void onLocationCountryChange;
@@ -809,14 +829,15 @@ export function FilterBar({
                         <button
                           key={tag}
                           type="button"
-                          onClick={() =>
+                          onClick={() => {
                             onIncludeExcludeChange("tags", {
                               ...filters.tags,
                               include: picked
                                 ? filters.tags.include.filter((t) => t !== tag)
                                 : [...filters.tags.include, tag],
-                            })
-                          }
+                            });
+                            if (!picked) onClientTagSelected?.(tag);
+                          }}
                           className={`rounded-full px-2 py-0.5 text-[11px] transition-colors ${
                             picked
                               ? "bg-primary text-primary-foreground"
@@ -834,6 +855,63 @@ export function FilterBar({
                 <span className="font-medium text-foreground">Contains</span> = substring;{" "}
                 <span className="font-medium text-foreground">Exact</span> = whole tag only.
               </p>
+            </div>
+          </FilterChip>
+        )}
+
+        {/* Targeting — structured geo entries (client-targeting auto-apply).
+            Only shown while entries exist; hand-editable per entry. */}
+        {(filters.locationTargets.include.length > 0 || filters.locationTargets.exclude.length > 0) && (
+          <FilterChip
+            label="Targeting"
+            activeCount={filters.locationTargets.include.length + filters.locationTargets.exclude.length}
+          >
+            <div className="space-y-3">
+              {(["include", "exclude"] as const).map((side) =>
+                filters.locationTargets[side].length > 0 ? (
+                  <div key={side}>
+                    <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      {side === "include" ? "Locations (any of)" : "Excluded locations"}
+                    </label>
+                    <div className="flex max-h-48 flex-wrap gap-1 overflow-y-auto">
+                      {filters.locationTargets[side].map((e, i) => (
+                        <span
+                          key={`${e.country}|${e.state ?? ""}|${e.city ?? ""}|${i}`}
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] ${
+                            side === "include" ? "bg-primary/10 text-primary" : "bg-destructive/10 text-destructive"
+                          }`}
+                        >
+                          {targetEntryLabel(e)}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onLocationTargetsChange?.({
+                                ...filters.locationTargets,
+                                [side]: filters.locationTargets[side].filter((_, j) => j !== i),
+                              })
+                            }
+                            className="opacity-60 hover:opacity-100"
+                          >
+                            <X className="size-3" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null
+              )}
+              <div className="flex items-center justify-between px-1">
+                <p className="text-[11px] text-muted-foreground">
+                  From the client&apos;s targeting rules. State entries include the whole state.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onLocationTargetsChange?.({ include: [], exclude: [] })}
+                  className="text-[11px] font-medium text-destructive hover:underline"
+                >
+                  Clear all
+                </button>
+              </div>
             </div>
           </FilterChip>
         )}

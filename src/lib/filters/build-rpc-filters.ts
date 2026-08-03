@@ -80,6 +80,11 @@ export function buildRpcFilters(filters: FilterState) {
       // legacy plain-string form for old stored batch filters.
       city: { include: cityInclude, exclude: cityExclude, ...(typeof city === "object" && city ? modes(city) : {}) },
     },
+    // Structured geo targeting — only sent when non-empty so old payload
+    // shapes stay byte-identical (the RPC skips the key entirely when absent).
+    ...((filters.locationTargets?.include?.length || filters.locationTargets?.exclude?.length)
+      ? { locationTargets: { include: filters.locationTargets.include, exclude: filters.locationTargets.exclude } }
+      : {}),
     companySize: { buckets: filters.companySize?.buckets || [], includeUnknown: filters.companySize?.includeUnknown || false, customMin: filters.companySize?.customMin ?? null, customMax: filters.companySize?.customMax ?? null },
     revenue: { buckets: filters.revenue?.buckets || [], includeUnknown: filters.revenue?.includeUnknown || false },
     fullName: filters.fullName || "",

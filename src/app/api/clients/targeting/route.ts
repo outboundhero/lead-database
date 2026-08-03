@@ -12,12 +12,19 @@ export interface TargetingConfig {
   countries: string[];
   include_locations: Array<{ country: string; state?: string; city?: string }>;
   exclude_locations: Array<{ country: string; state?: string; city?: string }>;
+  // Include-side lists (migration 067): auto-applied to the browse filters
+  // when the client tag is selected; they do NOT gate pushes.
+  include_industries: string[];
+  include_keywords: string[];
   exclude_industries: string[];
   exclude_keywords: string[];
   require_location: boolean;
   allow_inferred_location: boolean;
   commercial_cleaning: boolean;
   notes: string | null;
+  // Sheet-sync provenance (read-only here; written by sync-targeting).
+  source?: "manual" | "sheet";
+  sheet_synced_at?: string | null;
 }
 
 // GET /api/clients/targeting?tag=X — one config (404 if none yet)
@@ -39,6 +46,22 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({ targeting: data ?? [] });
 }
 
+// GeoNames spells out abbreviations ("St. George" -> "Saint George") and drops
+// some suffixes ("Suisun City" -> "Suisun"). Variants are tried only after the
+// exact key misses, so "Kansas City" never degrades to "Kansas".
+function cityVariants(city: string): string[] {
+  const out: string[] = [];
+  const abbr: Array<[RegExp, string]> = [
+    [/^st\.?\s+/i, "Saint "], [/^ste\.?\s+/i, "Sainte "], [/^ft\.?\s+/i, "Fort "], [/^mt\.?\s+/i, "Mount "],
+  ];
+  for (const [re, full] of abbr) if (re.test(city)) out.push(city.replace(re, full));
+  if (/\s+city$/i.test(city)) out.push(city.replace(/\s+city$/i, ""));
+  return out;
+}
+
+// city_key is accent-folded; the SQL regexp only strips non-letters, so fold here.
+const foldAccents = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
+
 async function validateEntries(entries: Array<{ country: string; state?: string; city?: string }>) {
   const pool = getPool();
   for (const e of entries) {
@@ -59,13 +82,19 @@ async function validateEntries(entries: Array<{ country: string; state?: string;
     }
     if (e.city) {
       if (!e.state) return `city "${e.city}" needs a state`;
-      const g = await pool.query(`
-        SELECT 1 FROM geo_locations g
-        JOIN geo_admin1 a ON a.country_code = g.country_code AND a.admin1_code = g.admin1_code
-        WHERE g.country_code = $1 AND a.state_code = $2
-          AND g.city_key = regexp_replace(lower($3), '[^a-z]', '', 'g') LIMIT 1`,
-        [country, e.state, e.city]);
-      if (!g.rows.length) return `"${e.city}" is not a known place in ${e.state}, ${country}`;
+      let found: string | null = null;
+      for (const candidate of [e.city, ...cityVariants(e.city)]) {
+        const g = await pool.query(`
+          SELECT g.city FROM geo_locations g
+          JOIN geo_admin1 a ON a.country_code = g.country_code AND a.admin1_code = g.admin1_code
+          WHERE g.country_code = $1 AND a.state_code = $2
+            AND g.city_key = regexp_replace(lower($3), '[^a-z]', '', 'g')
+          ORDER BY g.population DESC NULLS LAST LIMIT 1`,
+          [country, e.state, foldAccents(candidate)]);
+        if (g.rows.length) { found = g.rows[0].city; break; }
+      }
+      if (!found) return `"${e.city}" is not a known place in ${e.state}, ${country}`;
+      e.city = found; // canonical DB casing/spelling
     }
   }
   return null;
@@ -99,11 +128,15 @@ export async function PUT(request: NextRequest) {
   const countries = (Array.isArray(body.countries) ? body.countries : ["US"])
     .map((c) => String(c).trim().toUpperCase()).filter(Boolean);
 
+  // source/sheet_raw/sheet_synced_at are deliberately NOT written here, so
+  // sheet-sync provenance survives manual saves.
   const { error } = await admin.from("client_targeting").upsert({
     client_tag: tag,
     countries,
     include_locations: include,
     exclude_locations: exclude,
+    include_industries: Array.isArray(body.include_industries) ? body.include_industries : [],
+    include_keywords: Array.isArray(body.include_keywords) ? body.include_keywords : [],
     exclude_industries: Array.isArray(body.exclude_industries) ? body.exclude_industries : [],
     exclude_keywords: Array.isArray(body.exclude_keywords) ? body.exclude_keywords : [],
     require_location: !!body.require_location,

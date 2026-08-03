@@ -24,6 +24,23 @@ export interface LocationFilter {
   city: IncludeExclude; // was a plain string — normalizeFilterState migrates old payloads
 }
 
+// Structured geo targeting (migration 062 `locationTargets` + 066
+// fn_location_entry_condition): state-level entries omit city, and include
+// entries OR together — "all of WA plus Miami, FL" is expressible, unlike the
+// flat state/city filters which AND. state is a state_code; city matches by
+// geoname id (exact place, no cross-state name collisions). Populated by
+// client-tag auto-apply; editable via the Targeting chip.
+export interface LocationTargetEntry {
+  country: string;
+  state?: string;
+  city?: string;
+}
+
+export interface LocationTargetsFilter {
+  include: LocationTargetEntry[];
+  exclude: LocationTargetEntry[];
+}
+
 // New for OutboundHero — IncludeExclude shape for the keyword filter (was a plain string).
 // matchMode 'exact' = whole-term matching (word-boundaried, plural-tolerant:
 // "dry cleaner" matches only the full phrase — NOT everything containing
@@ -90,6 +107,7 @@ export interface FilterState {
 
   // Location
   location: LocationFilter;
+  locationTargets: LocationTargetsFilter;
 
   // Range
   companySize: RangeFilter;
@@ -147,6 +165,7 @@ export const DEFAULT_FILTER_STATE: FilterState = {
     state: ie(),
     city: ie(),
   },
+  locationTargets: { include: [], exclude: [] },
   companySize: { buckets: [], includeUnknown: false },
   revenue: { buckets: [], includeUnknown: false },
   keyword: { include: [], exclude: [], matchMode: "contains" },
@@ -163,6 +182,15 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   sortBy: "created_at",
   sortDir: "desc",
 };
+
+function sanitizeTargetEntries(v: unknown): LocationTargetEntry[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter(
+    (e): e is LocationTargetEntry =>
+      !!e && typeof e === "object" && typeof (e as LocationTargetEntry).country === "string" &&
+      (e as LocationTargetEntry).country.trim().length > 0
+  );
+}
 
 // Deep-merge a possibly-stale/partial FilterState (old saved presets, old
 // client payloads, URL state) onto DEFAULT_FILTER_STATE so fields added after
@@ -203,6 +231,10 @@ export function normalizeFilterState(partial: unknown): FilterState {
       city: typeof (p.location as { city?: unknown } | undefined)?.city === "string"
         ? { ...d.location.city, include: (p.location!.city as unknown as string) ? [p.location!.city as unknown as string] : [] }
         : mergeIE(p.location?.city as Partial<IncludeExclude> | undefined, d.location.city),
+    },
+    locationTargets: {
+      include: sanitizeTargetEntries(p.locationTargets?.include),
+      exclude: sanitizeTargetEntries(p.locationTargets?.exclude),
     },
     companySize: { ...d.companySize, ...(p.companySize ?? {}) },
     revenue: { ...d.revenue, ...(p.revenue ?? {}) },
@@ -261,6 +293,7 @@ export function countActiveFilters(filters: FilterState): number {
   if (filters.location.country.include.length || filters.location.country.exclude.length || filters.location.country.includeUnknown) count++;
   if (filters.location.state.include.length || filters.location.state.exclude.length || filters.location.state.includeUnknown) count++;
   if (filters.location.city.include.length || filters.location.city.exclude.length) count++;
+  if (filters.locationTargets.include.length || filters.locationTargets.exclude.length) count++;
   if (filters.companySize.buckets.length || filters.companySize.includeUnknown || filters.companySize.customMin || filters.companySize.customMax) count++;
   if (filters.revenue.buckets.length || filters.revenue.includeUnknown) count++;
   if (filters.keyword.include.length || filters.keyword.exclude.length) count++;

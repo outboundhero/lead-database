@@ -62,9 +62,12 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
   const [exclude, setExclude] = useState<Entry[]>([]);
   const [industries, setIndustries] = useState<string[]>([]);
   const [keywords, setKeywords] = useState<string[]>([]);
+  const [includeIndustries, setIncludeIndustries] = useState<string[]>([]);
+  const [includeKeywords, setIncludeKeywords] = useState<string[]>([]);
   const [requireLocation, setRequireLocation] = useState(false);
   const [allowInferred, setAllowInferred] = useState(true);
   const [commercialCleaning, setCommercialCleaning] = useState(false);
+  const [sheetSyncedAt, setSheetSyncedAt] = useState<string | null>(null);
 
   useEffect(() => {
     if (!tag) return;
@@ -76,7 +79,9 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
         if (!t) { // fresh config defaults
           setCountries(["US"]); setInclude([]); setExclude([]);
           setIndustries([]); setKeywords([]);
+          setIncludeIndustries([]); setIncludeKeywords([]);
           setRequireLocation(false); setAllowInferred(true); setCommercialCleaning(false);
+          setSheetSyncedAt(null);
           return;
         }
         setCountries(t.countries ?? ["US"]);
@@ -84,9 +89,12 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
         setExclude(t.exclude_locations ?? []);
         setIndustries(t.exclude_industries ?? []);
         setKeywords(t.exclude_keywords ?? []);
+        setIncludeIndustries(t.include_industries ?? []);
+        setIncludeKeywords(t.include_keywords ?? []);
         setRequireLocation(!!t.require_location);
         setAllowInferred(t.allow_inferred_location !== false);
         setCommercialCleaning(!!t.commercial_cleaning);
+        setSheetSyncedAt(t.source === "sheet" ? t.sheet_synced_at ?? null : null);
       })
       .catch(() => toast.error("Failed to load targeting"))
       .finally(() => setLoading(false));
@@ -104,6 +112,8 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
           countries,
           include_locations: include,
           exclude_locations: exclude,
+          include_industries: includeIndustries,
+          include_keywords: includeKeywords,
           exclude_industries: industries,
           exclude_keywords: keywords,
           require_location: requireLocation,
@@ -132,6 +142,12 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
           <p className="py-6 text-center text-xs text-muted-foreground">Loading…</p>
         ) : (
           <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
+            {sheetSyncedAt && (
+              <div className="rounded-xl bg-muted px-3 py-2 text-[11px] text-muted-foreground">
+                Synced from the onboarding sheet {new Date(sheetSyncedAt).toLocaleDateString()}.
+                Manual edits persist until that sheet row changes.
+              </div>
+            )}
             <div>
               <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Countries</p>
               <div className="flex flex-wrap gap-1.5">
@@ -167,6 +183,15 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
                 placeholder='e.g. "Spokane, WA" — overrides any inclusion'
                 onChange={(arr) => setExclude(arr.map(parseEntry))}
               />
+            </div>
+            <div>
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Include industries</p>
+              <TagInput values={includeIndustries} placeholder="Taxonomy category names" onChange={setIncludeIndustries} />
+              <p className="mt-1 px-1 text-[10px] text-muted-foreground">Taxonomy reference from the sheet — the Include keywords below are what auto-apply to filters. Neither gates pushes.</p>
+            </div>
+            <div>
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Include keywords</p>
+              <TagInput values={includeKeywords} placeholder='Category search terms ("dental", "office")' onChange={setIncludeKeywords} />
             </div>
             <div>
               <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Exclude industries</p>

@@ -11,9 +11,42 @@ import {
   type CustomTagsFilter,
   type WebsiteFilter,
   type RangeFilter,
+  type LocationTargetEntry,
+  type LocationTargetsFilter,
   DEFAULT_FILTER_STATE,
   normalizeFilterState,
 } from "@/types/filters";
+
+// Everything one client tag's targeting rules contribute to the filters —
+// applied as a unit on tag select and removed as a unit on deselect.
+export interface TargetingPatch {
+  locations: LocationTargetsFilter;
+  categorySearchInclude: string[]; // include phrases -> categorySearch.include (contains)
+  keywordExclude: string[];        // exclude keywords -> keyword.exclude (whole-term exact)
+  categoryExclude: string[];       // exclude industries -> category.exclude (exact)
+}
+
+const targetKey = (e: LocationTargetEntry) => `${e.country}|${e.state ?? ""}|${e.city ?? ""}`;
+
+function mergeEntries(current: LocationTargetEntry[], added: LocationTargetEntry[]) {
+  const seen = new Set(current.map(targetKey));
+  return [...current, ...added.filter((e) => !seen.has(targetKey(e)))];
+}
+
+function removeEntries(current: LocationTargetEntry[], removed: LocationTargetEntry[]) {
+  const drop = new Set(removed.map(targetKey));
+  return current.filter((e) => !drop.has(targetKey(e)));
+}
+
+const mergeStrings = (current: string[], added: string[]) => {
+  const seen = new Set(current.map((s) => s.toLowerCase()));
+  return [...current, ...added.filter((s) => !seen.has(s.toLowerCase()))];
+};
+
+const removeStrings = (current: string[], removed: string[]) => {
+  const drop = new Set(removed.map((s) => s.toLowerCase()));
+  return current.filter((s) => !drop.has(s.toLowerCase()));
+};
 
 type FilterAction =
   | { type: "SET_TEXT"; field: "fullName" | "companyName"; value: string }
@@ -36,6 +69,9 @@ type FilterAction =
   | { type: "SET_PAGE_SIZE"; value: number }
   | { type: "SET_SORT"; sortBy: string; sortDir: "asc" | "desc" }
   | { type: "LOAD_PRESET"; filters: FilterState }
+  | { type: "SET_LOCATION_TARGETS"; value: LocationTargetsFilter }
+  | { type: "APPLY_CLIENT_TARGETING"; patch: TargetingPatch }
+  | { type: "REMOVE_CLIENT_TARGETING"; patch: TargetingPatch }
   | { type: "RESET" };
 
 function filterReducer(state: FilterState, action: FilterAction): FilterState {
@@ -81,6 +117,58 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
     case "LOAD_PRESET":
       // Stored presets may predate newer FilterState keys — merge onto defaults
       return { ...normalizeFilterState(action.filters), page: 1 };
+    case "SET_LOCATION_TARGETS":
+      return { ...state, locationTargets: action.value, page: 1 };
+    case "APPLY_CLIENT_TARGETING":
+      return {
+        ...state,
+        locationTargets: {
+          include: mergeEntries(state.locationTargets.include, action.patch.locations.include),
+          exclude: mergeEntries(state.locationTargets.exclude, action.patch.locations.exclude),
+        },
+        // Side-wide match modes are only set when the side was EMPTY — flipping
+        // the mode under a user's pre-existing terms would silently change what
+        // those terms match.
+        categorySearch: {
+          ...state.categorySearch,
+          include: mergeStrings(state.categorySearch.include, action.patch.categorySearchInclude),
+          ...(action.patch.categorySearchInclude.length && state.categorySearch.include.length === 0
+            ? { includeMode: "contains" as const } : {}),
+        },
+        keyword: {
+          ...state.keyword,
+          exclude: mergeStrings(state.keyword.exclude, action.patch.keywordExclude),
+          // Whole-term matching so "retail" doesn't nuke "Retail Solutions Corp" by substring accident.
+          ...(action.patch.keywordExclude.length && state.keyword.exclude.length === 0
+            ? { excludeMode: "exact" as const } : {}),
+        },
+        category: {
+          ...state.category,
+          exclude: mergeStrings(state.category.exclude, action.patch.categoryExclude),
+        },
+        page: 1,
+      };
+    case "REMOVE_CLIENT_TARGETING":
+      return {
+        ...state,
+        locationTargets: {
+          include: removeEntries(state.locationTargets.include, action.patch.locations.include),
+          exclude: removeEntries(state.locationTargets.exclude, action.patch.locations.exclude),
+        },
+        categorySearch: {
+          ...state.categorySearch,
+          include: removeStrings(state.categorySearch.include, action.patch.categorySearchInclude),
+        },
+        keyword: {
+          ...state.keyword,
+          exclude: removeStrings(state.keyword.exclude, action.patch.keywordExclude),
+        },
+        category: {
+          ...state.category,
+          exclude: removeStrings(state.category.exclude, action.patch.categoryExclude),
+        },
+        page: 1,
+      };
     case "RESET":
       return DEFAULT_FILTER_STATE;
     default:
@@ -177,6 +265,18 @@ export function useFilters() {
     dispatch({ type: "LOAD_PRESET", filters });
   }, []);
 
+  const setLocationTargets = useCallback((value: LocationTargetsFilter) => {
+    dispatch({ type: "SET_LOCATION_TARGETS", value });
+  }, []);
+
+  const applyClientTargeting = useCallback((patch: TargetingPatch) => {
+    dispatch({ type: "APPLY_CLIENT_TARGETING", patch });
+  }, []);
+
+  const removeClientTargeting = useCallback((patch: TargetingPatch) => {
+    dispatch({ type: "REMOVE_CLIENT_TARGETING", patch });
+  }, []);
+
   const resetFilters = useCallback(() => {
     dispatch({ type: "RESET" });
   }, []);
@@ -204,6 +304,9 @@ export function useFilters() {
       setPageSize,
       setSort,
       loadPreset,
+      setLocationTargets,
+      applyClientTargeting,
+      removeClientTargeting,
       resetFilters,
     }),
     [
@@ -228,6 +331,9 @@ export function useFilters() {
       setPageSize,
       setSort,
       loadPreset,
+      setLocationTargets,
+      applyClientTargeting,
+      removeClientTargeting,
       resetFilters,
     ]
   );
