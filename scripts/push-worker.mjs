@@ -37,6 +37,7 @@
 import pg from "pg";
 import { randomUUID } from "node:crypto";
 import dotenv from "dotenv";
+import { espBucket } from "./lib/esp-bucket.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname });
 
 const env = process.env;
@@ -473,7 +474,7 @@ async function pushCycle() {
   const { rows: leadRows } = await pool.query(
     `select id, email, first_name, last_name, title, company, notes, category, subcategory,
             additional_category, city, state, tags, person_linkedin, domain, address, question,
-            company_phone, google_maps_url
+            company_phone, google_maps_url, esp
        from leads where id = any($1::uuid[])`,
     [[...new Set(items.map((i) => i.lead_id))]]
   );
@@ -537,11 +538,24 @@ async function pushCycle() {
       }
     }
     // Target campaigns are decided once and persisted — a retry reuses them.
+    // ESP ROUTING (client req #9): when the batch's campaigns carry buckets,
+    // a lead attaches ONLY to the campaign(s) matching its email provider:
+    //   outlook  — ESP is Microsoft/Outlook
+    //   seg      — ESP is a recognized security email gateway
+    //   default  — Google, custom mail servers, unknown, everything else
+    const routed = (batch.campaigns ?? []).some((c) => c.bucket);
+    const bucket = routed ? espBucket(lead.esp) : null;
     const targets = item.target_campaigns?.length
       ? item.target_campaigns
-      : (batch.campaigns ?? []).map((c) => ({ id: String(c.id), instance_url: c.instance_url }));
+      : (batch.campaigns ?? [])
+          .filter((c) => !routed || (c.bucket ?? "default") === bucket)
+          .map((c) => ({ id: String(c.id), instance_url: c.instance_url }));
     if (targets.length === 0) {
-      await setItem(item, token, { status: "failed", error: "batch has no campaigns", claimed_at: null });
+      if (routed) {
+        await setItem(item, token, { status: "skipped", error: `no campaign for ${bucket} bucket (esp: ${lead.esp ?? "unknown"})`, claimed_at: null });
+      } else {
+        await setItem(item, token, { status: "failed", error: "batch has no campaigns", claimed_at: null });
+      }
       continue;
     }
     const bisonIds = { ...(item.bison_ids ?? {}) };

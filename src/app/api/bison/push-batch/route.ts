@@ -22,6 +22,11 @@ interface PushBatchCampaign {
   name?: string;
   instance_url: string;
   workspace_name?: string;
+  // ESP routing (client req #9): when any campaign in the batch carries a
+  // bucket, each lead is attached ONLY to the campaign matching its email
+  // provider — outlook (Microsoft/Outlook), seg (security gateways), default
+  // (Google/custom/everything else). Bucket-less batches attach to all.
+  bucket?: "outlook" | "seg" | "default";
 }
 
 interface PushBatchPayload {
@@ -102,6 +107,7 @@ export async function POST(request: NextRequest) {
       name: typeof c.name === "string" ? c.name : undefined,
       instance_url: domain,
       workspace_name: typeof c.workspace_name === "string" ? c.workspace_name : undefined,
+      ...(c.bucket === "outlook" || c.bucket === "seg" || c.bucket === "default" ? { bucket: c.bucket } : {}),
     });
   }
 

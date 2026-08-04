@@ -46,10 +46,19 @@ const ONLY_CLIENT = (() => {
 
 const SHEET_ID = process.env.ONBOARDING_SHEET_ID || "1MGqSgGNoeN6WgjZnT7_Ij_nZftyyj7Z9DT77rVYLKuQ";
 const TAB_GID = 581954884;
+// Two model tiers: the client's verbatim location/exclusion prompts were
+// written for ChatGPT (GPT-4o-class) — 4o-mini repetition-loops on them and
+// prunes explicit city lists. Taxonomy matching + include phrases stay on mini.
 const MODEL = "gpt-4o-mini";
-const PRICE_IN = 0.15 / 1e6, PRICE_OUT = 0.6 / 1e6; // USD per token
+const TEXT_MODEL = process.env.TARGETING_TEXT_MODEL || "gpt-4o";
+const PRICES = { "gpt-4o-mini": [0.15 / 1e6, 0.6 / 1e6], "gpt-4o": [2.5 / 1e6, 10 / 1e6] };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const usage = { input: 0, output: 0, calls: 0 };
+const usage = { cost: 0, calls: 0 };
+const addUsage = (model, json) => {
+  const [pin, pout] = PRICES[model] ?? PRICES["gpt-4o-mini"];
+  usage.cost += (json.usage?.prompt_tokens ?? 0) * pin + (json.usage?.completion_tokens ?? 0) * pout;
+  usage.calls++;
+};
 
 // ── Google Sheets auth (same pattern as sync-clients-from-sheet.mjs) ─────────
 
@@ -138,9 +147,7 @@ async function aiJson(system, user, { maxTokens = 8000 } = {}) {
     }
     if (!res.ok) throw new Error(`OpenAI HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`);
     const json = await res.json();
-    usage.input += json.usage?.prompt_tokens ?? 0;
-    usage.output += json.usage?.completion_tokens ?? 0;
-    usage.calls++;
+    addUsage(MODEL, json);
     const choice = json.choices?.[0];
     if (choice?.finish_reason === "length") {
       const err = new Error("truncated");
@@ -148,6 +155,45 @@ async function aiJson(system, user, { maxTokens = 8000 } = {}) {
       throw err;
     }
     try { return JSON.parse(choice?.message?.content ?? "{}"); } catch { return {}; }
+  }
+}
+
+// Plain-text completion (the client's prompts specify non-JSON output) —
+// same retry/backoff/truncation semantics as aiJson.
+async function aiText(user, { maxTokens = 8000, model = TEXT_MODEL } = {}) {
+  const backoffMs = [2000, 8000, 30000];
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model, temperature: 0, max_tokens: maxTokens,
+          messages: [{ role: "user", content: user }],
+        }),
+      });
+    } catch (err) {
+      if (attempt < backoffMs.length) { await sleep(backoffMs[attempt]); continue; }
+      throw err;
+    }
+    if ((res.status === 429 || res.status >= 500) && attempt < backoffMs.length) {
+      await sleep(backoffMs[attempt]);
+      continue;
+    }
+    if (!res.ok) throw new Error(`OpenAI HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`);
+    const json = await res.json();
+    addUsage(model, json);
+    const choice = json.choices?.[0];
+    if (choice?.finish_reason === "length") {
+      // Callers can salvage the partial text (a truncated comma list is still
+      // usable) — gpt-4o-mini sometimes repetition-loops on list prompts.
+      const err = new Error("truncated");
+      err.truncated = true;
+      err.content = choice?.message?.content ?? "";
+      throw err;
+    }
+    return choice?.message?.content ?? "";
   }
 }
 
@@ -208,28 +254,86 @@ async function batchedAi(items, size, fn) {
 
 // ── AI prompts (ported from gmaps-UI sync.ts, adapted to this schema) ────────
 
-const LOCATION_PROMPT = `You extract location targeting from messy client-onboarding text.
-Supported countries ONLY: US, CA, AU, NZ, GB, IE.
+// The location + exclusion prompts below are the client's own (Spencer,
+// 2026-08-04), used VERBATIM — they are field-tested. Our only additions are
+// outside the prompt: the [INSERT] slot is filled with the raw sheet cell, the
+// plain-text output is parsed ("state: city, city" lines / one comma list),
+// and every parsed entry is still validated against the geo reference before
+// storage — nothing unvalidated is ever written.
+const CLIENT_LOCATION_PROMPT = `Create a comprehensive, accurate, normalized list of inclusion locations for commercial cleaning and janitorial lead targeting.
 
-RULES:
-1. Cities -> {"country":"US","state":"TX","city":"Houston"}. "state" is the standard
-   state/province code (US "TX", Canada "ON", Australia "NSW"); for GB/IE/NZ use the
-   region name. Preserve internal spaces ("King of Prussia").
-2. ZIP/postal codes -> resolve each to its city. Deduplicate aggressively — many ZIPs
-   collapse into one city.
-3. A state-level entry {"country":"US","state":"FL"} (no city) is ONLY for text that
-   targets an ENTIRE state: "Florida", "All of Texas", "statewide". NEVER collapse a
-   list of counties or cities into a state-level entry — if the text enumerates
-   specific cities, output EVERY listed city individually, even when there are 100+.
-   Do NOT expand a whole-state entry into cities.
-4. County names -> the cities and towns in that county (each as its own city entry).
-5. "N miles around X" -> cities strictly within that radius, plus X itself.
-6. Whole-country text ("All of USA", "United States", "nationwide", "All of
-   Australia") -> ONE country-level entry {"country":"US"} (no state, no city).
-   Vague non-location text -> skip (no entry).
-7. No duplicate entries. Ignore contact names, emails, and delivery notes.
+The client's core service area is:
+[INSERT STATES, COUNTIES, CITIES, TOWNS, ZIP CODES, OR METRO AREAS]
 
-Return JSON only: {"locations":[{"country":"US","state":"TX","city":"Houston"},{"country":"US","state":"FL"}]}`;
+Requirements:
+
+1. Support service areas that cross multiple states.
+
+2. Include every incorporated city and town clearly located within the stated service area.
+
+3. When counties are provided:
+- identify every incorporated city and town within each county
+- include major census-designated places, unincorporated communities, and postal communities when businesses commonly use those names
+- organize the final results by state
+- place each state on a separate line
+
+4. When ZIP codes are provided, identify all cities, towns, census-designated places, and commonly recognized postal communities physically represented by those ZIP codes. Do not rely only on the primary USPS mailing city.
+
+5. Add a practical 3–5-mile buffer beyond the stated service-area boundary when it makes geographic and operational sense.
+
+6. For the buffer, include nearby cities, towns, and commercially recognized communities when:
+- they directly border the core service area
+- part of the municipality falls within approximately 3–5 miles of the boundary
+- the municipality's developed or commercial area is reasonably close to the boundary
+- businesses there would reasonably use a provider serving the core market
+- the location is part of the same continuous developed or commercial area
+
+7. A buffer may cross county or state lines when geographically appropriate. Include those locations under the correct state.
+
+8. Do not add distant cities merely because they are part of the same county, metropolitan area, media market, or commuting region.
+
+9. Do not include a municipality when only a remote, rural, mountainous, wooded, industrial, or unpopulated edge falls inside the buffer while its primary developed area is materially farther away.
+
+10. Include incorporated cities and towns first. Also include major census-designated places, unincorporated communities, and postal place names when they commonly appear in:
+- business addresses
+- Google Business Profiles
+- LinkedIn company locations
+- company databases
+- website contact pages
+- local service-area descriptions
+
+11. Preserve useful community names that have been annexed into or are administratively part of a larger city only when businesses still commonly identify with that name.
+
+12. Exclude:
+- neighborhoods that are not commonly treated as separate business locations
+- subdivisions and residential developments
+- tiny or obscure rural localities with little commercial activity
+- counties, regions, and metro-area names
+- duplicate spellings
+- duplicate locations
+- military installations unless specifically relevant
+- locations outside the core area or buffer merely because they share a ZIP code or postal city
+
+13. Verify state and county placement carefully. Some cities, towns, ZIP codes, and postal communities cross county boundaries or use a mailing city different from their physical location.
+
+14. Verify borderline locations carefully. Do not guess. Leave out a questionable location unless there is a clear geographic and commercially practical reason to include it.
+
+15. Normalize the output:
+- lowercase
+- alphabetical order within each state
+- no quotation marks
+- no duplicates
+- one state per line
+- full state name followed by a colon
+- cities and towns separated by commas
+
+16. When multiple states are included, use this exact structure:
+
+state one: city, city, town, town
+state two: city, city, town, town
+state three: city, city, town, town
+
+17. Return only the final location list. Do not include explanations, headings, bullets, notes, citations, sources, or commentary.`;
 
 const categoriesPrompt = (categoryNames) => `You match client industry preferences to categories from a fixed list.
 
@@ -262,23 +366,47 @@ Return JSON keyed by each client's tag EXACTLY as it appears before the colon in
 (e.g. input "JV:\\nINCLUDE: ..." -> key "JV"):
 {"JV":{"include":["Category 1"],"exclude":["Category 2"]}, ...}`;
 
-const EXCLUDE_KEYWORDS_PROMPT = `You are generating exclusion keyword lists for commercial cleaning outbound campaigns. Each client has a raw exclusion string from their onboarding form.
+const CLIENT_EXCLUSION_PROMPT = `Create a comprehensive, normalized, comma-separated list of industry and business-type exclusion keywords for commercial cleaning and janitorial lead targeting.
 
-Context: Input may be messy — comma lists, numbered lists, multi-line entries, slashes, parenthetical notes. Your job is to interpret, expand, and standardize into high-quality exclusion keyword lists. Keywords are whole-word matched (plural-tolerant) against company names and business-category labels.
+The client does not want to target:
+[INSERT EXCLUDED INDUSTRIES OR BUSINESS TYPES]
 
-Instructions:
-1. For each client, take their input categories and expand into: synonyms, variations, related business types, common naming conventions (Google Maps, Yelp, etc.)
-2. Infer intent: "retail" -> boutique, clothing store, strip mall; "restaurants" -> diner, bistro, fast food
-3. Handle parenthetical notes: "bars (restaurants are fine)" -> exclude "bars" but NOT "restaurants"
-4. Do NOT over-exclude categories that may contain good targets unless explicitly stated.
-5. Matching is already plural-tolerant — no need for singular AND plural of the same word.
-6. Lowercase everything, remove duplicates. Skip prose that is not an exclusion ("not completely against...").
-7. Geographic restrictions (cities, states, counties, "nothing in downtown X") are handled
-   by a separate system — NEVER emit place names as keywords; drop location-only phrases.
+Requirements:
 
-Return JSON keyed by each client's tag EXACTLY as it appears before the colon in the input
-(e.g. input "JV: restaurants, bars" -> key "JV"):
-{"JV":["keyword1","keyword2",...], ...}`;
+1. Include the main industry term, common singular and plural variations, alternate spellings, commonly used business categories, and closely related business types.
+
+2. Focus on terms that would realistically appear in:
+- company names
+- business descriptions
+- industry classifications
+- Google business categories
+- LinkedIn company industries
+- lead databases
+- website descriptions
+
+3. Use industry and business-type keywords only. Do not add phrases involving cleaning services unless the excluded industry itself is a cleaning company.
+
+4. Keep the list comprehensive, but do not include broad terms that could exclude otherwise qualified businesses.
+
+5. Do not include unrelated industries merely because they sometimes operate alongside an excluded industry.
+
+6. Do not include job titles, employee roles, services offered by vendors, or equipment terms unless specifically requested.
+
+7. Normalize obvious duplicates, but retain meaningful variations when databases may treat them differently.
+
+8. Use lowercase.
+
+9. Do not use quotation marks.
+
+10. Return only one comma-separated list. Do not include an introduction, explanation, headings, bullets, or notes.
+
+Example input:
+salons, residential, bakeries, hair salons, barbershops
+
+The output should include accurate related categories such as:
+salon, salons, beauty salon, hair salon, hair studio, hairdresser, barber, barbershop, barber shop, nail salon, residential, residential property, apartment complex, condominium, homeowners association, bakery, bakeries, bake shop, pastry shop, cake shop, wholesale bakery
+
+Do not automatically include categories that may still be acceptable unless they are clearly covered by the client's exclusion request.`;
 
 const INCLUDE_KEYWORDS_PROMPT = `You turn a client's messy "target industries" text into clean search phrases. Each phrase is substring-matched (case-insensitive contains) against business-category labels like "Dental clinic", "Corporate office", "Executive coach", "Technology consultant", "Church", "Warehouse".
 
@@ -316,14 +444,36 @@ function cityVariants(city) {
 // SQL regexp below merely strips non-letters ("montral") — fold in JS first.
 const foldAccents = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
 
+// State names come back WITHOUT a country (the client's prompt emits bare
+// "massachusetts:") — resolve name/code to (country, state_code) with the
+// same country priority the alias loader uses.
+const stateResolveCache = new Map();
+async function resolveState(pool, raw) {
+  const key = raw.trim().toLowerCase();
+  if (stateResolveCache.has(key)) return stateResolveCache.get(key);
+  const { rows } = await pool.query(
+    `SELECT country_code, state_code FROM geo_admin1
+     WHERE LOWER(name) = $1 OR state_code = UPPER($2)
+     ORDER BY array_position(ARRAY['US','CA','AU','NZ','GB','IE'], country_code) LIMIT 1`,
+    [key, raw.trim()]);
+  const out = rows[0] ?? null;
+  stateResolveCache.set(key, out);
+  return out;
+}
+
 async function validateLocations(pool, tag, entries) {
   const valid = [];
   const dropped = [];
   const seen = new Set();
   for (const e of entries ?? []) {
-    const country = String(e?.country ?? "").trim().toUpperCase();
+    let country = String(e?.country ?? "").trim().toUpperCase();
     const state = String(e?.state ?? "").trim();
     const city = String(e?.city ?? "").trim();
+    if (!country && state) {
+      const resolved = await resolveState(pool, state);
+      if (!resolved) { dropped.push({ tag, entry: e, reason: `unknown state "${state}"` }); continue; }
+      country = resolved.country_code;
+    }
     if (!country) { dropped.push({ tag, entry: e, reason: "missing country" }); continue; }
     const c = await pool.query(`SELECT 1 FROM supported_countries WHERE code = $1 AND enabled`, [country]);
     if (!c.rows.length) { dropped.push({ tag, entry: e, reason: `unsupported country ${country}` }); continue; }
@@ -358,10 +508,25 @@ async function validateLocations(pool, tag, entries) {
   return { valid, dropped };
 }
 
-// Parse one client's location cell. Splits and retries the halves when the
-// response is truncated OR when the model returns zero entries for a clearly
-// list-like cell (gpt-4o-mini deterministically gives up on 100+-city lists
-// rather than emit the huge output — observed live, temp 0).
+// Parse one client's location cell through the client's verbatim prompt.
+// Output format is "state: city, city, town" lines (their rule 15/16); a bare
+// "state:" line counts as a state-level entry. Splits and retries the halves
+// when the response is truncated OR when the model returns zero entries for a
+// clearly list-like cell (gpt-4o-mini deterministically gives up on 100+-city
+// lists rather than emit the huge output — observed live, temp 0).
+function parseLocationLines(text) {
+  const entries = [];
+  for (const line of String(text).split("\n")) {
+    const m = line.match(/^\s*([a-z][a-z .'-]{1,40}?)\s*:\s*(.*)$/i);
+    if (!m) continue;
+    const stateName = m[1].trim();
+    const cities = m[2].split(",").map((s) => s.trim()).filter(Boolean);
+    if (!cities.length) entries.push({ state: stateName });
+    else for (const city of cities) entries.push({ state: stateName, city });
+  }
+  return entries;
+}
+
 async function parseLocations(rawText, depth = 0) {
   // Halve on LINE boundaries first so "utah: a, b, …" groups keep their state
   // header; a single long line is comma-halved with its "header:" prefix
@@ -385,8 +550,9 @@ async function parseLocations(rawText, depth = 0) {
     return [...a, ...b];
   };
   try {
-    const out = await aiJson(LOCATION_PROMPT, rawText);
-    const locations = out.locations ?? [];
+    const text = await aiText(
+      CLIENT_LOCATION_PROMPT.replace("[INSERT STATES, COUNTIES, CITIES, TOWNS, ZIP CODES, OR METRO AREAS]", rawText));
+    const locations = parseLocationLines(text);
     // ≥5 comma/newline segments but zero entries = the model bailed, not a
     // genuinely location-free cell. State headers ("utah: a, b, …") survive the
     // split because each half keeps its own prefix text.
@@ -558,13 +724,35 @@ async function main() {
     const canonCats = (list) =>
       [...new Set((Array.isArray(list) ? list : []).map((n) => catByLower.get(String(n).toLowerCase())).filter(Boolean))];
 
-    // Pass C: exclusion keyword expansion (batches of 10). No comma-split
-    // fallback: raw prose stored as whole-term keywords never matches anything
-    // and reads as protection that isn't there — failure keeps existing values.
+    // Pass C: exclusion keyword expansion — the client's verbatim prompt, one
+    // call per client (its [INSERT] slot is single-client), output is one
+    // comma-separated list. Failure keeps existing values, never [].
     const exclInput = changed.filter((c) => c.exclusion);
-    const exclRes = await batchedAi(exclInput, 10, async (batch) => {
-      const input = batch.map((c) => `${c.tag}: ${c.exclusion}`).join("\n---\n");
-      return aiJson(EXCLUDE_KEYWORDS_PROMPT, input);
+    const exclRes = { out: {}, failed: new Set() };
+    await mapConcurrent(exclInput, 4, async (c) => {
+      try {
+        let text;
+        try {
+          text = await aiText(
+            CLIENT_EXCLUSION_PROMPT.replace("[INSERT EXCLUDED INDUSTRIES OR BUSINESS TYPES]", c.exclusion),
+            { maxTokens: 3000 });
+        } catch (err) {
+          // Repetition-looped output hits max_tokens; the partial comma list is
+          // fine once deduped — drop the final (possibly cut-off) item.
+          if (!err.truncated || !err.content) throw err;
+          text = err.content.replace(/,[^,]*$/, "");
+        }
+        // Their rule 10: one comma-separated list, no prose. Take the longest
+        // comma-bearing line in case the model adds a stray blank/label line.
+        const line = text.split("\n").map((s) => s.trim()).filter(Boolean)
+          .sort((a, b) => b.length - a.length)[0] ?? "";
+        const keywords = line.split(",").map((s) => s.trim()).filter(Boolean);
+        if (!keywords.length) throw new Error("empty exclusion list from model");
+        exclRes.out[c.tag] = keywords;
+      } catch (err) {
+        exclRes.failed.add(c.tag);
+        console.error(`  ${c.tag}: exclusion expansion failed — ${err.message} (keeping existing values)`);
+      }
     });
 
     // Pass D: include search phrases (batches of 15).
@@ -645,8 +833,7 @@ async function main() {
       for (const d of allDropped.slice(0, 40)) console.log(`  ${d.tag}: ${JSON.stringify(d.entry)} — ${d.reason}`);
       if (allDropped.length > 40) console.log(`  … and ${allDropped.length - 40} more`);
     }
-    const cost = usage.input * PRICE_IN + usage.output * PRICE_OUT;
-    console.log(`\nsynced ${written} clients | ${usage.calls} AI calls, ${usage.input.toLocaleString()} in / ${usage.output.toLocaleString()} out tokens ≈ $${cost.toFixed(3)}`);
+    console.log(`\nsynced ${written} clients | ${usage.calls} AI calls ≈ $${usage.cost.toFixed(2)} (${MODEL} + ${TEXT_MODEL})`);
   } finally {
     await pool.end();
   }

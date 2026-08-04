@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import type { FilterState } from "@/types/filters";
+import { suggestBucketFromName } from "@/lib/bison/esp-bucket";
 
 // ── Send to Email Bison — the split-aware push wizard ──
 // A caller (leads page) opens this with the current filters + totalCount and an
@@ -48,6 +49,8 @@ interface PreviewCampaign {
   workspace_name?: string;
 }
 
+// (routing helpers use suggestBucketFromName from src/lib/bison/esp-bucket)
+
 interface PreviewSide {
   instance: string;
   count: number;
@@ -63,6 +66,49 @@ interface SendPreview {
 }
 
 const SKIP = "__skip__";
+
+// ESP routing (client req #9): each side can either route leads across three
+// bucket campaigns by email provider, or send everyone to a single campaign.
+type BucketKey = "outlook" | "seg" | "default";
+const BUCKETS: { key: BucketKey; label: string; hint: string }[] = [
+  { key: "outlook", label: "Outlook", hint: "Microsoft / Outlook mailboxes" },
+  { key: "seg", label: "Security gateways", hint: "Mimecast, Proofpoint, Barracuda…" },
+  { key: "default", label: "Google + Custom", hint: "Google, custom servers, everything else" },
+];
+interface SideChoice {
+  mode: "route" | "single";
+  single: string; // campaign id or SKIP
+  buckets: Record<BucketKey, string>; // campaign id or SKIP per bucket
+}
+const emptyChoice = (): SideChoice => ({
+  mode: "single",
+  single: SKIP,
+  buckets: { outlook: SKIP, seg: SKIP, default: SKIP },
+});
+
+// Pre-fill from campaign names; routing turns on automatically when at least
+// two buckets have a recognizable campaign ("…Outlook…", "…SEGs…", "…Google…").
+function seedChoice(side: PreviewSide): SideChoice {
+  const sendable = side.campaigns.filter((c) => !/nurture/i.test(String(c.name ?? "")));
+  const buckets: Record<BucketKey, string> = { outlook: SKIP, seg: SKIP, default: SKIP };
+  for (const c of sendable) {
+    const b = suggestBucketFromName(c.name);
+    if (b && buckets[b] === SKIP) buckets[b] = String(c.id);
+  }
+  const matched = (Object.keys(buckets) as BucketKey[]).filter((k) => buckets[k] !== SKIP).length;
+  if (side.count > 0 && matched >= 2) return { mode: "route", single: SKIP, buckets };
+  return {
+    mode: "single",
+    single: side.count > 0 && side.suggested ? String(side.suggested.id) : SKIP,
+    buckets,
+  };
+}
+
+function choiceSends(side: PreviewSide, choice: SideChoice): boolean {
+  if (side.count === 0) return false;
+  if (choice.mode === "single") return choice.single !== SKIP;
+  return (Object.keys(choice.buckets) as BucketKey[]).some((k) => choice.buckets[k] !== SKIP);
+}
 
 interface SendToBisonWizardProps {
   open: boolean;
@@ -96,9 +142,9 @@ export function SendToBisonWizard({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
-  // Step 3 — campaign choices (campaign id as string, or SKIP)
-  const [b2bChoice, setB2bChoice] = useState<string>(SKIP);
-  const [b2cChoice, setB2cChoice] = useState<string>(SKIP);
+  // Step 3 — campaign choices per side (routing or single campaign)
+  const [b2bChoice, setB2bChoice] = useState<SideChoice>(emptyChoice());
+  const [b2cChoice, setB2cChoice] = useState<SideChoice>(emptyChoice());
 
   const [confirming, setConfirming] = useState(false);
 
@@ -124,8 +170,8 @@ export function SendToBisonWizard({
     setSelectedTag(null);
     setPreview(null);
     setPreviewError(null);
-    setB2bChoice(SKIP);
-    setB2cChoice(SKIP);
+    setB2bChoice(emptyChoice());
+    setB2cChoice(emptyChoice());
     setTagsAttempted(false);
   }, [open]);
 
@@ -162,9 +208,10 @@ export function SendToBisonWizard({
       })
       .then((d: SendPreview) => {
         setPreview(d);
-        // Seed choices from the suggestion; skip a side that has no leads.
-        setB2bChoice(d.b2b.count > 0 && d.b2b.suggested ? String(d.b2b.suggested.id) : SKIP);
-        setB2cChoice(d.b2c.count > 0 && d.b2c.suggested ? String(d.b2c.suggested.id) : SKIP);
+        // Seed choices — routing auto-enables when the side has recognizable
+        // Outlook/SEG/Google campaigns; otherwise fall back to the suggestion.
+        setB2bChoice(seedChoice(d.b2b));
+        setB2cChoice(seedChoice(d.b2c));
       })
       .catch((e) => setPreviewError(e instanceof Error ? e.message : String(e)))
       .finally(() => setPreviewLoading(false));
@@ -176,36 +223,42 @@ export function SendToBisonWizard({
     runPreview(selectedTag);
   }
 
-  function findCampaign(side: PreviewSide, choice: string): PreviewCampaign | null {
-    if (choice === SKIP) return null;
-    return side.campaigns.find((c) => String(c.id) === choice) ?? null;
+  function findCampaign(side: PreviewSide, id: string): PreviewCampaign | null {
+    if (id === SKIP) return null;
+    return side.campaigns.find((c) => String(c.id) === id) ?? null;
   }
 
-  const b2bCampaign = preview ? findCampaign(preview.b2b, b2bChoice) : null;
-  const b2cCampaign = preview ? findCampaign(preview.b2c, b2cChoice) : null;
+  // The campaigns a side's choice resolves to (with routing buckets attached).
+  function chosenCampaigns(side: PreviewSide, choice: SideChoice) {
+    if (choice.mode === "single") {
+      const c = findCampaign(side, choice.single);
+      return c ? [{ campaign: c, bucket: undefined as BucketKey | undefined }] : [];
+    }
+    return (Object.keys(choice.buckets) as BucketKey[])
+      .map((k) => ({ campaign: findCampaign(side, choice.buckets[k]), bucket: k as BucketKey | undefined }))
+      .filter((x): x is { campaign: PreviewCampaign; bucket: BucketKey } => !!x.campaign);
+  }
 
-  // A side sends only when it has leads AND a campaign chosen.
-  const b2bSends = !!preview && preview.b2b.count > 0 && !!b2bCampaign;
-  const b2cSends = !!preview && preview.b2c.count > 0 && !!b2cCampaign;
+  const b2bSends = !!preview && choiceSends(preview.b2b, b2bChoice);
+  const b2cSends = !!preview && choiceSends(preview.b2c, b2cChoice);
   const canConfirm = b2bSends || b2cSends;
 
   async function queueSide(
     side: "b2b" | "b2c",
     sideData: PreviewSide,
-    campaign: PreviewCampaign
+    choice: SideChoice
   ): Promise<void> {
     const res = await fetch("/api/bison/push-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        campaigns: [
-          {
-            id: campaign.id,
-            name: campaign.name,
-            instance_url: sideData.instance,
-            workspace_name: campaign.workspace_name,
-          },
-        ],
+        campaigns: chosenCampaigns(sideData, choice).map(({ campaign, bucket }) => ({
+          id: campaign.id,
+          name: campaign.name,
+          instance_url: sideData.instance,
+          workspace_name: campaign.workspace_name,
+          ...(choice.mode === "route" && bucket ? { bucket } : {}),
+        })),
         selectedIds: usingSelection ? selectedIds : undefined,
         filters: usingSelection ? undefined : filters,
         clientTag: preview!.clientTag,
@@ -224,8 +277,8 @@ export function SendToBisonWizard({
     // failure when the first side already queued.
     const queued: string[] = [];
     try {
-      if (b2bSends && b2bCampaign) { await queueSide("b2b", preview.b2b, b2bCampaign); queued.push(`${preview.b2b.count.toLocaleString()} business`); }
-      if (b2cSends && b2cCampaign) { await queueSide("b2c", preview.b2c, b2cCampaign); queued.push(`${preview.b2c.count.toLocaleString()} personal`); }
+      if (b2bSends) { await queueSide("b2b", preview.b2b, b2bChoice); queued.push(`${preview.b2b.count.toLocaleString()} business`); }
+      if (b2cSends) { await queueSide("b2c", preview.b2c, b2cChoice); queued.push(`${preview.b2c.count.toLocaleString()} personal`); }
       toast.success(
         `Queued ${queued.join(" + ")} leads for ${preview.clientTag} — progress on the Exports page`,
         { id: toastId }
@@ -387,21 +440,23 @@ export function SendToBisonWizard({
               </span>{" "}
               leads total:
             </p>
-            {b2bSends && b2bCampaign ? (
+            {b2bSends ? (
               <SummaryRow
                 count={preview.b2b.count}
                 kind="business"
-                campaignName={b2bCampaign.name ?? `Campaign ${b2bCampaign.id}`}
+                choice={b2bChoice}
+                campaigns={chosenCampaigns(preview.b2b, b2bChoice)}
                 instance={preview.b2b.instance}
               />
             ) : (
               <p className="text-xs text-muted-foreground">Business (B2B): not sending.</p>
             )}
-            {b2cSends && b2cCampaign ? (
+            {b2cSends ? (
               <SummaryRow
                 count={preview.b2c.count}
                 kind="personal"
-                campaignName={b2cCampaign.name ?? `Campaign ${b2cCampaign.id}`}
+                choice={b2cChoice}
+                campaigns={chosenCampaigns(preview.b2c, b2cChoice)}
                 instance={preview.b2c.instance}
               />
             ) : (
@@ -480,10 +535,33 @@ function CampaignPicker({
 }: {
   label: string;
   side: PreviewSide;
-  value: string;
-  onChange: (v: string) => void;
+  value: SideChoice;
+  onChange: (v: SideChoice) => void;
 }) {
   const disabled = side.count === 0;
+  const [showNurture, setShowNurture] = useState(false);
+  // New leads must never go to nurture by default — same name rule the
+  // suggestion logic uses (send-preview suggestCampaign).
+  const sendable = side.campaigns.filter((c) => showNurture || !/nurture/i.test(String(c.name ?? "")));
+  const hidden = side.campaigns.length - sendable.length;
+
+  const campaignSelect = (val: string, set: (id: string) => void, skipLabel: string) => (
+    <Select value={val} onValueChange={set}>
+      <SelectTrigger className="h-9 w-full text-[13px]">
+        <SelectValue placeholder="Pick a campaign" />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={SKIP} className="text-[13px]">{skipLabel}</SelectItem>
+        {sendable.map((c) => (
+          <SelectItem key={String(c.id)} value={String(c.id)} className="text-[13px]">
+            {c.name ?? `Campaign ${c.id}`}
+            {side.suggested && String(side.suggested.id) === String(c.id) ? "  (suggested)" : ""}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+
   return (
     <div>
       <div className="mb-1 flex items-center gap-2">
@@ -491,6 +569,15 @@ function CampaignPicker({
         <span className="text-[11px] text-muted-foreground">
           {side.count.toLocaleString()} lead{side.count === 1 ? "" : "s"} · {side.instance}
         </span>
+        {!disabled && side.campaigns.length > 0 && (
+          <button
+            type="button"
+            onClick={() => onChange({ ...value, mode: value.mode === "route" ? "single" : "route" })}
+            className="ml-auto text-[11px] font-medium text-primary hover:underline"
+          >
+            {value.mode === "route" ? "Use one campaign" : "Route by email provider"}
+          </button>
+        )}
       </div>
       {disabled ? (
         <p className="text-[11px] text-muted-foreground">No leads on this side — nothing to send.</p>
@@ -499,38 +586,37 @@ function CampaignPicker({
           No campaigns on {side.instance}
           {side.error ? ` (${side.error})` : ""}.
         </p>
-      ) : (
-        (() => {
-          // New leads must never go to nurture — same name rule the
-          // suggestion logic uses (send-preview suggestCampaign).
-          const sendable = side.campaigns.filter((c) => !/nurture/i.test(String(c.name ?? "")));
-          const hidden = side.campaigns.length - sendable.length;
-          return (
-            <>
-              <Select value={value} onValueChange={onChange}>
-                <SelectTrigger className="h-9 w-full text-[13px]">
-                  <SelectValue placeholder="Pick a campaign" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={SKIP} className="text-[13px]">
-                    — Don&apos;t send this side —
-                  </SelectItem>
-                  {sendable.map((c) => (
-                    <SelectItem key={String(c.id)} value={String(c.id)} className="text-[13px]">
-                      {c.name ?? `Campaign ${c.id}`}
-                      {side.suggested && String(side.suggested.id) === String(c.id) ? "  (suggested)" : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {hidden > 0 && (
-                <p className="mt-1 text-[10px] text-muted-foreground">
-                  {hidden} nurture campaign{hidden === 1 ? "" : "s"} hidden — new leads never go to nurture.
-                </p>
+      ) : value.mode === "route" ? (
+        <div className="space-y-2">
+          {BUCKETS.map((b) => (
+            <div key={b.key}>
+              <p className="mb-0.5 px-1 text-[11px] font-medium text-muted-foreground">
+                {b.label} <span className="font-normal">— {b.hint}</span>
+              </p>
+              {campaignSelect(
+                value.buckets[b.key],
+                (id) => onChange({ ...value, buckets: { ...value.buckets, [b.key]: id } }),
+                "— Skip these leads —"
               )}
-            </>
-          );
-        })()
+            </div>
+          ))}
+          <p className="px-1 text-[10px] text-muted-foreground">
+            Each lead goes ONLY to the campaign matching its email provider. Leads whose bucket is skipped are not sent.
+          </p>
+        </div>
+      ) : (
+        campaignSelect(value.single, (id) => onChange({ ...value, single: id }), "— Don't send this side —")
+      )}
+      {hidden > 0 ? (
+        <button
+          type="button"
+          onClick={() => setShowNurture(true)}
+          className="mt-1 text-[10px] text-muted-foreground hover:text-foreground hover:underline"
+        >
+          {hidden} nurture campaign{hidden === 1 ? "" : "s"} hidden — show nurture campaigns
+        </button>
+      ) : showNurture && (
+        <p className="mt-1 text-[10px] text-amber-600">Nurture campaigns visible — new leads normally never go to nurture.</p>
       )}
     </div>
   );
@@ -539,20 +625,49 @@ function CampaignPicker({
 function SummaryRow({
   count,
   kind,
-  campaignName,
+  choice,
+  campaigns,
   instance,
 }: {
   count: number;
   kind: string;
-  campaignName: string;
+  choice: SideChoice;
+  campaigns: { campaign: PreviewCampaign; bucket?: BucketKey }[];
   instance: string;
 }) {
+  const bucketLabel = (k?: BucketKey) => BUCKETS.find((b) => b.key === k)?.label ?? "";
   return (
     <div className="rounded-xl border p-3">
-      <p className="text-[13px]">
-        <span className="font-semibold tabular-nums">{count.toLocaleString()}</span> {kind} leads →{" "}
-        <span className="font-medium">{campaignName}</span>
-      </p>
+      {choice.mode === "route" ? (
+        <>
+          <p className="text-[13px]">
+            <span className="font-semibold tabular-nums">{count.toLocaleString()}</span> {kind} leads,
+            routed by email provider:
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {campaigns.map(({ campaign, bucket }) => (
+              <li key={String(campaign.id)} className="text-[12px]">
+                <span className="text-muted-foreground">{bucketLabel(bucket)} →</span>{" "}
+                <span className="font-medium">{campaign.name ?? `Campaign ${campaign.id}`}</span>
+              </li>
+            ))}
+          </ul>
+          {(Object.keys(choice.buckets) as BucketKey[]).filter((k) => choice.buckets[k] === SKIP).length > 0 && (
+            <p className="mt-1 text-[10px] text-amber-600">
+              {(Object.keys(choice.buckets) as BucketKey[])
+                .filter((k) => choice.buckets[k] === SKIP)
+                .map((k) => bucketLabel(k))
+                .join(", ")}{" "}
+              leads will be skipped (no campaign chosen).
+            </p>
+          )}
+        </>
+      ) : (
+        <p className="text-[13px]">
+          <span className="font-semibold tabular-nums">{count.toLocaleString()}</span> {kind} leads →{" "}
+          <span className="font-medium">{campaigns[0]?.campaign.name ?? "?"}</span>
+        </p>
+      )}
       <p className="mt-0.5 text-[11px] text-muted-foreground">{instance}</p>
     </div>
   );
