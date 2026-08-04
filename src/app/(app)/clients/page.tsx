@@ -110,7 +110,8 @@ export default function ClientsPage() {
           </p>
         </div>
         {canRefresh && (
-          <Button variant="outline" size="sm" onClick={refreshStats} disabled={refreshing} className="gap-2">
+          <Button variant="outline" size="sm" onClick={refreshStats} disabled={refreshing} className="gap-2"
+            title="Recomputes each client's lead counts from the database (can take ~30s). Client names/statuses sync automatically from the Client Tracker sheet.">
             <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
             Refresh stats
           </Button>

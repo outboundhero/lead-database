@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Loader2, Trash2, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
+import { friendlyError } from "@/lib/friendly-error";
 import type { FilterState } from "@/types/filters";
 
 // Above this many rows we require the operator to type DELETE to confirm.
@@ -71,7 +72,7 @@ export function DeleteLeadsDialog({
         if (!cancelled) setExactCount(data.estimatedCount ?? 0);
       } catch (err) {
         if (!cancelled) {
-          toast.error(err instanceof Error ? err.message : "Failed to count leads");
+          toast.error(friendlyError(err, "Failed to count leads"));
         }
       } finally {
         if (!cancelled) setCounting(false);
@@ -105,7 +106,7 @@ export function DeleteLeadsDialog({
       onDeleted();
       onClose();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Delete failed", { id: toastId });
+      toast.error(friendlyError(err, "Delete failed"), { id: toastId });
     } finally {
       setLoading(false);
     }

@@ -572,6 +572,9 @@ export function FilterBar({
               value={filters.source}
               onChange={(v) => onIncludeExcludeChange("source", v)}
             />
+            <p className="mt-2 px-1 text-[10px] text-muted-foreground">
+              Where the lead came from — which Bison instance export or upload batch added it.
+            </p>
           </FilterChip>
         )}
 
@@ -638,6 +641,11 @@ export function FilterBar({
             activeCount={filters.categorySearch.include.length + filters.categorySearch.exclude.length}
           >
             <div className="space-y-3">
+              <p className="px-1 text-[10px] text-muted-foreground">
+                Free-text search INSIDE Category, Subcategory and Additional/SEO — &quot;dental&quot;
+                catches &quot;Dental clinic&quot;. The Category dropdown matches whole values instead.
+                Client-tag targeting auto-fills this from the onboarding sheet.
+              </p>
               <div>
                 <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Include
@@ -779,8 +787,10 @@ export function FilterBar({
                 ]}
               />
               <p className="px-1 text-[11px] text-muted-foreground">
-                <span className="font-medium text-foreground">Personal</span> = decision-maker;{" "}
-                <span className="font-medium text-foreground">General</span> = role-based / shared inbox.
+                <span className="font-medium text-foreground">Personal</span> = a named person&apos;s mailbox
+                (jane@company.com) — decision-maker outreach;{" "}
+                <span className="font-medium text-foreground">General</span> = shared/role inboxes
+                (info@, office@, sales@). Detected at import from the address prefix.
               </p>
             </div>
           </FilterChip>
