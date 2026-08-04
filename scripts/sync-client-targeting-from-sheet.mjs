@@ -260,80 +260,52 @@ async function batchedAi(items, size, fn) {
 // plain-text output is parsed ("state: city, city" lines / one comma list),
 // and every parsed entry is still validated against the geo reference before
 // storage — nothing unvalidated is ever written.
-const CLIENT_LOCATION_PROMPT = `Create a comprehensive, accurate, normalized list of inclusion locations for commercial cleaning and janitorial lead targeting.
+const CLIENT_LOCATION_PROMPT = `Create an accurate, comprehensive inclusion-location list for commercial cleaning and janitorial lead targeting.
 
-The client's core service area is:
-[INSERT STATES, COUNTIES, CITIES, TOWNS, ZIP CODES, OR METRO AREAS]
+Service area:
+[INSERT SERVICE AREA]
 
-Requirements:
+Rules:
 
-1. Support service areas that cross multiple states.
+1. Include every specifically named location.
 
-2. Include every incorporated city and town clearly located within the stated service area.
+2. Apply buffers based on the input:
+- ZIP codes: 1–3 miles around the combined ZIP boundaries
+- cities or towns: 3–5 miles around their combined municipal boundaries or developed commercial areas
+- counties: include the full counties plus a 3–5-mile buffer
+- mileage radius: use the stated radius without an additional buffer unless requested
 
-3. When counties are provided:
-- identify every incorporated city and town within each county
-- include major census-designated places, unincorporated communities, and postal communities when businesses commonly use those names
-- organize the final results by state
-- place each state on a separate line
+3. For ZIP codes, include all cities, towns, boroughs, villages, census-designated places, and commonly used postal communities physically represented by the ZIPs. Do not rely only on the primary USPS city.
 
-4. When ZIP codes are provided, identify all cities, towns, census-designated places, and commonly recognized postal communities physically represented by those ZIP codes. Do not rely only on the primary USPS mailing city.
+4. Include nearby locations only when their developed or commercial areas fall within the applicable buffer or form a continuous developed area with the core territory.
 
-5. Add a practical 3–5-mile buffer beyond the stated service-area boundary when it makes geographic and operational sense.
+5. Do not add locations merely because they are in the same county, metro area, postal area, or broader region.
 
-6. For the buffer, include nearby cities, towns, and commercially recognized communities when:
-- they directly border the core service area
-- part of the municipality falls within approximately 3–5 miles of the boundary
-- the municipality's developed or commercial area is reasonably close to the boundary
-- businesses there would reasonably use a provider serving the core market
-- the location is part of the same continuous developed or commercial area
+6. Exclude subdivisions, obscure rural localities, neighborhoods not commonly used as business locations, duplicates, misspellings, and locations clearly outside the territory.
 
-7. A buffer may cross county or state lines when geographically appropriate. Include those locations under the correct state.
+7. When multiple locations are provided, evaluate their combined service area.
 
-8. Do not add distant cities merely because they are part of the same county, metropolitan area, media market, or commuting region.
+8. Keep specifically named locations even when they fall outside a stated radius.
 
-9. Do not include a municipality when only a remote, rural, mountainous, wooded, industrial, or unpopulated edge falls inside the buffer while its primary developed area is materially farther away.
+9. Support multiple states and place each state on a separate line.
 
-10. Include incorporated cities and towns first. Also include major census-designated places, unincorporated communities, and postal place names when they commonly appear in:
-- business addresses
-- Google Business Profiles
-- LinkedIn company locations
-- company databases
-- website contact pages
-- local service-area descriptions
+10. Include ALL cities, towns, and commonly recognized communities within the service area and buffers — small towns, census-designated places, and unincorporated communities too, not just well-known cities. Measure buffers from municipal boundaries or developed commercial areas, not city centers.
 
-11. Preserve useful community names that have been annexed into or are administratively part of a larger city only when businesses still commonly identify with that name.
-
-12. Exclude:
-- neighborhoods that are not commonly treated as separate business locations
-- subdivisions and residential developments
-- tiny or obscure rural localities with little commercial activity
-- counties, regions, and metro-area names
-- duplicate spellings
-- duplicate locations
-- military installations unless specifically relevant
-- locations outside the core area or buffer merely because they share a ZIP code or postal city
-
-13. Verify state and county placement carefully. Some cities, towns, ZIP codes, and postal communities cross county boundaries or use a mailing city different from their physical location.
-
-14. Verify borderline locations carefully. Do not guess. Leave out a questionable location unless there is a clear geographic and commercially practical reason to include it.
-
-15. Normalize the output:
+11. Format:
 - lowercase
-- alphabetical order within each state
+- alphabetical within each state
 - no quotation marks
 - no duplicates
-- one state per line
 - full state name followed by a colon
-- cities and towns separated by commas
+- comma-separated locations
 
-16. When multiple states are included, use this exact structure:
+Example — service area "Midland, Texas, and Odessa Texas. 45 mile radius of Odessa covering Big Spring, Andrews, Monahan" returns:
+texas: andrews, big spring, coahoma, crane, gardendale, goldsmith, kermit, midland, monahans, odessa, penwell, pyote, stanton, west odessa, wickett, wink
 
-state one: city, city, town, town
-state two: city, city, town, town
-state three: city, city, town, town
+Return only the final list:
 
-17. Return only the final location list. Do not include explanations, headings, bullets, notes, citations, sources, or commentary.`;
+state one: city, city, town
+state two: city, city, town`;
 
 const categoriesPrompt = (categoryNames) => `You match client industry preferences to categories from a fixed list.
 
@@ -551,7 +523,7 @@ async function parseLocations(rawText, depth = 0) {
   };
   try {
     const text = await aiText(
-      CLIENT_LOCATION_PROMPT.replace("[INSERT STATES, COUNTIES, CITIES, TOWNS, ZIP CODES, OR METRO AREAS]", rawText));
+      CLIENT_LOCATION_PROMPT.replace("[INSERT SERVICE AREA]", rawText));
     const locations = parseLocationLines(text);
     // ≥5 comma/newline segments but zero entries = the model bailed, not a
     // genuinely location-free cell. State headers ("utah: a, b, …") survive the

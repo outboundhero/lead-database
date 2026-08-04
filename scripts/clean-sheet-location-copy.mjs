@@ -68,7 +68,7 @@ const formatMap = (map) =>
 // gpt-4o-mini gives up on 100+-city cells (returns nothing) — split on line
 // boundaries and merge the halves, exactly like the targeting sync does.
 async function cleanCell(raw, depth = 0) {
-  const text = await aiText(PROMPT.replace("[INSERT STATES, COUNTIES, CITIES, TOWNS, ZIP CODES, OR METRO AREAS]", raw));
+  const text = await aiText(PROMPT.replace("[INSERT SERVICE AREA]", raw));
   const map = parseLines(text);
   const segments = raw.split(/\n|,/).filter((s) => s.trim()).length;
   if (map.size === 0 && segments >= 5 && depth < 5) {
