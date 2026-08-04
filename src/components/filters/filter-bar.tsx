@@ -64,6 +64,14 @@ const TARGET_COUNTRY_LABELS: Record<string, string> = {
   US: "USA", CA: "Canada", AU: "Australia", NZ: "New Zealand", GB: "United Kingdom", IE: "Ireland",
 };
 
+const LIST_TARGET_LABEL: Record<string, string> = {
+  titles: "Title exclude",
+  keywords: "Keywords exclude",
+  competitors: "Keywords exclude",
+  domains: "Website exclude",
+  gateways: "ESP exclude",
+};
+
 function targetEntryLabel(e: LocationTargetEntry): string {
   const country = TARGET_COUNTRY_LABELS[e.country] ?? e.country;
   if (e.city) return e.country === "US" ? `${e.city}, ${e.state}` : `${e.city}, ${e.state}, ${country}`;
@@ -355,6 +363,47 @@ export function FilterBar({
   const cityActive = filters.location.city.include.length + filters.location.city.exclude.length;
   const hiddenActiveCount = HIDEABLE_CHIPS.filter((c) => isHidden(c.key)).length;
 
+  // Reusable exclusion lists (Lists page) — fetched lazily on chip open.
+  const [termLists, setTermLists] = useState<
+    { id: string; name: string; kind: string; items: string[] }[] | null
+  >(null);
+  const loadTermLists = useCallback(async () => {
+    try {
+      const res = await fetch("/api/lists");
+      if (!res.ok) { setTermLists([]); return; }
+      const d = await res.json();
+      setTermLists(d.lists ?? []);
+    } catch {
+      setTermLists([]);
+    }
+  }, []);
+
+  const mergeVals = (current: string[], added: string[]) => {
+    const seen = new Set(current.map((s) => s.toLowerCase()));
+    return [...current, ...added.filter((s) => !seen.has(s.toLowerCase()))];
+  };
+
+  function applyTermList(l: { name: string; kind: string; items: string[] }) {
+    if (l.kind === "titles") {
+      onIncludeExcludeChange("jobTitle", {
+        ...filters.jobTitle,
+        exclude: mergeVals(filters.jobTitle.exclude, l.items),
+        excludeMode: "contains",
+      });
+    } else if (l.kind === "domains") {
+      onWebsiteChange({ ...filters.website, exclude: mergeVals(filters.website.exclude, l.items) });
+    } else if (l.kind === "gateways") {
+      onIncludeExcludeChange("esp", { ...filters.esp, exclude: mergeVals(filters.esp.exclude, l.items) });
+    } else {
+      // keywords + competitors → whole-term keyword exclusion
+      onKeywordChange({
+        ...filters.keyword,
+        exclude: mergeVals(filters.keyword.exclude, l.items),
+        ...(filters.keyword.exclude.length === 0 ? { excludeMode: "exact" as const } : {}),
+      });
+    }
+  }
+
   return (
     <div className="ios-frost sticky top-0 z-20 space-y-2 border-b border-border/40 px-6 py-3">
       {/* Collapse / expand the whole filter panel to reclaim table space */}
@@ -447,11 +496,38 @@ export function FilterBar({
           </FilterChip>
         )}
 
+        {/* Company — next to Additional/SEO so the industry+company cluster reads
+            together (client req #3) */}
+        {!isHidden("company") && (
+          <FilterChip
+            label="Company"
+            activeCount={filters.company.include.length + filters.company.exclude.length + (filters.excludeEmptyCompany ? 1 : 0)}
+            onOpen={() => loadDistinctFor("company")}
+          >
+            <FilterMultiSelect
+              options={companyValues}
+              value={filters.company}
+              onChange={(v) => onIncludeExcludeChange("company", v)}
+              searchable
+              onSearch={(term) => liveSearch("company", term)}
+            />
+            <label className="flex items-center gap-2 mt-2 text-xs cursor-pointer">
+              <input
+                type="checkbox"
+                checked={filters.excludeEmptyCompany}
+                onChange={() => onToggleFlag("excludeEmptyCompany", !filters.excludeEmptyCompany)}
+                className="rounded"
+              />
+              <span className="text-muted-foreground">Exclude leads without company</span>
+            </label>
+          </FilterChip>
+        )}
+
         {/* Commercial Cleaning Client — excludes ~230 default non-buyer job titles */}
         <button
           type="button"
           onClick={() => onToggleFlag("commercialCleaning", !filters.commercialCleaning)}
-          title="Excludes ~230 non-buyer job titles (IT, sales reps, legal, drivers, retail…). Leads without a title are kept. List editable in the database."
+          title="Excludes ~230 non-buyer job titles (IT, sales reps, legal, drivers, retail…). Leads without a title are kept. Edit the list on the Lists page ('Commercial cleaning titles')."
           className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3.5 text-[13px] font-medium transition-all active:scale-[0.97] ${
             filters.commercialCleaning
               ? "bg-primary text-primary-foreground shadow-sm"
@@ -496,32 +572,6 @@ export function FilterBar({
               value={filters.source}
               onChange={(v) => onIncludeExcludeChange("source", v)}
             />
-          </FilterChip>
-        )}
-
-        {/* Company — searchable include/exclude dropdown (was a text box) */}
-        {!isHidden("company") && (
-          <FilterChip
-            label="Company"
-            activeCount={filters.company.include.length + filters.company.exclude.length + (filters.excludeEmptyCompany ? 1 : 0)}
-            onOpen={() => loadDistinctFor("company")}
-          >
-            <FilterMultiSelect
-              options={companyValues}
-              value={filters.company}
-              onChange={(v) => onIncludeExcludeChange("company", v)}
-              searchable
-              onSearch={(term) => liveSearch("company", term)}
-            />
-            <label className="flex items-center gap-2 mt-2 text-xs cursor-pointer">
-              <input
-                type="checkbox"
-                checked={filters.excludeEmptyCompany}
-                onChange={() => onToggleFlag("excludeEmptyCompany", !filters.excludeEmptyCompany)}
-                className="rounded"
-              />
-              <span className="text-muted-foreground">Exclude leads without company</span>
-            </label>
           </FilterChip>
         )}
 
@@ -915,6 +965,36 @@ export function FilterBar({
             </div>
           </FilterChip>
         )}
+
+        {/* Lists — apply a reusable exclusion list (managed on the Lists page) */}
+        <FilterChip label="Lists" activeCount={0} onOpen={loadTermLists}>
+          <div className="space-y-1.5">
+            {termLists === null ? (
+              <p className="px-1 text-[11px] text-muted-foreground">Loading lists…</p>
+            ) : termLists.length === 0 ? (
+              <p className="px-1 text-[11px] text-muted-foreground">No lists yet — create them on the Lists page.</p>
+            ) : (
+              termLists.map((l) => (
+                <div key={l.id} className="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-muted/50">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[12px] font-medium">{l.name}</p>
+                    <p className="text-[10px] text-muted-foreground">{l.items.length} items → {LIST_TARGET_LABEL[l.kind] ?? l.kind}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => applyTermList(l)}
+                    className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/20"
+                  >
+                    Apply
+                  </button>
+                </div>
+              ))
+            )}
+            <p className="px-1 text-[10px] text-muted-foreground">
+              Applying adds the list&apos;s terms to the matching exclude filter. Edit lists on the Lists page.
+            </p>
+          </div>
+        </FilterChip>
 
         {/* Custom Tags — free-text search on ANY lead tag (not just client tags) */}
         {!isHidden("customTags") && (

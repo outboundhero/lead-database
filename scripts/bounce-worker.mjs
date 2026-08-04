@@ -182,17 +182,33 @@ function classifyText(ndr) {
   return { type: "unknown", matched: null };
 }
 
-export function classifyBounce(text) {
+const ANY_EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+
+export function classifyBounce(text, leadEmail = null) {
   if (!text || !text.trim()) {
     return { type: "unknown", matched: null };
   }
   const ndr = truncateAtQuotedOriginal(text);
-  const verdict = classifyText(ndr);
+  let verdict = classifyText(ndr);
   // The quoted-original boundary can over-fire (any line-start "From:"/">"
   // ahead of the diagnostic). If the truncated text matched nothing but the
   // full text does, the diagnostic sat below the false boundary — use it.
   if (verdict.matched === null && ndr.length < text.length) {
-    return classifyText(text);
+    verdict = classifyText(text);
+  }
+  // GROUP-EXPANSION GUARD (client req #6): a hard verdict only sticks when the
+  // NDR actually concerns the contact's own address. If the full NDR (quoted
+  // original included — direct sends always echo the To: address there) never
+  // mentions the lead's email but does name other recipients, the failure was
+  // a group/distribution-list member — the individual contact is not dead.
+  if (verdict.type === "hard" && leadEmail) {
+    const lower = text.toLowerCase();
+    if (!lower.includes(String(leadEmail).toLowerCase())) {
+      const mentioned = text.match(ANY_EMAIL_RE) ?? [];
+      if (mentioned.length > 0) {
+        return { type: "group", matched: verdict.matched };
+      }
+    }
   }
   return verdict;
 }
@@ -406,9 +422,10 @@ async function run({ dryRun }) {
           type = "unknown";
           reason = "No bounced reply found in Email Bison";
         } else {
-          const c = classifyBounce(ndr);
+          const c = classifyBounce(ndr, lead.email);
           type = c.type;
-          reason = (c.matched ? `[${c.matched}] ` : "") + ndr.slice(0, REASON_MAX);
+          reason = (type === "group" ? "[group member bounced, not this contact] " : "") +
+            (c.matched ? `[${c.matched}] ` : "") + ndr.slice(0, REASON_MAX);
         }
       }
 
@@ -421,7 +438,7 @@ async function run({ dryRun }) {
                is_bounced = $3,
                updated_at = now()
            WHERE id = $4`,
-          [type, reason.slice(0, REASON_MAX + 60), type !== "sender" && type !== "gateway", lead.id]
+          [type, reason.slice(0, REASON_MAX + 60), type !== "sender" && type !== "gateway" && type !== "group", lead.id]
         );
       }
       counts[type]++;
