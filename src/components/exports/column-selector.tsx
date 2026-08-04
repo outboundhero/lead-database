@@ -119,6 +119,12 @@ export function ColumnSelector({
   const [campaignsError, setCampaignsError] = useState<string | null>(null);
   // One fetch per dialog open — never auto-retry on error/empty (manual Retry instead)
   const [campaignsAttempted, setCampaignsAttempted] = useState(false);
+  // Campaign-picker upgrades (client req #7)
+  const [showNurture, setShowNurture] = useState(false);
+  const [tagScope, setTagScope] = useState(""); // client-tag prefix filter ("" = all)
+  const [clientTagOptions, setClientTagOptions] = useState<string[]>([]);
+  const [presets, setPresets] = useState<{ id: string; name: string; campaign_keys: string[] }[]>([]);
+  const [presetName, setPresetName] = useState("");
 
   const loadCampaigns = useCallback(() => {
     setCampaignsAttempted(true);
@@ -132,6 +138,18 @@ export function ColumnSelector({
       .then((d) => setCampaigns(Array.isArray(d.campaigns) ? d.campaigns : []))
       .catch((e) => setCampaignsError(e instanceof Error ? e.message : String(e)))
       .finally(() => setCampaignsLoading(false));
+    // Best-effort side loads — the picker works without either.
+    fetch("/api/bison/campaign-presets")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setPresets(d.presets ?? []))
+      .catch(() => {});
+    fetch("/api/bison/client-tags")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        const tags = (d?.tags ?? []).map((t: { tag?: string }) => t?.tag).filter(Boolean) as string[];
+        setClientTagOptions([...new Set(tags)].sort());
+      })
+      .catch(() => {});
   }, []);
 
   // The component stays mounted across open/close (parent only toggles the
@@ -147,6 +165,9 @@ export function ColumnSelector({
     setCampaignSearch("");
     setCampaignsError(null);
     setCampaignsAttempted(false);
+    setShowNurture(false);
+    setTagScope("");
+    setPresetName("");
   }, [open]);
 
   // Load live Bison campaigns when the Bison destination is chosen — refetched
@@ -257,22 +278,119 @@ export function ColumnSelector({
               <p className="text-xs text-muted-foreground">No campaigns found.</p>
             ) : (() => {
               const q = campaignSearch.trim().toLowerCase();
-              const filtered = q
-                ? campaigns.filter(
-                    (c) =>
-                      (c.name ?? "").toLowerCase().includes(q) ||
-                      (c.workspace_name ?? "").toLowerCase().includes(q) ||
-                      (c.instance_url ?? "").toLowerCase().includes(q)
-                  )
-                : campaigns;
+              // Nurture hidden by default; client-tag scope matches the "TAG:"
+              // naming convention; search runs on what remains.
+              const nurtureHidden = campaigns.filter((c) => /nurture/i.test(String(c.name ?? ""))).length;
+              const filtered = campaigns.filter((c) => {
+                const name = (c.name ?? "").toLowerCase();
+                if (!showNurture && /nurture/.test(name)) return false;
+                if (tagScope && !name.startsWith(tagScope.toLowerCase())) return false;
+                if (!q) return true;
+                return (
+                  name.includes(q) ||
+                  (c.workspace_name ?? "").toLowerCase().includes(q) ||
+                  (c.instance_url ?? "").toLowerCase().includes(q)
+                );
+              });
+              const filteredKeys = filtered.map(campaignKey);
               return (
               <div className="space-y-2">
-                <Input
-                  placeholder={`Search ${campaigns.length} campaigns…`}
-                  value={campaignSearch}
-                  onChange={(e) => setCampaignSearch(e.target.value)}
-                  className="h-8 text-xs"
-                />
+                <div className="flex items-center gap-2">
+                  <Input
+                    placeholder={`Search ${campaigns.length} campaigns…`}
+                    value={campaignSearch}
+                    onChange={(e) => setCampaignSearch(e.target.value)}
+                    className="h-8 flex-1 text-xs"
+                  />
+                  <select
+                    value={tagScope}
+                    onChange={(e) => setTagScope(e.target.value)}
+                    className="h-8 max-w-[130px] rounded-md border bg-transparent px-2 text-xs"
+                    title="Only show campaigns named for this client tag"
+                  >
+                    <option value="">All clients</option>
+                    {clientTagOptions.map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                  <Button
+                    variant="outline" size="sm" className="h-6 px-2 text-[11px]"
+                    onClick={() => setSelectedCampaignKeys((prev) => new Set([...prev, ...filteredKeys]))}
+                  >
+                    All ({filtered.length})
+                  </Button>
+                  <Button
+                    variant="outline" size="sm" className="h-6 px-2 text-[11px]"
+                    onClick={() => setSelectedCampaignKeys(new Set())}
+                  >
+                    None
+                  </Button>
+                  <label className="flex items-center gap-1 text-muted-foreground">
+                    <input type="checkbox" checked={showNurture} onChange={(e) => setShowNurture(e.target.checked)} />
+                    Show nurture campaigns{!showNurture && nurtureHidden > 0 ? ` (${nurtureHidden} hidden)` : ""}
+                  </label>
+                </div>
+                {(presets.length > 0 || selectedCampaignKeys.size > 0) && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {presets.map((p) => (
+                      <span key={p.id} className="inline-flex items-center overflow-hidden rounded-full bg-muted text-[11px]">
+                        <button
+                          type="button"
+                          className="px-2 py-0.5 hover:bg-accent"
+                          title={`Select this preset's ${p.campaign_keys.length} campaigns`}
+                          onClick={() => setSelectedCampaignKeys(new Set(p.campaign_keys))}
+                        >
+                          {p.name} ({p.campaign_keys.length})
+                        </button>
+                        <button
+                          type="button"
+                          className="px-1 py-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                          title="Delete preset"
+                          onClick={async () => {
+                            await fetch("/api/bison/campaign-presets", {
+                              method: "DELETE",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ id: p.id }),
+                            });
+                            setPresets((prev) => prev.filter((x) => x.id !== p.id));
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    ))}
+                    {selectedCampaignKeys.size > 0 && (
+                      <span className="inline-flex items-center gap-1">
+                        <Input
+                          placeholder="Save selection as…"
+                          value={presetName}
+                          onChange={(e) => setPresetName(e.target.value)}
+                          className="h-6 w-32 text-[11px]"
+                        />
+                        <Button
+                          variant="outline" size="sm" className="h-6 px-2 text-[11px]"
+                          disabled={!presetName.trim()}
+                          onClick={async () => {
+                            const res = await fetch("/api/bison/campaign-presets", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ name: presetName.trim(), campaignKeys: [...selectedCampaignKeys] }),
+                            });
+                            const d = await res.json().catch(() => ({}));
+                            if (!res.ok) { toast.error(d.error ?? "Failed to save preset"); return; }
+                            setPresets((prev) => [...prev.filter((x) => x.name !== d.preset.name), d.preset].sort((a, b) => a.name.localeCompare(b.name)));
+                            setPresetName("");
+                            toast.success(`Preset "${d.preset.name}" saved`);
+                          }}
+                        >
+                          Save
+                        </Button>
+                      </span>
+                    )}
+                  </div>
+                )}
                 <div className="max-h-[40vh] space-y-2 overflow-y-auto rounded-md border p-2">
                 {filtered.length === 0 ? (
                   <p className="px-1 py-2 text-xs text-muted-foreground">No campaigns match “{campaignSearch}”.</p>
