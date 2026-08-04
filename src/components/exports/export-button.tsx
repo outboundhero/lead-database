@@ -37,6 +37,7 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
     rangeTo: number | undefined,
     destination: ExportDestination = "csv",
     campaigns: BisonCampaign[] = [],
+    pushExtras: { clientTag: string | null; includeAlreadyPushed: boolean } = { clientTag: null, includeAlreadyPushed: true },
   ) {
     setSelectorOpen(false);
     setExporting(true);
@@ -55,28 +56,48 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
       // selectedIds+range rather than guessing intent). On the filters path a
       // lone "To" acts as a max-leads cap server-side.
       try {
-        const res = await fetch("/api/bison/push-batch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            campaigns: campaigns.map((c) => ({
-              id: c.id,
-              name: c.name,
-              instance_url: c.instance_url,
-              workspace_name: c.workspace_name,
-            })),
-            selectedIds: isSelected ? selectedIds : undefined,
-            filters: isSelected ? undefined : filters,
-            // Both bounds -> a range; a lone "To" -> a max-leads cap. Never
-            // send a lone bound as a range key — the route rejects that pair.
-            ...(!isSelected && rangeFrom && rangeTo
-              ? { rangeFrom, rangeTo }
-              : !isSelected && rangeTo
-              ? { maxLeads: rangeTo }
-              : {}),
-          }),
-        });
-        const data = await res.json();
+        const queue = async (force: boolean) =>
+          fetch("/api/bison/push-batch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              campaigns: campaigns.map((c) => ({
+                id: c.id,
+                name: c.name,
+                instance_url: c.instance_url,
+                workspace_name: c.workspace_name,
+              })),
+              selectedIds: isSelected ? selectedIds : undefined,
+              filters: isSelected ? undefined : filters,
+              // Detected client tag rides along so per-tag dedupe/eligibility
+              // and the double-push guard apply on popup pushes too.
+              ...(pushExtras.clientTag
+                ? {
+                    clientTag: pushExtras.clientTag,
+                    pushOptions: { includeAlreadyPushed: pushExtras.includeAlreadyPushed },
+                  }
+                : {}),
+              force,
+              // Both bounds -> a range; a lone "To" -> a max-leads cap. Never
+              // send a lone bound as a range key — the route rejects that pair.
+              ...(!isSelected && rangeFrom && rangeTo
+                ? { rangeFrom, rangeTo }
+                : !isSelected && rangeTo
+                ? { maxLeads: rangeTo }
+                : {}),
+            }),
+          });
+        let res = await queue(false);
+        let data = await res.json();
+        if (res.status === 409) {
+          if (!window.confirm(data.error ?? "A recent push for this client already exists. Queue anyway?")) {
+            toast.info("Push not queued", { id: toastId });
+            setExporting(false);
+            return;
+          }
+          res = await queue(true);
+          data = await res.json();
+        }
         if (!res.ok) throw new Error(data.error ?? "Failed to queue push");
         const leadsLabel = isSelected
           ? `${selectedIds.length.toLocaleString()} selected leads`
@@ -225,6 +246,9 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
         onConfirm={handleExport}
         totalCount={exportType === "selected" ? selectedIds.length : totalCount}
         exportType={exportType}
+        tagIncludes={filters.tags?.include ?? []}
+        statsFilters={exportType === "selected" ? undefined : filters}
+        statsSelectedIds={exportType === "selected" && selectedIds.length > 0 ? selectedIds : undefined}
       />
     </>
   );

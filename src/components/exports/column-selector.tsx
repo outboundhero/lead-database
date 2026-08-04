@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Dialog,
   DialogContent,
@@ -93,9 +93,15 @@ interface ColumnSelectorProps {
     rangeTo: number | undefined,
     destination: ExportDestination,
     campaigns: BisonCampaign[],
+    pushExtras: { clientTag: string | null; includeAlreadyPushed: boolean },
   ) => void;
   totalCount?: number;
   exportType?: "filtered" | "selected";
+  // Client-tag values currently in the Tags filter — when one matches a known
+  // client, the campaign list auto-scopes to it and per-tag push stats show.
+  tagIncludes?: string[];
+  statsFilters?: unknown;
+  statsSelectedIds?: string[];
 }
 
 export function ColumnSelector({
@@ -104,6 +110,9 @@ export function ColumnSelector({
   onConfirm,
   totalCount,
   exportType = "filtered",
+  tagIncludes = [],
+  statsFilters,
+  statsSelectedIds,
 }: ColumnSelectorProps) {
   const [selected, setSelected] = useState<Set<string>>(
     new Set(DEFAULT_COLUMNS)
@@ -125,6 +134,19 @@ export function ColumnSelector({
   const [clientTagOptions, setClientTagOptions] = useState<string[]>([]);
   const [presets, setPresets] = useState<{ id: string; name: string; campaign_keys: string[] }[]>([]);
   const [presetName, setPresetName] = useState("");
+  // The Tags-filter value that matches a known client — drives auto-scoping,
+  // per-tag push stats, and rides on the queued push for dedupe/eligibility.
+  const scopeTouchedRef = useRef(false);
+  const detectedTag = useMemo(() => {
+    const known = new Map(clientTagOptions.map((t) => [t.toLowerCase(), t]));
+    for (const t of tagIncludes) {
+      const hit = known.get(String(t).trim().toLowerCase());
+      if (hit) return hit;
+    }
+    return null;
+  }, [tagIncludes, clientTagOptions]);
+  const [includeAlreadyPushed, setIncludeAlreadyPushed] = useState(false);
+  const [pushStats, setPushStats] = useState<{ matching: number; alreadyPushed: number; notPushed: number } | null>(null);
 
   const loadCampaigns = useCallback(() => {
     setCampaignsAttempted(true);
@@ -168,7 +190,31 @@ export function ColumnSelector({
     setShowNurture(false);
     setTagScope("");
     setPresetName("");
+    scopeTouchedRef.current = false;
+    setIncludeAlreadyPushed(false);
+    setPushStats(null);
   }, [open]);
+
+  // Auto-scope the campaign list to the selected client (until the user picks
+  // a different scope themselves).
+  useEffect(() => {
+    if (open && detectedTag && !scopeTouchedRef.current) setTagScope(detectedTag);
+  }, [open, detectedTag]);
+
+  // Per-tag "already exported" stats for the confirm summary.
+  useEffect(() => {
+    if (!open || destination !== "bison" || !detectedTag || (!statsFilters && !statsSelectedIds)) return;
+    setPushStats(null);
+    fetch("/api/bison/push-stats", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientTag: detectedTag, filters: statsFilters, selectedIds: statsSelectedIds }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setPushStats(d))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, destination, detectedTag]);
 
   // Load live Bison campaigns when the Bison destination is chosen — refetched
   // each dialog open (the server route has a 30s cache) so new campaigns appear.
@@ -304,9 +350,9 @@ export function ColumnSelector({
                   />
                   <select
                     value={tagScope}
-                    onChange={(e) => setTagScope(e.target.value)}
+                    onChange={(e) => { scopeTouchedRef.current = true; setTagScope(e.target.value); }}
                     className="h-8 max-w-[130px] rounded-md border bg-transparent px-2 text-xs"
-                    title="Only show campaigns named for this client tag"
+                    title="Only show campaigns named for this client tag (auto-set from the Tags filter)"
                   >
                     <option value="">All clients</option>
                     {clientTagOptions.map((t) => (
@@ -432,6 +478,30 @@ export function ColumnSelector({
               </div>
               );
             })()}
+            {detectedTag && (
+              <div className="mt-2 rounded-lg bg-muted/50 p-2">
+                {pushStats ? (
+                  <p className="text-[11px]">
+                    <span className="font-medium tabular-nums">{pushStats.alreadyPushed.toLocaleString()}</span> of{" "}
+                    <span className="font-medium tabular-nums">{pushStats.matching.toLocaleString()}</span> selected leads
+                    were already pushed to Bison for <span className="font-medium">{detectedTag}</span>
+                    {" · "}
+                    <span className="tabular-nums">{pushStats.notPushed.toLocaleString()}</span> not yet pushed.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground">Checking what&apos;s already been pushed for {detectedTag}…</p>
+                )}
+                <label className="mt-1 flex items-center gap-2 text-[11px]">
+                  <input
+                    type="checkbox"
+                    checked={includeAlreadyPushed}
+                    onChange={(e) => setIncludeAlreadyPushed(e.target.checked)}
+                    className="rounded"
+                  />
+                  Also send the already-pushed leads (off = only leads never pushed for {detectedTag})
+                </label>
+              </div>
+            )}
             <p className="text-[10px] text-muted-foreground mt-1">
               Every selected campaign receives every lead. Leads are created in Bison, then attached — queued in the background, progress on the Exports page.
             </p>
@@ -500,7 +570,8 @@ export function ColumnSelector({
                 toast.error("Pick at least one Bison campaign first");
                 return;
               }
-              onConfirm(Array.from(selected), limit && limit > 0 ? limit : null, from, to, destination, chosenCampaigns);
+              onConfirm(Array.from(selected), limit && limit > 0 ? limit : null, from, to, destination, chosenCampaigns,
+                { clientTag: detectedTag, includeAlreadyPushed });
             }}
             disabled={destination === "csv" ? selected.size === 0 : selectedCampaignKeys.size === 0}
           >
