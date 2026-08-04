@@ -385,7 +385,33 @@ async function gatherCycle() {
         `select fn_lead_filter_conditions($1::jsonb) as conds`,
         [JSON.stringify(batch.filters ?? {})]
       );
-      const where = [...(c?.conds ?? []), ELIGIBLE].join(" and ");
+      // Export accounting (client req #8): dedupe/new-only/retry semantics are
+      // per CLIENT TAG — every batch that carried the same tag counts, not just
+      // pushes to the same campaigns.
+      const accounting = [];
+      const opts = batch.push_options ?? {};
+      if (batch.client_tag) {
+        const tagLit = `'${String(batch.client_tag).replace(/'/g, "''")}'`;
+        if (opts.includeAlreadyPushed !== true) {
+          accounting.push(`not exists (
+            select 1 from push_items pi join push_batches pb on pb.id = pi.batch_id
+            where pb.client_tag = ${tagLit} and pi.lead_id = l.id
+              and pi.status = 'sent' and pi.batch_id <> '${batch.id}')`);
+        }
+        if (opts.onlyNewSinceLast === true) {
+          const { rows: [last] } = await pool.query(
+            `select max(created_at) as at from push_batches
+             where client_tag = $1 and id <> $2 and status in ('processing','complete')`,
+            [batch.client_tag, batch.id]);
+          if (last?.at) accounting.push(`l.created_at > '${new Date(last.at).toISOString()}'::timestamptz`);
+        }
+        if (opts.retryFailed === true) {
+          accounting.push(`exists (
+            select 1 from push_items pi join push_batches pb on pb.id = pi.batch_id
+            where pb.client_tag = ${tagLit} and pi.lead_id = l.id and pi.status = 'failed')`);
+        }
+      }
+      const where = [...(c?.conds ?? []), ELIGIBLE, ...accounting].join(" and ");
       const from = batch.range_from;
       const span = batch.range_to != null ? batch.range_to - (from ?? 1) + 1 : null;
       // Keyset pagination: a broad filter over the whole table must never pull

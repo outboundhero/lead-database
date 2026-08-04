@@ -25,6 +25,13 @@ interface PushBatch {
   error: string | null;
   created_at: string;
   completed_at: string | null;
+  client_tag?: string | null;
+  email_side?: string | null;
+}
+
+interface CampaignTotals {
+  totals: { id: number | string; name: string; bucket: string | null; leads: number }[];
+  skippedNoBucketCampaign: number;
 }
 
 const ACTIVE_STATUSES = new Set(["pending", "gathering", "processing"]);
@@ -45,6 +52,9 @@ export function PushBatchesPanel() {
   const [loaded, setLoaded] = useState(false);
   const [fetchFailed, setFetchFailed] = useState(false);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [totalsFor, setTotalsFor] = useState<string | null>(null);
+  const [totals, setTotals] = useState<CampaignTotals | null>(null);
 
   const loadBatches = useCallback(async () => {
     try {
@@ -97,6 +107,35 @@ export function PushBatchesPanel() {
     }
   }
 
+  async function handleRetry(batchId: string) {
+    setRetryingId(batchId);
+    try {
+      const res = await fetch("/api/bison/push-batches/retry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batchId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) toast.error(data.error ?? "Failed to retry");
+      else toast.success(`${data.requeued.toLocaleString()} failed contacts requeued`);
+      loadBatches();
+    } catch {
+      toast.error("Failed to retry");
+    } finally {
+      setRetryingId(null);
+    }
+  }
+
+  async function toggleTotals(batchId: string) {
+    if (totalsFor === batchId) { setTotalsFor(null); setTotals(null); return; }
+    setTotalsFor(batchId);
+    setTotals(null);
+    try {
+      const res = await fetch(`/api/bison/push-batches/campaign-totals?batchId=${batchId}`);
+      if (res.ok) setTotals(await res.json());
+    } catch { /* leave loading state */ }
+  }
+
   // No card at all until the first fetch resolves — and none for users who
   // have never queued a push.
   if (!loaded || batches.length === 0) return null;
@@ -117,6 +156,12 @@ export function PushBatchesPanel() {
           return (
             <div key={batch.id} className="rounded-xl border p-3">
               <div className="flex items-center gap-2">
+                {batch.client_tag && (
+                  <Badge variant="secondary" className="shrink-0">
+                    {batch.client_tag}
+                    {batch.email_side ? ` · ${batch.email_side}` : ""}
+                  </Badge>
+                )}
                 <p className="min-w-0 flex-1 truncate text-[13px] font-medium" title={campaignNames}>
                   {campaignNames || "—"}
                 </p>
@@ -160,7 +205,48 @@ export function PushBatchesPanel() {
                 <span>{batch.sent.toLocaleString()} sent</span>
                 <span>{batch.failed.toLocaleString()} failed</span>
                 <span>{batch.skipped.toLocaleString()} skipped</span>
+                <button
+                  type="button"
+                  onClick={() => toggleTotals(batch.id)}
+                  className="font-medium text-primary hover:underline"
+                >
+                  {totalsFor === batch.id ? "Hide totals" : "Routing totals"}
+                </button>
+                {!active && batch.failed > 0 && (
+                  <button
+                    type="button"
+                    disabled={retryingId === batch.id}
+                    onClick={() => handleRetry(batch.id)}
+                    className="font-medium text-primary hover:underline disabled:opacity-50"
+                  >
+                    {retryingId === batch.id ? "Retrying…" : `Retry ${batch.failed.toLocaleString()} failed`}
+                  </button>
+                )}
               </div>
+              {totalsFor === batch.id && (
+                <div className="mt-1.5 rounded-lg bg-muted/50 p-2">
+                  {totals ? (
+                    <>
+                      {totals.totals.map((t) => (
+                        <p key={String(t.id)} className="text-[11px] tabular-nums">
+                          <span className="font-medium">{t.leads.toLocaleString()}</span> →{" "}
+                          {t.name}
+                          {t.bucket ? (
+                            <span className="text-muted-foreground"> ({t.bucket === "default" ? "google + custom" : t.bucket})</span>
+                          ) : null}
+                        </p>
+                      ))}
+                      {totals.skippedNoBucketCampaign > 0 && (
+                        <p className="text-[11px] text-muted-foreground">
+                          {totals.skippedNoBucketCampaign.toLocaleString()} skipped — no campaign for their bucket
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground">Loading totals…</p>
+                  )}
+                </div>
+              )}
               {batch.error && (
                 <p className="mt-1 text-[12px] text-destructive">{batch.error}</p>
               )}

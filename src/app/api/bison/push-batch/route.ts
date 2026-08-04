@@ -41,6 +41,16 @@ interface PushBatchPayload {
   // matching leads so the wizard's two pushes never overlap.
   clientTag?: string;
   emailSide?: "b2b" | "b2c";
+  // Export accounting (client req #8), applied by the gather stage per client
+  // tag. Already-pushed leads are EXCLUDED by default.
+  pushOptions?: {
+    includeAlreadyPushed?: boolean;
+    onlyNewSinceLast?: boolean;
+    retryFailed?: boolean;
+  };
+  // Double-push guard override: a recent batch for the same client tag makes
+  // this endpoint 409 unless force is set.
+  force?: boolean;
 }
 
 export async function POST(request: NextRequest) {
@@ -185,6 +195,36 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  // DOUBLE-PUSH GUARD (client req #8/#10): a batch for the same client tag that
+  // is still running, or completed within the last 24h, blocks a new queue
+  // unless the caller explicitly forces — the exact accident that pushed
+  // CWSJ-OS twice. Guarded per (client_tag, email_side) since the wizard
+  // legitimately queues one batch per side back-to-back.
+  if (clientTag && body.force !== true) {
+    const { data: recent } = await admin
+      .from("push_batches")
+      .select("id, status, email_side, total, sent, created_at")
+      .eq("client_tag", clientTag)
+      .in("status", ["pending", "gathering", "processing", "complete"])
+      .gte("created_at", new Date(Date.now() - 24 * 3600 * 1000).toISOString())
+      .order("created_at", { ascending: false })
+      .limit(5);
+    const clash = (recent ?? []).find((b) => (b.email_side ?? null) === (emailSide ?? null));
+    if (clash) {
+      const when = new Date(clash.created_at).toLocaleString();
+      return NextResponse.json(
+        {
+          error:
+            clash.status === "complete"
+              ? `A ${clientTag} push already completed ${when} (${clash.sent ?? 0}/${clash.total ?? 0} sent). Queue again anyway?`
+              : `A ${clientTag} push is already ${clash.status} (queued ${when}). Queue another anyway?`,
+          duplicateOf: { id: clash.id, status: clash.status, created_at: clash.created_at, total: clash.total, sent: clash.sent },
+        },
+        { status: 409 }
+      );
+    }
+  }
+
   // Store the RPC-shaped filters (same p_filters the export stream feeds to
   // fn_export_leads / fn_lead_filter_conditions) so the worker consumes them
   // as-is; normalize first so old client payloads never miss newer keys. When
@@ -256,6 +296,13 @@ export async function POST(request: NextRequest) {
       max_leads: body.maxLeads ?? null,
       client_tag: clientTag,
       email_side: emailSide ?? null,
+      push_options: body.pushOptions && typeof body.pushOptions === "object"
+        ? {
+            includeAlreadyPushed: body.pushOptions.includeAlreadyPushed === true,
+            onlyNewSinceLast: body.pushOptions.onlyNewSinceLast === true,
+            retryFailed: body.pushOptions.retryFailed === true,
+          }
+        : null,
       status: "pending",
     })
     .select("id")

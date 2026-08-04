@@ -29,7 +29,7 @@ export async function GET(request: NextRequest) {
   const admin = createAdminClient();
   const { data, error } = await admin
     .from("push_batches")
-    .select("id, campaigns, total, processed, sent, failed, skipped, status, error, created_at, completed_at")
+    .select("id, campaigns, total, processed, sent, failed, skipped, status, error, created_at, completed_at, client_tag, email_side")
     .order("created_at", { ascending: false })
     .limit(limit);
   if (error) {

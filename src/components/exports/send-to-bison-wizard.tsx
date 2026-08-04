@@ -146,6 +146,21 @@ export function SendToBisonWizard({
   const [b2bChoice, setB2bChoice] = useState<SideChoice>(emptyChoice());
   const [b2cChoice, setB2cChoice] = useState<SideChoice>(emptyChoice());
 
+  // Step 3 — export amount + per-tag accounting (client req #8)
+  const [amountChoice, setAmountChoice] = useState<string>("full");
+  const [amountOther, setAmountOther] = useState("");
+  const [optIncludePushed, setOptIncludePushed] = useState(false);
+  const [optOnlyNew, setOptOnlyNew] = useState(false);
+  const [optRetryFailed, setOptRetryFailed] = useState(false);
+  const [stats, setStats] = useState<{
+    matching: number; alreadyPushed: number; notPushed: number;
+    newSinceLast: number; failedForTag: number; lastExportAt: string | null;
+  } | null>(null);
+  const maxLeads =
+    amountChoice === "full" ? undefined :
+    amountChoice === "other" ? (parseInt(amountOther, 10) > 0 ? parseInt(amountOther, 10) : undefined) :
+    parseInt(amountChoice, 10);
+
   const [confirming, setConfirming] = useState(false);
 
   const loadTags = useCallback(() => {
@@ -173,7 +188,32 @@ export function SendToBisonWizard({
     setB2bChoice(emptyChoice());
     setB2cChoice(emptyChoice());
     setTagsAttempted(false);
+    setAmountChoice("full");
+    setAmountOther("");
+    setOptIncludePushed(false);
+    setOptOnlyNew(false);
+    setOptRetryFailed(false);
+    setStats(null);
   }, [open]);
+
+  // Per-tag push accounting, fetched when the campaign step opens.
+  useEffect(() => {
+    if (step !== 3 || !preview) return;
+    setStats(null);
+    fetch("/api/bison/push-stats", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clientTag: preview.clientTag,
+        selectedIds: usingSelection ? selectedIds : undefined,
+        filters: usingSelection ? undefined : filters,
+      }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setStats(d))
+      .catch(() => {}); // stats are informative — sending works without them
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, preview?.clientTag]);
 
   useEffect(() => {
     if (open && !tagsAttempted && !tagsLoading) loadTags();
@@ -246,7 +286,8 @@ export function SendToBisonWizard({
   async function queueSide(
     side: "b2b" | "b2c",
     sideData: PreviewSide,
-    choice: SideChoice
+    choice: SideChoice,
+    force = false
   ): Promise<void> {
     const res = await fetch("/api/bison/push-batch", {
       method: "POST",
@@ -263,9 +304,24 @@ export function SendToBisonWizard({
         filters: usingSelection ? undefined : filters,
         clientTag: preview!.clientTag,
         emailSide: side,
+        maxLeads,
+        pushOptions: {
+          includeAlreadyPushed: optIncludePushed,
+          onlyNewSinceLast: optOnlyNew,
+          retryFailed: optRetryFailed,
+        },
+        force,
       }),
     });
     const data = await res.json().catch(() => ({}));
+    if (res.status === 409) {
+      // Double-push guard — surface the server's explanation and let the user
+      // decide (this is the exact accident that pushed CWSJ-OS twice).
+      if (window.confirm(`${data.error ?? "A recent push for this client already exists."}`)) {
+        return queueSide(side, sideData, choice, true);
+      }
+      throw Object.assign(new Error(`${side} push skipped — already pushed recently`), { skipped: true });
+    }
     if (!res.ok) throw new Error(data.error ?? `Failed to queue ${side} push`);
   }
 
@@ -276,13 +332,29 @@ export function SendToBisonWizard({
     // Queue sequentially so a second-side failure isn't misreported as a total
     // failure when the first side already queued.
     const queued: string[] = [];
+    const skipped: string[] = [];
+    const trySide = async (label: string, fn: () => Promise<void>) => {
+      try { await fn(); return true; }
+      catch (e) {
+        if ((e as { skipped?: boolean }).skipped) { skipped.push(label); return false; }
+        throw e;
+      }
+    };
     try {
-      if (b2bSends) { await queueSide("b2b", preview.b2b, b2bChoice); queued.push(`${preview.b2b.count.toLocaleString()} business`); }
-      if (b2cSends) { await queueSide("b2c", preview.b2c, b2cChoice); queued.push(`${preview.b2c.count.toLocaleString()} personal`); }
-      toast.success(
-        `Queued ${queued.join(" + ")} leads for ${preview.clientTag} — progress on the Exports page`,
-        { id: toastId }
-      );
+      if (b2bSends && await trySide("business", () => queueSide("b2b", preview.b2b, b2bChoice))) {
+        queued.push(`${preview.b2b.count.toLocaleString()} business`);
+      }
+      if (b2cSends && await trySide("personal", () => queueSide("b2c", preview.b2c, b2cChoice))) {
+        queued.push(`${preview.b2c.count.toLocaleString()} personal`);
+      }
+      if (queued.length) {
+        toast.success(
+          `Queued ${queued.join(" + ")} leads for ${preview.clientTag}${skipped.length ? ` (${skipped.join(", ")} skipped — recent push exists)` : ""} — progress on the Exports page`,
+          { id: toastId }
+        );
+      } else {
+        toast.info(`Nothing queued — ${skipped.join(", ")} already pushed recently`, { id: toastId });
+      }
       onClose();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to queue pushes";
@@ -404,9 +476,9 @@ export function SendToBisonWizard({
           </div>
         )}
 
-        {/* ── Step 3: pick a campaign per side ── */}
+        {/* ── Step 3: pick a campaign per side + amount & history ── */}
         {step === 3 && preview && (
-          <div className="space-y-4">
+          <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
             <CampaignPicker
               label="Business (B2B)"
               side={preview.b2b}
@@ -419,6 +491,82 @@ export function SendToBisonWizard({
               value={b2cChoice}
               onChange={setB2cChoice}
             />
+
+            {/* Per-tag accounting (req #8): what's been pushed before */}
+            <div className="rounded-xl border p-3">
+              <p className="mb-1 text-[12px] font-medium">Export history — {preview.clientTag}</p>
+              {stats ? (
+                <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
+                  <span className="text-muted-foreground">Matching contacts</span>
+                  <span className="text-right font-medium tabular-nums">{stats.matching.toLocaleString()}</span>
+                  <span className="text-muted-foreground">Already pushed for {preview.clientTag}</span>
+                  <span className="text-right font-medium tabular-nums">{stats.alreadyPushed.toLocaleString()}</span>
+                  <span className="text-muted-foreground">Not yet pushed</span>
+                  <span className="text-right font-medium tabular-nums">{stats.notPushed.toLocaleString()}</span>
+                  <span className="text-muted-foreground">New since last export{stats.lastExportAt ? ` (${new Date(stats.lastExportAt).toLocaleDateString()})` : ""}</span>
+                  <span className="text-right font-medium tabular-nums">{stats.newSinceLast.toLocaleString()}</span>
+                  {stats.failedForTag > 0 && (
+                    <>
+                      <span className="text-muted-foreground">Previously failed (retryable)</span>
+                      <span className="text-right font-medium tabular-nums">{stats.failedForTag.toLocaleString()}</span>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <p className="text-[11px] text-muted-foreground">Loading push history…</p>
+              )}
+              <div className="mt-2 space-y-1.5">
+                <label className="flex items-center gap-2 text-[11px]">
+                  <input type="checkbox" checked={optIncludePushed} onChange={(e) => setOptIncludePushed(e.target.checked)} />
+                  Include contacts already pushed for this client
+                </label>
+                <label className="flex items-center gap-2 text-[11px]">
+                  <input type="checkbox" checked={optOnlyNew} onChange={(e) => setOptOnlyNew(e.target.checked)} />
+                  Only contacts added since the last export
+                </label>
+                <label className="flex items-center gap-2 text-[11px]">
+                  <input type="checkbox" checked={optRetryFailed} onChange={(e) => setOptRetryFailed(e.target.checked)} />
+                  Retry contacts that previously failed
+                </label>
+              </div>
+            </div>
+
+            {/* Export amount (req #8) */}
+            <div>
+              <p className="mb-1 text-[12px] font-medium">Export amount</p>
+              <div className="flex items-center gap-2">
+                <Select value={amountChoice} onValueChange={setAmountChoice}>
+                  <SelectTrigger className="h-9 w-full text-[13px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {["5000", "7500", "10000", "12500"].map((v) => (
+                      <SelectItem key={v} value={v} className="text-[13px]">
+                        {parseInt(v, 10).toLocaleString()} leads
+                      </SelectItem>
+                    ))}
+                    <SelectItem value="full" className="text-[13px]">Full remaining list</SelectItem>
+                    <SelectItem value="other" className="text-[13px]">Other…</SelectItem>
+                  </SelectContent>
+                </Select>
+                {amountChoice === "other" && (
+                  <Input
+                    type="number"
+                    min={1}
+                    placeholder="Amount"
+                    value={amountOther}
+                    onChange={(e) => setAmountOther(e.target.value)}
+                    className="h-9 w-28 text-[13px]"
+                  />
+                )}
+              </div>
+              {maxLeads != null && (
+                <p className="mt-1 px-1 text-[10px] text-muted-foreground">
+                  Applied per side — up to {maxLeads.toLocaleString()} business + {maxLeads.toLocaleString()} personal.
+                </p>
+              )}
+            </div>
+
             {!canConfirm && (
               <p className="text-[11px] text-destructive">
                 Pick a campaign for at least one side with leads.
