@@ -113,11 +113,18 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  // Whether the slow pre-export validation pass will run. When it will, the
+  // response is NOT gzip-compressed: CompressionStream buffers small chunks,
+  // which would swallow the keepalive bytes that stop the edge proxy from
+  // killing the silent connection ("upstream error" on big searches).
+  const willValidate = isValidationEnabled() && !!jobId && !isSelectedExport;
+
   const stream = new ReadableStream({
     async start(controller) {
       let closed = false;
       let errored = false;
       let aborted = false;
+      let keepalive: ReturnType<typeof setInterval> | null = null;
       const safeClose = () => {
         if (closed) return;
         closed = true;
@@ -153,6 +160,15 @@ export async function POST(request: NextRequest) {
       });
 
       try {
+        // FIRST BYTES IMMEDIATELY: the CSV header goes out before the (slow)
+        // validation pre-pass, and a keepalive newline flows every 15s during
+        // it — otherwise the edge proxy sees minutes of silence before the
+        // first byte and kills the response ("upstream error"). Blank lines
+        // between header and data are ignored by every CSV parser. Only
+        // effective because compression is disabled when willValidate.
+        safeEnqueue(encoder.encode(columnSelection.join(",") + "\n"));
+        if (willValidate) keepalive = setInterval(() => safeEnqueue(encoder.encode("\n")), 15000);
+
         // ─── Pre-export validation pass ─────────────────────────────────
         // Validate ONLY leads inside THIS export's filtered set (the RPC reuses
         // fn_export_leads' filter builder) that are unvalidated or older than
@@ -231,9 +247,7 @@ export async function POST(request: NextRequest) {
           }
         }
         // ────────────────────────────────────────────────────────────────
-
-        // CSV header
-        safeEnqueue(encoder.encode(columnSelection.join(",") + "\n"));
+        if (keepalive) { clearInterval(keepalive); keepalive = null; }
 
         let totalRows = 0;
         let hasMore = true;
@@ -388,6 +402,7 @@ export async function POST(request: NextRequest) {
 
         safeClose();
       } catch (err) {
+        if (keepalive) clearInterval(keepalive);
         const msg = err instanceof Error ? err.message : "Unknown error";
         console.error("Stream export failed:", err);
         await markJobError(msg);
@@ -402,12 +417,15 @@ export async function POST(request: NextRequest) {
   // repetitive ASCII. The browser auto-decompresses based on the
   // Content-Encoding header, so the user gets a regular .csv file but
   // the bytes-over-the-wire are 5-10× smaller. Big win on slower networks.
-  const compressedStream = stream.pipeThrough(new CompressionStream("gzip"));
+  // Validated exports stream UNcompressed so the keepalive bytes actually
+  // reach the proxy during the silent validation phase (CompressionStream
+  // buffers small chunks). Everything else keeps the 5-10× gzip win.
+  const body = willValidate ? stream : stream.pipeThrough(new CompressionStream("gzip"));
 
-  return new Response(compressedStream, {
+  return new Response(body, {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Encoding": "gzip",
+      ...(willValidate ? {} : { "Content-Encoding": "gzip" }),
       "Content-Disposition": `attachment; filename="export_${timestamp}.csv"`,
       "Cache-Control": "no-cache",
     },
