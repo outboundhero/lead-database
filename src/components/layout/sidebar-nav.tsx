@@ -10,7 +10,6 @@ import {
   Download,
   Shield,
   KeyRound,
-  MailX,
   ChevronLeft,
   ChevronRight,
   Sparkles,
@@ -34,7 +33,6 @@ const NAV_SECTIONS = [
       { title: "Locations", href: "/locations", icon: MapPin, minRole: "manager" as UserRole, tint: "text-[oklch(0.7_0.17_160)]" },
       { title: "Lists", href: "/lists", icon: ListChecks, minRole: "manager" as UserRole, tint: "text-[oklch(0.6_0.2_310)]" },
       { title: "Uploads", href: "/uploads", icon: Upload, minRole: "admin" as UserRole, tint: "text-[oklch(0.52_0.21_290)]" },
-      { title: "Bounces", href: "/uploads/bounces", icon: MailX, minRole: "admin" as UserRole, tint: "text-[oklch(0.65_0.235_25)]" },
     ],
   },
   {

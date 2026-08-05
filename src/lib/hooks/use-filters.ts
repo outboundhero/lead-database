@@ -19,12 +19,21 @@ import {
 
 // Everything one client tag's targeting rules contribute to the filters —
 // applied as a unit on tag select and removed as a unit on deselect.
+// Locations flatten into the State/City filters directly (client decision
+// 2026-08-06): city entries -> location.city.include (exact), state-level
+// entries -> location.state.include.
 export interface TargetingPatch {
   locations: LocationTargetsFilter;
   categorySearchInclude: string[]; // include phrases -> categorySearch.include (contains)
   keywordExclude: string[];        // exclude keywords -> keyword.exclude (whole-term exact)
   categoryExclude: string[];       // exclude industries -> category.exclude (exact)
+  commercialCleaning?: boolean;    // Cleaning clients auto-enable the CC toggle
 }
+
+const entryCities = (entries: LocationTargetEntry[]) =>
+  entries.filter((e) => e.city).map((e) => e.city as string);
+const entryStates = (entries: LocationTargetEntry[]) =>
+  entries.filter((e) => !e.city && e.state).map((e) => e.state as string);
 
 const targetKey = (e: LocationTargetEntry) => `${e.country}|${e.state ?? ""}|${e.city ?? ""}`;
 
@@ -70,6 +79,7 @@ type FilterAction =
   | { type: "SET_SORT"; sortBy: string; sortDir: "asc" | "desc" }
   | { type: "LOAD_PRESET"; filters: FilterState }
   | { type: "SET_LOCATION_TARGETS"; value: LocationTargetsFilter }
+  | { type: "SET_CATEGORY_CASCADE"; value: { enabled: boolean; includeCompany: boolean } }
   | { type: "APPLY_CLIENT_TARGETING"; patch: TargetingPatch }
   | { type: "REMOVE_CLIENT_TARGETING"; patch: TargetingPatch }
   | { type: "RESET" };
@@ -119,13 +129,28 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
       return { ...normalizeFilterState(action.filters), page: 1 };
     case "SET_LOCATION_TARGETS":
       return { ...state, locationTargets: action.value, page: 1 };
+    case "SET_CATEGORY_CASCADE":
+      return { ...state, categoryCascade: action.value, page: 1 };
     case "APPLY_CLIENT_TARGETING":
       return {
         ...state,
-        locationTargets: {
-          include: mergeEntries(state.locationTargets.include, action.patch.locations.include),
-          exclude: mergeEntries(state.locationTargets.exclude, action.patch.locations.exclude),
+        location: {
+          ...state.location,
+          city: {
+            ...state.location.city,
+            include: mergeStrings(state.location.city.include, entryCities(action.patch.locations.include)),
+            exclude: mergeStrings(state.location.city.exclude, entryCities(action.patch.locations.exclude)),
+            // Exact whole-city matching (sheet cities are geo-validated names).
+            ...(entryCities(action.patch.locations.include).length && state.location.city.include.length === 0
+              ? { includeMode: "exact" as const } : {}),
+          },
+          state: {
+            ...state.location.state,
+            include: mergeStrings(state.location.state.include, entryStates(action.patch.locations.include)),
+            exclude: mergeStrings(state.location.state.exclude, entryStates(action.patch.locations.exclude)),
+          },
         },
+        ...(action.patch.commercialCleaning ? { commercialCleaning: true } : {}),
         // Side-wide match modes are only set when the side was EMPTY — flipping
         // the mode under a user's pre-existing terms would silently change what
         // those terms match.
@@ -151,10 +176,20 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
     case "REMOVE_CLIENT_TARGETING":
       return {
         ...state,
-        locationTargets: {
-          include: removeEntries(state.locationTargets.include, action.patch.locations.include),
-          exclude: removeEntries(state.locationTargets.exclude, action.patch.locations.exclude),
+        location: {
+          ...state.location,
+          city: {
+            ...state.location.city,
+            include: removeStrings(state.location.city.include, entryCities(action.patch.locations.include)),
+            exclude: removeStrings(state.location.city.exclude, entryCities(action.patch.locations.exclude)),
+          },
+          state: {
+            ...state.location.state,
+            include: removeStrings(state.location.state.include, entryStates(action.patch.locations.include)),
+            exclude: removeStrings(state.location.state.exclude, entryStates(action.patch.locations.exclude)),
+          },
         },
+        ...(action.patch.commercialCleaning ? { commercialCleaning: false } : {}),
         categorySearch: {
           ...state.categorySearch,
           include: removeStrings(state.categorySearch.include, action.patch.categorySearchInclude),
@@ -269,6 +304,10 @@ export function useFilters() {
     dispatch({ type: "SET_LOCATION_TARGETS", value });
   }, []);
 
+  const setCategoryCascade = useCallback((value: { enabled: boolean; includeCompany: boolean }) => {
+    dispatch({ type: "SET_CATEGORY_CASCADE", value });
+  }, []);
+
   const applyClientTargeting = useCallback((patch: TargetingPatch) => {
     dispatch({ type: "APPLY_CLIENT_TARGETING", patch });
   }, []);
@@ -305,6 +344,7 @@ export function useFilters() {
       setSort,
       loadPreset,
       setLocationTargets,
+      setCategoryCascade,
       applyClientTargeting,
       removeClientTargeting,
       resetFilters,
@@ -332,6 +372,7 @@ export function useFilters() {
       setSort,
       loadPreset,
       setLocationTargets,
+      setCategoryCascade,
       applyClientTargeting,
       removeClientTargeting,
       resetFilters,

@@ -96,20 +96,28 @@ const SENDER_BROAD_PATTERNS = [
 ];
 
 const HARD_PATTERNS = [
-  // Recipient doesn't exist
+  // Recipient doesn't exist — the ONLY evidence the address is dead. Policy
+  // blocks are deliberately NOT here (client rule 2026-08-06): "blocked by
+  // recipient policy" is not a real bounce — only invalid addresses and
+  // specifically-identified security gateways (GATEWAY_PATTERNS, checked
+  // first) may exclude a lead.
   /user (unknown|not found|does ?n[o']t exist|invalid)/i,
   /no such (user|recipient|mailbox|address|person)/i,
   /mailbox (unavailable|not found|does ?n[o']t exist|disabled|inactive|invalid)/i,
-  /recipient (not found|rejected|unknown|invalid|does ?n[o']t exist)/i,
-  /(recipient |)address (not found|rejected|unknown|invalid|no longer (valid|in use))/i,
+  /recipient (not found|unknown|invalid|does ?n[o']t exist)/i,
+  /(recipient |)address (not found|unknown|invalid|no longer (valid|in use))/i,
   /invalid (recipient|mailbox|address)/i,
   /email (account|address) .{0,40}(does ?n[o']t exist|disabled|discontinued)/i,
   /account (disabled|deactivated|discontinued|closed)/i,
   /\b550[ -]5\.1\.[01]\b/,
   /\b(551|553)[ -]/,
   /delivery to the following recipient failed permanently/i,
-  /permanent(ly)? (failure|error|rejected|delivery failure)/i,
-  // Recipient-side policy blocks
+  /permanent(ly)? (failure|error|delivery failure)/i,
+];
+
+// Recipient-side policy blocks — recoverable ('policy', is_bounced flips back
+// to false). Checked AFTER gateways so a named SEG still classifies 'gateway'.
+const POLICY_PATTERNS = [
   /blocked (by|due to|for) .{0,40}(policy|administrator|recipient|organization)/i,
   /message rejected due to .{0,40}(policy|content)/i,
   /rejected (by|due to) .{0,40}(policy|recipient)/i,
@@ -117,6 +125,8 @@ const HARD_PATTERNS = [
   /prohibited by administrator/i,
   /recipient.{0,40}(policy|blocked)/i,
   /this message was blocked/i,
+  /recipient (rejected)/i,
+  /(recipient |)address (rejected)/i,
 ];
 
 // Recipient-storage failures — checked BEFORE sender patterns so the generic
@@ -170,6 +180,10 @@ function classifyText(ndr) {
   for (const re of HARD_PATTERNS) {
     const m = ndr.match(re);
     if (m) return { type: "hard", matched: m[0] };
+  }
+  for (const re of POLICY_PATTERNS) {
+    const m = ndr.match(re);
+    if (m) return { type: "policy", matched: m[0] };
   }
   for (const re of SENDER_BROAD_PATTERNS) {
     const m = ndr.match(re);
@@ -438,7 +452,7 @@ async function run({ dryRun }) {
                is_bounced = $3,
                updated_at = now()
            WHERE id = $4`,
-          [type, reason.slice(0, REASON_MAX + 60), type !== "sender" && type !== "gateway" && type !== "group", lead.id]
+          [type, reason.slice(0, REASON_MAX + 60), !["sender", "gateway", "group", "policy"].includes(type), lead.id]
         );
       }
       counts[type]++;

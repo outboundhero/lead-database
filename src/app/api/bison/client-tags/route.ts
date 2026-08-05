@@ -15,8 +15,10 @@ export interface ClientTagRow {
   b2c_instance: string | null;
   owner: string | null;
   status: string | null;
+  client_type: string | null; // "Cleaning" | "Non-Cleaning" (Onboarding col F)
   churned: boolean;
   sendable: boolean; // has an instance pair (roster-only churned clients don't)
+  contactable: number | null; // cached contactable-lead count (client_stats)
 }
 
 export async function GET() {
@@ -28,10 +30,14 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { data, error } = await supabase
-    .from("client_tags")
-    .select("tag, group_no, b2b_instance, b2c_instance, owner, status")
-    .order("tag", { ascending: true });
+  const [{ data, error }, { data: stats }] = await Promise.all([
+    supabase
+      .from("client_tags")
+      .select("tag, group_no, b2b_instance, b2c_instance, owner, status, client_type")
+      .order("tag", { ascending: true }),
+    supabase.from("client_stats").select("tag, contactable"),
+  ]);
+  const statByTag = new Map((stats ?? []).map((s) => [s.tag as string, Number(s.contactable ?? 0)]));
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
@@ -44,11 +50,13 @@ export async function GET() {
     b2c_instance: (r.b2c_instance as string | null) ?? null,
     owner: (r.owner as string | null) ?? null,
     status: (r.status as string | null) ?? null,
+    client_type: (r.client_type as string | null) ?? null,
     // "Confirmed Churn", "Churned", etc.
     churned:
       typeof r.status === "string" && r.status.toLowerCase().includes("churn"),
     // Only clients with an instance mapping can actually receive a push.
     sendable: !!r.b2b_instance || !!r.b2c_instance,
+    contactable: statByTag.get(r.tag as string) ?? null,
   }));
 
   // Sendable + active first; churned/unmapped sink to the bottom.

@@ -105,6 +105,11 @@ export interface FilterState {
   additionalCategory: IncludeExclude;
   tags: IncludeExclude;                 // Bison tags (client tags etc.), substring match
 
+  // Category cascade (client req 2026-08-06): values picked in the Category
+  // filter also apply to Subcategory + Additional/SEO (same contains/exact
+  // mode); includeCompany extends excludes to the company name too.
+  categoryCascade?: { enabled: boolean; includeCompany: boolean };
+
   // Location
   location: LocationFilter;
   locationTargets: LocationTargetsFilter;
@@ -160,6 +165,7 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   subcategory: ie(),
   additionalCategory: ie(),
   tags: ie(),
+  categoryCascade: { enabled: false, includeCompany: false },
   location: {
     country: ie(),
     state: ie(),
@@ -231,6 +237,10 @@ export function normalizeFilterState(partial: unknown): FilterState {
       city: typeof (p.location as { city?: unknown } | undefined)?.city === "string"
         ? { ...d.location.city, include: (p.location!.city as unknown as string) ? [p.location!.city as unknown as string] : [] }
         : mergeIE(p.location?.city as Partial<IncludeExclude> | undefined, d.location.city),
+    },
+    categoryCascade: {
+      enabled: p.categoryCascade?.enabled === true,
+      includeCompany: p.categoryCascade?.includeCompany === true,
     },
     locationTargets: {
       include: sanitizeTargetEntries(p.locationTargets?.include),

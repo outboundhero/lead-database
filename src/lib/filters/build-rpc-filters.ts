@@ -31,6 +31,11 @@ function stripUnknown(ie: { include: string[]; exclude: string[]; includeUnknown
   };
 }
 
+const dedupeMerge = (base: string[], add: string[]) => {
+  const seen = new Set(base.map((s) => s.toLowerCase()));
+  return [...base, ...add.filter((v) => !seen.has(v.toLowerCase()))];
+};
+
 export function buildRpcFilters(filters: FilterState) {
   const jobTitle = stripUnknown(filters.jobTitle);
   const generalIndustry = stripUnknown(filters.generalIndustry);
@@ -42,6 +47,23 @@ export function buildRpcFilters(filters: FilterState) {
   const category = stripUnknown(filters.category);
   const subcategory = stripUnknown(filters.subcategory);
   const additionalCategory = stripUnknown(filters.additionalCategory ?? { include: [], exclude: [] });
+  // CATEGORY CASCADE (client req 2026-08-06): Category picks flow into the
+  // other category fields with the same match modes. Includes OR across the
+  // three category columns via categorySearch; excludes AND onto Subcategory +
+  // Additional (+ Company when includeCompany).
+  const cascade = filters.categoryCascade;
+  const catMode = filters.category?.includeMode ?? "exact";
+  const catExMode = filters.category?.excludeMode ?? "exact";
+  const cascadeSearchInclude = cascade?.enabled ? [...category.include] : [];
+  // Includes MOVE to the category-search (OR across all three columns) — kept
+  // on the category field too they'd AND and defeat the cascade.
+  if (cascadeSearchInclude.length) category.include = [];
+  if (cascade?.enabled && category.exclude.length) {
+    subcategory.exclude = dedupeMerge(subcategory.exclude, category.exclude);
+    additionalCategory.exclude = dedupeMerge(additionalCategory.exclude, category.exclude);
+    if (cascade.includeCompany) company.exclude = dedupeMerge(company.exclude, category.exclude);
+  }
+
   const country = stripUnknown(filters.location.country);
   const state = stripUnknown(filters.location.state);
   const city = filters.location.city;
@@ -70,8 +92,20 @@ export function buildRpcFilters(filters: FilterState) {
     },
     company: { include: company.include, exclude: company.exclude, includeUnknown: company.includeUnknown, selectUnknown: company.selectUnknown, ...modes(filters.company) },
     category: { include: category.include, exclude: category.exclude, includeUnknown: category.includeUnknown, selectUnknown: category.selectUnknown, ...modes(filters.category) },
-    subcategory: { include: subcategory.include, exclude: subcategory.exclude, includeUnknown: subcategory.includeUnknown, selectUnknown: subcategory.selectUnknown, ...modes(filters.subcategory) },
-    additionalCategory: { include: additionalCategory.include, exclude: additionalCategory.exclude, includeUnknown: additionalCategory.includeUnknown, selectUnknown: additionalCategory.selectUnknown, ...modes(filters.additionalCategory) },
+    subcategory: {
+      include: subcategory.include, exclude: subcategory.exclude, includeUnknown: subcategory.includeUnknown, selectUnknown: subcategory.selectUnknown,
+      ...modes(filters.subcategory),
+      // Cascaded excludes match with the CATEGORY chip's mode unless the user
+      // set their own subcategory excludes.
+      ...(cascade?.enabled && category.exclude.length && !(filters.subcategory?.exclude ?? []).length
+        ? { excludeMode: catExMode } : {}),
+    },
+    additionalCategory: {
+      include: additionalCategory.include, exclude: additionalCategory.exclude, includeUnknown: additionalCategory.includeUnknown, selectUnknown: additionalCategory.selectUnknown,
+      ...modes(filters.additionalCategory),
+      ...(cascade?.enabled && category.exclude.length && !(filters.additionalCategory?.exclude ?? []).length
+        ? { excludeMode: catExMode } : {}),
+    },
     tags: { include: filters.tags?.include ?? [], exclude: filters.tags?.exclude ?? [], ...modes(filters.tags) },
     location: {
       country: { include: country.include, exclude: country.exclude, includeUnknown: country.includeUnknown, selectUnknown: country.selectUnknown },
@@ -100,10 +134,16 @@ export function buildRpcFilters(filters: FilterState) {
       exclude: filters.emailContains?.exclude ?? [],
     },
     categorySearch: {
-      include: filters.categorySearch?.include ?? [],
+      // Cascade includes OR across category/subcategory/additional via the
+      // category-search field, with the Category chip's include mode.
+      include: cascadeSearchInclude.length
+        ? dedupeMerge(filters.categorySearch?.include ?? [], cascadeSearchInclude)
+        : filters.categorySearch?.include ?? [],
       exclude: filters.categorySearch?.exclude ?? [],
       matchMode: filters.categorySearch?.matchMode === "exact" ? "exact" : "contains",
       ...modes(filters.categorySearch),
+      ...(cascadeSearchInclude.length && !(filters.categorySearch?.include ?? []).length
+        ? { includeMode: catMode } : {}),
     },
     customTags: {
       include: filters.customTags?.include ?? [],

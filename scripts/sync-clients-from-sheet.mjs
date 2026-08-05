@@ -150,7 +150,7 @@ async function main() {
       for (const row of (tv.values ?? []).slice(1)) {
         const name = (row[0] ?? "").trim();
         const abbr = (row[1] ?? "").trim();
-        const health = (row[7] ?? "").trim();
+        const health = (row[7] ?? "").trim(); // col H — legacy status fallback
         if (!abbr) continue;
         // Abbreviation cells can hold several "&"-joined tags (e.g. "CPGH & CPGA").
         for (const raw of abbr.split(/\s*&\s*/)) {
@@ -167,6 +167,30 @@ async function main() {
             added++;
           }
         }
+      }
+      // Onboarding Form Responses tab (same workbook): col A = abbreviation,
+      // col E = Status (Active/Churned/Not Found — AUTHORITATIVE, overrides
+      // health), col F = Client Type (Cleaning/Non-Cleaning). Later rows win
+      // (form resubmissions append).
+      try {
+        const ob = await sheetsGet(token, `${trackerId}/values/${encodeURIComponent("'Onboarding Form Responses'!A1:F3000")}`);
+        let typed = 0;
+        for (const row of (ob.values ?? []).slice(1)) {
+          const abbr = (row[0] ?? "").trim();
+          const status = (row[4] ?? "").trim();
+          const clientType = (row[5] ?? "").trim();
+          if (!abbr) continue;
+          for (const raw of abbr.split(/\s*&\s*|\s*\/\s*/)) {
+            const tag = cleanTag(raw);
+            const c = clients.get(tag) ?? (tag.includes("&") ? null : clients.get(tag));
+            if (!c) continue;
+            if (status) c.status = status;
+            if (clientType) { c.client_type = clientType; typed++; }
+          }
+        }
+        console.log(`Onboarding tab merged: status/type applied (${typed} typed).`);
+      } catch (e) {
+        console.warn(`  Onboarding tab skipped: ${e.message}`);
       }
       console.log(`Client Tracker merged: +${added} roster-only tags.`);
     } catch (e) {
@@ -198,8 +222,8 @@ async function main() {
     // roster-only tracker row (COALESCE preserves the mapping).
     for (const c of list) {
       await client.query(
-        `insert into client_tags (tag, group_no, b2b_instance, b2c_instance, owner, status, name, source, synced_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8, now())
+        `insert into client_tags (tag, group_no, b2b_instance, b2c_instance, owner, status, name, client_type, source, synced_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
          on conflict (tag) do update set
            group_no = coalesce(excluded.group_no, client_tags.group_no),
            b2b_instance = coalesce(excluded.b2b_instance, client_tags.b2b_instance),
@@ -207,9 +231,10 @@ async function main() {
            owner = coalesce(excluded.owner, client_tags.owner),
            status = coalesce(excluded.status, client_tags.status),
            name = coalesce(excluded.name, client_tags.name),
+           client_type = coalesce(excluded.client_type, client_tags.client_type),
            source = case when excluded.group_no is not null then excluded.source else client_tags.source end,
            synced_at = now()`,
-        [c.tag, c.group_no, c.b2b, c.b2c, c.owner ?? null, c.status ?? null, c.name ?? null, c.source ?? null]
+        [c.tag, c.group_no, c.b2b, c.b2c, c.owner ?? null, c.status ?? null, c.name ?? null, c.client_type ?? null, c.source ?? null]
       );
     }
     const del = await client.query(`delete from client_tags where tag <> all($1::text[])`, [list.map((c) => c.tag)]);

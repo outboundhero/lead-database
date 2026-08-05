@@ -53,6 +53,7 @@ export default function LeadsPage() {
     setSort,
     loadPreset,
     setLocationTargets,
+    setCategoryCascade,
     applyClientTargeting,
     removeClientTargeting,
     resetFilters,
@@ -107,60 +108,81 @@ export default function LeadsPage() {
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
 
+  // Low-availability popup (client req: warn when a client has <250 fresh leads).
+  const [lowAvail, setLowAvail] = useState<{
+    tag: string;
+    available: number;
+    targeting: {
+      include_locations?: LocationTargetEntry[];
+      include_industries?: string[];
+      include_keywords?: string[];
+      exclude_industries?: string[];
+      exclude_keywords?: string[];
+    } | null;
+  } | null>(null);
+
   const handleClientTagSelected = useCallback(async (tag: string) => {
     if (appliedRef.current.has(tag)) return;
     try {
-      const res = await fetch(`/api/clients/targeting?tag=${encodeURIComponent(tag)}`);
-      if (!res.ok) return;
-      const { targeting } = (await res.json()) as {
-        targeting: {
-          include_locations?: LocationTargetEntry[];
-          exclude_locations?: LocationTargetEntry[];
-          include_keywords?: string[];
-          exclude_keywords?: string[];
-          exclude_industries?: string[];
-        } | null;
-      };
-      if (!targeting) {
-        toast.info(`No targeting rules on file for ${tag} — filtering by tag only`);
-        return;
-      }
+      const [tRes, aRes] = await Promise.all([
+        fetch(`/api/clients/targeting?tag=${encodeURIComponent(tag)}`),
+        fetch(`/api/clients/availability?tag=${encodeURIComponent(tag)}`),
+      ]);
+      const { targeting } = tRes.ok
+        ? ((await tRes.json()) as {
+            targeting: {
+              include_locations?: LocationTargetEntry[];
+              exclude_locations?: LocationTargetEntry[];
+              include_keywords?: string[];
+              exclude_keywords?: string[];
+              exclude_industries?: string[];
+              include_industries?: string[];
+            } | null;
+          })
+        : { targeting: null };
+      const avail = aRes.ok
+        ? ((await aRes.json()) as { available: number; client_type: string | null })
+        : null;
       // The tag may have been deselected (or filters reset) while the fetch
       // was in flight — applying now would orphan the patch.
       if (!filtersRef.current.tags.include.includes(tag)) return;
+
+      const isCleaning = avail?.client_type === "Cleaning";
       // The patch records the client's FULL targeting (apply dedupes against
       // current state), so two selected clients sharing a value each claim it
       // and the removal refcount keeps it until both are deselected.
       const patch: TargetingPatch = {
         locations: {
-          include: targeting.include_locations ?? [],
-          exclude: targeting.exclude_locations ?? [],
+          include: targeting?.include_locations ?? [],
+          exclude: targeting?.exclude_locations ?? [],
         },
-        categorySearchInclude: targeting.include_keywords ?? [],
-        keywordExclude: targeting.exclude_keywords ?? [],
-        categoryExclude: targeting.exclude_industries ?? [],
+        categorySearchInclude: targeting?.include_keywords ?? [],
+        keywordExclude: targeting?.exclude_keywords ?? [],
+        categoryExclude: targeting?.exclude_industries ?? [],
+        ...(isCleaning && !filtersRef.current.commercialCleaning ? { commercialCleaning: true } : {}),
       };
       const n =
         patch.locations.include.length + patch.locations.exclude.length +
-        patch.categorySearchInclude.length + patch.keywordExclude.length + patch.categoryExclude.length;
-      if (n === 0) {
-        toast.info(`${tag}: no targeting values to apply`);
-        return;
+        patch.categorySearchInclude.length + patch.keywordExclude.length +
+        patch.categoryExclude.length + (patch.commercialCleaning ? 1 : 0);
+      if (n > 0) {
+        appliedRef.current.set(tag, patch);
+        applyClientTargeting(patch);
+        const bits = [
+          patch.locations.include.length && `${patch.locations.include.length} locations → City/State filters`,
+          patch.categorySearchInclude.length && `${patch.categorySearchInclude.length} category terms`,
+          patch.categoryExclude.length && `${patch.categoryExclude.length} excluded industries`,
+          patch.keywordExclude.length && `${patch.keywordExclude.length} excluded keywords`,
+          patch.commercialCleaning && "Commercial Cleaning titles on",
+        ].filter(Boolean).join(", ");
+        toast.success(`${tag} targeting applied: ${bits}`);
+      } else if (!targeting) {
+        toast.info(`No targeting rules on file for ${tag} — filtering by tag only`);
       }
-      appliedRef.current.set(tag, patch);
-      applyClientTargeting(patch);
-      const bits = [
-        patch.locations.include.length && `${patch.locations.include.length} locations`,
-        patch.locations.exclude.length && `${patch.locations.exclude.length} excluded locations`,
-        patch.categorySearchInclude.length && `${patch.categorySearchInclude.length} category terms`,
-        patch.categoryExclude.length && `${patch.categoryExclude.length} excluded industries`,
-        patch.keywordExclude.length && `${patch.keywordExclude.length} excluded keywords`,
-      ].filter(Boolean).join(", ");
-      toast.success(`${tag} targeting applied: ${bits}`, {
-        description: patch.locations.include.length
-          ? "Leads with unknown locations are hidden while location targeting is on."
-          : undefined,
-      });
+      // Low availability warning (fresh = eligible, contactable, never pushed).
+      if (avail && avail.available < 250) {
+        setLowAvail({ tag, available: avail.available, targeting: targeting ?? null });
+      }
     } catch {
       /* targeting fetch failed — tag filter still applies */
     }
@@ -200,6 +222,8 @@ export default function LeadsPage() {
         categorySearchInclude: patch.categorySearchInclude.filter((v) => !othersHave("categorySearchInclude", v)),
         keywordExclude: patch.keywordExclude.filter((v) => !othersHave("keywordExclude", v)),
         categoryExclude: patch.categoryExclude.filter((v) => !othersHave("categoryExclude", v)),
+        ...(patch.commercialCleaning && !others.some((p) => p.commercialCleaning)
+          ? { commercialCleaning: true } : {}),
       });
     }
   }, [filters.tags.include, removeClientTargeting]);
@@ -316,6 +340,7 @@ export default function LeadsPage() {
           onLoadPreset={handleLoadPreset}
           onClientTagSelected={handleClientTagSelected}
           onLocationTargetsChange={setLocationTargets}
+          onCategoryCascadeChange={setCategoryCascade}
           onReset={handleReset}
         />
       </div>
@@ -441,6 +466,54 @@ export default function LeadsPage() {
             fetchLeads();
           }}
         />
+      )}
+
+      {/* Low lead-availability warning — closable, informational */}
+      {lowAvail && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setLowAvail(null)}>
+          <div className="w-full max-w-md rounded-2xl bg-card p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-2">
+              <h2 className="text-[17px] font-semibold">
+                Low lead availability — {lowAvail.tag}
+              </h2>
+              <button type="button" onClick={() => setLowAvail(null)} className="rounded-full p-1 hover:bg-muted">
+                <X className="size-4" />
+              </button>
+            </div>
+            <p className="mt-2 text-[13px]">
+              Only <span className="font-semibold tabular-nums">{lowAvail.available.toLocaleString()}</span> fresh
+              leads match this client&apos;s targeting (eligible, contactable, never pushed for {lowAvail.tag}).
+              <span className="font-medium"> New leads are needed.</span>
+            </p>
+            {lowAvail.targeting ? (
+              <div className="mt-3 space-y-2 rounded-xl bg-muted/50 p-3 text-[12px]">
+                {(lowAvail.targeting.include_locations?.length ?? 0) > 0 && (
+                  <p><span className="font-medium">Locations:</span>{" "}
+                    {lowAvail.targeting.include_locations!.slice(0, 12).map((e) => e.city ?? e.state ?? e.country).join(", ")}
+                    {lowAvail.targeting.include_locations!.length > 12 ? ` +${lowAvail.targeting.include_locations!.length - 12} more` : ""}
+                  </p>
+                )}
+                {(lowAvail.targeting.include_industries?.length ?? 0) > 0 && (
+                  <p><span className="font-medium">Target industries:</span> {lowAvail.targeting.include_industries!.join(", ")}</p>
+                )}
+                {(lowAvail.targeting.include_keywords?.length ?? 0) > 0 && (
+                  <p><span className="font-medium">Target keywords:</span> {lowAvail.targeting.include_keywords!.slice(0, 15).join(", ")}</p>
+                )}
+                {(lowAvail.targeting.exclude_industries?.length ?? 0) > 0 && (
+                  <p><span className="font-medium">Excluded industries:</span> {lowAvail.targeting.exclude_industries!.join(", ")}</p>
+                )}
+                {(lowAvail.targeting.exclude_keywords?.length ?? 0) > 0 && (
+                  <p className="text-muted-foreground"><span className="font-medium text-foreground">Excluded keywords:</span> {lowAvail.targeting.exclude_keywords!.slice(0, 15).join(", ")}{lowAvail.targeting.exclude_keywords!.length > 15 ? "…" : ""}</p>
+                )}
+              </div>
+            ) : (
+              <p className="mt-3 text-[12px] text-muted-foreground">No targeting rules on file for this client.</p>
+            )}
+            <div className="mt-4 flex justify-end">
+              <Button size="sm" onClick={() => setLowAvail(null)}>Got it</Button>
+            </div>
+          </div>
+        </div>
       )}
 
       <LeadDetailPanel

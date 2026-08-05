@@ -57,6 +57,7 @@ interface FilterBarProps {
   // auto-apply that client's targeting rules to the other filters.
   onClientTagSelected?: (tag: string) => void;
   onLocationTargetsChange?: (value: LocationTargetsFilter) => void;
+  onCategoryCascadeChange?: (value: { enabled: boolean; includeCompany: boolean }) => void;
   onReset: () => void;
 }
 
@@ -216,6 +217,7 @@ export function FilterBar({
   onLoadPreset,
   onClientTagSelected,
   onLocationTargetsChange,
+  onCategoryCascadeChange,
   onReset,
 }: FilterBarProps) {
   void onLocationCountryChange;
@@ -256,6 +258,10 @@ export function FilterBar({
   // Per-option lead counts (state/city) from the filter_option_counts RPC.
   const [optionCounts, setOptionCounts] = useState<Record<string, Record<string, number>>>({});
   const [clientTagOptions, setClientTagOptions] = useState<string[]>([]);
+  const [clientRoster, setClientRoster] = useState<
+    { tag: string; status?: string | null; client_type?: string | null; churned?: boolean; contactable?: number | null }[]
+  >([]);
+  const [clientSearch, setClientSearch] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   void countries;
 
@@ -341,8 +347,8 @@ export function FilterBar({
     }, 300);
   }, [loadDistinctFor, applyValues]);
 
-  // Client tags for the Tags chip's quick-pick list. Fetched from the Bison
-  // client-tags proxy; falls back silently to free-typing only if unavailable.
+  // Client roster for the Client dropdown — synced from the Client Tracker /
+  // Onboarding sheets (tag, status, Cleaning/Non-Cleaning, contactable count).
   const clientTagsLoadedRef = useRef(false);
   const loadClientTags = useCallback(async () => {
     if (clientTagsLoadedRef.current) return;
@@ -350,13 +356,13 @@ export function FilterBar({
     try {
       const res = await fetch("/api/bison/client-tags");
       if (!res.ok) return;
-      const json = (await res.json()) as { tags?: { tag: string }[] };
-      const tags = (json.tags ?? [])
-        .map((t) => t?.tag)
-        .filter((t): t is string => typeof t === "string" && t.length > 0);
-      setClientTagOptions([...new Set(tags)]);
+      const json = (await res.json()) as {
+        tags?: { tag: string; status?: string | null; client_type?: string | null; churned?: boolean; contactable?: number | null }[];
+      };
+      setClientRoster((json.tags ?? []).filter((t) => t?.tag));
+      setClientTagOptions([...new Set((json.tags ?? []).map((t) => t?.tag).filter(Boolean) as string[])]);
     } catch {
-      /* proxy not ready — free typing still works */
+      /* roster unavailable — chip shows an empty list */
     }
   }, []);
 
@@ -452,6 +458,30 @@ export function FilterBar({
             activeCount={filters.category.include.length + filters.category.exclude.length + (filters.category.includeUnknown ? 1 : 0)}
             onOpen={() => loadDistinctFor("category")}
           >
+            <div className="mb-2 space-y-1 rounded-lg bg-muted/50 p-2">
+              <label className="flex items-center gap-2 text-[11px]">
+                <input
+                  type="checkbox"
+                  checked={filters.categoryCascade?.enabled ?? false}
+                  onChange={(e) =>
+                    onCategoryCascadeChange?.({ enabled: e.target.checked, includeCompany: filters.categoryCascade?.includeCompany ?? false })
+                  }
+                />
+                Also apply to Subcategory + Additional/SEO (same contains/exact)
+              </label>
+              {filters.categoryCascade?.enabled && (
+                <label className="ml-5 flex items-center gap-2 text-[11px]">
+                  <input
+                    type="checkbox"
+                    checked={filters.categoryCascade?.includeCompany ?? false}
+                    onChange={(e) =>
+                      onCategoryCascadeChange?.({ enabled: true, includeCompany: e.target.checked })
+                    }
+                  />
+                  Include company name in exclusions
+                </label>
+              )}
+            </div>
             <FilterMultiSelect
               options={categoryValues}
               value={filters.category}
@@ -837,83 +867,73 @@ export function FilterBar({
           </FilterChip>
         )}
 
-        {/* Client Tags — client tags (substring, server-side) + free typing */}
+        {/* Client — single-select roster dropdown (synced from the sheets).
+            Selecting applies the client's targeting to the other filters;
+            free-text tag matching lives in Custom Tags. */}
         {!isHidden("tags") && (
           <FilterChip
-            label="Client Tags"
-            activeCount={filters.tags.include.length + filters.tags.exclude.length}
+            label={filters.tags.include[0] ? `Client: ${filters.tags.include[0]}` : "Client"}
+            activeCount={filters.tags.include.length}
             onOpen={loadClientTags}
           >
-            <div className="space-y-3">
-              <div>
-                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Include
-                  <SideModeToggle
-                    value={filters.tags.includeMode ?? "contains"}
-                    onChange={(v) => onIncludeExcludeChange("tags", { ...filters.tags, includeMode: v })}
-                  />
-                </label>
-                <TagInput
-                  values={filters.tags.include}
-                  placeholder="Type a tag, press Enter"
-                  onChange={(arr) =>
-                    onIncludeExcludeChange("tags", { ...filters.tags, include: arr })
-                  }
-                />
-              </div>
-              <div>
-                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Exclude
-                  <SideModeToggle
-                    value={filters.tags.excludeMode ?? "contains"}
-                    onChange={(v) => onIncludeExcludeChange("tags", { ...filters.tags, excludeMode: v })}
-                  />
-                </label>
-                <TagInput
-                  values={filters.tags.exclude}
-                  placeholder="Tag to exclude"
-                  onChange={(arr) =>
-                    onIncludeExcludeChange("tags", { ...filters.tags, exclude: arr })
-                  }
-                />
-              </div>
-              {clientTagOptions.length > 0 && (
-                <div>
-                  <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Client tags
-                  </label>
-                  <div className="flex max-h-32 flex-wrap gap-1 overflow-y-auto">
-                    {clientTagOptions.map((tag) => {
-                      const picked = filters.tags.include.includes(tag);
+            <div className="space-y-2">
+              <Input
+                placeholder={`Search ${clientRoster.length || ""} clients…`}
+                value={clientSearch}
+                onChange={(e) => setClientSearch(e.target.value)}
+                className="h-8 text-xs"
+              />
+              {filters.tags.include.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onIncludeExcludeChange("tags", { ...filters.tags, include: [], exclude: [] })}
+                  className="w-full rounded-lg bg-muted px-2 py-1.5 text-left text-[12px] hover:bg-accent"
+                >
+                  ✕ Clear client ({filters.tags.include[0]})
+                </button>
+              )}
+              <div className="max-h-64 space-y-0.5 overflow-y-auto">
+                {clientRoster.length === 0 ? (
+                  <p className="px-1 py-2 text-[11px] text-muted-foreground">Loading clients…</p>
+                ) : (
+                  clientRoster
+                    .filter((c) => !clientSearch.trim() || c.tag.toLowerCase().includes(clientSearch.trim().toLowerCase()))
+                    .map((c) => {
+                      const picked = filters.tags.include[0] === c.tag;
                       return (
                         <button
-                          key={tag}
+                          key={c.tag}
                           type="button"
                           onClick={() => {
-                            onIncludeExcludeChange("tags", {
-                              ...filters.tags,
-                              include: picked
-                                ? filters.tags.include.filter((t) => t !== tag)
-                                : [...filters.tags.include, tag],
-                            });
-                            if (!picked) onClientTagSelected?.(tag);
+                            if (picked) {
+                              onIncludeExcludeChange("tags", { ...filters.tags, include: [] });
+                            } else {
+                              onIncludeExcludeChange("tags", { ...filters.tags, include: [c.tag] });
+                              onClientTagSelected?.(c.tag);
+                            }
                           }}
-                          className={`rounded-full px-2 py-0.5 text-[11px] transition-colors ${
-                            picked
-                              ? "bg-primary text-primary-foreground"
-                              : "bg-muted text-foreground hover:bg-accent"
+                          className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] transition-colors ${
+                            picked ? "bg-primary/10 ring-1 ring-primary/40" : "hover:bg-muted/60"
                           }`}
                         >
-                          {tag}
+                          <span className="font-medium">{c.tag}</span>
+                          {c.client_type && (
+                            <span className={`rounded-full px-1.5 text-[9px] ${c.client_type === "Cleaning" ? "bg-orange-500/15 text-orange-600" : "bg-sky-500/15 text-sky-600"}`}>
+                              {c.client_type}
+                            </span>
+                          )}
+                          {c.churned && <span className="rounded-full bg-destructive/10 px-1.5 text-[9px] text-destructive">churned</span>}
+                          <span className="ml-auto shrink-0 tabular-nums text-[11px] text-muted-foreground">
+                            {c.contactable != null ? c.contactable.toLocaleString() : ""}
+                          </span>
                         </button>
                       );
-                    })}
-                  </div>
-                </div>
-              )}
-              <p className="px-1 text-[11px] text-muted-foreground">
-                <span className="font-medium text-foreground">Contains</span> = substring;{" "}
-                <span className="font-medium text-foreground">Exact</span> = whole tag only.
+                    })
+                )}
+              </div>
+              <p className="px-1 text-[10px] text-muted-foreground">
+                Numbers = contactable leads carrying the tag. Picking a client applies its
+                sheet targeting (locations, categories, exclusions) to the filters.
               </p>
             </div>
           </FilterChip>

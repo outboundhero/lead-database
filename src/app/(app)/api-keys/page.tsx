@@ -569,6 +569,50 @@ export default function ApiKeysPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* ── API documentation (client req 2026-08-06) ───────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-[17px]">API documentation</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4 text-[13px]">
+          <p className="text-muted-foreground">
+            All endpoints authenticate with <code className="rounded bg-muted px-1">Authorization: Bearer &lt;token&gt;</code>{" "}
+            using a key from this page. Base URL = this app&apos;s URL.
+          </p>
+          <div className="rounded-xl border p-3">
+            <p className="font-semibold">POST /api/v1/leads — add or update leads (Clay webhook target)</p>
+            <p className="mt-1 text-muted-foreground">
+              Send one lead object, or <code className="rounded bg-muted px-1">{"{ \"leads\": [ … ] }"}</code> (max 500).
+              Upserts by email: new emails are created, existing ones get non-empty fields merged.
+              Manual/Clay-sourced categories are never overwritten; <code className="rounded bg-muted px-1">tags</code> values append.
+              Accepted fields: first_name, last_name, title, company, phone, company_phone, website, domain,
+              address, city, state, postal_code, country, category, subcategory, additional_category,
+              general_industry, specific_industry, seniority, person_linkedin, company_linkedin, notes,
+              question, google_maps_url, tags, company_size, annual_revenue.
+            </p>
+            <pre className="mt-2 overflow-x-auto rounded-lg bg-muted p-2 text-[11px]">{`curl -X POST "$APP_URL/api/v1/leads" \\
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+  -d '{"email":"jane@acme.com","first_name":"Jane","company":"Acme Dental",
+       "city":"Spokane","state":"WA","category":"Dental & Orthodontics","tags":"CWSJ"}'`}</pre>
+            <p className="mt-1 text-muted-foreground">
+              Response: <code className="rounded bg-muted px-1">{"{ \"created\": 1, \"updated\": 0, \"failed\": 0 }"}</code>.
+              In Clay, use an HTTP API enrichment pointed at this URL with the JSON body mapped from your table columns.
+            </p>
+          </div>
+          <div className="rounded-xl border p-3">
+            <p className="font-semibold">POST /api/leads/update — update fields on an existing lead</p>
+            <p className="mt-1 text-muted-foreground">
+              Body: <code className="rounded bg-muted px-1">{"{ \"email\": \"jane@acme.com\", \"fields\": { \"title\": \"Owner\" } }"}</code>.
+              404s if the email doesn&apos;t exist (use /api/v1/leads to create-or-update instead).
+            </p>
+          </div>
+          <div className="rounded-xl border p-3">
+            <p className="font-semibold">GET /api/leads/search/company_name?q=… · GET /api/leads/first5</p>
+            <p className="mt-1 text-muted-foreground">Lookup helpers — search leads by company name; sample the five newest leads.</p>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
