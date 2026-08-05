@@ -13,7 +13,7 @@ import { LeadDetailPanel } from "@/components/leads/lead-detail-panel";
 import { ExportButton } from "@/components/exports/export-button";
 import { DeleteLeadsDialog } from "@/components/leads/delete-leads-dialog";
 import { Button } from "@/components/ui/button";
-import { ArrowUpDown, X, Trash2 } from "lucide-react";
+import { ArrowUpDown, X, Trash2, Link2 } from "lucide-react";
 import { useHasPermission } from "@/lib/context/role-context";
 import { countActiveFilters } from "@/types/filters";
 import type { Lead } from "@/types/database";
@@ -204,13 +204,56 @@ export default function LeadsPage() {
     }
   }, [filters.tags.include, removeClientTargeting]);
 
+  // Restore a shared search (/leads?s=<id>) once on mount.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    const id = new URLSearchParams(window.location.search).get("s");
+    if (!id) return;
+    fetch(`/api/shared-search?id=${encodeURIComponent(id)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("Search link not found"))))
+      .then((d) => {
+        loadPreset(d.filters);
+        toast.success("Shared search restored");
+      })
+      .catch((e) => toast.error(e instanceof Error ? e.message : "Couldn't restore the shared search"));
+  }, [loadPreset]);
+
+  const [copyingLink, setCopyingLink] = useState(false);
+  const copySearchLink = useCallback(async () => {
+    setCopyingLink(true);
+    try {
+      const res = await fetch("/api/shared-search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filters }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error ?? "Failed to create link");
+      const url = `${window.location.origin}/leads?s=${d.id}`;
+      await navigator.clipboard.writeText(url);
+      window.history.replaceState(null, "", `/leads?s=${d.id}`);
+      toast.success("Search link copied — anyone on the team can open it");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to copy link");
+    } finally {
+      setCopyingLink(false);
+    }
+  }, [filters]);
+
   const fetchLeads = useCallback(async () => {
     setIsLoading(true);
+    // Big searches can exceed the server's patience — abort at 100s with a
+    // clear message instead of spinning forever, and KEEP the previous rows.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 100_000);
     try {
       const res = await fetch("/api/leads/filter", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(debouncedFilters),
+        signal: controller.signal,
       });
       if (!res.ok) throw new Error(`Filter request failed: ${res.status}`);
       const result: FilterResult & { isApproximate?: boolean } = await res.json();
@@ -219,11 +262,15 @@ export default function LeadsPage() {
       setIsApproximate(result.isApproximate ?? false);
     } catch (err) {
       console.error("Filter query error:", err);
-      setLeads([]);
-      setTotalCount(0);
-      setIsApproximate(false);
+      if (err instanceof DOMException && err.name === "AbortError") {
+        toast.error("This search is too heavy and timed out — remove a filter or two and try again. Showing the previous results.");
+      } else {
+        toast.error("Search failed — showing the previous results. Try adjusting the filters.");
+      }
+    } finally {
+      clearTimeout(timer);
+      setIsLoading(false);
     }
-    setIsLoading(false);
   }, [debouncedFilters]);
 
   useEffect(() => {
@@ -337,6 +384,17 @@ export default function LeadsPage() {
               </Button>
             </>
           )}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground"
+            disabled={copyingLink}
+            onClick={copySearchLink}
+            title="Copy a link that restores this exact search — reopen it later or send it to anyone on the team"
+          >
+            <Link2 className="h-4 w-4 mr-1" />
+            {copyingLink ? "Copying…" : "Copy search link"}
+          </Button>
           {canDelete && (
             <Button
               variant="ghost"
