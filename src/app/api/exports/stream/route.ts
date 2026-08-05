@@ -420,9 +420,9 @@ export async function POST(request: NextRequest) {
   // Validated exports stream UNcompressed so the keepalive bytes actually
   // reach the proxy during the silent validation phase (CompressionStream
   // buffers small chunks). Everything else keeps the 5-10× gzip win.
-  const body = willValidate ? stream : stream.pipeThrough(new CompressionStream("gzip"));
+  const responseBody = willValidate ? stream : stream.pipeThrough(new CompressionStream("gzip"));
 
-  return new Response(body, {
+  return new Response(responseBody, {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
       ...(willValidate ? {} : { "Content-Encoding": "gzip" }),
