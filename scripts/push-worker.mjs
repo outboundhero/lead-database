@@ -43,7 +43,7 @@ dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname });
 const env = process.env;
 const POLL_MS = Number(env.PUSH_POLL_MS) || 4000;
 const CLAIM_BATCH = Math.min(200, Number(env.PUSH_CLAIM_BATCH) || 50);
-const RATE = 5; // per-instance Bison requests/sec
+const RATE = Math.max(1, Number(process.env.PUSH_RATE) || 5); // per-instance Bison requests/sec (per process)
 const STALE_MIN = Math.max(10, Number(process.env.PUSH_STALE_MIN) || 30); // reclaim items stuck in 'pushing' after this long
 const MAX_ATTEMPTS = 3;
 const ATTACH_CHUNK = 100;
