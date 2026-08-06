@@ -488,7 +488,10 @@ async function pushCycle() {
           from push_items p
           join push_batches b on b.id = p.batch_id
          where p.status = 'pending' and b.status = 'processing'
-         order by p.batch_id, p.lead_id
+         -- lead_id order interleaves concurrent batches, so pushes to
+         -- DIFFERENT Bison instances proceed in parallel instead of one
+         -- batch fully draining before the next starts.
+         order by p.lead_id
          limit $1
          for update of p skip locked
       )
@@ -595,7 +598,15 @@ async function pushCycle() {
           throw Object.assign(new Error(`no API key for instance ${domain}`), { configFatal: true });
         }
         if (bisonIds[auth.domain] == null) {
-          bisonIds[auth.domain] = await createLead(auth, lead, tagsForLead(batch.client_tag, lead.tags));
+          // SEARCH-FIRST: these databases were imported FROM Bison exports, so
+          // nearly every lead already exists on its instance — one search hit
+          // replaces the create→422→search→refresh round trip entirely.
+          const existing = await findLeadByEmail(auth, lead.email, 1);
+          if (existing && existing.id != null) {
+            bisonIds[auth.domain] = String(existing.id);
+          } else {
+            bisonIds[auth.domain] = await createLead(auth, lead, tagsForLead(batch.client_tag, lead.tags));
+          }
         }
       }
       // Persist BEFORE any attach — crash recovery must never duplicate creates.
