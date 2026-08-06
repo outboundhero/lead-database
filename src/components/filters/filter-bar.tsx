@@ -350,19 +350,21 @@ export function FilterBar({
   // Client roster for the Client dropdown — synced from the Client Tracker /
   // Onboarding sheets (tag, status, Cleaning/Non-Cleaning, contactable count).
   const clientTagsLoadedRef = useRef(false);
-  const loadClientTags = useCallback(async () => {
-    if (clientTagsLoadedRef.current) return;
+  const loadClientTags = useCallback(async (force = false) => {
+    if (clientTagsLoadedRef.current && !force) return;
     clientTagsLoadedRef.current = true;
     try {
       const res = await fetch("/api/bison/client-tags");
-      if (!res.ok) return;
+      if (!res.ok) throw new Error(String(res.status));
       const json = (await res.json()) as {
         tags?: { tag: string; status?: string | null; client_type?: string | null; churned?: boolean; contactable?: number | null }[];
       };
       setClientRoster((json.tags ?? []).filter((t) => t?.tag));
       setClientTagOptions([...new Set((json.tags ?? []).map((t) => t?.tag).filter(Boolean) as string[])]);
     } catch {
-      /* roster unavailable — chip shows an empty list */
+      // One transient failure must not permanently blank the dropdown —
+      // unlatch so the next open (or the Retry button) refetches.
+      clientTagsLoadedRef.current = false;
     }
   }, []);
 
@@ -894,7 +896,16 @@ export function FilterBar({
               )}
               <div className="max-h-64 space-y-0.5 overflow-y-auto">
                 {clientRoster.length === 0 ? (
-                  <p className="px-1 py-2 text-[11px] text-muted-foreground">Loading clients…</p>
+                  <div className="space-y-1 px-1 py-2">
+                    <p className="text-[11px] text-muted-foreground">Loading clients…</p>
+                    <button
+                      type="button"
+                      onClick={() => loadClientTags(true)}
+                      className="text-[11px] font-medium text-primary hover:underline"
+                    >
+                      Not loading? Retry
+                    </button>
+                  </div>
                 ) : (
                   clientRoster
                     .filter((c) => !clientSearch.trim() || c.tag.toLowerCase().includes(clientSearch.trim().toLowerCase()))
