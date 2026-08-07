@@ -197,6 +197,19 @@ function tagsForLead(clientTag, leadTags) {
 }
 
 async function findLeadByEmail(auth, email, tries = 1) {
+  // DIRECT LOOKUP FIRST: Bison accepts the email as the lead id
+  // (GET /api/leads/{email}, same as the bounce-worker's replies endpoint) and
+  // answers in ~250ms. The ?search= endpoint scans and, on workspaces with
+  // hundreds of thousands of leads, takes 30s+ or times out outright — it was
+  // the entire push bottleneck (2026-08-07).
+  try {
+    const direct = await bison(auth, "GET", `/api/leads/${encodeURIComponent(email)}`);
+    const hit = direct?.data ?? direct;
+    if (hit && hit.id != null && (hit.email || "").toLowerCase() === email.toLowerCase()) return hit;
+  } catch (e) {
+    if (e.status !== 404 && e.status !== 422) throw e; // real error, not "absent"
+  }
+  // Fallback: search (kept for instances/versions without the direct route).
   for (let t = 0; t < tries; t++) {
     if (t > 0) await sleep(2000); // Bison search indexing delay
     const found = await bison(auth, "GET", `/api/leads?search=${encodeURIComponent(email)}`);
