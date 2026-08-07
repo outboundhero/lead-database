@@ -80,6 +80,7 @@ type FilterAction =
   | { type: "LOAD_PRESET"; filters: FilterState }
   | { type: "SET_LOCATION_TARGETS"; value: LocationTargetsFilter }
   | { type: "SET_CATEGORY_CASCADE"; value: { enabled: boolean; includeCompany: boolean } }
+  | { type: "SET_CLIENT_TAG"; value: string | null }
   | { type: "APPLY_CLIENT_TARGETING"; patch: TargetingPatch }
   | { type: "REMOVE_CLIENT_TARGETING"; patch: TargetingPatch }
   | { type: "RESET" };
@@ -131,6 +132,11 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
       return { ...state, locationTargets: action.value, page: 1 };
     case "SET_CATEGORY_CASCADE":
       return { ...state, categoryCascade: action.value, page: 1 };
+    case "SET_CLIENT_TAG":
+      // Selecting a client scopes settings/exports — it must NOT filter leads
+      // by the tag (client req #1), or a search only ever returns leads that
+      // were already pushed for that client.
+      return { ...state, clientTag: action.value, page: 1 };
     case "APPLY_CLIENT_TARGETING":
       return {
         ...state,
@@ -308,6 +314,10 @@ export function useFilters() {
     dispatch({ type: "SET_CATEGORY_CASCADE", value });
   }, []);
 
+  const setClientTag = useCallback((value: string | null) => {
+    dispatch({ type: "SET_CLIENT_TAG", value });
+  }, []);
+
   const applyClientTargeting = useCallback((patch: TargetingPatch) => {
     dispatch({ type: "APPLY_CLIENT_TARGETING", patch });
   }, []);
@@ -345,6 +355,7 @@ export function useFilters() {
       loadPreset,
       setLocationTargets,
       setCategoryCascade,
+      setClientTag,
       applyClientTargeting,
       removeClientTargeting,
       resetFilters,
@@ -373,6 +384,7 @@ export function useFilters() {
       loadPreset,
       setLocationTargets,
       setCategoryCascade,
+      setClientTag,
       applyClientTargeting,
       removeClientTargeting,
       resetFilters,

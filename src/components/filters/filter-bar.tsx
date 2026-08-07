@@ -58,6 +58,7 @@ interface FilterBarProps {
   onClientTagSelected?: (tag: string) => void;
   onLocationTargetsChange?: (value: LocationTargetsFilter) => void;
   onCategoryCascadeChange?: (value: { enabled: boolean; includeCompany: boolean }) => void;
+  onClientTagChange?: (tag: string | null) => void;
   onReset: () => void;
 }
 
@@ -218,6 +219,7 @@ export function FilterBar({
   onClientTagSelected,
   onLocationTargetsChange,
   onCategoryCascadeChange,
+  onClientTagChange,
   onReset,
 }: FilterBarProps) {
   void onLocationCountryChange;
@@ -874,8 +876,8 @@ export function FilterBar({
             free-text tag matching lives in Custom Tags. */}
         {!isHidden("tags") && (
           <FilterChip
-            label={filters.tags.include[0] ? `Client: ${filters.tags.include[0]}` : "Client"}
-            activeCount={filters.tags.include.length}
+            label={filters.clientTag ? `Client: ${filters.clientTag}` : "Client"}
+            activeCount={filters.clientTag ? 1 : 0}
             onOpen={loadClientTags}
           >
             <div className="space-y-2">
@@ -885,13 +887,13 @@ export function FilterBar({
                 onChange={(e) => setClientSearch(e.target.value)}
                 className="h-8 text-xs"
               />
-              {filters.tags.include.length > 0 && (
+              {filters.clientTag && (
                 <button
                   type="button"
-                  onClick={() => onIncludeExcludeChange("tags", { ...filters.tags, include: [], exclude: [] })}
+                  onClick={() => onClientTagChange?.(null)}
                   className="w-full rounded-lg bg-muted px-2 py-1.5 text-left text-[12px] hover:bg-accent"
                 >
-                  ✕ Clear client ({filters.tags.include[0]})
+                  ✕ Clear client ({filters.clientTag})
                 </button>
               )}
               <div className="max-h-64 space-y-0.5 overflow-y-auto">
@@ -910,16 +912,16 @@ export function FilterBar({
                   clientRoster
                     .filter((c) => !clientSearch.trim() || c.tag.toLowerCase().includes(clientSearch.trim().toLowerCase()))
                     .map((c) => {
-                      const picked = filters.tags.include[0] === c.tag;
+                      const picked = filters.clientTag === c.tag;
                       return (
                         <button
                           key={c.tag}
                           type="button"
                           onClick={() => {
                             if (picked) {
-                              onIncludeExcludeChange("tags", { ...filters.tags, include: [] });
+                              onClientTagChange?.(null);
                             } else {
-                              onIncludeExcludeChange("tags", { ...filters.tags, include: [c.tag] });
+                              onClientTagChange?.(c.tag);
                               onClientTagSelected?.(c.tag);
                             }
                           }}
@@ -934,8 +936,11 @@ export function FilterBar({
                             </span>
                           )}
                           {c.churned && <span className="rounded-full bg-destructive/10 px-1.5 text-[9px] text-destructive">churned</span>}
-                          <span className="ml-auto shrink-0 tabular-nums text-[11px] text-muted-foreground">
-                            {c.contactable != null ? c.contactable.toLocaleString() : ""}
+                          <span
+                            className="ml-auto shrink-0 tabular-nums text-[11px] text-muted-foreground"
+                            title="Leads already pushed/tagged for this client (cached). Availability for a NEW send is shown when you select the client."
+                          >
+                            {c.contactable != null && c.contactable > 0 ? c.contactable.toLocaleString() : ""}
                           </span>
                         </button>
                       );
@@ -943,8 +948,9 @@ export function FilterBar({
                 )}
               </div>
               <p className="px-1 text-[10px] text-muted-foreground">
-                Numbers = contactable leads carrying the tag. Picking a client applies its
-                sheet targeting (locations, categories, exclusions) to the filters.
+                Picking a client applies its sheet targeting (locations, categories,
+                exclusions) to the filters — it does NOT filter by the tag, so new
+                untagged leads still show. Available-to-send count appears on select.
               </p>
             </div>
           </FilterChip>

@@ -54,6 +54,7 @@ export default function LeadsPage() {
     loadPreset,
     setLocationTargets,
     setCategoryCascade,
+    setClientTag,
     applyClientTargeting,
     removeClientTargeting,
     resetFilters,
@@ -108,6 +109,17 @@ export default function LeadsPage() {
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
 
+  const [availability, setAvailability] = useState<{ tag: string; available: number } | null>(null);
+  const clientTypeRef = useRef<Map<string, string>>(new Map());
+  useEffect(() => {
+    fetch("/api/bison/client-tags")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        for (const t of d?.tags ?? []) if (t?.tag && t?.client_type) clientTypeRef.current.set(t.tag, t.client_type);
+      })
+      .catch(() => {});
+  }, []);
+
   // Low-availability popup (client req: warn when a client has <250 fresh leads).
   const [lowAvail, setLowAvail] = useState<{
     tag: string;
@@ -124,10 +136,10 @@ export default function LeadsPage() {
   const handleClientTagSelected = useCallback(async (tag: string) => {
     if (appliedRef.current.has(tag)) return;
     try {
-      const [tRes, aRes] = await Promise.all([
-        fetch(`/api/clients/targeting?tag=${encodeURIComponent(tag)}`),
-        fetch(`/api/clients/availability?tag=${encodeURIComponent(tag)}`),
-      ]);
+      // Targeting is fetched on its own: the availability count scans millions
+      // of rows and must never be able to swallow the targeting apply (it did —
+      // a slow/failed count left the filters empty on select).
+      const tRes = await fetch(`/api/clients/targeting?tag=${encodeURIComponent(tag)}`);
       const { targeting } = tRes.ok
         ? ((await tRes.json()) as {
             targeting: {
@@ -140,14 +152,7 @@ export default function LeadsPage() {
             } | null;
           })
         : { targeting: null };
-      const avail = aRes.ok
-        ? ((await aRes.json()) as { available: number; client_type: string | null })
-        : null;
-      // The tag may have been deselected (or filters reset) while the fetch
-      // was in flight — applying now would orphan the patch.
-      if (!filtersRef.current.tags.include.includes(tag)) return;
-
-      const isCleaning = avail?.client_type === "Cleaning";
+      const isCleaning = clientTypeRef.current.get(tag) === "Cleaning";
       // The patch records the client's FULL targeting (apply dedupes against
       // current state), so two selected clients sharing a value each claim it
       // and the removal refcount keeps it until both are deselected.
@@ -179,10 +184,15 @@ export default function LeadsPage() {
       } else if (!targeting) {
         toast.info(`No targeting rules on file for ${tag} — filtering by tag only`);
       }
-      // Low availability warning (fresh = eligible, contactable, never pushed).
-      if (avail && avail.available < 250) {
-        setLowAvail({ tag, available: avail.available, targeting: targeting ?? null });
-      }
+      // Availability afterwards, independently — informational only.
+      fetch(`/api/clients/availability?tag=${encodeURIComponent(tag)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((a: { available: number } | null) => {
+          if (!a) return;
+          setAvailability({ tag, available: a.available });
+          if (a.available < 250) setLowAvail({ tag, available: a.available, targeting: targeting ?? null });
+        })
+        .catch(() => {});
     } catch {
       /* targeting fetch failed — tag filter still applies */
     }
@@ -203,7 +213,7 @@ export default function LeadsPage() {
   // Removal is observed from state (covers pill re-click, TagInput ✕) rather
   // than hooked to a click handler.
   useEffect(() => {
-    const selected = new Set(filters.tags.include);
+    const selected = new Set(filters.clientTag ? [filters.clientTag] : []);
     for (const [tag, patch] of appliedRef.current) {
       if (selected.has(tag)) continue;
       appliedRef.current.delete(tag);
@@ -226,7 +236,7 @@ export default function LeadsPage() {
           ? { commercialCleaning: true } : {}),
       });
     }
-  }, [filters.tags.include, removeClientTargeting]);
+  }, [filters.clientTag, removeClientTargeting]);
 
   // Restore a shared search (/leads?s=<id>) once on mount.
   const restoredRef = useRef(false);
@@ -341,6 +351,7 @@ export default function LeadsPage() {
           onClientTagSelected={handleClientTagSelected}
           onLocationTargetsChange={setLocationTargets}
           onCategoryCascadeChange={setCategoryCascade}
+          onClientTagChange={(t) => { setClientTag(t); if (!t) setAvailability(null); }}
           onReset={handleReset}
         />
       </div>
@@ -355,6 +366,11 @@ export default function LeadsPage() {
           >
             {isApproximate ? "~" : ""}
             {totalCount.toLocaleString()} contacts
+            {availability && availability.tag === filters.clientTag && (
+              <span className="ml-2 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                {availability.available.toLocaleString()} available for {availability.tag}
+              </span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">

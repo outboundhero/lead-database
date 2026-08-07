@@ -105,6 +105,13 @@ export interface FilterState {
   additionalCategory: IncludeExclude;
   tags: IncludeExclude;                 // Bison tags (client tags etc.), substring match
 
+  // Selected client (client req #1: "client tags control settings and export
+  // history — they don't need to be a lead filter"). Drives targeting
+  // auto-apply, export scoping/dedupe and push routing; it is deliberately NOT
+  // translated into a leads.tags filter, so a client's search still sees
+  // untagged leads (the ones a push is about to tag).
+  clientTag?: string | null;
+
   // Category cascade (client req 2026-08-06): values picked in the Category
   // filter also apply to Subcategory + Additional/SEO (same contains/exact
   // mode); includeCompany extends excludes to the company name too.
@@ -165,6 +172,7 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   subcategory: ie(),
   additionalCategory: ie(),
   tags: ie(),
+  clientTag: null,
   categoryCascade: { enabled: false, includeCompany: false },
   location: {
     country: ie(),
@@ -238,6 +246,7 @@ export function normalizeFilterState(partial: unknown): FilterState {
         ? { ...d.location.city, include: (p.location!.city as unknown as string) ? [p.location!.city as unknown as string] : [] }
         : mergeIE(p.location?.city as Partial<IncludeExclude> | undefined, d.location.city),
     },
+    clientTag: typeof p.clientTag === "string" && p.clientTag.trim() ? p.clientTag.trim() : null,
     categoryCascade: {
       enabled: p.categoryCascade?.enabled === true,
       includeCompany: p.categoryCascade?.includeCompany === true,
