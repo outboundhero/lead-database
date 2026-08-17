@@ -11,7 +11,26 @@
 
 **Why we forked Renaissance:** OutboundHero needs the same filtering/export engine but with three new capabilities that don't exist in Renaissance: (a) email-type classification (general vs personal/decision-maker), (b) Reoon→FindEmail email validation with cached re-validation, (c) bounce tracking + auto-exclusion. Plus an iOS-style visual refresh of the entire UI.
 
-**Current state:** Phase 0 (bootstrap + rebrand) complete. Schema additions, validation layer, email-type detection, iOS re-skin, and bounce flow in progress. Target scale: 15–20M contacts.
+**Current state:** LIVE IN PRODUCTION on Railway. All phases shipped: validation,
+email-type detection, bounce classification, category enrichment, location
+intelligence, client targeting, and queued Bison pushes. Migrations run to **074**.
+
+**Actual production scale** (measured 2026-08-17 — not estimates):
+
+| Table | Rows | Size |
+|---|---|---|
+| `leads` | 8.19M | 13 GB |
+| `lead_history` | 8.04M | 1.5 GB |
+| `companies` | **1.32M** | 796 MB |
+| `lead_job_titles` | 958k | 195 MB |
+| `company_locations` | 892k | 140 MB |
+| `geo_locations` | 293k | 51 MB |
+| `push_items` | 90k | 42 MB |
+| `client_tags` / `client_targeting` | 196 / 187 | small |
+
+`leads` carries ~48 indexes, so **any mass UPDATE on it is extremely
+write-amplified** — every row rewrite touches every index. This is the single
+biggest performance consideration in the codebase.
 
 **Stack:** Next.js 16 (App Router) + Supabase (PostgreSQL + Auth + Storage) + TypeScript.
 
@@ -156,7 +175,10 @@ REOON_API_KEY                 # Email validation primary
 FINDEMAIL_API_KEY             # Email validation fallback
 VALIDATION_BATCH_SIZE         # default 100
 VALIDATION_REVALIDATE_DAYS    # default 45
-EMAILBISON_KEYS               # JSON: instance domain -> token (3 separate Bison installs)
+EMAILBISON_KEYS               # JSON: instance domain -> token. FOUR Bison installs
+                              #   group 1: app.outboundhero.co   + personal.cleaningoutbound.com
+                              #   group 2: app.facilityreach.com + personal.outboundclean.com
+                              # (b2b + b2c per group; every client belongs to one group)
 EMAILBISON_API_KEY            # single/default Bison token (fallback for any instance)
 EMAILBISON_BASE_URL           # optional; default instance domain
 OPENAI_API_KEY                # gpt-4o-mini — categorize worker AI tier (preferred)
@@ -169,7 +191,22 @@ CATEGORIZE_MODEL              # optional model override
 
 ## Storage & compute
 
-Target scale: 15–20M leads. Reference: Renaissance ran 6M leads on Supabase XL (16 GB RAM, 4 CPU). Recommended starting tier for OutboundHero: **Supabase 2XL** (~$1099/mo), with headroom to upgrade to 4XL once data passes ~12M rows.
+Target scale: 15–20M leads. Currently at **8.19M leads / 13 GB** (plus 1.5 GB
+history, 796 MB companies).
+
+⚠ **Disk I/O budget is the real constraint, not storage.** Supabase compute
+tiers have a burst IOPS budget; exhaust it and the whole project — app
+included — throttles to baseline until it refills. It has been exhausted at
+least once (2026-08-07) by enrichment work. Before running anything that scans
+or rewrites `leads` in bulk, check Reports → Database in the Supabase dashboard.
+
+Known I/O-heavy patterns to avoid:
+- Unbounded `fn_sync_companies()` — fixed in migration 074, keep it bounded
+- `scripts/infer-company-locations.mjs` C1 pass uses **OFFSET pagination over a
+  GROUP BY**, so every page re-aggregates the whole table. It also sets
+  `statement_timeout = 0`, removing the safety net, and loads the entire
+  no-location cohort into Node memory with no LIMIT
+- `scripts/backfill-lead-locations.mjs` pass 2 loads all city-only leads unbounded
 
 ---
 
@@ -216,7 +253,8 @@ scripts/backfill-email-type.mjs            — One-off classification backfill (
 
 Bounces are split into contactable vs dead by `scripts/bounce-worker.mjs`, a
 **separate Railway cron service in the same project** (same repo; start command
-`npm run bounce-worker`, schedule `*/15 * * * *`).
+`node scripts/bounce-worker.mjs`, schedule **`0 */6 * * *`** — every 6 hours,
+NOT the `*/15` this doc previously claimed).
 
 For every lead with `bounces > 0` not yet checked (or re-bounced since last
 check), the worker calls Email Bison
@@ -225,14 +263,26 @@ lead's email as the id) and classifies the NDR text:
 
 | `bounce_type` | Meaning | Effect |
 |---|---|---|
-| `sender` | Our sending inbox's fault (auth/quota/reputation/rate-limit) | `is_bounced` flipped back to **false** — lead re-enters filters + exports |
-| `hard` | Recipient invalid / blocked / policy rejection | stays excluded, never exported |
+| `sender` | Our sending inbox's fault (auth/quota/reputation/rate-limit) | `is_bounced` → **false**, lead restored |
+| `gateway` | Recipient security gateway (Proofpoint, Mimecast, Barracuda, EOP…) — migration 063 | `is_bounced` → **false**, lead restored |
+| `group` | NDR names other recipients, never the contact — a distribution-list failure — migration 070 | `is_bounced` → **false**, lead restored |
+| `policy` | "Blocked by recipient policy" — migration 072 | `is_bounced` → **false**, lead restored |
+| `hard` | Recipient genuinely invalid / no such mailbox | stays excluded, never exported |
 | `unknown` | No bounce reply found or ambiguous | treated like hard, reviewable |
+
+**Client rule (2026-08-06): only a genuinely invalid address counts as a real
+bounce.** Policy blocks and gateway rejections are recoverable, so four of the
+six verdicts restore the lead.
 
 Columns (migration 047): `bounce_type`, `bounce_reason` (NDR snippet),
 `bounce_checked_at`. The leads-page "Bounced" chip ("Include undeliverable",
 visible to all roles) un-hides hard/unknown leads in the table; exports always
 exclude them.
+
+⚠ `node scripts/bounce-worker.mjs --test-classifier` currently fails 3/30: the
+built-in corpus still expects `hard` for the three policy-block NDRs that
+migration 072 deliberately reclassified as `policy`. Production behaviour is
+correct; the test expectations are stale.
 
 ---
 
@@ -249,11 +299,28 @@ never re-processed.
 state (normalized `company_key` generated column). `fn_sync_companies()` —
 called after every import and by the worker — (1) upserts companies from
 leads, (2) seeds company categories from categorized leads, (3) propagates
-cached company categories to uncategorized leads. Expected ≤50k companies.
+cached company categories to uncategorized leads.
 Legacy `UNIQUE(domain)` was dropped (many businesses share gmail.com).
 
-**Fallback worker** `scripts/categorize-worker.mjs` (Railway cron,
-`npm run categorize-worker`), per still-uncategorized COMPANY:
+⚠ **"Expected ≤50k companies" was wrong by 26×** — production has **1.32M**
+companies, 284k of them still uncategorized. Plan cost and runtime against the
+real number.
+
+⚠ **`fn_sync_companies` signature history — read before touching it.**
+Migration 049 created the 0-arg form; 050 created `(p_propagate_limit integer)`.
+`CREATE OR REPLACE` only replaces a MATCHING signature, so 050 added a second
+overload instead of replacing, and a no-arg call became ambiguous
+(`ERROR: function fn_sync_companies() is not unique`, SQLSTATE 42725). That
+silently broke `/api/uploads/process` (error only `console.error`'d, so imports
+reported success while never syncing companies) and crash-looped the categorize
+worker. **Migration 073 drops the 0-arg overload; 074 changes the default from
+NULL to 50000** so no-argument callers get the BOUNDED propagation branch
+instead of a single UPDATE across 8.19M leads × 1.32M companies.
+
+**Fallback worker** `scripts/categorize-worker.mjs` (Railway cron, schedule
+**`0 3 * * *`**, start command `node scripts/categorize-worker.mjs
+--keyword-only` — the AI tier is switched OFF in production), per
+still-uncategorized COMPANY:
 
 | Tier | Method | Cost |
 |---|---|---|
@@ -354,9 +421,135 @@ category_source='clay' (never over 'manual', diff-aware), appends the client
 tag to leads.tags. Category enrichment precedence stays Bison/Clay > keyword >
 AI (AI fallback still OFF pending green-light).
 
+## Railway services (production topology, verified 2026-08-17)
+
+Railway project `extraordinary-spirit`, environment `production`. Every service
+deploys from THIS repo, so a push to `main` rebuilds all of them.
+
+| Service | Type | Schedule | Start command |
+|---|---|---|---|
+| `lead-database` | web | always on | (default Next.js) |
+| `push-worker` | worker | always on | `node scripts/push-worker.mjs` |
+| `bounce-worker` | cron | `0 */6 * * *` | `node scripts/bounce-worker.mjs` |
+| `client-sync` | cron | `0 */6 * * *` | `npm run sync-clients && npm run sync-targeting` |
+| `categorize-worker` | cron | `0 3 * * *` | `node scripts/categorize-worker.mjs --keyword-only` |
+| `location-worker` | cron | `0 12 * * 0` | `npm run location-worker` |
+
+### ⚠ Every worker service MUST override the build command
+
+Workers run a single `node` script and never need the Next.js build — but
+Railpack auto-detects Next.js and runs `npm run build` unless told otherwise.
+That build **fails on any service without the Supabase env vars**, because four
+API routes construct their Supabase client at module scope and Next evaluates
+every route module during "Collecting page data":
+
+```
+Error: supabaseUrl is required.  →  Failed to collect page data for /api/leads/filter
+```
+
+Every worker therefore sets Build Command to `echo 'worker service: no next build'`.
+`client-sync` was missing it and its build failed for 12 days (2026-08-05 →
+2026-08-17), silently freezing the client roster and targeting rules.
+
+The durable fix is to make those four routes lazy like the other 32
+(`createAdminClient()` inside the handler, not at module scope):
+`api/leads/filter`, `api/exports/stream`, `api/exports/process`,
+`api/admin/unknown-stats`. **Not yet done.**
+
+### Pausing a worker without Railway access
+
+`categorize-worker` checks a lease row in `worker_locks` before doing ANY work
+([categorize-worker.mjs:387](scripts/categorize-worker.mjs#L387)), so it can be
+parked from SQL alone:
+
+```sql
+-- park it (exits immediately every run, zero DB work)
+INSERT INTO worker_locks (key, owner, locked_until)
+VALUES ('categorize-worker', gen_random_uuid(), now() + interval '30 days')
+ON CONFLICT (key) DO UPDATE
+  SET owner = EXCLUDED.owner, locked_until = EXCLUDED.locked_until;
+
+-- release it
+DELETE FROM worker_locks WHERE key = 'categorize-worker';
+```
+
+**A lease is currently held (set 2026-08-17, ~30 days).** Do not release it
+until `categorize-worker.mjs` loops on `fn_sync_companies(p_propagate_limit)`
+until a round returns fewer rows than the limit. No other worker uses this table.
+
+---
+
+## Migration discipline (learned the hard way)
+
+1. **Never re-run all migrations wholesale against production.** The
+   `for f in *.sql; do psql -f $f; done` loop in SETUP.md is what recreated the
+   `fn_sync_companies` 0-arg overload and broke uploads + the categorize worker.
+   Migrations 073/074 make that sequence self-healing, but the habit is unsafe.
+2. **The live database has drifted from this repo.** Confirmed case:
+   `fn_sync_companies` had `statement_timeout` raised `600s → 3600s` directly in
+   the database, invisible in any migration file. **Always build a function
+   migration from `pg_get_functiondef()` of the LIVE definition**, never from the
+   repo's previous migration, or you will silently revert production changes.
+3. **`CREATE OR REPLACE FUNCTION` does not replace a different signature** — it
+   adds an overload. Changing or adding a parameter requires an explicit
+   `DROP FUNCTION name(oldsig);`. Audit with:
+   ```sql
+   SELECT p.proname, count(*) FROM pg_proc p
+     JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname='public' AND p.prokind='f'
+    GROUP BY 1 HAVING count(*) > 1;
+   ```
+4. After DDL, `NOTIFY pgrst, 'reload schema';` so PostgREST picks it up.
+
+---
+
+## Migrations 054–074 (previously undocumented)
+
+| # | What it adds |
+|---|---|
+| 054 | `client_tags` full roster from the Client Tracker sheet; nullable instances for churned clients |
+| 055 | `categorySearch` filter (OR across category/subcategory/additional) |
+| 056 | `client_stats` cache + `fn_refresh_client_stats()` |
+| 057 | Company include/exclude filter |
+| 058 | Category exact-match, Custom Tags, Website filters |
+| 059 | Subcategory index fix |
+| 060 | City filter dropdown cache |
+| 061 | Per-option lead counts in filter dropdowns |
+| 062 | Per-side match modes (`includeMode`/`excludeMode`); `commercial_cleaning_excluded_titles` (230 terms) |
+| 063 | `gateway` bounce type |
+| 064 | Geo reference: `supported_countries`, `geo_admin1`, `geo_locations`, `location_aliases`, `company_locations`, `client_targeting` |
+| 065 | State dual-match (code or full name) |
+| 066 | `fn_location_entry_condition`, `fn_commercial_cleaning_condition`, `fn_client_eligibility_conditions` |
+| 067 | Onboarding-sheet targeting sync provenance (`sheet_raw`, `include_industries`, `include_keywords`) |
+| 068 | `push_batches.push_options` — per-client-tag export accounting |
+| 069 | `campaign_presets`, `custom_lists` |
+| 070 | `group` bounce type |
+| 071 | `shared_searches` — shareable `/leads?s=<id>` links |
+| 072 | `client_tags.client_type`; `policy` bounce type |
+| **073** | **Drops the duplicate 0-arg `fn_sync_companies()`** |
+| **074** | **`fn_sync_companies` default `NULL → 50000`** (bounded propagation) |
+
 ## Known issues / TODO
 
 - [ ] Reoon bulk endpoint batch size — confirm exact cap from docs before tuning `VALIDATION_BATCH_SIZE`
 - [ ] "(general)" field location — voice memo wasn't precise; current detection covers first_name/last_name/job_title. Adjust regex when a sample Email Bison export is available.
 - [ ] Email Bison webhook for live bounces — out of scope for v1; CSV upload + bounce-worker polling
 - [ ] Initial validation cost — first export of imported leads will validate from scratch. Recommend opt-in per pull rather than bulk run; cap with `VALIDATION_DAILY_BUDGET` if needed.
+
+### Open after the 2026-08-17 incident
+
+- [ ] **Loop `categorize-worker` on `fn_sync_companies(p_propagate_limit)`** until a
+      round returns < limit, then `DELETE FROM worker_locks WHERE key='categorize-worker'`.
+      Until then the worker is parked and no categorization happens (284k companies pending).
+- [ ] **Make the 4 module-scope Supabase clients lazy** so no worker service can be
+      broken again by a web-route env var (see Railway services above).
+- [ ] **Fix `infer-company-locations.mjs` C1 OFFSET-over-GROUP-BY pagination** (keyset
+      instead), add a LIMIT to the cohort query, and stop setting `statement_timeout = 0`.
+- [ ] **Refresh the bounce classifier test corpus** — 3/30 expectations predate the
+      `policy` verdict added in migration 072.
+- [ ] **`/api/dashboard/refresh` has no auth of its own** and is behind the session
+      middleware, so the GitHub Action that curls it gets a 307 to `/login` and silently
+      no-ops (`curl --fail` treats a redirect as success). The dashboard is presumably
+      kept fresh by pg_cron instead — confirm, then either add token auth or delete the workflow.
+- [ ] **`/api/leads/filter` uses the service-role key with no in-route auth check** —
+      protected only by middleware position, unlike the other 32 routes. Harden it.
