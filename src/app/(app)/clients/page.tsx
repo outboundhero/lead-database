@@ -11,6 +11,7 @@ import {
 import { toast } from "sonner";
 import { useHasPermission } from "@/lib/context/role-context";
 import { ClientTargetingDialog } from "@/components/clients/client-targeting-dialog";
+import { RulesSyncProvider, RulesSyncButton, RulesSyncPanel } from "@/components/clients/rules-sync-panel";
 import type { ClientRow } from "@/app/api/clients/route";
 
 type Filter = "all" | "active" | "churned" | "mapped" | "unmapped";
@@ -130,6 +131,7 @@ export default function ClientsPage() {
   }), [clients]);
 
   return (
+    <RulesSyncProvider>
     <div className="max-w-6xl space-y-5">
       <div className="flex items-start justify-between">
         <div>
@@ -147,6 +149,7 @@ export default function ClientsPage() {
               <Users className={`h-4 w-4 ${syncingGroups ? "animate-pulse" : ""}`} />
               {syncingGroups ? "Syncing…" : "Sync groups"}
             </Button>
+            <RulesSyncButton canRun={canRefresh} />
             <Button variant="outline" size="sm" onClick={refreshStats} disabled={refreshing || syncingGroups} className="gap-2"
               title="Recomputes each client's lead counts from the database (can take ~30s). Client names/statuses sync automatically from the Client Tracker sheet.">
               <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
@@ -155,6 +158,10 @@ export default function ClientsPage() {
           </div>
         )}
       </div>
+
+      {/* Live progress for an in-flight rules sync. Runs server-side, so it
+          survives a closed tab; dismissing a finished one is permanent. */}
+      <RulesSyncPanel />
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative">
@@ -254,6 +261,7 @@ export default function ClientsPage() {
       </div>
       <ClientTargetingDialog tag={targetingTag} onClose={() => setTargetingTag(null)} />
     </div>
+    </RulesSyncProvider>
   );
 }
 

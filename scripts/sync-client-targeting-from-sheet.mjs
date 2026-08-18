@@ -47,6 +47,37 @@ const ONLY_CLIENT = (() => {
   return i >= 0 ? String(process.argv[i + 1] ?? "").trim().toUpperCase() : null;
 })();
 
+// --serve: stay up, claim queued targeting_sync_jobs rows and run them, so the
+// Clients page can start a sync that survives the browser tab closing. One job
+// at a time; a job names the client tags to re-parse (empty = whatever changed).
+const SERVE = process.argv.includes("--serve");
+const POLL_MS = Number(process.env.TARGETING_POLL_MS) || 5000;
+
+// Progress for the row the UI polls. All writes are best-effort — losing a
+// progress update must never abort a sync that is otherwise working.
+const JOB = { id: null, total: 0, processed: 0, synced: 0, failed: 0, pool: null };
+async function jobSet(fields) {
+  if (!JOB.id || !JOB.pool) return;
+  const keys = Object.keys(fields);
+  if (!keys.length) return;
+  try {
+    await JOB.pool.query(
+      `update targeting_sync_jobs set ${keys.map((k, i) => `${k} = $${i + 2}`).join(", ")} where id = $1`,
+      [JOB.id, ...keys.map((k) => fields[k])]
+    );
+  } catch (e) { console.warn(`  (progress update failed: ${e.message})`); }
+}
+async function jobStep(n = 1) {
+  JOB.processed += n;
+  await jobSet({ processed: JOB.processed, ai_calls: usage.calls, ai_cost_usd: usage.cost.toFixed(4) });
+}
+async function jobLog(line) {
+  if (!JOB.id || !JOB.pool) return;
+  try {
+    await JOB.pool.query(`update targeting_sync_jobs set log = array_append(log, $2) where id = $1`, [JOB.id, line]);
+  } catch { /* best effort */ }
+}
+
 const SHEET_ID = process.env.ONBOARDING_SHEET_ID || "1MGqSgGNoeN6WgjZnT7_Ij_nZftyyj7Z9DT77rVYLKuQ";
 const TAB_GID = 581954884;
 // Two model tiers: the client's verbatim location/exclusion prompts were
@@ -546,7 +577,7 @@ async function mapConcurrent(items, limit, fn) {
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
-async function main() {
+async function main(job = null) {
   const saB64 = process.env.GOOGLE_SERVICE_ACCOUNT_B64;
   if (!saB64) { console.error("GOOGLE_SERVICE_ACCOUNT_B64 must be set."); process.exit(1); }
   if (!DRY && !process.env.OPENAI_API_KEY) { console.error("OPENAI_API_KEY must be set."); process.exit(1); }
@@ -637,8 +668,19 @@ async function main() {
               exclude_industries, exclude_keywords, sheet_raw FROM client_targeting`);
     const existingByTag = new Map(existing.map((r) => [r.client_tag, r]));
     const rawOf = (c) => ({ target: c.target, exclusion: c.exclusion, locations: c.locations });
-    const changed = clients.filter((c) => FORCE || JSON.stringify(existingByTag.get(c.tag)?.sheet_raw ?? null) !== JSON.stringify(rawOf(c)));
+    let changed = clients.filter((c) => FORCE || JSON.stringify(existingByTag.get(c.tag)?.sheet_raw ?? null) !== JSON.stringify(rawOf(c)));
+    // A job may name specific tags (what the operator confirmed in the preview);
+    // an empty list means "whatever is currently changed".
+    if (job?.client_tags?.length) {
+      const want = new Set(job.client_tags.map((t) => String(t).toUpperCase()));
+      changed = clients.filter((c) => want.has(c.tag));
+    }
     console.log(`${changed.length} changed, ${clients.length - changed.length} unchanged (skipped).`);
+    if (job) {
+      // 2 slow AI passes per client (locations, exclusions) + 1 write step.
+      JOB.total = changed.length * 2 + 1;
+      await jobSet({ total: JOB.total, phase: `Parsing ${changed.length} client(s)` });
+    }
 
     if (DRY) {
       for (const c of changed.slice(0, 15)) {
@@ -674,6 +716,8 @@ async function main() {
       } catch (err) {
         locFailed.add(c.tag);
         console.error(`  ${c.tag}: location parse failed — ${err.message} (keeping existing locations)`);
+      } finally {
+        await jobStep();
       }
     });
 
@@ -714,6 +758,8 @@ async function main() {
       } catch (err) {
         exclRes.failed.add(c.tag);
         console.error(`  ${c.tag}: exclusion expansion failed — ${err.message} (keeping existing values)`);
+      } finally {
+        await jobStep();
       }
     });
 
@@ -732,6 +778,22 @@ async function main() {
     // Write — one transaction. Per client, a field is only overwritten when its
     // pass succeeded; sheet_raw advances ONLY when every relevant pass
     // succeeded, so partially-failed clients are re-parsed on the next run.
+    // Snapshot what we are about to overwrite so the whole job can be reverted.
+    // Re-parsing is not deterministic — the same sheet text can yield materially
+    // different locations/exclusions — so an undo is not optional.
+    if (JOB.id && JOB.pool) {
+      try {
+        const tags = changed.map((c) => c.tag);
+        const { rows: snap } = await pool.query(
+          `select * from client_targeting where client_tag = any($1::text[])`, [tags]);
+        await JOB.pool.query(`update targeting_sync_jobs set snapshot = $2::jsonb where id = $1`,
+          [JOB.id, JSON.stringify(snap)]);
+        console.log(`  snapshot: ${snap.length} client row(s) saved for revert`);
+      } catch (e) {
+        throw new Error(`could not snapshot current rules (refusing to overwrite): ${e.message}`);
+      }
+    }
+
     const client = await pool.connect();
     let written = 0;
     const partial = [];
@@ -788,9 +850,13 @@ async function main() {
            [...new Set([...exclInd, ...exclKw].map((x) => String(x).trim().toLowerCase()).filter(Boolean))].sort()]
         );
         written++;
-        console.log(`  ${c.tag}: ${locFail ? "locations kept" : `${locs.length} locations`}, ${exclInd.length} excl-cats, ${exclKw.length} excl-keywords${allOk ? "" : "  [PARTIAL — will retry next run]"}`);
+        const line = `${c.tag}: ${locFail ? "locations kept" : `${locs.length} locations`}, ${exclInd.length} excl-cats, ${exclKw.length} excl-keywords${allOk ? "" : "  [PARTIAL — will retry next run]"}`;
+        console.log(`  ${line}`);
+        await jobLog(line);
       }
       await client.query("commit");
+      await jobSet({ synced: written, failed: partial.length, phase: "Saved" });
+      await jobStep();
     } catch (err) {
       await client.query("rollback").catch(() => {});
       throw err;
@@ -812,7 +878,58 @@ async function main() {
   }
 }
 
-main().catch((e) => {
+// One job at a time, claimed with FOR UPDATE SKIP LOCKED so a second worker (or
+// an overlapping deploy) can never run the same job twice.
+async function serve() {
+  const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 2 });
+  pool.on("error", (e) => console.error("pg idle-client error:", e.message)); // never kill the loop
+  JOB.pool = pool;
+  let shuttingDown = false;
+  process.on("SIGTERM", () => { shuttingDown = true; console.log("SIGTERM — finishing current job, then exiting"); });
+
+  console.log(`targeting-worker up — polling every ${POLL_MS}ms`);
+  while (!shuttingDown) {
+    let job = null;
+    try {
+      ({ rows: [job] } = await pool.query(
+        `update targeting_sync_jobs
+            set status = 'running', started_at = coalesce(started_at, now()), phase = 'Reading the onboarding sheet'
+          where id = (select id from targeting_sync_jobs where status = 'pending'
+                       order by created_at limit 1 for update skip locked)
+          returning *`));
+    } catch (e) {
+      console.error("claim failed:", e.message);
+    }
+    if (!job) { await sleep(POLL_MS); continue; }
+
+    console.log(`\n=== job ${job.id} (${job.client_tags?.length || "all changed"} client(s)) ===`);
+    JOB.id = job.id; JOB.processed = 0; JOB.total = 0;
+    usage.calls = 0; usage.cost = 0;
+    try {
+      await main(job);
+      await pool.query(
+        `update targeting_sync_jobs
+            set status = 'complete', completed_at = now(), phase = 'Done',
+                processed = greatest(processed, total), ai_calls = $2, ai_cost_usd = $3
+          where id = $1`,
+        [job.id, usage.calls, usage.cost.toFixed(4)]);
+      console.log(`=== job ${job.id} complete — ${usage.calls} AI calls ≈ $${usage.cost.toFixed(2)} ===`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await pool.query(
+        `update targeting_sync_jobs set status = 'error', completed_at = now(), error = $2,
+                ai_calls = $3, ai_cost_usd = $4 where id = $1`,
+        [job.id, msg.slice(0, 500), usage.calls, usage.cost.toFixed(4)]).catch(() => {});
+      console.error(`=== job ${job.id} FAILED: ${msg} ===`);
+    }
+    JOB.id = null;
+  }
+  await pool.end();
+  console.log("targeting-worker stopped");
+}
+
+const entry = SERVE ? serve() : main();
+entry.catch((e) => {
   console.error(e instanceof Error ? e.stack ?? e.message : e);
   process.exit(1);
 });
