@@ -208,6 +208,13 @@ export default function LeadsPage() {
   const handleReset = useCallback(() => {
     appliedRef.current.clear();
     resetFilters();
+    // Also drop the shared-search id from the address bar. Without this the URL
+    // keeps ?s=<id>, so a refresh silently re-applies the very search that was
+    // just cleared. replaceState (not push) so Back doesn't bounce through a
+    // reset that no longer matches the filters on screen.
+    if (typeof window !== "undefined" && window.location.search) {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
   }, [resetFilters]);
 
   // Removal is observed from state (covers pill re-click, TagInput ✕) rather
