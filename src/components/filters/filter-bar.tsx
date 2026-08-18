@@ -485,9 +485,10 @@ export function FilterBar({
           >
             <div className="space-y-3">
               <p className="px-1 text-[10px] text-muted-foreground">
-                Searches Category, Subcategory and Additional/SEO together, so
-                &quot;dental&quot; finds a lead however it was labelled. Client-tag targeting
-                fills this in automatically.
+                Broad search across Category, Subcategory, Additional/SEO,
+                Company, Industry and Company overview — so &quot;dental&quot; finds a lead
+                however it was labelled, even with no category at all. Client-tag
+                targeting fills this in automatically.
               </p>
               <div>
                 <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -559,9 +560,13 @@ export function FilterBar({
                 />
               </div>
               <p className="px-1 text-[11px] text-muted-foreground">
-                Matches category, subcategory, or additional category.{" "}
+                Matches any of: category, subcategory, additional category, company
+                name, general/specific industry, company overview.{" "}
                 <span className="font-medium text-foreground">Exact</span> = whole-term;{" "}
                 <span className="font-medium text-foreground">Contains</span> = substring. Each side has its own setting.
+                Excludes use the same wide net — excluding &quot;restaurant&quot; also drops a
+                company called &quot;Restaurant Depot&quot;. Use the Company or Keywords chips
+                when you need to target one field precisely.
               </p>
             </div>
           </FilterChip>
