@@ -470,11 +470,103 @@ export function FilterBar({
           ))}
         </div>
 
-        {/* Category / Subcategory / Additional-SEO were three separate chips until
-            2026-08-19. They are merged into the single "Category" chip below, which
-            searches all three columns at once via categorySearch. The three filters
-            still exist in FilterState and in fn_lead_filter_conditions, so saved
-            searches, shared links and stored push-batch filters keep working. */}
+        {/* Category — the MERGED field (2026-08-19). Replaces the three separate
+            Category / Subcategory / Additional-SEO chips with one control that
+            searches all three columns at once via categorySearch. Positioned
+            immediately left of Company so the category+company cluster reads
+            together. The three original filters still exist in FilterState and in
+            fn_lead_filter_conditions, so saved searches, shared links and stored
+            push-batch filters keep resolving unchanged. */}
+        {!isHidden("categorySearch") && (
+          <FilterChip
+            label="Category"
+            activeCount={filters.categorySearch.include.length + filters.categorySearch.exclude.length}
+            onOpen={loadTaxonomy}
+          >
+            <div className="space-y-3">
+              <p className="px-1 text-[10px] text-muted-foreground">
+                Searches Category, Subcategory and Additional/SEO together, so
+                &quot;dental&quot; finds a lead however it was labelled. Client-tag targeting
+                fills this in automatically.
+              </p>
+              <div>
+                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Include
+                  <SideModeToggle
+                    value={filters.categorySearch.includeMode ?? (filters.categorySearch.matchMode === "exact" ? "exact" : "contains")}
+                    onChange={(v) => onCategorySearchChange({ ...filters.categorySearch, includeMode: v })}
+                  />
+                </label>
+                <TagInput
+                  values={filters.categorySearch.include}
+                  placeholder="e.g. dental, school, restaurant"
+                  onChange={(arr) =>
+                    onCategorySearchChange({ ...filters.categorySearch, include: arr })
+                  }
+                />
+                {taxonomy.length > 0 && (
+                  <div className="mt-2">
+                    <p className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Quick pick
+                    </p>
+                    <div className="flex max-h-32 flex-wrap gap-1 overflow-y-auto pr-1">
+                      {taxonomy.map((name) => {
+                        const on = filters.categorySearch.include.some(
+                          (v) => v.toLowerCase() === name.toLowerCase()
+                        );
+                        return (
+                          <button
+                            key={name}
+                            type="button"
+                            onClick={() =>
+                              onCategorySearchChange({
+                                ...filters.categorySearch,
+                                include: on
+                                  ? filters.categorySearch.include.filter(
+                                      (v) => v.toLowerCase() !== name.toLowerCase()
+                                    )
+                                  : [...filters.categorySearch.include, name],
+                              })
+                            }
+                            className={`rounded-full px-2 py-0.5 text-[11px] transition-colors ${
+                              on
+                                ? "bg-primary text-primary-foreground"
+                                : "bg-muted text-foreground hover:bg-accent"
+                            }`}
+                          >
+                            {name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Exclude
+                  <SideModeToggle
+                    value={filters.categorySearch.excludeMode ?? (filters.categorySearch.matchMode === "exact" ? "exact" : "contains")}
+                    onChange={(v) => onCategorySearchChange({ ...filters.categorySearch, excludeMode: v })}
+                  />
+                </label>
+                <TagInput
+                  values={filters.categorySearch.exclude}
+                  placeholder="e.g. pre, mobile"
+                  onChange={(arr) =>
+                    onCategorySearchChange({ ...filters.categorySearch, exclude: arr })
+                  }
+                />
+              </div>
+              <p className="px-1 text-[11px] text-muted-foreground">
+                Matches category, subcategory, or additional category.{" "}
+                <span className="font-medium text-foreground">Exact</span> = whole-term;{" "}
+                <span className="font-medium text-foreground">Contains</span> = substring. Each side has its own setting.
+              </p>
+            </div>
+          </FilterChip>
+        )}
+
 
         {/* Company — next to Additional/SEO so the industry+company cluster reads
             together (client req #3) */}
@@ -614,98 +706,6 @@ export function FilterBar({
           </FilterChip>
         )}
 
-        {/* Category — the MERGED field (2026-08-19). One chip that searches
-            Category, Subcategory and Additional/SEO together, replacing the
-            three separate dropdowns. */}
-        {!isHidden("categorySearch") && (
-          <FilterChip
-            label="Category"
-            activeCount={filters.categorySearch.include.length + filters.categorySearch.exclude.length}
-            onOpen={loadTaxonomy}
-          >
-            <div className="space-y-3">
-              <p className="px-1 text-[10px] text-muted-foreground">
-                Searches Category, Subcategory and Additional/SEO together, so
-                &quot;dental&quot; finds a lead however it was labelled. Client-tag targeting
-                fills this in automatically.
-              </p>
-              <div>
-                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Include
-                  <SideModeToggle
-                    value={filters.categorySearch.includeMode ?? (filters.categorySearch.matchMode === "exact" ? "exact" : "contains")}
-                    onChange={(v) => onCategorySearchChange({ ...filters.categorySearch, includeMode: v })}
-                  />
-                </label>
-                <TagInput
-                  values={filters.categorySearch.include}
-                  placeholder="e.g. dental, school, restaurant"
-                  onChange={(arr) =>
-                    onCategorySearchChange({ ...filters.categorySearch, include: arr })
-                  }
-                />
-                {taxonomy.length > 0 && (
-                  <div className="mt-2">
-                    <p className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                      Quick pick
-                    </p>
-                    <div className="flex max-h-32 flex-wrap gap-1 overflow-y-auto pr-1">
-                      {taxonomy.map((name) => {
-                        const on = filters.categorySearch.include.some(
-                          (v) => v.toLowerCase() === name.toLowerCase()
-                        );
-                        return (
-                          <button
-                            key={name}
-                            type="button"
-                            onClick={() =>
-                              onCategorySearchChange({
-                                ...filters.categorySearch,
-                                include: on
-                                  ? filters.categorySearch.include.filter(
-                                      (v) => v.toLowerCase() !== name.toLowerCase()
-                                    )
-                                  : [...filters.categorySearch.include, name],
-                              })
-                            }
-                            className={`rounded-full px-2 py-0.5 text-[11px] transition-colors ${
-                              on
-                                ? "bg-primary text-primary-foreground"
-                                : "bg-muted text-foreground hover:bg-accent"
-                            }`}
-                          >
-                            {name}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-              <div>
-                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Exclude
-                  <SideModeToggle
-                    value={filters.categorySearch.excludeMode ?? (filters.categorySearch.matchMode === "exact" ? "exact" : "contains")}
-                    onChange={(v) => onCategorySearchChange({ ...filters.categorySearch, excludeMode: v })}
-                  />
-                </label>
-                <TagInput
-                  values={filters.categorySearch.exclude}
-                  placeholder="e.g. pre, mobile"
-                  onChange={(arr) =>
-                    onCategorySearchChange({ ...filters.categorySearch, exclude: arr })
-                  }
-                />
-              </div>
-              <p className="px-1 text-[11px] text-muted-foreground">
-                Matches category, subcategory, or additional category.{" "}
-                <span className="font-medium text-foreground">Exact</span> = whole-term;{" "}
-                <span className="font-medium text-foreground">Contains</span> = substring. Each side has its own setting.
-              </p>
-            </div>
-          </FilterChip>
-        )}
 
         {/* Keywords — include + exclude, with a Contains vs Exact match toggle */}
         {!isHidden("keywords") && (
