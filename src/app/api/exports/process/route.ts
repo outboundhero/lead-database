@@ -258,6 +258,21 @@ export async function POST(request: NextRequest) {
 
   const adminSupabase = createAdminClient();
 
+  // Role gate — same rule as /api/exports/stream: a `viewer` cannot extract data.
+  {
+    const { data: profile } = await adminSupabase
+      .from("user_profiles")
+      .select("role")
+      .eq("id", user.id)
+      .single();
+    if (!profile || !["owner", "admin", "manager"].includes(profile.role)) {
+      return NextResponse.json(
+        { error: "Your role cannot export leads" },
+        { status: 403 }
+      );
+    }
+  }
+
   let body: ExportPayload;
   try {
     body = await request.json();

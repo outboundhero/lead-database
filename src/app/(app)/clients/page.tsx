@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { RefreshCw, Search } from "lucide-react";
+import { RefreshCw, Search, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +22,7 @@ export default function ClientsPage() {
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [syncingGroups, setSyncingGroups] = useState(false);
   const [savingTag, setSavingTag] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
@@ -56,6 +57,36 @@ export default function ClientsPage() {
       toast.error(e instanceof Error ? e.message : "Refresh failed", { id });
     } finally {
       setRefreshing(false);
+    }
+  }
+
+  // On-demand Bison group re-sync from the tracker's "Groups" tab. Clients get
+  // moved between groups there, but client_tags otherwise only catches up on the
+  // 6-hourly cron. Groups only — never touches names, statuses, or the roster.
+  async function syncGroups() {
+    setSyncingGroups(true);
+    const id = toast.loading("Reading the Groups sheet…");
+    try {
+      const res = await fetch("/api/clients/sync-groups", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Group sync failed");
+
+      const gained: string[] = data.gained ?? [];
+      const moved: Array<{ tag: string; from: number; to: number }> = data.moved ?? [];
+      const parts: string[] = [];
+      if (gained.length) parts.push(`${gained.length} now sendable (${gained.join(", ")})`);
+      if (moved.length) parts.push(`${moved.length} moved (${moved.map((m) => `${m.tag}: ${m.from}→${m.to}`).join(", ")})`);
+      if (data.notInDb?.length) parts.push(`${data.notInDb.length} not in the client list yet`);
+
+      toast.success(
+        parts.length ? `Groups synced — ${parts.join(" · ")}` : "Groups synced — nothing changed",
+        { id, duration: parts.length ? 8000 : 4000 }
+      );
+      await load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Group sync failed", { id });
+    } finally {
+      setSyncingGroups(false);
     }
   }
 
@@ -110,11 +141,18 @@ export default function ClientsPage() {
           </p>
         </div>
         {canRefresh && (
-          <Button variant="outline" size="sm" onClick={refreshStats} disabled={refreshing} className="gap-2"
-            title="Recomputes each client's lead counts from the database (can take ~30s). Client names/statuses sync automatically from the Client Tracker sheet.">
-            <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-            Refresh stats
-          </Button>
+          <div className="flex shrink-0 gap-2">
+            <Button variant="outline" size="sm" onClick={syncGroups} disabled={syncingGroups || refreshing} className="gap-2"
+              title="Re-reads the Groups tab of the Client Tracker sheet and applies Bison group changes now, instead of waiting for the 6-hourly sync. Groups only — never changes names, statuses, or which clients exist, and never removes an existing mapping.">
+              <Users className={`h-4 w-4 ${syncingGroups ? "animate-pulse" : ""}`} />
+              {syncingGroups ? "Syncing…" : "Sync groups"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={refreshStats} disabled={refreshing || syncingGroups} className="gap-2"
+              title="Recomputes each client's lead counts from the database (can take ~30s). Client names/statuses sync automatically from the Client Tracker sheet.">
+              <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+              Refresh stats
+            </Button>
+          </div>
         )}
       </div>
 

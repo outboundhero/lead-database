@@ -13,6 +13,21 @@ export async function POST(request: NextRequest) {
   const { filters, columnSelection, limit, rangeFrom, rangeTo, action, jobId, rowCount, selectedIds } = body;
   const adminSupabase = createAdminClient();
 
+  // Role gate — matches /api/exports/stream and /api/exports/process. This route
+  // only writes export_jobs bookkeeping (it never returns lead data), but a
+  // viewer could otherwise fill the 4 concurrent queue slots and block real
+  // exports.
+  {
+    const { data: profile } = await adminSupabase
+      .from("user_profiles")
+      .select("role")
+      .eq("id", user.id)
+      .single();
+    if (!profile || !["owner", "admin", "manager"].includes(profile.role)) {
+      return NextResponse.json({ error: "Your role cannot export leads" }, { status: 403 });
+    }
+  }
+
   if (action === "start") {
     // Self-heal stuck 'processing' rows before checking the queue. Zombies
     // happen when Next.js maxDuration (600s) terminates the streaming

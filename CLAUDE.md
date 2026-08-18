@@ -528,6 +528,80 @@ until a round returns fewer rows than the limit. No other worker uses this table
 | 072 | `client_tags.client_type`; `policy` bounce type |
 | **073** | **Drops the duplicate 0-arg `fn_sync_companies()`** |
 | **074** | **`fn_sync_companies` default `NULL → 50000`** (bounded propagation) |
+| **075** | **Empties `client_targeting.include_industries` / `include_keywords`** |
+| **076** | Drops un-split comma lists from `exclude_industries` (the `TagInput` paste bug) |
+
+---
+
+## Permissions — enforce SERVER-side, always
+
+`useHasPermission` / `AccessDenied` only hide UI. The API route is the boundary.
+
+Two routes shipped with **no authentication at all** while using the service-role
+client, and took `performedBy` from the request body (fixed 2026-08-18):
+`api/admin/update-role` (any logged-in account — a viewer included — could
+promote itself to owner) and `api/admin/reset-password`. Both now follow the
+`api/admin/invite` pattern: `auth.getUser()` → look up the caller's role →
+gate. **Never trust an actor id from the request body**; derive it from the session.
+
+Extra rules now enforced in `update-role`: only an `owner` may grant `owner` or
+change an existing owner's role, and the last remaining owner cannot be demoted.
+`delete-user` also refuses self-deletion.
+
+**Exports are `owner`/`admin`/`manager`.** `exports/stream`, `exports/process`
+and `exports/log` each check the role — previously any authenticated session
+could stream all 8.19M leads, contradicting the `viewer` row in the table above.
+`export-button.tsx` hides the control for viewers so the UI matches the server.
+
+When adding a route, copy an existing gated one; the audit above found 16 routes
+with role checks and 4 relying on middleware position alone.
+
+---
+
+## Clients page: "Sync groups" button
+
+`POST /api/clients/sync-groups` (owner/admin/manager) re-reads the **Groups tab**
+of the tracker workbook (gid `239723744`) and applies Bison group changes on
+demand, instead of waiting for the 6-hourly `client-sync` cron — which reads a
+*different* workbook (`CLIENTS_SHEET_ID` → `Sheet1`) that has drifted.
+
+Groups only: it updates `group_no` / `b2b_instance` / `b2c_instance`, never
+inserts a tag (roster stays the cron's job), and never clears an existing
+mapping (`COALESCE` semantics — a tag missing from the sheet keeps what it has).
+
+⚠ **That tab is NOT two adjacent tag columns**:
+
+| A | B | C | D | E | F | G | H |
+|---|---|---|---|---|---|---|---|
+| Group 1 tags | Status | Churn Date | Plan | Group 2 tags | Status | Churn Date | Plan |
+
+Reading `A:B` would treat "Active"/"Churned" as client tags and create clients
+named `ACTIVE`/`CHURNED` **with real Bison routing**. The route finds the two tag
+columns by header regex and rejects any Status/Plan value via `NOT_A_TAG`.
+Shared Sheets auth now lives in [src/lib/google/sheets.ts](src/lib/google/sheets.ts)
+(readonly scope only).
+
+## Targeting include-lists are empty by design
+
+`client_targeting.include_industries` / `include_keywords` are **always empty**
+unless set by hand in the Rules dialog (client request 2026-08-18; migration 075
+cleared 960 + 1,960 entries). `sync-client-targeting-from-sheet.mjs` no longer
+writes them — Pass D was deleted; Pass B still *asks* the model for the include
+side but uses it only to keep a category out of `exclude_industries`.
+
+Neither ever gated pushes. The only behaviour change: selecting a client on the
+Leads page no longer pre-fills the Category-search filter.
+
+## `TagInput` splits lists by default
+
+[tag-input.tsx](src/components/ui/ios/tag-input.tsx) splits committed values on
+`, ; newline tab` — **including on paste**, which was the actual bug (the `,`
+keypress was handled, paste was not, so a pasted list became one chip; production
+had a single 588-character entry). De-dupes case-insensitively, `maxTags` is 500
+and now warns instead of silently discarding the overflow.
+
+Pass `splitOn={null}` where a comma belongs to the value — the two **location**
+fields in the targeting dialog (`"Spokane, WA"` must stay one chip).
 
 ## Known issues / TODO
 

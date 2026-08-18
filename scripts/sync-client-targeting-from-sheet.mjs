@@ -4,8 +4,11 @@
 //
 // Sheet (ONBOARDING_SHEET_ID, tab gid 581954884 "Onboarding Form Responses"):
 //   col A = Client Abbreviation (client_tag, may be "&"-joined compounds)
-//   col L = Target industries & keywords        -> include_industries (taxonomy)
-//                                                  + include_keywords (search phrases)
+//   col L = Target industries & keywords        -> read, but NO LONGER STORED.
+//           (2026-08-18) include_industries / include_keywords are always written
+//           empty by client request. The text is still sent to the taxonomy pass
+//           so an "include" category can never also land in exclude_industries.
+//           Set the include side by hand in the Rules dialog if it's ever wanted.
 //   col M = Exclusion industries & keywords     -> exclude_industries (taxonomy)
 //                                                  + exclude_keywords (whole-term)
 //   col O = Inclusion locations (ZIPs/counties/ -> include_locations [{country,state,city}]
@@ -380,23 +383,10 @@ salon, salons, beauty salon, hair salon, hair studio, hairdresser, barber, barbe
 
 Do not automatically include categories that may still be acceptable unless they are clearly covered by the client's exclusion request.`;
 
-const INCLUDE_KEYWORDS_PROMPT = `You turn a client's messy "target industries" text into clean search phrases. Each phrase is substring-matched (case-insensitive contains) against business-category labels like "Dental clinic", "Corporate office", "Executive coach", "Technology consultant", "Church", "Warehouse".
+// INCLUDE_KEYWORDS_PROMPT was removed 2026-08-18: include_keywords is no longer
+// derived from the sheet (see the write phase). Recover it from git history if
+// the include side is ever reinstated.
 
-Instructions:
-1. Extract EVERY distinct business type as a short lowercase phrase (1-3 words) —
-   physical AND professional-services alike: "dental", "medical office", "church",
-   "warehouse", "school", "car dealership", "coach", "consultant", "law firm", "software".
-2. Prefer the STEM that catches variants: "dental" (catches dentist/dental clinic),
-   "restaurant" (catches restaurants), "consultant" (catches technology consultants,
-   DEI consultants), "coach" (catches executive coaches).
-3. Conservative synonym expansion only when clearly implied: "religious institutions" -> "church", "temple", "mosque"; "medical" -> "clinic", "medical".
-4. NEVER output generic words that match everything: "service", "services", "company", "business", "commercial", "office building" is fine but bare "building" is not.
-5. Skip vague prose ("most other commercial spaces", "TBD").
-6. Deduplicate; drop a phrase if another phrase is its substring.
-
-Return JSON keyed by each client's tag EXACTLY as it appears before the colon in the input
-(e.g. input "JV: dental offices, gyms" -> key "JV"):
-{"JV":["phrase1","phrase2",...], ...}`;
 
 // ── Geo validation (same SQL as /api/clients/targeting validateEntries) ──────
 
@@ -727,12 +717,11 @@ async function main() {
       }
     });
 
-    // Pass D: include search phrases (batches of 15).
-    const inclInput = changed.filter((c) => c.target);
-    const inclRes = await batchedAi(inclInput, 15, async (batch) => {
-      const input = batch.map((c) => `${c.tag}: ${c.target}`).join("\n---\n");
-      return aiJson(INCLUDE_KEYWORDS_PROMPT, input);
-    });
+    // Pass D (include search phrases) was REMOVED 2026-08-18 by client request:
+    // include_keywords / include_industries are now always empty, set by hand in
+    // the Rules dialog if wanted at all. They never gated pushes — include_keywords
+    // only pre-filled the Category search filter when a client was selected. This
+    // also drops ~1 AI call per changed client per run.
 
     const cleanList = (tag, kind, list, max = 200) => {
       const cleaned = [...new Set((Array.isArray(list) ? list : []).map((s) => String(s).trim().toLowerCase()).filter((s) => s && s.length <= 60))];
@@ -754,17 +743,19 @@ async function main() {
         const locFail = hasLoc && (locFailed.has(c.tag) || !locByTag.has(c.tag));
         const bFail = (c.target || c.exclusion) && catRes.failed.has(c.tag);
         const cFail = c.exclusion && exclRes.failed.has(c.tag);
-        const dFail = c.target && inclRes.failed.has(c.tag);
 
         const locs = locFail ? (ex?.include_locations ?? []) : (hasLoc ? locByTag.get(c.tag) : []);
         const cats = bFail ? null : (catRes.out[c.tag] ?? {});
-        const inclInd = cats ? canonCats(cats.include) : (ex?.include_industries ?? []);
-        const exclInd = cats ? canonCats(cats.exclude).filter((n) => !inclInd.includes(n)) : (ex?.exclude_industries ?? []);
+        // The model's INCLUDE list is still requested and used HERE ONLY, to
+        // guarantee a category is never both included and excluded. It is no
+        // longer stored — include_industries/include_keywords are written empty
+        // (client request 2026-08-18); set them by hand in the Rules dialog if needed.
+        const aiInclude = cats ? canonCats(cats.include) : [];
+        const exclInd = cats ? canonCats(cats.exclude).filter((n) => !aiInclude.includes(n)) : (ex?.exclude_industries ?? []);
         const exclKw = cFail ? (ex?.exclude_keywords ?? []) : cleanList(c.tag, "exclude_keywords", exclRes.out[c.tag]);
-        const inclKw = dFail ? (ex?.include_keywords ?? []) : cleanList(c.tag, "include_keywords", inclRes.out[c.tag]);
         const derived = [...new Set(locs.map((l) => l.country))];
         const countries = derived.length ? derived : (ex?.countries?.length ? ex.countries : ["US"]);
-        const allOk = !locFail && !bFail && !cFail && !dFail;
+        const allOk = !locFail && !bFail && !cFail;
         const sheetRaw = allOk ? rawOf(c) : (ex?.sheet_raw ?? null);
         if (!allOk) partial.push(c.tag);
 
@@ -783,11 +774,13 @@ async function main() {
              sheet_synced_at = now(),
              source = 'sheet',
              updated_at = now()`,
-          [c.tag, countries, JSON.stringify(locs), inclInd, inclKw, exclInd, exclKw,
+          // $4 / $5 are always '{}' now — include_industries / include_keywords
+          // are never populated from the sheet.
+          [c.tag, countries, JSON.stringify(locs), [], [], exclInd, exclKw,
            sheetRaw === null ? null : JSON.stringify(sheetRaw)]
         );
         written++;
-        console.log(`  ${c.tag}: ${locFail ? "locations kept" : `${locs.length} locations`}, ${inclInd.length} incl-cats, ${inclKw.length} incl-phrases, ${exclInd.length} excl-cats, ${exclKw.length} excl-keywords${allOk ? "" : "  [PARTIAL — will retry next run]"}`);
+        console.log(`  ${c.tag}: ${locFail ? "locations kept" : `${locs.length} locations`}, ${exclInd.length} excl-cats, ${exclKw.length} excl-keywords${allOk ? "" : "  [PARTIAL — will retry next run]"}`);
       }
       await client.query("commit");
     } catch (err) {

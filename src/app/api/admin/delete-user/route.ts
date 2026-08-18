@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
   // Role check — only owner and admin can delete users
   const { data: callerProfile } = await supabase
     .from("user_profiles")
-    .select("role")
+    .select("email, role")
     .eq("id", user.id)
     .single();
 
@@ -24,16 +24,21 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Only owners and admins can delete users" }, { status: 403 });
   }
 
-  let body: { userId: string; performedBy?: string };
+  // `performedBy` is deliberately NOT read from the body — the caller must not
+  // be able to attribute the action to someone else in the audit log.
+  let body: { userId?: string };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { userId, performedBy } = body;
+  const { userId } = body;
   if (!userId) {
     return NextResponse.json({ error: "userId required" }, { status: 400 });
+  }
+  if (userId === user.id) {
+    return NextResponse.json({ error: "You cannot delete your own account" }, { status: 400 });
   }
 
   // Get user info before deleting
@@ -65,7 +70,7 @@ export async function POST(request: NextRequest) {
 
   await logAudit({
     action: "User Deleted",
-    performedBy,
+    performedBy: callerProfile.email ?? user.id,
     details: `User Email: ${profile?.email ?? userId}`,
   });
 

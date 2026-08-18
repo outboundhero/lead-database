@@ -36,6 +36,19 @@ export async function POST(request: NextRequest) {
     return new Response("Unauthorized", { status: 401 });
   }
 
+  // Role gate: a `viewer` may filter and browse but not extract data. Without
+  // this, any authenticated session could stream the entire leads table.
+  {
+    const { data: profile } = await createAdminClient()
+      .from("user_profiles")
+      .select("role")
+      .eq("id", user.id)
+      .single();
+    if (!profile || !["owner", "admin", "manager"].includes(profile.role)) {
+      return new Response("Forbidden: your role cannot export leads", { status: 403 });
+    }
+  }
+
   const body = await request.json();
   const { filters, columnSelection, limit, rangeFrom, rangeTo, jobId, selectedIds } = body as {
     filters: FilterState;

@@ -172,6 +172,8 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
               <TagInput
                 values={include.map(entryLabel)}
                 placeholder='"Washington", "Spokane, WA", "Canada" — Enter to add'
+                // splitOn={null}: a comma is part of the value here ("Spokane, WA").
+                splitOn={null}
                 onChange={(arr) => setInclude(arr.map(parseEntry))}
               />
               <p className="mt-1 px-1 text-[10px] text-muted-foreground">Empty = the whole targeted country list.</p>
@@ -181,17 +183,19 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
               <TagInput
                 values={exclude.map(entryLabel)}
                 placeholder='e.g. "Spokane, WA" — overrides any inclusion'
+                splitOn={null}
                 onChange={(arr) => setExclude(arr.map(parseEntry))}
               />
             </div>
             <div>
               <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Include industries</p>
               <TagInput values={includeIndustries} placeholder="Taxonomy category names" onChange={setIncludeIndustries} />
-              <p className="mt-1 px-1 text-[10px] text-muted-foreground">Taxonomy reference from the sheet — the Include keywords below are what auto-apply to filters. Neither gates pushes.</p>
+              <p className="mt-1 px-1 text-[10px] text-muted-foreground">Optional. Empty unless you set it — no longer filled in from the onboarding sheet. Reference only: it never gates pushes.</p>
             </div>
             <div>
               <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Include keywords</p>
               <TagInput values={includeKeywords} placeholder='Category search terms ("dental", "office")' onChange={setIncludeKeywords} />
+              <p className="mt-1 px-1 text-[10px] text-muted-foreground">Optional. Empty by default. Anything here pre-fills the Category search filter when this client is selected on the Leads page; it never gates pushes.</p>
             </div>
             <div>
               <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Exclude industries</p>

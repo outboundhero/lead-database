@@ -13,6 +13,7 @@ import {
 import { ColumnSelector, type BisonCampaign, type ExportDestination } from "./column-selector";
 import { toast } from "sonner";
 import type { FilterState } from "@/types/filters";
+import { useHasPermission } from "@/lib/context/role-context";
 
 interface ExportButtonProps {
   filters: FilterState;
@@ -24,6 +25,7 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [exportType, setExportType] = useState<"filtered" | "selected">("filtered");
   const [exporting, setExporting] = useState(false);
+  const canExport = useHasPermission("manager"); // owner / admin / manager
 
   function openSelector(type: "filtered" | "selected") {
     setExportType(type);
@@ -200,6 +202,11 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
   }
 
   const hasSelection = selectedIds.length > 0;
+
+  // A `viewer` may filter and browse but not extract data — the same rule the
+  // export API routes enforce. Hiding the control keeps the UI honest instead of
+  // offering an action that would 403.
+  if (!canExport) return null;
 
   return (
     <>
