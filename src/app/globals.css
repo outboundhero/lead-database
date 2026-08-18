@@ -119,6 +119,11 @@
 
   /* Frosted surface backdrop (use with `backdrop-blur-xl bg-popover/80`) */
   --frosted: oklch(1 0 0 / 0.72);
+  /* Floating overlays (popover / dropdown / select) sit over arbitrary page
+     content, so they must stay readable even when backdrop-filter is not
+     applied — which happens on elements that also animate opacity/transform,
+     as all three of these do. 0.72 let table rows show through. */
+  --frosted-overlay: oklch(1 0 0 / 0.98);
 }
 
 .dark {
@@ -169,6 +174,8 @@
   --shadow-elevated: 0 2px 8px rgba(0, 0, 0, 0.5), 0 16px 40px rgba(0, 0, 0, 0.6);
 
   --frosted: oklch(0.165 0.005 264 / 0.78);
+  /* Matches --popover in dark so an overlay reads as one solid surface. */
+  --frosted-overlay: oklch(0.21 0.005 264 / 0.98);
 }
 
 @layer base {
@@ -200,6 +207,14 @@
     background-color: var(--frosted);
     backdrop-filter: saturate(180%) blur(40px);
     -webkit-backdrop-filter: saturate(180%) blur(40px);
+  }
+  /* Floating menus: keep the frosted look, but opaque enough that the page
+     behind never competes with the content. Use for popover / dropdown /
+     select — NOT for sticky toolbars, where see-through is the point. */
+  .ios-frost-overlay {
+    background-color: var(--frosted-overlay);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
   }
   .shadow-ios {
     box-shadow: var(--shadow-card);
