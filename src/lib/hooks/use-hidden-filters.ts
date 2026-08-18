@@ -9,13 +9,37 @@ import { useCallback, useEffect, useState } from "react";
 // clears the underlying filter value.
 const STORAGE_KEY = "outboundhero.hiddenFilters";
 
+// One-time cleanup stamp. On 2026-08-19 the Category / Subcategory /
+// Additional-SEO chips were merged into the single "Category" chip, which is
+// keyed `categorySearch`. Anyone who had hidden that chip — or who still has the
+// three dead keys stored — would otherwise never see the merged field, which is
+// precisely the "I can't see the feature" problem this change set out to fix.
+// So we un-hide it once and drop the retired keys, then stamp so it never
+// re-runs and the user's later choices are respected.
+const MIGRATION_KEY = "outboundhero.hiddenFilters.mergedCategory";
+const RETIRED_KEYS = ["category", "subcategory", "additionalCategory"];
+
 function readStored(): string[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+    let values = Array.isArray(parsed)
+      ? parsed.filter((v): v is string => typeof v === "string")
+      : [];
+
+    if (!window.localStorage.getItem(MIGRATION_KEY)) {
+      const cleaned = values.filter(
+        (v) => v !== "categorySearch" && !RETIRED_KEYS.includes(v)
+      );
+      if (cleaned.length !== values.length) {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
+        values = cleaned;
+      }
+      window.localStorage.setItem(MIGRATION_KEY, "1");
+    }
+    return values;
   } catch {
     return [];
   }

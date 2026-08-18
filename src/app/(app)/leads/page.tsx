@@ -350,7 +350,6 @@ export default function LeadsPage() {
           onLoadPreset={handleLoadPreset}
           onClientTagSelected={handleClientTagSelected}
           onLocationTargetsChange={setLocationTargets}
-          onCategoryCascadeChange={setCategoryCascade}
           onClientTagChange={(t) => { setClientTag(t); if (!t) setAvailability(null); }}
           onReset={handleReset}
         />

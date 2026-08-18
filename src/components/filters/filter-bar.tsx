@@ -57,7 +57,9 @@ interface FilterBarProps {
   // auto-apply that client's targeting rules to the other filters.
   onClientTagSelected?: (tag: string) => void;
   onLocationTargetsChange?: (value: LocationTargetsFilter) => void;
-  onCategoryCascadeChange?: (value: { enabled: boolean; includeCompany: boolean }) => void;
+  // onCategoryCascadeChange: removed with the merged Category chip (2026-08-19).
+  // categoryCascade remains in FilterState + buildRpcFilters so old saved
+  // searches still resolve; there is simply no UI to switch it on any more.
   onClientTagChange?: (tag: string | null) => void;
   onReset: () => void;
 }
@@ -142,7 +144,7 @@ const HIDEABLE_CHIPS: { key: string; label: string }[] = [
   { key: "title", label: "Title" },
   { key: "city", label: "City" },
   { key: "state", label: "State" },
-  { key: "categorySearch", label: "Category Search" },
+  { key: "categorySearch", label: "Category" },
   { key: "keywords", label: "Keywords" },
   { key: "emailContains", label: "Email Contains" },
   { key: "website", label: "Website / Domain" },
@@ -150,9 +152,9 @@ const HIDEABLE_CHIPS: { key: string; label: string }[] = [
   { key: "emailType", label: "Email Type" },
   { key: "bounced", label: "Bounced" },
   { key: "esp", label: "Email Service Provider" },
-  { key: "category", label: "Category" },
-  { key: "subcategory", label: "Subcategory" },
-  { key: "additionalCategory", label: "Additional Category" },
+  // category / subcategory / additionalCategory were removed here on 2026-08-19 —
+  // the three chips are merged into "Category" above. Leaving them listed would
+  // offer a toggle for chips that no longer render.
   { key: "tags", label: "Client Tags" },
 ];
 
@@ -218,7 +220,6 @@ export function FilterBar({
   onLoadPreset,
   onClientTagSelected,
   onLocationTargetsChange,
-  onCategoryCascadeChange,
   onClientTagChange,
   onReset,
 }: FilterBarProps) {
@@ -252,11 +253,14 @@ export function FilterBar({
   const [jobTitles, setJobTitles] = useState<string[]>([]);
   const [sources, setSources] = useState<string[]>([]);
   const [espValues, setEspValues] = useState<string[]>([]);
-  const [categoryValues, setCategoryValues] = useState<string[]>([]);
-  const [subcategoryValues, setSubcategoryValues] = useState<string[]>([]);
-  const [additionalCategoryValues, setAdditionalCategoryValues] = useState<string[]>([]);
   const [cityValues, setCityValues] = useState<string[]>([]);
   const [companyValues, setCompanyValues] = useState<string[]>([]);
+  // The 36-name category taxonomy (lead_categories), used as quick-picks in the
+  // merged Category chip. Deliberately NOT the distinct values from `leads` —
+  // subcategory alone holds 478,631 distinct values and loading them is what
+  // made the old dropdowns hang.
+  const [taxonomy, setTaxonomy] = useState<string[]>([]);
+  const taxonomyLoadedRef = useRef(false);
   // Per-option lead counts (state/city) from the filter_option_counts RPC.
   const [optionCounts, setOptionCounts] = useState<Record<string, Record<string, number>>>({});
   const [clientTagOptions, setClientTagOptions] = useState<string[]>([]);
@@ -278,9 +282,6 @@ export function FilterBar({
       case "title": setJobTitles(values); break;
       case "source": setSources(values); break;
       case "esp": setEspValues([...new Set(values)]); break;
-      case "category": setCategoryValues(values); break;
-      case "subcategory": setSubcategoryValues(values); break;
-      case "additional_category": setAdditionalCategoryValues(values); break;
       case "city": setCityValues(values); break;
       case "company": setCompanyValues(values); break;
     }
@@ -321,6 +322,20 @@ export function FilterBar({
 
     applyValues(col, values);
   }, [applyValues]);
+
+  // 36 rows, read once per page — effectively instant. RLS on lead_categories
+  // allows any authenticated session to SELECT.
+  const loadTaxonomy = useCallback(async () => {
+    if (taxonomyLoadedRef.current) return;
+    taxonomyLoadedRef.current = true;
+    try {
+      const supabase = createClient();
+      const { data } = await supabase.from("lead_categories").select("name").order("name");
+      if (data) setTaxonomy((data as { name: string }[]).map((r) => r.name).filter(Boolean));
+    } catch {
+      taxonomyLoadedRef.current = false; // let the next open retry
+    }
+  }, []);
 
   // Live search: when user types in searchable filters, query DB for matching values
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -455,80 +470,11 @@ export function FilterBar({
           ))}
         </div>
 
-        {/* Category — populated by the categorize worker (lead_categories taxonomy) */}
-        {!isHidden("category") && (
-          <FilterChip
-            label="Category"
-            activeCount={filters.category.include.length + filters.category.exclude.length + (filters.category.includeUnknown ? 1 : 0)}
-            onOpen={() => loadDistinctFor("category")}
-          >
-            <div className="mb-2 space-y-1 rounded-lg bg-muted/50 p-2">
-              <label className="flex items-center gap-2 text-[11px]">
-                <input
-                  type="checkbox"
-                  checked={filters.categoryCascade?.enabled ?? false}
-                  onChange={(e) =>
-                    onCategoryCascadeChange?.({ enabled: e.target.checked, includeCompany: filters.categoryCascade?.includeCompany ?? false })
-                  }
-                />
-                Also apply to Subcategory + Additional/SEO (same contains/exact)
-              </label>
-              {filters.categoryCascade?.enabled && (
-                <label className="ml-5 flex items-center gap-2 text-[11px]">
-                  <input
-                    type="checkbox"
-                    checked={filters.categoryCascade?.includeCompany ?? false}
-                    onChange={(e) =>
-                      onCategoryCascadeChange?.({ enabled: true, includeCompany: e.target.checked })
-                    }
-                  />
-                  Include company name in exclusions
-                </label>
-              )}
-            </div>
-            <FilterMultiSelect
-              options={categoryValues}
-              value={filters.category}
-              onChange={(v) => onIncludeExcludeChange("category", v)}
-              searchable
-              onSearch={(term) => liveSearch("category", term)}
-            />
-          </FilterChip>
-        )}
-
-        {/* Subcategory — Bison-enriched, second-level category */}
-        {!isHidden("subcategory") && (
-          <FilterChip
-            label="Subcategory"
-            activeCount={filters.subcategory.include.length + filters.subcategory.exclude.length + (filters.subcategory.includeUnknown ? 1 : 0)}
-            onOpen={() => loadDistinctFor("subcategory")}
-          >
-            <FilterMultiSelect
-              options={subcategoryValues}
-              value={filters.subcategory}
-              onChange={(v) => onIncludeExcludeChange("subcategory", v)}
-              searchable
-              onSearch={(term) => liveSearch("subcategory", term)}
-            />
-          </FilterChip>
-        )}
-
-        {/* Additional / SEO — third-level category; holds Clay "Company SEO Description" text */}
-        {!isHidden("additionalCategory") && (
-          <FilterChip
-            label="Additional / SEO"
-            activeCount={filters.additionalCategory.include.length + filters.additionalCategory.exclude.length + (filters.additionalCategory.includeUnknown ? 1 : 0)}
-            onOpen={() => loadDistinctFor("additional_category")}
-          >
-            <FilterMultiSelect
-              options={additionalCategoryValues}
-              value={filters.additionalCategory}
-              onChange={(v) => onIncludeExcludeChange("additionalCategory", v)}
-              searchable
-              onSearch={(term) => liveSearch("additional_category", term)}
-            />
-          </FilterChip>
-        )}
+        {/* Category / Subcategory / Additional-SEO were three separate chips until
+            2026-08-19. They are merged into the single "Category" chip below, which
+            searches all three columns at once via categorySearch. The three filters
+            still exist in FilterState and in fn_lead_filter_conditions, so saved
+            searches, shared links and stored push-batch filters keep working. */}
 
         {/* Company — next to Additional/SEO so the industry+company cluster reads
             together (client req #3) */}
@@ -668,17 +614,20 @@ export function FilterBar({
           </FilterChip>
         )}
 
-        {/* Category Search — matches category/subcategory/additional; Contains or Exact */}
+        {/* Category — the MERGED field (2026-08-19). One chip that searches
+            Category, Subcategory and Additional/SEO together, replacing the
+            three separate dropdowns. */}
         {!isHidden("categorySearch") && (
           <FilterChip
-            label="Category Search"
+            label="Category"
             activeCount={filters.categorySearch.include.length + filters.categorySearch.exclude.length}
+            onOpen={loadTaxonomy}
           >
             <div className="space-y-3">
               <p className="px-1 text-[10px] text-muted-foreground">
-                Free-text search INSIDE Category, Subcategory and Additional/SEO — &quot;dental&quot;
-                catches &quot;Dental clinic&quot;. The Category dropdown matches whole values instead.
-                Client-tag targeting auto-fills this from the onboarding sheet.
+                Searches Category, Subcategory and Additional/SEO together, so
+                &quot;dental&quot; finds a lead however it was labelled. Client-tag targeting
+                fills this in automatically.
               </p>
               <div>
                 <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -690,11 +639,48 @@ export function FilterBar({
                 </label>
                 <TagInput
                   values={filters.categorySearch.include}
-                  placeholder="e.g. dry, school, restaurant"
+                  placeholder="e.g. dental, school, restaurant"
                   onChange={(arr) =>
                     onCategorySearchChange({ ...filters.categorySearch, include: arr })
                   }
                 />
+                {taxonomy.length > 0 && (
+                  <div className="mt-2">
+                    <p className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Quick pick
+                    </p>
+                    <div className="flex max-h-32 flex-wrap gap-1 overflow-y-auto pr-1">
+                      {taxonomy.map((name) => {
+                        const on = filters.categorySearch.include.some(
+                          (v) => v.toLowerCase() === name.toLowerCase()
+                        );
+                        return (
+                          <button
+                            key={name}
+                            type="button"
+                            onClick={() =>
+                              onCategorySearchChange({
+                                ...filters.categorySearch,
+                                include: on
+                                  ? filters.categorySearch.include.filter(
+                                      (v) => v.toLowerCase() !== name.toLowerCase()
+                                    )
+                                  : [...filters.categorySearch.include, name],
+                              })
+                            }
+                            className={`rounded-full px-2 py-0.5 text-[11px] transition-colors ${
+                              on
+                                ? "bg-primary text-primary-foreground"
+                                : "bg-muted text-foreground hover:bg-accent"
+                            }`}
+                          >
+                            {name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
               <div>
                 <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
