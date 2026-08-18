@@ -24,9 +24,12 @@ import {
 // entries -> location.state.include.
 export interface TargetingPatch {
   locations: LocationTargetsFilter;
-  categorySearchInclude: string[]; // include phrases -> categorySearch.include (contains)
-  keywordExclude: string[];        // exclude keywords -> keyword.exclude (whole-term exact)
-  categoryExclude: string[];       // exclude industries -> category.exclude (exact)
+  categorySearchInclude: string[];  // include terms -> categorySearch.include (contains)
+  keywordExclude: string[];         // exclude terms -> keyword.exclude (whole-term)
+  // Exclude terms -> categorySearch.exclude. Was category.exclude until the
+  // three category chips were merged (2026-08-19); that chip no longer renders,
+  // so writing there set a filter the user could neither see nor clear.
+  categorySearchExclude: string[];
   commercialCleaning?: boolean;    // Cleaning clients auto-enable the CC toggle
 }
 
@@ -163,8 +166,12 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
         categorySearch: {
           ...state.categorySearch,
           include: mergeStrings(state.categorySearch.include, action.patch.categorySearchInclude),
+          exclude: mergeStrings(state.categorySearch.exclude, action.patch.categorySearchExclude),
           ...(action.patch.categorySearchInclude.length && state.categorySearch.include.length === 0
             ? { includeMode: "contains" as const } : {}),
+          // Whole-term so "retail" can't nuke "Retail Solutions Corp" by substring.
+          ...(action.patch.categorySearchExclude.length && state.categorySearch.exclude.length === 0
+            ? { excludeMode: "exact" as const } : {}),
         },
         keyword: {
           ...state.keyword,
@@ -172,10 +179,6 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
           // Whole-term matching so "retail" doesn't nuke "Retail Solutions Corp" by substring accident.
           ...(action.patch.keywordExclude.length && state.keyword.exclude.length === 0
             ? { excludeMode: "exact" as const } : {}),
-        },
-        category: {
-          ...state.category,
-          exclude: mergeStrings(state.category.exclude, action.patch.categoryExclude),
         },
         page: 1,
       };
@@ -199,14 +202,11 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
         categorySearch: {
           ...state.categorySearch,
           include: removeStrings(state.categorySearch.include, action.patch.categorySearchInclude),
+          exclude: removeStrings(state.categorySearch.exclude, action.patch.categorySearchExclude),
         },
         keyword: {
           ...state.keyword,
           exclude: removeStrings(state.keyword.exclude, action.patch.keywordExclude),
-        },
-        category: {
-          ...state.category,
-          exclude: removeStrings(state.category.exclude, action.patch.categoryExclude),
         },
         page: 1,
       };

@@ -761,8 +761,10 @@ async function main() {
 
         await client.query(
           `INSERT INTO client_targeting (client_tag, countries, include_locations, include_industries, include_keywords,
-                                         exclude_industries, exclude_keywords, sheet_raw, sheet_synced_at, source, updated_at)
-           VALUES ($1, $2::text[], $3::jsonb, $4::text[], $5::text[], $6::text[], $7::text[], $8::jsonb, now(), 'sheet', now())
+                                         exclude_industries, exclude_keywords, exclude_terms, include_terms,
+                                         sheet_raw, sheet_synced_at, source, updated_at)
+           VALUES ($1, $2::text[], $3::jsonb, $4::text[], $5::text[], $6::text[], $7::text[], $9::text[], '{}',
+                   $8::jsonb, now(), 'sheet', now())
            ON CONFLICT (client_tag) DO UPDATE SET
              countries = $2::text[],
              include_locations = $3::jsonb,
@@ -770,14 +772,20 @@ async function main() {
              include_keywords = $5::text[],
              exclude_industries = $6::text[],
              exclude_keywords = $7::text[],
+             exclude_terms = $9::text[],
+             include_terms = '{}',
              sheet_raw = $8::jsonb,
              sheet_synced_at = now(),
              source = 'sheet',
              updated_at = now()`,
           // $4 / $5 are always '{}' now — include_industries / include_keywords
           // are never populated from the sheet.
+          // $9 exclude_terms: the merged list migrations 078/079 made THE list
+          // the send logic reads. The legacy $6/$7 columns are still written so
+          // 079 stays rollback-able; drop them once that's no longer needed.
           [c.tag, countries, JSON.stringify(locs), [], [], exclInd, exclKw,
-           sheetRaw === null ? null : JSON.stringify(sheetRaw)]
+           sheetRaw === null ? null : JSON.stringify(sheetRaw),
+           [...new Set([...exclInd, ...exclKw].map((x) => String(x).trim().toLowerCase()).filter(Boolean))].sort()]
         );
         written++;
         console.log(`  ${c.tag}: ${locFail ? "locations kept" : `${locs.length} locations`}, ${exclInd.length} excl-cats, ${exclKw.length} excl-keywords${allOk ? "" : "  [PARTIAL — will retry next run]"}`);

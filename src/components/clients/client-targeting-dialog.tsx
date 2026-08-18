@@ -60,10 +60,9 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
   const [countries, setCountries] = useState<string[]>(["US"]);
   const [include, setInclude] = useState<Entry[]>([]);
   const [exclude, setExclude] = useState<Entry[]>([]);
-  const [industries, setIndustries] = useState<string[]>([]);
-  const [keywords, setKeywords] = useState<string[]>([]);
-  const [includeIndustries, setIncludeIndustries] = useState<string[]>([]);
-  const [includeKeywords, setIncludeKeywords] = useState<string[]>([]);
+  // Merged lists (migrations 078/079) — one Include box, one Exclude box.
+  const [excludeTerms, setExcludeTerms] = useState<string[]>([]);
+  const [includeTerms, setIncludeTerms] = useState<string[]>([]);
   const [requireLocation, setRequireLocation] = useState(false);
   const [allowInferred, setAllowInferred] = useState(true);
   const [commercialCleaning, setCommercialCleaning] = useState(false);
@@ -78,8 +77,7 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
         const t = d.targeting;
         if (!t) { // fresh config defaults
           setCountries(["US"]); setInclude([]); setExclude([]);
-          setIndustries([]); setKeywords([]);
-          setIncludeIndustries([]); setIncludeKeywords([]);
+          setExcludeTerms([]); setIncludeTerms([]);
           setRequireLocation(false); setAllowInferred(true); setCommercialCleaning(false);
           setSheetSyncedAt(null);
           return;
@@ -87,10 +85,16 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
         setCountries(t.countries ?? ["US"]);
         setInclude(t.include_locations ?? []);
         setExclude(t.exclude_locations ?? []);
-        setIndustries(t.exclude_industries ?? []);
-        setKeywords(t.exclude_keywords ?? []);
-        setIncludeIndustries(t.include_industries ?? []);
-        setIncludeKeywords(t.include_keywords ?? []);
+        setExcludeTerms(
+          t.exclude_terms?.length
+            ? t.exclude_terms
+            : [...new Set([...(t.exclude_industries ?? []), ...(t.exclude_keywords ?? [])].map((x: string) => x.toLowerCase()))]
+        );
+        setIncludeTerms(
+          t.include_terms?.length
+            ? t.include_terms
+            : [...new Set([...(t.include_industries ?? []), ...(t.include_keywords ?? [])].map((x: string) => x.toLowerCase()))]
+        );
         setRequireLocation(!!t.require_location);
         setAllowInferred(t.allow_inferred_location !== false);
         setCommercialCleaning(!!t.commercial_cleaning);
@@ -112,10 +116,8 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
           countries,
           include_locations: include,
           exclude_locations: exclude,
-          include_industries: includeIndustries,
-          include_keywords: includeKeywords,
-          exclude_industries: industries,
-          exclude_keywords: keywords,
+          include_terms: includeTerms,
+          exclude_terms: excludeTerms,
           require_location: requireLocation,
           allow_inferred_location: allowInferred,
           commercial_cleaning: commercialCleaning,
@@ -188,22 +190,30 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
               />
             </div>
             <div>
-              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Include industries</p>
-              <TagInput values={includeIndustries} placeholder="Taxonomy category names" onChange={setIncludeIndustries} />
-              <p className="mt-1 px-1 text-[10px] text-muted-foreground">Optional. Empty unless you set it — no longer filled in from the onboarding sheet. Reference only: it never gates pushes.</p>
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Exclude terms</p>
+              <TagInput
+                values={excludeTerms}
+                placeholder='e.g. restaurant, bar, retail — paste a comma list'
+                onChange={setExcludeTerms}
+              />
+              <p className="mt-1 px-1 text-[10px] text-muted-foreground">
+                Blocks these from every send. Matched as whole words (plural-tolerant, so
+                &quot;restaurant&quot; also blocks &quot;Restaurants&quot;) across category, subcategory,
+                additional category, company name and industry. It won&apos;t match inside another
+                word — &quot;bar&quot; never blocks &quot;Barber&quot;.
+              </p>
             </div>
             <div>
-              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Include keywords</p>
-              <TagInput values={includeKeywords} placeholder='Category search terms ("dental", "office")' onChange={setIncludeKeywords} />
-              <p className="mt-1 px-1 text-[10px] text-muted-foreground">Optional. Empty by default. Anything here pre-fills the Category search filter when this client is selected on the Leads page; it never gates pushes.</p>
-            </div>
-            <div>
-              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Exclude industries</p>
-              <TagInput values={industries} placeholder="Exact industry/category names" onChange={setIndustries} />
-            </div>
-            <div>
-              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Exclude keywords</p>
-              <TagInput values={keywords} placeholder="Whole-word match on company/categories" onChange={setKeywords} />
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Include terms</p>
+              <TagInput
+                values={includeTerms}
+                placeholder='Optional — e.g. dental, office'
+                onChange={setIncludeTerms}
+              />
+              <p className="mt-1 px-1 text-[10px] text-muted-foreground">
+                Optional and empty by default. These never block anyone — they only pre-fill the
+                Category filter when you pick this client on the Leads page.
+              </p>
             </div>
 
             <div className="space-y-2.5 rounded-xl border p-3">

@@ -128,6 +128,7 @@ export default function LeadsPage() {
       include_locations?: LocationTargetEntry[];
       include_industries?: string[];
       include_keywords?: string[];
+      include_terms?: string[];
       exclude_industries?: string[];
       exclude_keywords?: string[];
     } | null;
@@ -146,8 +147,10 @@ export default function LeadsPage() {
               include_locations?: LocationTargetEntry[];
               exclude_locations?: LocationTargetEntry[];
               include_keywords?: string[];
+              include_terms?: string[];
               exclude_keywords?: string[];
               exclude_industries?: string[];
+              exclude_terms?: string[];
               include_industries?: string[];
             } | null;
           })
@@ -161,23 +164,29 @@ export default function LeadsPage() {
           include: targeting?.include_locations ?? [],
           exclude: targeting?.exclude_locations ?? [],
         },
-        categorySearchInclude: targeting?.include_keywords ?? [],
-        keywordExclude: targeting?.exclude_keywords ?? [],
-        categoryExclude: targeting?.exclude_industries ?? [],
+        // include_terms is the merged list (migrations 078/079); fall back to the
+        // legacy column so nothing breaks if a row predates the migration.
+        categorySearchInclude: targeting?.include_terms ?? targeting?.include_keywords ?? [],
+        // One merged list now drives both sides. exclude_terms goes to the
+        // Category chip's exclude (it spans company + industry too); the legacy
+        // columns are the fallback for rows written before migration 078.
+        keywordExclude: [],
+        categorySearchExclude:
+          targeting?.exclude_terms ??
+          [...new Set([...(targeting?.exclude_industries ?? []), ...(targeting?.exclude_keywords ?? [])])],
         ...(isCleaning && !filtersRef.current.commercialCleaning ? { commercialCleaning: true } : {}),
       };
       const n =
         patch.locations.include.length + patch.locations.exclude.length +
         patch.categorySearchInclude.length + patch.keywordExclude.length +
-        patch.categoryExclude.length + (patch.commercialCleaning ? 1 : 0);
+        patch.categorySearchExclude.length + (patch.commercialCleaning ? 1 : 0);
       if (n > 0) {
         appliedRef.current.set(tag, patch);
         applyClientTargeting(patch);
         const bits = [
           patch.locations.include.length && `${patch.locations.include.length} locations → City/State filters`,
           patch.categorySearchInclude.length && `${patch.categorySearchInclude.length} category terms`,
-          patch.categoryExclude.length && `${patch.categoryExclude.length} excluded industries`,
-          patch.keywordExclude.length && `${patch.keywordExclude.length} excluded keywords`,
+          patch.categorySearchExclude.length && `${patch.categorySearchExclude.length} excluded terms`,
           patch.commercialCleaning && "Commercial Cleaning titles on",
         ].filter(Boolean).join(", ");
         toast.success(`${tag} targeting applied: ${bits}`);
@@ -229,8 +238,8 @@ export default function LeadsPage() {
       const entryKey = (e: LocationTargetEntry) => `${e.country}|${e.state ?? ""}|${e.city ?? ""}`;
       const othersHaveEntry = (e: LocationTargetEntry, side: "include" | "exclude") =>
         others.some((p) => p.locations[side].some((o) => entryKey(o) === entryKey(e)));
-      const othersHave = (field: "categorySearchInclude" | "keywordExclude" | "categoryExclude", v: string) =>
-        others.some((p) => p[field].some((o) => o.toLowerCase() === v.toLowerCase()));
+      const othersHave = (field: "categorySearchInclude" | "keywordExclude" | "categorySearchExclude", v: string) =>
+        others.some((p) => p[field].some((o: string) => o.toLowerCase() === v.toLowerCase()));
       removeClientTargeting({
         locations: {
           include: patch.locations.include.filter((e) => !othersHaveEntry(e, "include")),
@@ -238,7 +247,7 @@ export default function LeadsPage() {
         },
         categorySearchInclude: patch.categorySearchInclude.filter((v) => !othersHave("categorySearchInclude", v)),
         keywordExclude: patch.keywordExclude.filter((v) => !othersHave("keywordExclude", v)),
-        categoryExclude: patch.categoryExclude.filter((v) => !othersHave("categoryExclude", v)),
+        categorySearchExclude: patch.categorySearchExclude.filter((v) => !othersHave("categorySearchExclude", v)),
         ...(patch.commercialCleaning && !others.some((p) => p.commercialCleaning)
           ? { commercialCleaning: true } : {}),
       });
@@ -518,8 +527,8 @@ export default function LeadsPage() {
                 {(lowAvail.targeting.include_industries?.length ?? 0) > 0 && (
                   <p><span className="font-medium">Target industries:</span> {lowAvail.targeting.include_industries!.join(", ")}</p>
                 )}
-                {(lowAvail.targeting.include_keywords?.length ?? 0) > 0 && (
-                  <p><span className="font-medium">Target keywords:</span> {lowAvail.targeting.include_keywords!.slice(0, 15).join(", ")}</p>
+                {((lowAvail.targeting.include_terms ?? lowAvail.targeting.include_keywords)?.length ?? 0) > 0 && (
+                  <p><span className="font-medium">Target keywords:</span> {(lowAvail.targeting.include_terms ?? lowAvail.targeting.include_keywords)!.slice(0, 15).join(", ")}</p>
                 )}
                 {(lowAvail.targeting.exclude_industries?.length ?? 0) > 0 && (
                   <p><span className="font-medium">Excluded industries:</span> {lowAvail.targeting.exclude_industries!.join(", ")}</p>

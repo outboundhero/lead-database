@@ -12,8 +12,13 @@ export interface TargetingConfig {
   countries: string[];
   include_locations: Array<{ country: string; state?: string; city?: string }>;
   exclude_locations: Array<{ country: string; state?: string; city?: string }>;
-  // Include-side lists (migration 067): auto-applied to the browse filters
-  // when the client tag is selected; they do NOT gate pushes.
+  // Merged term lists (migrations 078/079). exclude_terms is THE list that
+  // gates sends — whole-word, plural-tolerant, across category, subcategory,
+  // additional_category, company, general_industry and specific_industry.
+  // include_terms gates nothing; it only pre-fills the Leads filters.
+  include_terms: string[];
+  exclude_terms: string[];
+  // Superseded by the two above, kept so old payloads/readers don't break.
   include_industries: string[];
   include_keywords: string[];
   exclude_industries: string[];
@@ -100,6 +105,18 @@ async function validateEntries(entries: Array<{ country: string; state?: string;
   return null;
 }
 
+// Trim, lower-case, drop blanks, de-duplicate — mirrors what migration 078 did
+// to the existing data so hand-edits and migrated rows stay consistent.
+function cleanTerms(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const seen = new Set<string>();
+  for (const raw of v) {
+    const t = String(raw).trim().toLowerCase();
+    if (t) seen.add(t);
+  }
+  return [...seen].sort();
+}
+
 // PUT /api/clients/targeting — upsert a config (admin/owner)
 export async function PUT(request: NextRequest) {
   const server = await createClient();
@@ -135,10 +152,10 @@ export async function PUT(request: NextRequest) {
     countries,
     include_locations: include,
     exclude_locations: exclude,
-    include_industries: Array.isArray(body.include_industries) ? body.include_industries : [],
-    include_keywords: Array.isArray(body.include_keywords) ? body.include_keywords : [],
-    exclude_industries: Array.isArray(body.exclude_industries) ? body.exclude_industries : [],
-    exclude_keywords: Array.isArray(body.exclude_keywords) ? body.exclude_keywords : [],
+    // The dialog now sends only the merged lists. Terms are lower-cased for
+    // consistent de-duplication; matching is case-insensitive regardless.
+    include_terms: cleanTerms(body.include_terms),
+    exclude_terms: cleanTerms(body.exclude_terms),
     require_location: !!body.require_location,
     allow_inferred_location: body.allow_inferred_location !== false,
     commercial_cleaning: !!body.commercial_cleaning,
