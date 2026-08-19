@@ -633,9 +633,26 @@ Leads page no longer pre-fills the Category-search filter.
 ## Client locations apply as city+state PAIRS (2026-08-19)
 
 Selecting a client on the Leads page puts its `include_locations` into the
-**`locationTargets`** filter (the "Targeting" chip) as pairs, and additionally
-lists the DISTINCT states it covers in the State chip so the coverage is
-visible at a glance.
+**`locationTargets`** filter (the "Targeting" chip) as pairs. That chip is what
+CONSTRAINS the query. The State chip (distinct states covered) and the City chip
+(bare city names) are additionally populated for **visibility only** — operators
+want to see the coverage at a glance.
+
+That is safe only because `locationTargets` already restricts to exact pairs, so
+the flat chips are a superset that removes nothing except rows whose city/state
+TEXT contradicts their resolved `location_id` (23 rows for BBS — e.g. text
+"Austin" on a lead resolving to Las Vegas, NV). **Bare city names must never be
+the only location filter** — that is precisely the bug below. The regression
+test asserts `city.include` is non-empty only when `locationTargets.include` is
+too.
+
+The City chip stays fully usable by hand, which matters for "target the whole
+state but drop a few cities": a state-level entry plus a city exclusion works
+through either chip — measured on Utah, 125,645 leads → 118,639 after excluding
+Provo, identical via `locationTargets.exclude` (geoname id) or the City chip's
+exclude (text). No client currently has city-level excludes, so client
+auto-apply only ever populates the City chip's INCLUDE side; a bare excluded
+city name would drop that city in every covered state.
 
 ⚠ **They used to be flattened into the flat City/State chips** (client decision
 2026-08-06). Those two chips AND *independently* and cannot express a pair, and

@@ -49,6 +49,11 @@ export interface TargetingPatch {
   commercialCleaning?: boolean;    // Cleaning clients auto-enable the CC toggle
 }
 
+// Bare city names. DISPLAY value for the City chip only — never the sole
+// location filter, since a bare name matches that city in EVERY state.
+const entryCities = (entries: LocationTargetEntry[]) =>
+  entries.filter((e) => e.city).map((e) => e.city as string);
+
 // Every state a client covers, whether named by a city entry or a state entry.
 // DISPLAY value for the State chip — see the TargetingPatch note above.
 const entryCoveredStates = (entries: LocationTargetEntry[]) => [
@@ -169,9 +174,8 @@ export function filterReducer(state: FilterState, action: FilterAction): FilterS
     case "APPLY_CLIENT_TARGETING":
       return {
         ...state,
-        // City+state stay PAIRED here — this is what stops Washington, UT from
-        // matching Washington, DC. The flat City chip is deliberately NOT
-        // touched: a bare city name matches in every state.
+        // City+state stay PAIRED here — this is what constrains the query, and
+        // what stops Washington, UT from matching Washington, DC.
         locationTargets: {
           include: mergeEntries(state.locationTargets.include, action.patch.locations.include),
           exclude: mergeEntries(state.locationTargets.exclude, action.patch.locations.exclude),
@@ -183,6 +187,22 @@ export function filterReducer(state: FilterState, action: FilterAction): FilterS
             include: mergeStrings(state.location.state.include, entryCoveredStates(action.patch.locations.include)),
             // Only whole-state excludes may widen to a whole state.
             exclude: mergeStrings(state.location.state.exclude, entryStates(action.patch.locations.exclude)),
+          },
+          city: {
+            ...state.location.city,
+            // VISIBILITY ONLY — operators want to see which cities a client
+            // covers. Safe because locationTargets above already restricts to
+            // exact city+state pairs, so these bare names are a superset and
+            // remove nothing except rows whose city TEXT contradicts their
+            // resolved location (23 rows for BBS, e.g. text "Austin" on a lead
+            // that resolves to Las Vegas, NV). They must never be the ONLY
+            // location filter — that was the 2026-08-19 wrong-state bug.
+            include: mergeStrings(state.location.city.include, entryCities(action.patch.locations.include)),
+            ...(entryCities(action.patch.locations.include).length && state.location.city.include.length === 0
+              ? { includeMode: "exact" as const } : {}),
+            // Exclude side deliberately NOT populated: a bare excluded city name
+            // would drop that city in EVERY covered state. No client currently
+            // has city-level excludes; locationTargets.exclude handles them.
           },
         },
         ...(action.patch.commercialCleaning ? { commercialCleaning: true } : {}),
@@ -222,6 +242,10 @@ export function filterReducer(state: FilterState, action: FilterAction): FilterS
             ...state.location.state,
             include: removeStrings(state.location.state.include, entryCoveredStates(action.patch.locations.include)),
             exclude: removeStrings(state.location.state.exclude, entryStates(action.patch.locations.exclude)),
+          },
+          city: {
+            ...state.location.city,
+            include: removeStrings(state.location.city.include, entryCities(action.patch.locations.include)),
           },
         },
         ...(action.patch.commercialCleaning ? { commercialCleaning: false } : {}),

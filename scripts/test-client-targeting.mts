@@ -78,8 +78,10 @@ async function main() {
     const withCity = entries.filter((e) => e.city);
     const coveredStates = [...new Set(entries.filter((e) => e.state).map((e) => e.state))];
 
-    // 1. THE BUG: bare city names must never reach the flat City chip.
-    if (s.location.city.include.length > 0) cityChipPolluted++;
+    // 1. THE BUG: bare city names match that city in EVERY state, so they must
+    //    never be the ONLY location filter. The City chip is allowed to show
+    //    them for visibility, but locationTargets must always carry the pairs.
+    if (s.location.city.include.length > 0 && s.locationTargets.include.length === 0) cityChipPolluted++;
 
     // 2. Every city entry must survive as a PAIR in locationTargets.
     const paired = new Set(s.locationTargets.include.map((e) => `${e.country}|${e.state ?? ""}|${e.city ?? ""}`));
@@ -96,7 +98,7 @@ async function main() {
         back.location.city.include.length !== 0) roundTripDirty++;
   }
 
-  ok("no client puts bare city names in the City chip", cityChipPolluted === 0, `${cityChipPolluted} client(s) polluted`);
+  ok("bare city names are never the only location filter", cityChipPolluted === 0, `${cityChipPolluted} client(s) unpaired`);
   ok("every city entry survives as a city+state pair", pairsLost === 0, `${pairsLost} client(s) lost pairs`);
   ok("every covered state is visible in the State chip", stateMissing === 0, `${stateMissing} client(s) missing states`);
   ok("deselecting a client restores a clean slate", roundTripDirty === 0, `${roundTripDirty} client(s) left residue`);
@@ -111,7 +113,7 @@ async function main() {
     const rpc = buildRpcFilters(normalizeFilterState({
       ...DEFAULT_FILTER_STATE,
       locationTargets: s.locationTargets,
-      location: { ...DEFAULT_FILTER_STATE.location, state: s.location.state },
+      location: { ...DEFAULT_FILTER_STATE.location, state: s.location.state, city: s.location.city },
     } as never));
 
     const { rows: [{ w }] } = await db.query<{ w: string }>(
