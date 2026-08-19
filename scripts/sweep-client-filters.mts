@@ -67,20 +67,31 @@ async function main() {
         'commercialCleaning', true
       ) as filters from client_targeting t where t.client_tag=$1`, [t.client_tag]);
 
-    const started = Date.now();
-    let total = "?", exact = "?";
+    // Measure what /api/leads/filter ACTUALLY does since migration 086: the page
+    // of rows and the count are two separate calls fired CONCURRENTLY, so the
+    // latency a user feels is the slower of the two, not the sum. Calling
+    // fn_filter_leads_v2 without skipCount (or twice in one SELECT, as an
+    // earlier version of this script did) measures the old serial path and
+    // roughly quadruples the work.
+    const js = JSON.stringify(f.filters);
+    let total = "?", exact = "?", rowsMs = 0, countMs = 0;
     try {
-      const { rows: [r] } = await db.query<{ total: string; approx: string }>(
-        `select fn_filter_leads_v2($1::jsonb,'','desc',50,0) #>> '{totalCount}' as total,
-                fn_filter_leads_v2($1::jsonb,'','desc',50,0) #>> '{isApproximate}' as approx`,
-        [JSON.stringify(f.filters)]);
-      total = r.total; exact = r.approx === "false" ? "yes" : "NO";
-    } catch (e) {
+      let t0 = Date.now();
+      await db.query(`select fn_filter_leads_v2($1::jsonb,'','desc',50,0)`,
+        [JSON.stringify({ ...(f.filters as object), skipCount: true })]);
+      rowsMs = Date.now() - t0;
+
+      t0 = Date.now();
+      const { rows: [c] } = await db.query<{ total: string; approx: string }>(
+        `select r #>> '{totalCount}' as total, r #>> '{isApproximate}' as approx
+           from fn_filter_leads_count($1::jsonb) r`, [js]);
+      countMs = Date.now() - t0;
+      total = c.total; exact = c.approx === "false" ? "yes" : "NO";
+    } catch {
       failed.push(t.client_tag);
       total = "ERROR"; exact = "-";
     }
-    // Halved: the query above evaluates the function twice.
-    const secs = (Date.now() - started) / 2000;
+    const secs = Math.max(rowsMs, countMs) / 1000;
 
     // Wrong-state check. This MUST be measured on what the filter actually
     // RETURNS -- an earlier version of this script counted every lead sharing a
@@ -106,10 +117,12 @@ async function main() {
     if (secs > SLOW_S) slow.push(`${t.client_tag} (${secs.toFixed(1)}s)`);
     if (oos > 0) wrong.push(`${t.client_tag} (${oos})`);
 
-    console.log(
+    // Write unbuffered so progress is visible while a long sweep runs.
+    process.stdout.write(
       `  ${t.client_tag.padEnd(9)} ${secs.toFixed(1).padStart(5)}  ${String(total).padStart(9)}` +
       `   ${exact.padStart(5)}   ${oos === 0 ? "0" : oos < 0 ? "?" : `*** ${oos} ***`}` +
-      `${secs > SLOW_S ? "   <-- SLOW" : ""}`);
+      `   (rows ${(rowsMs/1000).toFixed(1)}s | count ${(countMs/1000).toFixed(1)}s)` +
+      `${secs > SLOW_S ? "  <-- SLOW" : ""}\n`);
   }
 
   console.log("\n" + "=".repeat(58));
