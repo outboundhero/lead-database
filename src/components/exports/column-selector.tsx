@@ -9,6 +9,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { isNurtureCampaign } from "@/lib/bison/campaigns";
 import { Input } from "@/components/ui/input";
 import { LEAD_FIELDS } from "@/lib/uploads/constants";
 import { toast } from "sonner";
@@ -129,7 +130,6 @@ export function ColumnSelector({
   // One fetch per dialog open — never auto-retry on error/empty (manual Retry instead)
   const [campaignsAttempted, setCampaignsAttempted] = useState(false);
   // Campaign-picker upgrades (client req #7)
-  const [showNurture, setShowNurture] = useState(false);
   const [tagScope, setTagScope] = useState(""); // client-tag prefix filter ("" = all)
   const [clientTagOptions, setClientTagOptions] = useState<string[]>([]);
   const [presets, setPresets] = useState<{ id: string; name: string; campaign_keys: string[] }[]>([]);
@@ -187,7 +187,6 @@ export function ColumnSelector({
     setCampaignSearch("");
     setCampaignsError(null);
     setCampaignsAttempted(false);
-    setShowNurture(false);
     setTagScope("");
     setPresetName("");
     scopeTouchedRef.current = false;
@@ -324,12 +323,14 @@ export function ColumnSelector({
               <p className="text-xs text-muted-foreground">No campaigns found.</p>
             ) : (() => {
               const q = campaignSearch.trim().toLowerCase();
-              // Nurture hidden by default; client-tag scope matches the "TAG:"
-              // naming convention; search runs on what remains.
-              const nurtureHidden = campaigns.filter((c) => /nurture/i.test(String(c.name ?? ""))).length;
+              // Nurture campaigns are ALWAYS excluded (client rule 2026-08-20:
+              // the database only ever sends to main campaigns). This used to be
+              // a default that a checkbox could switch off. Client-tag scope
+              // matches the "TAG:" naming convention; search runs on what remains.
+              const nurtureHidden = campaigns.filter((c) => isNurtureCampaign(c.name)).length;
               const filtered = campaigns.filter((c) => {
                 const name = (c.name ?? "").toLowerCase();
-                if (!showNurture && /nurture/.test(name)) return false;
+                if (isNurtureCampaign(c.name)) return false;
                 if (tagScope && !name.startsWith(tagScope.toLowerCase())) return false;
                 if (!q) return true;
                 return (
@@ -373,10 +374,11 @@ export function ColumnSelector({
                   >
                     None
                   </Button>
-                  <label className="flex items-center gap-1 text-muted-foreground">
-                    <input type="checkbox" checked={showNurture} onChange={(e) => setShowNurture(e.target.checked)} />
-                    Show nurture campaigns{!showNurture && nurtureHidden > 0 ? ` (${nurtureHidden} hidden)` : ""}
-                  </label>
+                  {nurtureHidden > 0 && (
+                    <span className="text-muted-foreground" title="Leads are only ever pushed to main campaigns. Nurture campaigns are populated from replies inside Bison.">
+                      {nurtureHidden} nurture campaign{nurtureHidden === 1 ? "" : "s"} not shown
+                    </span>
+                  )}
                 </div>
                 {(presets.length > 0 || selectedCampaignKeys.size > 0) && (
                   <div className="flex flex-wrap items-center gap-1.5">

@@ -19,6 +19,14 @@ const STORAGE_KEY = "outboundhero.hiddenFilters";
 const MIGRATION_KEY = "outboundhero.hiddenFilters.mergedCategory";
 const RETIRED_KEYS = ["category", "subcategory", "additionalCategory"];
 
+// Second one-time cleanup, 2026-08-20: the "Keywords" chip was retired (its job
+// is done by the Category chip, which spans company + industries + overview
+// since migration 077). Needs its OWN stamp — anyone who already ran the
+// merged-category cleanup above carries that stamp, so reusing it would skip
+// this entirely and leave a dead "keywords" key in their stored list forever.
+const KEYWORDS_MIGRATION_KEY = "outboundhero.hiddenFilters.retiredKeywords";
+const KEYWORDS_RETIRED_KEYS = ["keywords"];
+
 function readStored(): string[] {
   if (typeof window === "undefined") return [];
   try {
@@ -38,6 +46,15 @@ function readStored(): string[] {
         values = cleaned;
       }
       window.localStorage.setItem(MIGRATION_KEY, "1");
+    }
+
+    if (!window.localStorage.getItem(KEYWORDS_MIGRATION_KEY)) {
+      const cleaned = values.filter((v) => !KEYWORDS_RETIRED_KEYS.includes(v));
+      if (cleaned.length !== values.length) {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
+        values = cleaned;
+      }
+      window.localStorage.setItem(KEYWORDS_MIGRATION_KEY, "1");
     }
     return values;
   } catch {

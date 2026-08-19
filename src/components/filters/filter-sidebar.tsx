@@ -238,15 +238,6 @@ export function FilterSidebar({
         </div>
       </FilterGroup>
 
-      {/* Keywords — legacy sidebar input. Use FilterBar for include/exclude support. */}
-      <FilterGroup
-        title="Keywords"
-        activeCount={filters.keyword.include.length + filters.keyword.exclude.length}
-      >
-        <p className="text-xs text-muted-foreground">
-          Keyword filtering moved to the chip bar above.
-        </p>
-      </FilterGroup>
     </div>
   );
 }

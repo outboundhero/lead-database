@@ -25,6 +25,20 @@ export function TopBar() {
           />
         </div>
 
+        {/* Slot for page-specific top-bar controls. The Leads page portals its
+            Client selector in here (2026-08-20 — picking a client is how you
+            start a piece of work, so it belongs beside the search box rather
+            than buried among twenty filter chips).
+
+            A portal rather than lifting state: TopBar renders in the app shell
+            ABOVE <main>{children}</main>, so it is a sibling ancestor of the
+            page and shares no state with it. useFilters lives inside LeadsPage.
+            Portalling keeps the selector inside the page's React tree — so it
+            still sees `filters` and the targeting callbacks with no provider —
+            while painting it here. Lifting useFilters into a layout-level
+            provider would touch every filter consumer for a cosmetic move. */}
+        <div id="topbar-slot" className="flex items-center gap-2" />
+
         <div className="ml-auto flex items-center gap-2">
           <Button size="sm" onClick={() => setAddLeadOpen(true)}>
             <Plus className="size-4" strokeWidth={2.25} />

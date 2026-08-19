@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/table";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
-import { leadColumns } from "./lead-columns";
+import { leadColumns, mainCampaignsColumn } from "./lead-columns";
 import { LeadTablePagination } from "./lead-table-pagination";
 import type { Lead } from "@/types/database";
 
@@ -54,6 +54,12 @@ interface LeadTableProps {
   onRowClick: (lead: Lead) => void;
   rowSelection: RowSelectionState;
   onRowSelectionChange: (selection: RowSelectionState) => void;
+  /** Leads already sent to a main campaign for the selected client. */
+  pushedLeadIds?: Set<string>;
+  /** False while the push-status lookup is still in flight. */
+  pushedLoaded?: boolean;
+  /** Only show the Main Campaigns column when a client is selected. */
+  showMainCampaigns?: boolean;
 }
 
 export function LeadTable({
@@ -67,8 +73,20 @@ export function LeadTable({
   onRowClick,
   rowSelection,
   onRowSelectionChange,
+  pushedLeadIds,
+  pushedLoaded = false,
+  showMainCampaigns = false,
 }: LeadTableProps) {
-  const allColumns = [checkboxColumn, ...leadColumns];
+  const allColumns = React.useMemo(
+    () => [
+      checkboxColumn,
+      ...leadColumns,
+      ...(showMainCampaigns
+        ? [mainCampaignsColumn(pushedLeadIds ?? new Set<string>(), pushedLoaded)]
+        : []),
+    ],
+    [showMainCampaigns, pushedLeadIds, pushedLoaded]
+  );
   const [sorting, setSorting] = React.useState<SortingState>([]);
   const table = useReactTable({
     data,

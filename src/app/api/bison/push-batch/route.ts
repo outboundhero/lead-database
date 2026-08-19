@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isNurtureCampaign } from "@/lib/bison/campaigns";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeFilterState } from "@/types/filters";
@@ -109,6 +110,15 @@ export async function POST(request: NextRequest) {
     if (!domain || !instances.some((i) => i.domain === domain)) {
       return NextResponse.json(
         { error: `Unknown Bison instance "${c.instance_url}" — not one of the configured instances` },
+        { status: 400 }
+      );
+    }
+    // Only MAIN campaigns may be pushed to. The pickers already hide Nurture
+    // campaigns, but a picker is not a boundary — this route is, and it is what
+    // the API consumers hit directly.
+    if (isNurtureCampaign(c.name)) {
+      return NextResponse.json(
+        { error: `"${String(c.name)}" is a Nurture campaign — leads are only ever pushed to main campaigns.` },
         { status: 400 }
       );
     }

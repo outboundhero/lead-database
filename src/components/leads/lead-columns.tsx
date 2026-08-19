@@ -152,3 +152,34 @@ export const leadColumns: ColumnDef<Lead>[] = [
     },
   },
 ];
+
+/**
+ * "Main Campaigns" — shows Pushed when this lead has already been sent to a
+ * MAIN (non-Nurture) campaign for the CURRENTLY SELECTED client.
+ *
+ * A factory rather than a static entry because it closes over live state: the
+ * pushed set arrives from /api/leads/push-status after the rows render, so the
+ * column must re-render when it lands. Only added when a client is selected —
+ * "pushed" is meaningless without one.
+ *
+ * `loaded` distinguishes "we know this lead was not pushed" (—) from "we have
+ * not heard back yet" (blank), so an in-flight lookup never reads as a No.
+ */
+export function mainCampaignsColumn(
+  pushedIds: Set<string>,
+  loaded: boolean
+): ColumnDef<Lead> {
+  return {
+    id: "main_campaigns",
+    header: () => <span className="text-[13px] font-medium">Main Campaigns</span>,
+    enableSorting: false,
+    cell: ({ row }) => {
+      if (!loaded) return <span className="text-[13px] text-muted-foreground/40">·</span>;
+      return pushedIds.has(row.original.id) ? (
+        <Badge variant="success">Pushed</Badge>
+      ) : (
+        <span className="text-[13px] text-muted-foreground">—</span>
+      );
+    },
+  };
+}

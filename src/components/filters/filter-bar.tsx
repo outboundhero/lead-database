@@ -19,7 +19,6 @@ import type {
   CustomTagsFilter,
   WebsiteFilter,
   RangeFilter,
-  KeywordFilter,
   EmailTypeFilter,
   EmailContainsFilter,
   CategorySearchFilter,
@@ -43,7 +42,6 @@ interface FilterBarProps {
   onLocationCityChange: (value: IncludeExclude) => void;
   onFilterOperatorChange: (value: "AND" | "OR") => void;
   onToggleFlag: (field: "excludeEmptyName" | "excludeEmptyCompany" | "excludeEmptyOverview" | "commercialCleaning", value: boolean) => void;
-  onKeywordChange: (value: KeywordFilter) => void;
   onEmailTypeChange: (value: EmailTypeFilter) => void;
   onEmailContainsChange: (value: EmailContainsFilter) => void;
   onCategorySearchChange: (value: CategorySearchFilter) => void;
@@ -53,14 +51,10 @@ interface FilterBarProps {
   onIncludeBouncedChange: (value: boolean) => void;
   onLoadPreset?: (filters: FilterState) => void;
   // Fired when a client tag is SELECTED from the quick-pick list (not on
-  // deselect, free typing, or preset load) — the leads page uses it to
-  // auto-apply that client's targeting rules to the other filters.
-  onClientTagSelected?: (tag: string) => void;
   onLocationTargetsChange?: (value: LocationTargetsFilter) => void;
   // onCategoryCascadeChange: removed with the merged Category chip (2026-08-19).
   // categoryCascade remains in FilterState + buildRpcFilters so old saved
   // searches still resolve; there is simply no UI to switch it on any more.
-  onClientTagChange?: (tag: string | null) => void;
   onReset: () => void;
 }
 
@@ -70,8 +64,8 @@ const TARGET_COUNTRY_LABELS: Record<string, string> = {
 
 const LIST_TARGET_LABEL: Record<string, string> = {
   titles: "Title exclude",
-  keywords: "Keywords exclude",
-  competitors: "Keywords exclude",
+  keywords: "Category exclude",
+  competitors: "Category exclude",
   domains: "Website exclude",
   gateways: "ESP exclude",
 };
@@ -145,7 +139,6 @@ const HIDEABLE_CHIPS: { key: string; label: string }[] = [
   { key: "city", label: "City" },
   { key: "state", label: "State" },
   { key: "categorySearch", label: "Category" },
-  { key: "keywords", label: "Keywords" },
   { key: "emailContains", label: "Email Contains" },
   { key: "website", label: "Website / Domain" },
   { key: "customTags", label: "Custom Tags" },
@@ -209,7 +202,6 @@ export function FilterBar({
   onLocationCityChange,
   onFilterOperatorChange,
   onToggleFlag,
-  onKeywordChange,
   onEmailTypeChange,
   onEmailContainsChange,
   onCategorySearchChange,
@@ -218,9 +210,7 @@ export function FilterBar({
   onGlobalSearchChange,
   onIncludeBouncedChange,
   onLoadPreset,
-  onClientTagSelected,
   onLocationTargetsChange,
-  onClientTagChange,
   onReset,
 }: FilterBarProps) {
   void onLocationCountryChange;
@@ -240,7 +230,6 @@ export function FilterBar({
     else onEmailTypeChange({ personal: false, general: true });
   };
 
-  const keywordMode: "contains" | "exact" = filters.keyword.matchMode === "exact" ? "exact" : "contains";
 
   const activeCount = countActiveFilters(filters);
   const op = filters.filterOperator ?? "AND";
@@ -263,11 +252,6 @@ export function FilterBar({
   const taxonomyLoadedRef = useRef(false);
   // Per-option lead counts (state/city) from the filter_option_counts RPC.
   const [optionCounts, setOptionCounts] = useState<Record<string, Record<string, number>>>({});
-  const [clientTagOptions, setClientTagOptions] = useState<string[]>([]);
-  const [clientRoster, setClientRoster] = useState<
-    { tag: string; status?: string | null; client_type?: string | null; churned?: boolean; contactable?: number | null }[]
-  >([]);
-  const [clientSearch, setClientSearch] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   void countries;
 
@@ -364,26 +348,6 @@ export function FilterBar({
     }, 300);
   }, [loadDistinctFor, applyValues]);
 
-  // Client roster for the Client dropdown — synced from the Client Tracker /
-  // Onboarding sheets (tag, status, Cleaning/Non-Cleaning, contactable count).
-  const clientTagsLoadedRef = useRef(false);
-  const loadClientTags = useCallback(async (force = false) => {
-    if (clientTagsLoadedRef.current && !force) return;
-    clientTagsLoadedRef.current = true;
-    try {
-      const res = await fetch("/api/bison/client-tags");
-      if (!res.ok) throw new Error(String(res.status));
-      const json = (await res.json()) as {
-        tags?: { tag: string; status?: string | null; client_type?: string | null; churned?: boolean; contactable?: number | null }[];
-      };
-      setClientRoster((json.tags ?? []).filter((t) => t?.tag));
-      setClientTagOptions([...new Set((json.tags ?? []).map((t) => t?.tag).filter(Boolean) as string[])]);
-    } catch {
-      // One transient failure must not permanently blank the dropdown —
-      // unlatch so the next open (or the Retry button) refetches.
-      clientTagsLoadedRef.current = false;
-    }
-  }, []);
 
   const cityActive = filters.location.city.include.length + filters.location.city.exclude.length;
   const hiddenActiveCount = HIDEABLE_CHIPS.filter((c) => isHidden(c.key)).length;
@@ -420,11 +384,16 @@ export function FilterBar({
     } else if (l.kind === "gateways") {
       onIncludeExcludeChange("esp", { ...filters.esp, exclude: mergeVals(filters.esp.exclude, l.items) });
     } else {
-      // keywords + competitors → whole-term keyword exclusion
-      onKeywordChange({
-        ...filters.keyword,
-        exclude: mergeVals(filters.keyword.exclude, l.items),
-        ...(filters.keyword.exclude.length === 0 ? { excludeMode: "exact" as const } : {}),
+      // keywords + competitors -> the CATEGORY chip's exclude side, whole-term.
+      // These used to write filters.keyword.exclude. That chip is gone (its job
+      // was merged into Category by migration 077, which widened categorySearch
+      // to span company + industries + overview), so writing there would set a
+      // filter the user can neither see nor clear -- exactly the bug recorded in
+      // use-filters.ts about the old category.exclude write.
+      onCategorySearchChange({
+        ...filters.categorySearch,
+        exclude: mergeVals(filters.categorySearch.exclude, l.items),
+        ...(filters.categorySearch.exclude.length === 0 ? { excludeMode: "exact" as const } : {}),
       });
     }
   }
@@ -565,8 +534,8 @@ export function FilterBar({
                 <span className="font-medium text-foreground">Exact</span> = whole-term;{" "}
                 <span className="font-medium text-foreground">Contains</span> = substring. Each side has its own setting.
                 Excludes use the same wide net — excluding &quot;restaurant&quot; also drops a
-                company called &quot;Restaurant Depot&quot;. Use the Company or Keywords chips
-                when you need to target one field precisely.
+                company called &quot;Restaurant Depot&quot;. Use the Company chip
+                when you need to match the company name alone.
               </p>
             </div>
           </FilterChip>
@@ -712,48 +681,6 @@ export function FilterBar({
         )}
 
 
-        {/* Keywords — include + exclude, with a Contains vs Exact match toggle */}
-        {!isHidden("keywords") && (
-          <FilterChip
-            label="Keywords"
-            activeCount={filters.keyword.include.length + filters.keyword.exclude.length}
-          >
-            <div className="space-y-3">
-              <div>
-                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Include
-                  <SideModeToggle
-                    value={filters.keyword.includeMode ?? keywordMode}
-                    onChange={(v) => onKeywordChange({ ...filters.keyword, includeMode: v })}
-                  />
-                </label>
-                <TagInput
-                  values={filters.keyword.include}
-                  placeholder="e.g. cleaning, plumbing"
-                  onChange={(arr) =>
-                    onKeywordChange({ ...filters.keyword, include: arr })
-                  }
-                />
-              </div>
-              <div>
-                <label className="mb-1 flex items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Exclude
-                  <SideModeToggle
-                    value={filters.keyword.excludeMode ?? keywordMode}
-                    onChange={(v) => onKeywordChange({ ...filters.keyword, excludeMode: v })}
-                  />
-                </label>
-                <TagInput
-                  values={filters.keyword.exclude}
-                  placeholder="e.g. restaurant"
-                  onChange={(arr) =>
-                    onKeywordChange({ ...filters.keyword, exclude: arr })
-                  }
-                />
-              </div>
-            </div>
-          </FilterChip>
-        )}
 
         {/* Email contains — free-text include/exclude on email + domain */}
         {!isHidden("emailContains") && (
@@ -865,87 +792,6 @@ export function FilterBar({
         {/* Client — single-select roster dropdown (synced from the sheets).
             Selecting applies the client's targeting to the other filters;
             free-text tag matching lives in Custom Tags. */}
-        {!isHidden("tags") && (
-          <FilterChip
-            label={filters.clientTag ? `Client: ${filters.clientTag}` : "Client"}
-            activeCount={filters.clientTag ? 1 : 0}
-            onOpen={loadClientTags}
-          >
-            <div className="space-y-2">
-              <Input
-                placeholder={`Search ${clientRoster.length || ""} clients…`}
-                value={clientSearch}
-                onChange={(e) => setClientSearch(e.target.value)}
-                className="h-8 text-xs"
-              />
-              {filters.clientTag && (
-                <button
-                  type="button"
-                  onClick={() => onClientTagChange?.(null)}
-                  className="w-full rounded-lg bg-muted px-2 py-1.5 text-left text-[12px] hover:bg-accent"
-                >
-                  ✕ Clear client ({filters.clientTag})
-                </button>
-              )}
-              <div className="max-h-64 space-y-0.5 overflow-y-auto">
-                {clientRoster.length === 0 ? (
-                  <div className="space-y-1 px-1 py-2">
-                    <p className="text-[11px] text-muted-foreground">Loading clients…</p>
-                    <button
-                      type="button"
-                      onClick={() => loadClientTags(true)}
-                      className="text-[11px] font-medium text-primary hover:underline"
-                    >
-                      Not loading? Retry
-                    </button>
-                  </div>
-                ) : (
-                  clientRoster
-                    .filter((c) => !clientSearch.trim() || c.tag.toLowerCase().includes(clientSearch.trim().toLowerCase()))
-                    .map((c) => {
-                      const picked = filters.clientTag === c.tag;
-                      return (
-                        <button
-                          key={c.tag}
-                          type="button"
-                          onClick={() => {
-                            if (picked) {
-                              onClientTagChange?.(null);
-                            } else {
-                              onClientTagChange?.(c.tag);
-                              onClientTagSelected?.(c.tag);
-                            }
-                          }}
-                          className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] transition-colors ${
-                            picked ? "bg-primary/10 ring-1 ring-primary/40" : "hover:bg-muted/60"
-                          }`}
-                        >
-                          <span className="font-medium">{c.tag}</span>
-                          {c.client_type && (
-                            <span className={`rounded-full px-1.5 text-[9px] ${c.client_type === "Cleaning" ? "bg-orange-500/15 text-orange-600" : "bg-sky-500/15 text-sky-600"}`}>
-                              {c.client_type}
-                            </span>
-                          )}
-                          {c.churned && <span className="rounded-full bg-destructive/10 px-1.5 text-[9px] text-destructive">churned</span>}
-                          <span
-                            className="ml-auto shrink-0 tabular-nums text-[11px] text-muted-foreground"
-                            title="Leads already pushed/tagged for this client (cached). Availability for a NEW send is shown when you select the client."
-                          >
-                            {c.contactable != null && c.contactable > 0 ? c.contactable.toLocaleString() : ""}
-                          </span>
-                        </button>
-                      );
-                    })
-                )}
-              </div>
-              <p className="px-1 text-[10px] text-muted-foreground">
-                Picking a client applies its sheet targeting (locations, categories,
-                exclusions) to the filters — it does NOT filter by the tag, so new
-                untagged leads still show. Available-to-send count appears on select.
-              </p>
-            </div>
-          </FilterChip>
-        )}
 
         {/* Targeting — structured geo entries (client-targeting auto-apply).
             Only shown while entries exist; hand-editable per entry. */}

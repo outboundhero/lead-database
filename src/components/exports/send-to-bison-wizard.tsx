@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
+import { mainCampaignsOnly } from "@/lib/bison/campaigns";
 import type { FilterState } from "@/types/filters";
 import { suggestBucketFromName } from "@/lib/bison/esp-bucket";
 
@@ -89,7 +90,7 @@ const emptyChoice = (): SideChoice => ({
 // Pre-fill from campaign names; routing turns on automatically when at least
 // two buckets have a recognizable campaign ("…Outlook…", "…SEGs…", "…Google…").
 function seedChoice(side: PreviewSide): SideChoice {
-  const sendable = side.campaigns.filter((c) => !/nurture/i.test(String(c.name ?? "")));
+  const sendable = mainCampaignsOnly(side.campaigns);
   const buckets: Record<BucketKey, string> = { outlook: SKIP, seg: SKIP, default: SKIP };
   for (const c of sendable) {
     const b = suggestBucketFromName(c.name);
@@ -687,10 +688,11 @@ function CampaignPicker({
   onChange: (v: SideChoice) => void;
 }) {
   const disabled = side.count === 0;
-  const [showNurture, setShowNurture] = useState(false);
-  // New leads must never go to nurture by default — same name rule the
-  // suggestion logic uses (send-preview suggestCampaign).
-  const sendable = side.campaigns.filter((c) => showNurture || !/nurture/i.test(String(c.name ?? "")));
+  // Nurture campaigns are ALWAYS excluded (client rule 2026-08-20: the database
+  // only ever sends to main campaigns). This was previously a default with a
+  // "show nurture campaigns" escape hatch; the escape hatch is gone, and
+  // /api/bison/push-batch now rejects them server-side regardless.
+  const sendable = mainCampaignsOnly(side.campaigns);
   const hidden = side.campaigns.length - sendable.length;
 
   const campaignSelect = (val: string, set: (id: string) => void, skipLabel: string) => (
@@ -755,16 +757,10 @@ function CampaignPicker({
       ) : (
         campaignSelect(value.single, (id) => onChange({ ...value, single: id }), "— Don't send this side —")
       )}
-      {hidden > 0 ? (
-        <button
-          type="button"
-          onClick={() => setShowNurture(true)}
-          className="mt-1 text-[10px] text-muted-foreground hover:text-foreground hover:underline"
-        >
-          {hidden} nurture campaign{hidden === 1 ? "" : "s"} hidden — show nurture campaigns
-        </button>
-      ) : showNurture && (
-        <p className="mt-1 text-[10px] text-amber-600">Nurture campaigns visible — new leads normally never go to nurture.</p>
+      {hidden > 0 && (
+        <p className="mt-1 text-[10px] text-muted-foreground" title="Nurture campaigns are populated from replies inside Bison, never from a push out of here.">
+          {hidden} nurture campaign{hidden === 1 ? "" : "s"} not shown — leads only go to main campaigns
+        </p>
       )}
     </div>
   );

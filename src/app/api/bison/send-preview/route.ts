@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isNurtureCampaign } from "@/lib/bison/campaigns";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeFilterState } from "@/types/filters";
@@ -110,7 +111,10 @@ function suggestCampaign(
     .filter((c) => typeof c.name === "string" && prefixRe.test(c.name.trim()))
     .sort(byNewest);
   if (matching.length === 0) return null;
-  return matching.find((c) => !/nurture/i.test(String(c.name))) ?? matching[0];
+  // NEVER fall back to a Nurture campaign. The old `?? matching[0]` meant that a
+  // client whose every tag-prefixed campaign is a Nurture got one suggested
+  // anyway — the opposite of the rule that we only ever send to main campaigns.
+  return matching.find((c) => !isNurtureCampaign(c.name)) ?? null;
 }
 
 export async function POST(request: NextRequest) {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { RowSelectionState } from "@tanstack/react-table";
 import { toast } from "sonner";
 import type { FilterResult } from "@/lib/filters/build-rpc-filters";
@@ -8,6 +9,7 @@ import { useFilters, type TargetingPatch } from "@/lib/hooks/use-filters";
 import type { LocationTargetEntry } from "@/types/filters";
 import { useDebounce } from "@/lib/hooks/use-debounce";
 import { FilterBar } from "@/components/filters/filter-bar";
+import { ClientSelector, type ClientRosterEntry } from "@/components/filters/client-selector";
 import { LeadTable } from "@/components/leads/lead-table";
 import { LeadDetailPanel } from "@/components/leads/lead-detail-panel";
 import { ExportButton } from "@/components/exports/export-button";
@@ -40,7 +42,6 @@ export default function LeadsPage() {
     setLocationCity,
     setFilterOperator,
     toggleFlag,
-    setKeyword,
     setEmailType,
     setEmailContains,
     setCategorySearch,
@@ -61,6 +62,19 @@ export default function LeadsPage() {
   } = useFilters();
 
   const debouncedFilters = useDebounce(filters, 300);
+
+  // The portal target lives in the app-shell TopBar, which is not in this tree.
+  // It only exists after the first client render, so hold off one tick.
+  const [topbarSlot, setTopbarSlot] = useState<Element | null>(null);
+  useEffect(() => { setTopbarSlot(document.getElementById("topbar-slot")); }, []);
+
+  // "Main Campaigns" column: which of the rows on screen have already gone to a
+  // main (non-Nurture) campaign for the selected client. Fetched SEPARATELY from
+  // the leads themselves so it can never delay the table — the column shows a
+  // placeholder until it lands.
+  const [pushedIds, setPushedIds] = useState<Set<string>>(new Set());
+  const [pushedLoaded, setPushedLoaded] = useState(false);
+  const pushReqSeq = useRef(0);
 
   // The 300ms debounce window is a hole: `filters` has already changed but the
   // fetch has not started, so isLoading is still false and the PREVIOUS query's
@@ -118,14 +132,12 @@ export default function LeadsPage() {
   filtersRef.current = filters;
 
   const [availability, setAvailability] = useState<{ tag: string; available: number } | null>(null);
+  // Cleaning vs Non-Cleaning per tag, used to auto-enable the Commercial
+  // Cleaning toggle. Filled from the roster the ClientSelector already fetches
+  // rather than issuing a second identical /api/bison/client-tags request.
   const clientTypeRef = useRef<Map<string, string>>(new Map());
-  useEffect(() => {
-    fetch("/api/bison/client-tags")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        for (const t of d?.tags ?? []) if (t?.tag && t?.client_type) clientTypeRef.current.set(t.tag, t.client_type);
-      })
-      .catch(() => {});
+  const handleRosterLoaded = useCallback((roster: ClientRosterEntry[]) => {
+    for (const t of roster) if (t?.tag && t?.client_type) clientTypeRef.current.set(t.tag, t.client_type);
   }, []);
 
   // Low-availability popup (client req: warn when a client has <250 fresh leads).
@@ -305,6 +317,34 @@ export default function LeadsPage() {
   // unfiltered load resolving after the client-filtered load.
   const reqSeq = useRef(0);
 
+  useEffect(() => {
+    const tag = filters.clientTag;
+    const ids = leads.map((l) => l.id);
+    if (!tag || ids.length === 0) {
+      setPushedIds(new Set());
+      setPushedLoaded(!!tag); // no client selected -> column is hidden anyway
+      return;
+    }
+    const myReq = ++pushReqSeq.current;
+    setPushedLoaded(false);
+    fetch("/api/leads/push-status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ leadIds: ids, clientTag: tag }),
+    })
+      .then((r) => (r.ok ? r.json() : { pushed: [] }))
+      .then((d: { pushed?: string[] }) => {
+        if (myReq !== pushReqSeq.current) return; // superseded by a newer page
+        setPushedIds(new Set(d.pushed ?? []));
+        setPushedLoaded(true);
+      })
+      .catch(() => {
+        if (myReq !== pushReqSeq.current) return;
+        setPushedIds(new Set());
+        setPushedLoaded(true); // informational column; fail quietly as "—"
+      });
+  }, [leads, filters.clientTag]);
+
   const fetchLeads = useCallback(async () => {
     const myReq = ++reqSeq.current;
     setIsLoading(true);
@@ -359,6 +399,20 @@ export default function LeadsPage() {
 
   return (
     <div className="flex h-[calc(100vh-7.5rem)] flex-col gap-4">
+      {/* The Client selector paints into the app-shell top bar, beside the
+          search box, but stays part of THIS component's tree so it keeps access
+          to the filter state and the targeting callbacks. */}
+      {topbarSlot &&
+        createPortal(
+          <ClientSelector
+            clientTag={filters.clientTag}
+            onChange={(t) => { setClientTag(t); if (!t) setAvailability(null); }}
+            onSelected={handleClientTagSelected}
+            onRosterLoaded={handleRosterLoaded}
+          />,
+          topbarSlot
+        )}
+
       {/* Filter bar */}
       <div className="-mx-6 -mt-6">
         <FilterBar
@@ -371,7 +425,6 @@ export default function LeadsPage() {
           onLocationCityChange={setLocationCity}
           onFilterOperatorChange={setFilterOperator}
           onToggleFlag={toggleFlag}
-          onKeywordChange={setKeyword}
           onEmailTypeChange={setEmailType}
           onEmailContainsChange={setEmailContains}
           onCategorySearchChange={setCategorySearch}
@@ -380,9 +433,7 @@ export default function LeadsPage() {
           onGlobalSearchChange={setGlobalSearch}
           onIncludeBouncedChange={setIncludeBounced}
           onLoadPreset={handleLoadPreset}
-          onClientTagSelected={handleClientTagSelected}
           onLocationTargetsChange={setLocationTargets}
-          onClientTagChange={(t) => { setClientTag(t); if (!t) setAvailability(null); }}
           onReset={handleReset}
         />
       </div>
@@ -497,6 +548,9 @@ export default function LeadsPage() {
           pageSize={filters.pageSize}
           /* debounce window counts as busy — see filtersSettled */
           isLoading={isLoading || !filtersSettled}
+          pushedLeadIds={pushedIds}
+          pushedLoaded={pushedLoaded}
+          showMainCampaigns={!!filters.clientTag}
           onPageChange={setPage}
           onPageSizeChange={setPageSize}
           onRowClick={setSelectedLead}
