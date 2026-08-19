@@ -19,6 +19,8 @@ interface LeadTablePaginationProps {
   page: number;
   pageSize: number;
   totalCount: number;
+  /** While true the count belongs to the PREVIOUS query — don't present it as this one's. */
+  isLoading?: boolean;
   onPageChange: (page: number) => void;
   onPageSizeChange: (size: number) => void;
 }
@@ -27,6 +29,7 @@ export function LeadTablePagination({
   page,
   pageSize,
   totalCount,
+  isLoading = false,
   onPageChange,
   onPageSizeChange,
 }: LeadTablePaginationProps) {
@@ -37,9 +40,11 @@ export function LeadTablePagination({
   return (
     <div className="ios-frost flex items-center justify-between border-t border-border/40 px-4 py-3">
       <div className="text-[13px] text-muted-foreground">
-        {totalCount === 0
-          ? "No results"
-          : `${from.toLocaleString()}–${to.toLocaleString()} of ${totalCount.toLocaleString()}`}
+        {isLoading
+          ? "Loading…"
+          : totalCount === 0
+            ? "No results"
+            : `${from.toLocaleString()}–${to.toLocaleString()} of ${totalCount.toLocaleString()}`}
       </div>
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2">

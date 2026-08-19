@@ -379,8 +379,13 @@ export default function LeadsPage() {
             className="mt-0.5 text-[13px] text-muted-foreground"
             title={isApproximate ? "Approximate count (planner estimate, ±5%)" : undefined}
           >
-            {isApproximate ? "~" : ""}
-            {totalCount.toLocaleString()} contacts
+            {/* While a query is in flight the PREVIOUS count is meaningless —
+                showing it made a heavy filter look like it had not applied at
+                all (the header sat on the unfiltered 7,395,814 for minutes).
+                Show that we are counting instead. */}
+            {isLoading
+              ? "Counting…"
+              : `${isApproximate ? "~" : ""}${totalCount.toLocaleString()} contacts`}
             {availability && availability.tag === filters.clientTag && (
               <span className="ml-2 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
                 {availability.available.toLocaleString()} available for {availability.tag}

@@ -235,6 +235,7 @@ export function LeadTable({
         page={page}
         pageSize={pageSize}
         totalCount={totalCount}
+        isLoading={isLoading}
         onPageChange={onPageChange}
         onPageSizeChange={onPageSizeChange}
       />
