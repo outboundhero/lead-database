@@ -25,26 +25,42 @@ export async function POST(req: NextRequest) {
 
     const p_filters = buildRpcFilters(filters);
 
-    const { data, error } = await supabaseAdmin.rpc("fn_filter_leads_v2", {
-      p_filters,
-      p_sort_by: filters.sortBy === "created_at" ? "" : (filters.sortBy || ""),
-      p_sort_dir: filters.sortDir || "desc",
-      p_limit: limit,
-      p_offset: offset,
-    });
+    // The page of rows and the total are two expensive scans over the same
+    // filtered set. Running them IN SERIES inside one RPC meant a heavy client
+    // filter paid both (CCGCT: rows 4.8s THEN count 4.5s). Fire them together
+    // and the wall clock is the slower of the two, not the sum.
+    const [rowsRes, countRes] = await Promise.all([
+      supabaseAdmin.rpc("fn_filter_leads_v2", {
+        p_filters: { ...p_filters, skipCount: true },
+        p_sort_by: filters.sortBy === "created_at" ? "" : (filters.sortBy || ""),
+        p_sort_dir: filters.sortDir || "desc",
+        p_limit: limit,
+        p_offset: offset,
+      }),
+      supabaseAdmin.rpc("fn_filter_leads_count", { p_filters }),
+    ]);
 
-    if (error) {
-      console.error("Filter RPC error:", error);
-      return NextResponse.json(
-        { error: error.message },
-        { status: 500 }
-      );
+    if (rowsRes.error) {
+      console.error("Filter RPC error:", rowsRes.error);
+      return NextResponse.json({ error: rowsRes.error.message }, { status: 500 });
+    }
+
+    const rows = rowsRes.data?.data ?? [];
+    // A failed COUNT must never fail the whole request — the table is the point.
+    // Fall back to what we can prove from the page we already have.
+    if (countRes.error) {
+      console.error("Filter count RPC error:", countRes.error);
+      return NextResponse.json({
+        data: rows,
+        totalCount: offset + rows.length,
+        isApproximate: true,
+      });
     }
 
     return NextResponse.json({
-      data: data?.data ?? [],
-      totalCount: data?.totalCount ?? 0,
-      isApproximate: data?.isApproximate ?? false,
+      data: rows,
+      totalCount: countRes.data?.totalCount ?? 0,
+      isApproximate: countRes.data?.isApproximate ?? false,
     });
   } catch (err) {
     console.error("Filter API error:", err);
