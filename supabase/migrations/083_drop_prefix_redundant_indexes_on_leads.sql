@@ -1,0 +1,45 @@
+-- 083: drop three prefix-redundant indexes on leads.
+--
+-- WHY: leads carries 7,971 MB of indexes on a 3,979 MB table, against a
+-- shared_buffers of only 4,096 MB. The working set (heap + indexes + the rest
+-- of the database, ~15 GB) cannot fit in cache, and the measured heap cache hit
+-- ratio is 73% where it should be >99%. Every index removed is cache the rest
+-- of the database gets back, so this is about overall responsiveness, not about
+-- any single query.
+--
+-- WHY THESE THREE AND NOTHING ELSE: each one is a STRICT PREFIX of a wider
+-- index that is still present. A btree on (a) can serve nothing that a btree on
+-- (a, b) cannot — same leading column, same sort direction — so no query plan,
+-- no filter and no feature loses an access path here. This is the only class of
+-- index that can be dropped with a proof rather than an argument.
+--
+--   idx_leads_created_at         btree (created_at DESC)
+--     -> covered by idx_leads_created_id  btree (created_at DESC, id DESC)
+--   idx_leads_seniority          btree (seniority)
+--     -> covered by idx_leads_seniority_industry  btree (seniority, general_industry)
+--   idx_leads_validation_status  btree (validation_status)
+--     -> covered by idx_leads_validation_bounce   btree (validation_status, is_bounced)
+--
+-- Reclaims ~380 MB.
+--
+-- DELIBERATELY NOT DROPPED, even though pg_stat_user_indexes reports 0 scans
+-- over the 18-day window: idx_leads_first_name_trgm, idx_leads_last_name_trgm
+-- (back the name filter and globalSearch), idx_leads_annual_revenue,
+-- idx_leads_company_size, idx_leads_industry_size, idx_leads_seniority_industry,
+-- idx_leads_title_industry, idx_leads_country, idx_leads_technologies,
+-- idx_leads_postal_code, idx_leads_bison_lead_id (all referenced by live app
+-- code) and idx_leads_category_pending (needed by categorize-worker, currently
+-- parked by its worker_locks lease). A zero scan count means the planner has not
+-- chosen it lately, NOT that the feature behind it is gone.
+--
+-- TO RESTORE ANY OF THESE, run the matching statement:
+--   CREATE INDEX CONCURRENTLY idx_leads_created_at ON public.leads USING btree (created_at DESC);
+--   CREATE INDEX CONCURRENTLY idx_leads_seniority ON public.leads USING btree (seniority);
+--   CREATE INDEX CONCURRENTLY idx_leads_validation_status ON public.leads USING btree (validation_status);
+--
+-- CONCURRENTLY so nothing on the live table is blocked. Cannot run inside a
+-- transaction block — apply these statements one at a time.
+
+DROP INDEX CONCURRENTLY IF EXISTS public.idx_leads_created_at;
+DROP INDEX CONCURRENTLY IF EXISTS public.idx_leads_seniority;
+DROP INDEX CONCURRENTLY IF EXISTS public.idx_leads_validation_status;
