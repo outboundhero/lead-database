@@ -62,6 +62,14 @@ export default function LeadsPage() {
 
   const debouncedFilters = useDebounce(filters, 300);
 
+  // The 300ms debounce window is a hole: `filters` has already changed but the
+  // fetch has not started, so isLoading is still false and the PREVIOUS query's
+  // rows and count render as if they answered the new filters. Selecting a
+  // client showed "7,422,696 contacts" over unfiltered Alabama rows before
+  // flipping to 59,527. Treat "filters differ from the ones we fetched" as busy.
+  const filtersSettled =
+    JSON.stringify(filters) === JSON.stringify(debouncedFilters);
+
   const [leads, setLeads] = useState<Lead[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [isApproximate, setIsApproximate] = useState(false);
@@ -292,7 +300,13 @@ export default function LeadsPage() {
     }
   }, [filters]);
 
+  // Monotonic request id. Without it a SLOW request can land after a FAST one
+  // fired later and overwrite correct results with stale ones — e.g. the
+  // unfiltered load resolving after the client-filtered load.
+  const reqSeq = useRef(0);
+
   const fetchLeads = useCallback(async () => {
+    const myReq = ++reqSeq.current;
     setIsLoading(true);
     // Big searches can exceed the server's patience — abort at 100s with a
     // clear message instead of spinning forever, and KEEP the previous rows.
@@ -307,10 +321,12 @@ export default function LeadsPage() {
       });
       if (!res.ok) throw new Error(`Filter request failed: ${res.status}`);
       const result: FilterResult & { isApproximate?: boolean } = await res.json();
+      if (myReq !== reqSeq.current) return; // superseded — drop it
       setLeads(result.data);
       setTotalCount(result.totalCount);
       setIsApproximate(result.isApproximate ?? false);
     } catch (err) {
+      if (myReq !== reqSeq.current) return; // superseded — its abort is expected
       console.error("Filter query error:", err);
       if (err instanceof DOMException && err.name === "AbortError") {
         toast.error("This search is too heavy and timed out — remove a filter or two and try again. Showing the previous results.");
@@ -319,7 +335,7 @@ export default function LeadsPage() {
       }
     } finally {
       clearTimeout(timer);
-      setIsLoading(false);
+      if (myReq === reqSeq.current) setIsLoading(false);
     }
   }, [debouncedFilters]);
 
@@ -383,7 +399,7 @@ export default function LeadsPage() {
                 showing it made a heavy filter look like it had not applied at
                 all (the header sat on the unfiltered 7,395,814 for minutes).
                 Show that we are counting instead. */}
-            {isLoading
+            {isLoading || !filtersSettled
               ? "Counting…"
               : `${isApproximate ? "~" : ""}${totalCount.toLocaleString()} contacts`}
             {availability && availability.tag === filters.clientTag && (
@@ -479,7 +495,8 @@ export default function LeadsPage() {
           totalCount={totalCount}
           page={filters.page}
           pageSize={filters.pageSize}
-          isLoading={isLoading}
+          /* debounce window counts as busy — see filtersSettled */
+          isLoading={isLoading || !filtersSettled}
           onPageChange={setPage}
           onPageSizeChange={setPageSize}
           onRowClick={setSelectedLead}
