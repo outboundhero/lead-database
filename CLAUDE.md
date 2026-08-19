@@ -200,6 +200,44 @@ included — throttles to baseline until it refills. It has been exhausted at
 least once (2026-08-07) by enrichment work. Before running anything that scans
 or rewrites `leads` in bulk, check Reports → Database in the Supabase dashboard.
 
+### Index bloat and cache pressure (measured 2026-08-19)
+
+`shared_buffers` is **4,096 MB** against a database of ~11 GB, so the working
+set does not fit in cache. Measured heap cache hit ratio was **73%** (healthy is
+>99%) — that, not any single slow query, is why the whole app felt slow. Every
+MB of index bloat is cache the rest of the database does not get.
+
+`leads` had **7,971 MB of indexes on a 3,979 MB table**. Cause: 7.33M updates of
+which only 758k were HOT, so ~90% rewrite all ~39 index entries. With autovacuum
+on the global defaults (vacuum only after ~1.64M dead rows) the dead entries
+never got reclaimed — `idx_leads_subcategory_trgm` was **62% bloat**,
+`idx_leads_created_id` 46.8%, `leads_email_key` 36.2%.
+
+Fixed by migrations **083** (drop 3 prefix-redundant indexes) and **084**
+(per-table autovacuum: vacuum 0.2→0.05, analyze 0.1→0.02) plus a full
+`REINDEX INDEX CONCURRENTLY` pass. Result: **7,971 MB → 4,340 MB**.
+
+- Check bloat with `pgstatindex('idx_name')` — **btree only**; it errors on GIN.
+- `REINDEX INDEX CONCURRENTLY` is safe and cheap (most indexes 10–20s): the old
+  index stays valid and serving the whole time. If it is cancelled it leaves an
+  INVALID `*_ccnew` index consuming space — always check
+  `pg_index WHERE NOT indisvalid` afterwards and drop what you find.
+- ⚠ **A zero `idx_scan` does not mean an index is droppable.** It means the
+  planner has not chosen it lately. Only drop an index that is a STRICT PREFIX
+  of a wider surviving index (`(a)` under `(a,b)`), which is provable, or one
+  whose feature is genuinely gone. ~2 GB of zero-scan indexes were deliberately
+  KEPT for this reason (name trigrams, annual_revenue, category_pending…).
+- ⚠ `ALTER TABLE leads SET (...)` needs a brief ACCESS EXCLUSIVE lock and will
+  hit the 2-minute timeout if a `REINDEX CONCURRENTLY` is running. Wait it out.
+
+### statement_timeout DOES survive the SESSION pooler
+
+The role default is **2min**. CLAUDE.md previously said `statement_timeout` does
+not survive Supavisor — that is true of the **transaction** pooler (port 6543)
+but NOT of **session** mode (port 5432), where `SET statement_timeout = 0` holds.
+Use port 5432 for long maintenance (the 1.3 GB GIN reindex needed 205s and was
+killed twice on 6543).
+
 Known I/O-heavy patterns to avoid:
 - Unbounded `fn_sync_companies()` — fixed in migration 074, keep it bounded
 - `scripts/infer-company-locations.mjs` C1 pass uses **OFFSET pagination over a
