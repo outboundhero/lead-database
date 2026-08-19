@@ -19,9 +19,25 @@ import {
 
 // Everything one client tag's targeting rules contribute to the filters —
 // applied as a unit on tag select and removed as a unit on deselect.
-// Locations flatten into the State/City filters directly (client decision
-// 2026-08-06): city entries -> location.city.include (exact), state-level
-// entries -> location.state.include.
+//
+// LOCATIONS GO IN AS PAIRS (2026-08-19). They used to be flattened into the
+// flat City/State chips (client decision 2026-08-06), but those two chips AND
+// independently and cannot express a pair, so the state was DISCARDED and the
+// City chip was left holding 117 bare city names that match in ANY state. For
+// client BBS that leaked 77,658 wrong-state leads into the view — Washington DC
+// (29,647), Salem OR (15,720), Rockville MD (6,414), Syracuse NY — which is
+// exactly what the client reported seeing.
+//
+// locationTargets matches a city by geoname id, so "Washington, UT" can never
+// match Washington, DC. The send path already worked this way (it resolves
+// location_id), which is why only the on-screen view was ever wrong.
+//
+// The State chip is still populated, with the DISTINCT states a client covers
+// (BBS -> Utah, Nevada), because operators want to see the coverage at a
+// glance. It is safe: every lead passing the pairs is already in one of those
+// states, so ANDing it removes nothing except rows whose city and state
+// contradict each other (21 rows for BBS, e.g. city "Salt Lake City" with
+// state "Florida") — which should not go to that client anyway.
 export interface TargetingPatch {
   locations: LocationTargetsFilter;
   categorySearchInclude: string[];  // include terms -> categorySearch.include (contains)
@@ -33,8 +49,15 @@ export interface TargetingPatch {
   commercialCleaning?: boolean;    // Cleaning clients auto-enable the CC toggle
 }
 
-const entryCities = (entries: LocationTargetEntry[]) =>
-  entries.filter((e) => e.city).map((e) => e.city as string);
+// Every state a client covers, whether named by a city entry or a state entry.
+// DISPLAY value for the State chip — see the TargetingPatch note above.
+const entryCoveredStates = (entries: LocationTargetEntry[]) => [
+  ...new Set(entries.filter((e) => e.state).map((e) => e.state as string)),
+];
+
+// STATE-LEVEL entries only (no city). Used for the EXCLUDE side, where widening
+// to a whole state would be destructive: excluding "Provo, UT" must never
+// exclude all of Utah. City-level excludes are carried by locationTargets.
 const entryStates = (entries: LocationTargetEntry[]) =>
   entries.filter((e) => !e.city && e.state).map((e) => e.state as string);
 
@@ -88,7 +111,10 @@ type FilterAction =
   | { type: "REMOVE_CLIENT_TARGETING"; patch: TargetingPatch }
   | { type: "RESET" };
 
-function filterReducer(state: FilterState, action: FilterAction): FilterState {
+// Exported (pure function, no behaviour change) so client-targeting application
+// can be tested directly against real client_targeting rows — see
+// scripts/test-client-targeting.mts.
+export function filterReducer(state: FilterState, action: FilterAction): FilterState {
   switch (action.type) {
     case "SET_TEXT":
       return { ...state, [action.field]: action.value, page: 1 };
@@ -143,19 +169,19 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
     case "APPLY_CLIENT_TARGETING":
       return {
         ...state,
+        // City+state stay PAIRED here — this is what stops Washington, UT from
+        // matching Washington, DC. The flat City chip is deliberately NOT
+        // touched: a bare city name matches in every state.
+        locationTargets: {
+          include: mergeEntries(state.locationTargets.include, action.patch.locations.include),
+          exclude: mergeEntries(state.locationTargets.exclude, action.patch.locations.exclude),
+        },
         location: {
           ...state.location,
-          city: {
-            ...state.location.city,
-            include: mergeStrings(state.location.city.include, entryCities(action.patch.locations.include)),
-            exclude: mergeStrings(state.location.city.exclude, entryCities(action.patch.locations.exclude)),
-            // Exact whole-city matching (sheet cities are geo-validated names).
-            ...(entryCities(action.patch.locations.include).length && state.location.city.include.length === 0
-              ? { includeMode: "exact" as const } : {}),
-          },
           state: {
             ...state.location.state,
-            include: mergeStrings(state.location.state.include, entryStates(action.patch.locations.include)),
+            include: mergeStrings(state.location.state.include, entryCoveredStates(action.patch.locations.include)),
+            // Only whole-state excludes may widen to a whole state.
             exclude: mergeStrings(state.location.state.exclude, entryStates(action.patch.locations.exclude)),
           },
         },
@@ -185,16 +211,16 @@ function filterReducer(state: FilterState, action: FilterAction): FilterState {
     case "REMOVE_CLIENT_TARGETING":
       return {
         ...state,
+        // Mirror of APPLY above — remove exactly what was added, nothing else.
+        locationTargets: {
+          include: removeEntries(state.locationTargets.include, action.patch.locations.include),
+          exclude: removeEntries(state.locationTargets.exclude, action.patch.locations.exclude),
+        },
         location: {
           ...state.location,
-          city: {
-            ...state.location.city,
-            include: removeStrings(state.location.city.include, entryCities(action.patch.locations.include)),
-            exclude: removeStrings(state.location.city.exclude, entryCities(action.patch.locations.exclude)),
-          },
           state: {
             ...state.location.state,
-            include: removeStrings(state.location.state.include, entryStates(action.patch.locations.include)),
+            include: removeStrings(state.location.state.include, entryCoveredStates(action.patch.locations.include)),
             exclude: removeStrings(state.location.state.exclude, entryStates(action.patch.locations.exclude)),
           },
         },

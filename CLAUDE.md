@@ -630,6 +630,51 @@ side but uses it only to keep a category out of `exclude_industries`.
 Neither ever gated pushes. The only behaviour change: selecting a client on the
 Leads page no longer pre-fills the Category-search filter.
 
+## Client locations apply as city+state PAIRS (2026-08-19)
+
+Selecting a client on the Leads page puts its `include_locations` into the
+**`locationTargets`** filter (the "Targeting" chip) as pairs, and additionally
+lists the DISTINCT states it covers in the State chip so the coverage is
+visible at a glance.
+
+⚠ **They used to be flattened into the flat City/State chips** (client decision
+2026-08-06). Those two chips AND *independently* and cannot express a pair, and
+`entryStates` only kept entries with **no** city — so for a list of city+state
+pairs the state was **discarded entirely**, leaving the City chip holding bare
+city names that match in ANY state. Measured damage before the fix:
+
+| Client | Shown | Correct | Wrong-state leads |
+|---|---|---|---|
+| BBS | 233,549 | 155,891 | **77,658** (33%) |
+| JPCO | 248,732 | 180,149 | 68,583 |
+| ABM | 133,571 | 77,471 | 56,100 |
+
+BBS targets `Washington, UT` → it was showing Washington **DC** (29,647),
+Rockville **MD**, Syracuse **NY**. The client reported exactly this.
+
+Only the on-screen view was ever wrong. **The send path was always correct** —
+`fn_client_eligibility_conditions` resolves entries through
+`fn_location_entry_condition`, which turns a city+state entry into geoname ids
+and matches `l.location_id`. Nothing incorrect was ever pushed to Bison.
+
+Two consequences worth knowing:
+
+- Matching is by **geoname id**, so the free-text `l.city` column is NOT the
+  authority and can disagree with it (BBS has 6 rows whose city text says
+  "Austin" but which resolve to Las Vegas, NV). Assert against the resolved
+  place, not `l.city`. Only 62.5% of leads have a resolved `location_id`, but
+  collateral loss is negligible — at most **4 leads** for any single client.
+- It also fixed the header count. Bare-city ILIKE conditions estimated
+  4,289,572 rows against a real 233,455, and `fn_filter_leads_v2` only computes
+  an exact `COUNT(*)` when the estimate is ≤ 500,000 — so the UI displayed the
+  garbage estimate ("~3,780,912", the `~` marks `is_approximate`).
+  `location_id = ANY(...)` estimates at 3,551, so the exact count now runs.
+  **The underlying threshold issue remains** for genuinely large result sets.
+
+Regression test: `DATABASE_URL=... npx tsx scripts/test-client-targeting.mts`
+drives the real reducer + `buildRpcFilters` + `fn_lead_filter_conditions`
+against every client with location targeting.
+
 ## `TagInput` splits lists by default
 
 [tag-input.tsx](src/components/ui/ios/tag-input.tsx) splits committed values on

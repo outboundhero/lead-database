@@ -184,7 +184,7 @@ export default function LeadsPage() {
         appliedRef.current.set(tag, patch);
         applyClientTargeting(patch);
         const bits = [
-          patch.locations.include.length && `${patch.locations.include.length} locations → City/State filters`,
+          patch.locations.include.length && `${patch.locations.include.length} locations → Targeting chip (city+state paired)`,
           patch.categorySearchInclude.length && `${patch.categorySearchInclude.length} category terms`,
           patch.categorySearchExclude.length && `${patch.categorySearchExclude.length} excluded terms`,
           patch.commercialCleaning && "Commercial Cleaning titles on",
