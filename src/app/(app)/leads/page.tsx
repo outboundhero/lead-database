@@ -131,7 +131,6 @@ export default function LeadsPage() {
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
 
-  const [availability, setAvailability] = useState<{ tag: string; available: number } | null>(null);
   // Cleaning vs Non-Cleaning per tag, used to auto-enable the Commercial
   // Cleaning toggle. Filled from the roster the ClientSelector already fetches
   // rather than issuing a second identical /api/bison/client-tags request.
@@ -218,7 +217,9 @@ export default function LeadsPage() {
         .then((r) => (r.ok ? r.json() : null))
         .then((a: { available: number } | null) => {
           if (!a) return;
-          setAvailability({ tag, available: a.available });
+          // The "N available for TAG" badge was removed 2026-08-20 (client
+          // request). The count is still fetched because the low-availability
+          // warning below depends on it.
           if (a.available < 250) setLowAvail({ tag, available: a.available, targeting: targeting ?? null });
         })
         .catch(() => {});
@@ -406,7 +407,7 @@ export default function LeadsPage() {
         createPortal(
           <ClientSelector
             clientTag={filters.clientTag}
-            onChange={(t) => { setClientTag(t); if (!t) setAvailability(null); }}
+            onChange={(t) => { setClientTag(t); if (!t) setLowAvail(null); }}
             onSelected={handleClientTagSelected}
             onRosterLoaded={handleRosterLoaded}
           />,
@@ -453,11 +454,6 @@ export default function LeadsPage() {
             {isLoading || !filtersSettled
               ? "Counting…"
               : `${isApproximate ? "~" : ""}${totalCount.toLocaleString()} contacts`}
-            {availability && availability.tag === filters.clientTag && (
-              <span className="ml-2 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
-                {availability.available.toLocaleString()} available for {availability.tag}
-              </span>
-            )}
           </p>
         </div>
         <div className="flex items-center gap-2">
