@@ -254,6 +254,7 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
         totalCount={exportType === "selected" ? selectedIds.length : totalCount}
         exportType={exportType}
         tagIncludes={filters.tags?.include ?? []}
+        clientTag={filters.clientTag ?? null}
         statsFilters={exportType === "selected" ? undefined : filters}
         statsSelectedIds={exportType === "selected" && selectedIds.length > 0 ? selectedIds : undefined}
       />

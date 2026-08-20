@@ -102,6 +102,9 @@ interface ColumnSelectorProps {
   // Client-tag values currently in the Tags filter — when one matches a known
   // client, the campaign list auto-scopes to it and per-tag push stats show.
   tagIncludes?: string[];
+  /** The client picked in the top-bar selector. Takes precedence over
+   *  tagIncludes for scoping the campaign list — it is an explicit choice. */
+  clientTag?: string | null;
   statsFilters?: unknown;
   statsSelectedIds?: string[];
 }
@@ -113,6 +116,7 @@ export function ColumnSelector({
   totalCount,
   exportType = "filtered",
   tagIncludes = [],
+  clientTag = null,
   statsFilters,
   statsSelectedIds,
 }: ColumnSelectorProps) {
@@ -140,12 +144,18 @@ export function ColumnSelector({
   const scopeTouchedRef = useRef(false);
   const detectedTag = useMemo(() => {
     const known = new Map(clientTagOptions.map((t) => [t.toLowerCase(), t]));
+    // The top-bar Client selector wins: it is a deliberate choice, whereas
+    // tagIncludes is whatever happens to be in the Tags filter. Fall back to
+    // the raw value if the roster has not loaded yet, so scoping still works.
+    if (clientTag && clientTag.trim()) {
+      return known.get(clientTag.trim().toLowerCase()) ?? clientTag.trim();
+    }
     for (const t of tagIncludes) {
       const hit = known.get(String(t).trim().toLowerCase());
       if (hit) return hit;
     }
     return null;
-  }, [tagIncludes, clientTagOptions]);
+  }, [clientTag, tagIncludes, clientTagOptions]);
   const [includeAlreadyPushed, setIncludeAlreadyPushed] = useState(false);
   const [pushStats, setPushStats] = useState<{ matching: number; alreadyPushed: number; notPushed: number } | null>(null);
 
@@ -369,10 +379,13 @@ export function ColumnSelector({
                     value={tagScope}
                     onChange={(e) => { scopeTouchedRef.current = true; setTagScope(e.target.value); }}
                     className="h-8 max-w-[130px] rounded-md border bg-transparent px-2 text-xs"
-                    title="Only show campaigns named for this client tag (auto-set from the Tags filter)"
+                    title="Only show campaigns named for this client tag. Pre-set from the client you selected — change it to All clients, or pick another, at any time."
                   >
                     <option value="">All clients</option>
-                    {clientTagOptions.map((t) => (
+                    {(clientTagOptions.includes(tagScope) || !tagScope
+                      ? clientTagOptions
+                      : [tagScope, ...clientTagOptions]
+                    ).map((t) => (
                       <option key={t} value={t}>{t}</option>
                     ))}
                   </select>
@@ -457,7 +470,26 @@ export function ColumnSelector({
                 )}
                 <div className="max-h-[40vh] space-y-2 overflow-y-auto rounded-md border p-2">
                 {filtered.length === 0 ? (
-                  <p className="px-1 py-2 text-xs text-muted-foreground">No campaigns match “{campaignSearch}”.</p>
+                  // Say WHICH filter emptied the list. Scoping to a client hides
+                  // every campaign whose name does not start with that tag, and
+                  // blaming the (often empty) search box for that is misleading.
+                  tagScope ? (
+                    <p className="px-1 py-2 text-xs text-muted-foreground">
+                      No campaigns named for <span className="font-medium text-foreground">{tagScope}</span>
+                      {campaignSearch ? <> matching “{campaignSearch}”</> : null}.{" "}
+                      <button
+                        type="button"
+                        onClick={() => { scopeTouchedRef.current = true; setTagScope(""); }}
+                        className="font-medium text-primary hover:underline"
+                      >
+                        Show all clients
+                      </button>
+                    </p>
+                  ) : (
+                    <p className="px-1 py-2 text-xs text-muted-foreground">
+                      {campaignSearch ? <>No campaigns match “{campaignSearch}”.</> : <>No campaigns found.</>}
+                    </p>
+                  )
                 ) : Array.from(
                   filtered.reduce<Map<string, BisonCampaign[]>>((groups, c) => {
                     const group = c.workspace_name || c.instance_url || "Unknown workspace";
