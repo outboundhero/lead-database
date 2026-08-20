@@ -8,6 +8,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { isNurtureCampaign } from "@/lib/bison/campaigns";
 import { Input } from "@/components/ui/input";
@@ -148,11 +149,14 @@ export function ColumnSelector({
   const [includeAlreadyPushed, setIncludeAlreadyPushed] = useState(false);
   const [pushStats, setPushStats] = useState<{ matching: number; alreadyPushed: number; notPushed: number } | null>(null);
 
-  const loadCampaigns = useCallback(() => {
+  // force = true asks the server to bypass its cache (?fresh=1) and re-read the
+  // Bison installs live. That is what the "Sync" button does: a campaign created
+  // in Bison seconds ago is otherwise only picked up when the cache lapses.
+  const loadCampaigns = useCallback((force = false) => {
     setCampaignsAttempted(true);
     setCampaignsLoading(true);
     setCampaignsError(null);
-    fetch("/api/bison/campaigns")
+    fetch(force ? "/api/bison/campaigns?fresh=1" : "/api/bison/campaigns")
       .then(async (r) => {
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
         return r.json();
@@ -307,15 +311,27 @@ export function ColumnSelector({
 
         {destination === "bison" && (
           <div className="mb-2">
-            <label className="text-xs text-muted-foreground mb-1 block">
-              Bison campaigns{selectedCampaignKeys.size > 0 ? ` (${selectedCampaignKeys.size} selected)` : ""}
-            </label>
+            <div className="mb-1 flex items-center gap-2">
+              <label className="text-xs text-muted-foreground">
+                Bison campaigns{selectedCampaignKeys.size > 0 ? ` (${selectedCampaignKeys.size} selected)` : ""}
+              </label>
+              <button
+                type="button"
+                onClick={() => loadCampaigns(true)}
+                disabled={campaignsLoading}
+                className="ml-auto inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline disabled:opacity-50"
+                title="Re-read the campaign list from Bison now, instead of waiting for the cached copy to lapse. Use this after creating a campaign."
+              >
+                <RefreshCw className={`size-3 ${campaignsLoading ? "animate-spin" : ""}`} />
+                {campaignsLoading ? "Syncing…" : "Sync campaigns"}
+              </button>
+            </div>
             {campaignsLoading ? (
               <p className="text-xs text-muted-foreground">Loading campaigns…</p>
             ) : campaignsError ? (
               <div className="flex items-center gap-2">
                 <p className="flex-1 text-xs text-destructive">Couldn&apos;t load campaigns: {campaignsError}</p>
-                <Button variant="outline" size="sm" className="h-7 text-xs shrink-0" onClick={loadCampaigns}>
+                <Button variant="outline" size="sm" className="h-7 text-xs shrink-0" onClick={() => loadCampaigns(true)}>
                   Retry
                 </Button>
               </div>
