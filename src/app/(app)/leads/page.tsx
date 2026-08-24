@@ -627,6 +627,12 @@ export default function LeadsPage() {
           setSelectedLead(null);
           fetchLeads();
         }}
+        onUpdated={(updated) => {
+          // Patch the row in place so the table reflects the edit without
+          // re-running the (expensive) filter query.
+          setLeads((rows) => rows.map((r) => (r.id === updated.id ? updated : r)));
+          setSelectedLead(updated);
+        }}
       />
     </div>
   );
