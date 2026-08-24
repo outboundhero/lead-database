@@ -471,7 +471,21 @@ deploys from THIS repo, so a push to `main` rebuilds all of them.
 | `bounce-worker` | cron | `0 */6 * * *` | `node scripts/bounce-worker.mjs` |
 | `client-sync` | cron | `0 */6 * * *` | `npm run sync-clients && npm run sync-targeting` |
 | `categorize-worker` | cron | `0 3 * * *` | `node scripts/categorize-worker.mjs --keyword-only` |
-| `location-worker` | cron | `0 12 * * 0` | `npm run location-worker` |
+| `location-worker` | cron | `*/30 * * * *` | `npm run location-backfill` |
+
+### ⚠ The location pass is SPLIT — never put both halves on a frequent cron
+
+`npm run location-worker` still runs both halves and is kept for manual use,
+but the cron runs **`npm run location-backfill` only** (geo-reference resolution
+of leads that already carry city/state text — cheap, bounded, ~56k rows pending
+at the 2026-08-25 measurement, near-zero once caught up).
+
+`npm run location-inference` (`infer-company-locations.mjs`) is the other half
+and is **deliberately unscheduled**. It targets the ~2.58M leads with no
+location text at all, using the OFFSET-over-GROUP-BY pagination that
+re-aggregates the whole table per page with `statement_timeout = 0` — the
+pattern that exhausted the disk-I/O budget on 2026-08-07. Give it a schedule
+only after that pagination is fixed (open TODO below), and never `*/30`.
 
 ### ⚠ Every worker service MUST override the build command
 
