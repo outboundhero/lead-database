@@ -20,12 +20,34 @@ const PAGE_CONCURRENCY = 8;          // pages fetched in parallel per instance
 // (measured 2026-08-25), so page COUNT is the cost driver — hence the parallel
 // page fetch in refresh() and the search path below.
 
-// Server-side search — the escape hatch from that pagination. Bison's
-// ?search= returns every match in ONE page (measured: 9 CCGCT campaigns in
-// 1.8s vs 22 paged requests), so a client-scoped picker asks for exactly the
-// campaigns it needs instead of trying to enumerate the whole install and
-// silently running out of budget.
+// Server-side search — the escape hatch from that pagination. A client-scoped
+// picker asks for exactly the campaigns it needs instead of enumerating the
+// whole install and silently running out of budget.
+//
+// CAREFUL (measured 2026-08-25): Bison DROPS the search term from its own
+// pagination links. A search response's links.next is plain
+// `/api/campaigns?page=2` — so following it walks the ENTIRE UNFILTERED install
+// from page 2 on (meta.total flips 32 -> 1429 mid-walk). That is how the picker
+// ended up showing "JPCA: SEGs" twice: once from the real search page, then
+// again when the unfiltered walk reached it. Page explicitly with search= on
+// every request instead, driven by meta.last_page. (JPCA: 1429 rows in 50s
+// following links.next, vs 32 rows over 3 pages in ~1s paging explicitly.)
 const searchCache = new Map<string, { at: number; data: Array<Record<string, unknown>>; errors: string[] }>();
+
+// Last line of defence against a campaign appearing twice in the picker. Rows
+// are keyed by `instance#id` in the UI, so a duplicate is not merely cosmetic:
+// two rows sharing a React key make both checkboxes toggle as one.
+function dedupeCampaigns(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const seen = new Set<string>();
+  const out: Array<Record<string, unknown>> = [];
+  for (const c of rows) {
+    const key = `${c.instance_url ?? ""}#${c.id ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(c);
+  }
+  return out;
+}
 
 async function searchInstances(
   instances: ReturnType<typeof bisonInstances>,
@@ -36,25 +58,34 @@ async function searchInstances(
   await Promise.all(
     instances.map(async ({ domain, key }) => {
       const startedAt = Date.now();
+      // Always carries search= — never links.next, which silently loses it.
+      const get = async (page: number) => {
+        const url = `https://${domain}/api/campaigns?search=${encodeURIComponent(term)}&page=${page}`;
+        const res = await fetch(url, {
+          headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+          cache: "no-store",
+          signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
+        });
+        if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
+        return res.json();
+      };
       try {
-        let url: string | null =
-          `https://${domain}/api/campaigns?search=${encodeURIComponent(term)}`;
-        for (let page = 0; url && page < MAX_PAGES; page++) {
-          const res: Response = await fetch(url, {
-            headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
-            cache: "no-store",
-            signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
-          });
-          if (!res.ok) { errors.push(`${domain}: HTTP ${res.status}`); return; }
-          const json = await res.json();
-          const list = Array.isArray(json?.data) ? json.data : [];
-          for (const c of list) data.push({ ...c, instance_url: domain });
-          if (list.length === 0) break;
-          url = typeof json?.links?.next === "string" ? json.links.next : null;
-          if (url && Date.now() - startedAt > INSTANCE_BUDGET_MS) {
+        const first = await get(1);
+        const list = Array.isArray(first?.data) ? first.data : [];
+        for (const c of list) data.push({ ...c, instance_url: domain });
+
+        // A scoped result is small (tens of rows, single-digit pages), so serial
+        // paging is fine here — unlike the full enumeration in refresh().
+        const lastPage = Math.min(Number(first?.meta?.last_page) || 1, MAX_PAGES);
+        for (let page = 2; page <= lastPage; page++) {
+          if (Date.now() - startedAt > INSTANCE_BUDGET_MS) {
             errors.push(`${domain}: partial — stopped after ${Math.round((Date.now() - startedAt) / 1000)}s`);
             break;
           }
+          const json = await get(page);
+          const rows = Array.isArray(json?.data) ? json.data : [];
+          if (rows.length === 0) break;
+          for (const c of rows) data.push({ ...c, instance_url: domain });
         }
       } catch (err) {
         const msg = err instanceof Error && err.name === "TimeoutError"
@@ -64,7 +95,7 @@ async function searchInstances(
       }
     })
   );
-  return { data, errors };
+  return { data: dedupeCampaigns(data), errors };
 }
 let cache: { at: number; data: Array<Record<string, unknown>>; errors: string[] } | null = null;
 let inFlight: Promise<void> | null = null;
@@ -125,7 +156,10 @@ async function refresh(instances: ReturnType<typeof bisonInstances>): Promise<vo
 
         // Say so when the install holds more than we fetched, instead of
         // handing back a short list that looks complete.
-        const got = campaigns.filter((c) => c.instance_url === domain).length;
+        // Count DISTINCT campaigns: a duplicate must not mask a short list.
+        const got = new Set(
+          campaigns.filter((c) => c.instance_url === domain).map((c) => c.id)
+        ).size;
         if (expected != null && got < expected) {
           errors.push(`${domain}: ${got} of ${expected} campaigns (list incomplete)`);
         }
@@ -141,8 +175,9 @@ async function refresh(instances: ReturnType<typeof bisonInstances>): Promise<vo
   // Don't cache a total failure — an empty picker would replay for the full
   // TTL even after the instances recover.
   lastErrors = errors;
-  if (campaigns.length > 0 || errors.length === 0) {
-    cache = { at: Date.now(), data: campaigns, errors };
+  const deduped = dedupeCampaigns(campaigns);
+  if (deduped.length > 0 || errors.length === 0) {
+    cache = { at: Date.now(), data: deduped, errors };
   }
 }
 
