@@ -89,7 +89,8 @@ async function bisonFetch(base: string, apiKey: string, method: string, path: st
   if (!res.ok) {
     const data = json?.data as { message?: string } | undefined;
     const msg = data?.message || (json?.message as string | undefined) || text.slice(0, 160);
-    throw new Error(`${method} ${path}: HTTP ${res.status} ${msg}`);
+    // Carry the code: callers need to tell "absent" (404/422) from a real fault.
+    throw Object.assign(new Error(`${method} ${path}: HTTP ${res.status} ${msg}`), { status: res.status });
   }
   return json ?? {};
 }
@@ -106,19 +107,26 @@ async function createLead(base: string, apiKey: string, lead: BisonPushLead): Pr
     // Only a duplicate email means "find and reuse"; other errors are real.
     if (!/taken|already exists|duplicate/i.test((err as Error).message)) throw err;
   }
-  // Duplicate: find the existing lead by search (retrying for indexing delay),
-  // refresh its fields with PUT, reuse its id — corofy's production pattern.
+  // Duplicate: fetch the existing lead BY EMAIL (Bison accepts the address as
+  // the lead id, ~250ms, case-insensitive), refresh its fields with PUT, reuse
+  // its id. This used to call ?search=, which now takes 34s+ or times out on
+  // every install — see the note in scripts/push-worker.mjs findLeadByEmail.
   for (let t = 0; t < 3; t++) {
-    if (t > 0) await new Promise((r) => setTimeout(r, 2000));
-    const found = await bisonFetch(base, apiKey, "GET", `/api/leads?search=${encodeURIComponent(lead.email)}`);
-    const rows = (found?.data ?? []) as Array<{ id: number | string; email?: string }>;
-    const hit = rows.find((l) => (l.email || "").toLowerCase() === lead.email.toLowerCase());
-    if (hit) {
-      await bisonFetch(base, apiKey, "PUT", `/api/leads/${hit.id}`, leadBody(lead));
-      return hit.id;
+    if (t > 0) await new Promise((r) => setTimeout(r, 1000)); // indexing delay
+    try {
+      const found = await bisonFetch(base, apiKey, "GET", `/api/leads/${encodeURIComponent(lead.email)}`);
+      const hit = (found?.data ?? found) as { id?: number | string; email?: string } | undefined;
+      if (hit?.id != null && (hit.email || "").toLowerCase() === lead.email.toLowerCase()) {
+        await bisonFetch(base, apiKey, "PUT", `/api/leads/${hit.id}`, leadBody(lead));
+        return hit.id;
+      }
+    } catch (err) {
+      if ((err as { fatal?: boolean }).fatal) throw err;
+      const status = (err as { status?: number }).status;
+      if (status !== 404 && status !== 422) throw err; // real error, not "absent"
     }
   }
-  throw new Error(`lead ${lead.email} exists in Bison but was not found by search`);
+  throw new Error(`lead ${lead.email} exists in Bison but could not be fetched by email`);
 }
 
 async function attachLeads(base: string, apiKey: string, campaignId: number | string, ids: Array<number | string>): Promise<void> {

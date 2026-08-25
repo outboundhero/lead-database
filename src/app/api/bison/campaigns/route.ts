@@ -13,7 +13,12 @@ import { bisonInstances } from "@/lib/bison/keys";
 const CACHE_TTL_MS = 60_000;          // considered fresh
 const STALE_OK_MS = 15 * 60_000;     // served while a refresh runs behind it
 const MAX_PAGES = 300;               // safety cap per instance (~4,500 campaigns)
-const PAGE_TIMEOUT_MS = 8_000;       // per HTTP request
+// Per HTTP request. 8s was too tight and produced a false "list incomplete"
+// warning on every client: app.facilityreach.com answers its campaign pages in
+// ~7.1s under load (measured 2026-08-25), so it tripped at random even though
+// nothing was actually missing. The scoped search is only a few pages now, so a
+// longer ceiling costs nothing on the happy path.
+const PAGE_TIMEOUT_MS = 20_000;
 const INSTANCE_BUDGET_MS = 60_000;   // per instance, across all its pages
 const PAGE_CONCURRENCY = 8;          // pages fetched in parallel per instance
 // NOTE: Bison HARD-CAPS a page at 15 rows and ignores per_page/limit entirely

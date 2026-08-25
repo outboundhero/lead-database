@@ -197,24 +197,32 @@ function tagsForLead(clientTag, leadTags) {
 }
 
 async function findLeadByEmail(auth, email, tries = 1) {
-  // DIRECT LOOKUP FIRST: Bison accepts the email as the lead id
-  // (GET /api/leads/{email}, same as the bounce-worker's replies endpoint) and
-  // answers in ~250ms. The ?search= endpoint scans and, on workspaces with
-  // hundreds of thousands of leads, takes 30s+ or times out outright — it was
-  // the entire push bottleneck (2026-08-07).
-  try {
-    const direct = await bison(auth, "GET", `/api/leads/${encodeURIComponent(email)}`);
-    const hit = direct?.data ?? direct;
-    if (hit && hit.id != null && (hit.email || "").toLowerCase() === email.toLowerCase()) return hit;
-  } catch (e) {
-    if (e.status !== 404 && e.status !== 422) throw e; // real error, not "absent"
-  }
-  // Fallback: search (kept for instances/versions without the direct route).
+  // DIRECT LOOKUP ONLY: Bison accepts the email as the lead id
+  // (GET /api/leads/{email}, same as the bounce-worker's replies endpoint),
+  // answers in ~250ms, and matches case-insensitively regardless of how the
+  // address is stored — verified on all four installs 2026-08-25.
+  //
+  // The ?search= fallback that used to sit here is deliberately GONE. That
+  // endpoint now takes 34s+ or times out outright on EVERY install, and bison()
+  // retries a timeout twice more, so ONE call cost ~93s. pushCycle resolves
+  // leads serially and once per instance, so a single lead absent from two
+  // installs burned ~3 minutes: the queue stalled at 278k pending with 0 items
+  // sent in 95s, and 1,524 items failed on nothing but timeouts (2026-08-25).
+  //
+  // Do not reinstate it as a "safety net". It cannot find anything the direct
+  // route misses — it only decides how slowly we discover the lead is absent.
+  //
+  // `tries` still covers the post-create indexing delay, but now retries the
+  // direct route at ~0.25s a go instead of the 30s search.
   for (let t = 0; t < tries; t++) {
-    if (t > 0) await sleep(2000); // Bison search indexing delay
-    const found = await bison(auth, "GET", `/api/leads?search=${encodeURIComponent(email)}`);
-    const hit = (found?.data ?? []).find((l) => (l.email || "").toLowerCase() === email.toLowerCase());
-    if (hit) return hit;
+    if (t > 0) await sleep(1000);
+    try {
+      const direct = await bison(auth, "GET", `/api/leads/${encodeURIComponent(email)}`);
+      const hit = direct?.data ?? direct;
+      if (hit && hit.id != null && (hit.email || "").toLowerCase() === email.toLowerCase()) return hit;
+    } catch (e) {
+      if (e.status !== 404 && e.status !== 422) throw e; // real error, not "absent"
+    }
   }
   return null;
 }
@@ -245,7 +253,7 @@ async function createLead(auth, lead, tags) {
     }
   }
   const hit = await findLeadByEmail(auth, lead.email, 6);
-  if (!hit) throw new Error(`lead ${lead.email} exists in Bison but was not found by search`);
+  if (!hit) throw new Error(`lead ${lead.email} exists in Bison but could not be fetched by email`);
   await bison(auth, "PUT", `/api/leads/${hit.id}`, leadPayload(lead, tags, auth.domain)); // refresh fields + tags
   return String(hit.id);
 }
@@ -587,11 +595,25 @@ async function pushCycle() {
     //   default  — Google, custom mail servers, unknown, everything else
     const routed = (batch.campaigns ?? []).some((c) => c.bucket);
     const bucket = routed ? espBucket(lead.esp) : null;
-    const targets = item.target_campaigns?.length
-      ? item.target_campaigns
-      : (batch.campaigns ?? [])
-          .filter((c) => !routed || (c.bucket ?? "default") === bucket)
-          .map((c) => ({ id: String(c.id), instance_url: c.instance_url }));
+    // De-duplicate by instance+id: the same campaign listed twice would be
+    // attached twice, and Bison rejects the second attach as "already in
+    // another sequence" — turning a clean push into a partial failure. Batches
+    // queued before 2026-08-25 can carry duplicates because the picker showed
+    // them (Bison drops search= from its own pagination links, so the scoped
+    // list re-collected campaigns it had already returned).
+    const seenTarget = new Set();
+    const targets = (
+      item.target_campaigns?.length
+        ? item.target_campaigns
+        : (batch.campaigns ?? [])
+            .filter((c) => !routed || (c.bucket ?? "default") === bucket)
+            .map((c) => ({ id: String(c.id), instance_url: c.instance_url }))
+    ).filter((t) => {
+      const k = `${t.instance_url ?? ""}|${t.id}`;
+      if (seenTarget.has(k)) return false;
+      seenTarget.add(k);
+      return true;
+    });
     if (targets.length === 0) {
       if (routed) {
         await setItem(item, token, { status: "skipped", error: `no campaign for ${bucket} bucket (esp: ${lead.esp ?? "unknown"})`, claimed_at: null });
