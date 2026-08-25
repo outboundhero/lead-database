@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { ArrowUpDown, X, Trash2, Link2 } from "lucide-react";
 import { useHasPermission } from "@/lib/context/role-context";
 import { countActiveFilters } from "@/types/filters";
+import { LocationCoverageNotice, type LocationCoverage } from "@/components/clients/location-coverage-notice";
 import type { Lead } from "@/types/database";
 
 const SORT_OPTIONS = [
@@ -140,6 +141,11 @@ export default function LeadsPage() {
     for (const t of roster) if (t?.tag && t?.client_type) clientTypeRef.current.set(t.tag, t.client_type);
   }, []);
 
+  // Per-location coverage for the selected client (include/preferred locations
+  // only). Survives dismissal as a pill — see LocationCoverageNotice.
+  const [coverage, setCoverage] = useState<LocationCoverage | null>(null);
+  const [coverageLoading, setCoverageLoading] = useState(false);
+
   // Low-availability popup (client req: warn when a client has <250 fresh leads).
   const [lowAvail, setLowAvail] = useState<{
     tag: string;
@@ -213,6 +219,18 @@ export default function LeadsPage() {
       } else if (!targeting) {
         toast.info(`No targeting rules on file for ${tag} — filtering by tag only`);
       }
+      // Per-location coverage: which of the client's PREFERRED areas are short
+      // of leads. Fetched in the background and never awaited — it is a grouped
+      // scan of the client's eligible set (13-30s measured), so blocking the
+      // client switch on it would freeze the page.
+      setCoverage(null);
+      setCoverageLoading(true);
+      fetch(`/api/clients/location-coverage?tag=${encodeURIComponent(tag)}&threshold=500`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d: LocationCoverage | null) => { if (d?.hasTargeting) setCoverage(d); })
+        .catch(() => {})
+        .finally(() => setCoverageLoading(false));
+
       // Availability afterwards, independently — informational only.
       fetch(`/api/clients/availability?tag=${encodeURIComponent(tag)}`)
         .then((r) => (r.ok ? r.json() : null))
@@ -408,7 +426,7 @@ export default function LeadsPage() {
         createPortal(
           <ClientSelector
             clientTag={filters.clientTag}
-            onChange={(t) => { setClientTag(t); if (!t) setLowAvail(null); }}
+            onChange={(t) => { setClientTag(t); if (!t) { setLowAvail(null); setCoverage(null); } }}
             onSelected={handleClientTagSelected}
             onRosterLoaded={handleRosterLoaded}
           />,
@@ -579,6 +597,22 @@ export default function LeadsPage() {
           }}
         />
       )}
+
+      {/* Which of this client's preferred locations are short of leads.
+          Dismissing it leaves a pill that reopens it — see the component. */}
+      <LocationCoverageNotice
+        coverage={coverage}
+        loading={coverageLoading}
+        onRefresh={() => {
+          if (!coverage) return;
+          setCoverageLoading(true);
+          fetch(`/api/clients/location-coverage?tag=${encodeURIComponent(coverage.tag)}&threshold=${coverage.threshold}&fresh=1`)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d: LocationCoverage | null) => { if (d?.hasTargeting) setCoverage(d); })
+            .catch(() => {})
+            .finally(() => setCoverageLoading(false));
+        }}
+      />
 
       {/* Low lead-availability warning — closable, informational */}
       {lowAvail && (
