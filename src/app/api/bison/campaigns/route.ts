@@ -39,6 +39,31 @@ const PAGE_CONCURRENCY = 8;          // pages fetched in parallel per instance
 // following links.next, vs 32 rows over 3 pages in ~1s paging explicitly.)
 const searchCache = new Map<string, { at: number; data: Array<Record<string, unknown>>; errors: string[] }>();
 
+// TWO PAGINATION STYLES, one reader (measured 2026-08-26):
+//   page-cursor : meta = {current_page, last_page, total}, links.next = ?page=2
+//   keyset      : meta = {per_page, next_cursor},          links.next = ?cursor=…
+// app.outboundhero.co served the first style in the morning and the second by
+// the afternoon, so neither can be assumed. Anything that derives page COUNT
+// from meta.last_page silently collapses to ONE page (15 rows) on a keyset
+// install — and meta.total is absent there too, so the "list incomplete"
+// warning cannot fire either. Follow links.next instead: it exists in both.
+function nextUrl(json: unknown): string | null {
+  const links = (json as { links?: { next?: unknown } } | null)?.links;
+  return typeof links?.next === "string" && links.next ? links.next : null;
+}
+
+// Bison drops ?search= from its own next-links in BOTH styles, so page 2 onward
+// silently becomes the whole unfiltered install. Re-apply the term every hop.
+function withSearch(url: string, term: string): string {
+  try {
+    const u = new URL(url);
+    u.searchParams.set("search", term);
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 // Last line of defence against a campaign appearing twice in the picker. Rows
 // are keyed by `instance#id` in the UI, so a duplicate is not merely cosmetic:
 // two rows sharing a React key make both checkboxes toggle as one.
@@ -63,9 +88,7 @@ async function searchInstances(
   await Promise.all(
     instances.map(async ({ domain, key }) => {
       const startedAt = Date.now();
-      // Always carries search= — never links.next, which silently loses it.
-      const get = async (page: number) => {
-        const url = `https://${domain}/api/campaigns?search=${encodeURIComponent(term)}&page=${page}`;
+      const get = async (url: string) => {
         const res = await fetch(url, {
           headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
           cache: "no-store",
@@ -75,22 +98,21 @@ async function searchInstances(
         return res.json();
       };
       try {
-        const first = await get(1);
-        const list = Array.isArray(first?.data) ? first.data : [];
-        for (const c of list) data.push({ ...c, instance_url: domain });
-
-        // A scoped result is small (tens of rows, single-digit pages), so serial
-        // paging is fine here — unlike the full enumeration in refresh().
-        const lastPage = Math.min(Number(first?.meta?.last_page) || 1, MAX_PAGES);
-        for (let page = 2; page <= lastPage; page++) {
-          if (Date.now() - startedAt > INSTANCE_BUDGET_MS) {
+        // Follow the install's OWN next-link but re-apply search= to it every
+        // time. That covers both pagination styles Bison serves (see the note
+        // on nextUrl), and both of them drop the search term from their links.
+        let url: string | null = withSearch(`https://${domain}/api/campaigns`, term);
+        for (let page = 0; url && page < MAX_PAGES; page++) {
+          const json = await get(url);
+          const rows = Array.isArray(json?.data) ? json.data : [];
+          for (const c of rows) data.push({ ...c, instance_url: domain });
+          if (rows.length === 0) break;
+          const next = nextUrl(json);
+          url = next ? withSearch(next, term) : null;
+          if (url && Date.now() - startedAt > INSTANCE_BUDGET_MS) {
             errors.push(`${domain}: partial — stopped after ${Math.round((Date.now() - startedAt) / 1000)}s`);
             break;
           }
-          const json = await get(page);
-          const rows = Array.isArray(json?.data) ? json.data : [];
-          if (rows.length === 0) break;
-          for (const c of rows) data.push({ ...c, instance_url: domain });
         }
       } catch (err) {
         const msg = err instanceof Error && err.name === "TimeoutError"
@@ -115,8 +137,10 @@ async function refresh(instances: ReturnType<typeof bisonInstances>): Promise<vo
   await Promise.all(
     instances.map(async ({ domain, key }) => {
       const startedAt = Date.now();
-      const get = async (page?: number) => {
-        const url = `https://${domain}/api/campaigns${page ? `?page=${page}` : ""}`;
+      const get = async (target?: number | string) => {
+        const url = typeof target === "string"
+          ? target
+          : `https://${domain}/api/campaigns${target ? `?page=${target}` : ""}`;
         const res = await fetch(url, {
           headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
           cache: "no-store",
@@ -127,17 +151,34 @@ async function refresh(instances: ReturnType<typeof bisonInstances>): Promise<vo
       };
       try {
         // Bison caps a page at 15 rows no matter what per_page says, so the
-        // page COUNT is what costs time: outboundhero is 1,429 campaigns over
-        // 96 pages. Chaining links.next serially blew the time budget and
-        // truncated silently. meta.last_page is known from page 1, so fetch
-        // the rest concurrently instead — all 96 pages land in ~9s.
+        // page COUNT is what costs time: outboundhero is ~1,429 campaigns over
+        // ~96 pages.
         const first = await get();
         const list = Array.isArray(first?.data) ? first.data : [];
         for (const c of list) campaigns.push({ ...c, instance_url: domain });
         const expected: number | null = typeof first?.meta?.total === "number" ? first.meta.total : null;
         const lastPage = Math.min(Number(first?.meta?.last_page) || 1, MAX_PAGES);
 
-        if (lastPage > 1) {
+        // KEYSET INSTALL (no last_page): pages are only reachable one at a time
+        // through links.next, so this walks serially — ~21s for outboundhero's
+        // 94 pages, inside the 60s budget. Deriving a page count from the
+        // absent meta.last_page instead would silently stop at 15 campaigns.
+        if (lastPage <= 1 && nextUrl(first)) {
+          let url: string | null = nextUrl(first);
+          let hops = 0;
+          while (url && hops < MAX_PAGES) {
+            if (Date.now() - startedAt > INSTANCE_BUDGET_MS) {
+              errors.push(`${domain}: partial — stopped after ${Math.round((Date.now() - startedAt) / 1000)}s`);
+              break;
+            }
+            const json = await get(url);
+            const rows = Array.isArray(json?.data) ? json.data : [];
+            for (const c of rows) campaigns.push({ ...c, instance_url: domain });
+            if (rows.length === 0) break;
+            url = nextUrl(json);
+            hops++;
+          }
+        } else if (lastPage > 1) {
           const pages = Array.from({ length: lastPage - 1 }, (_, i) => i + 2);
           let next = 0;
           let aborted = false;
