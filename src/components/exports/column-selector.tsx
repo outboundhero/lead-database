@@ -132,6 +132,7 @@ export function ColumnSelector({
   const [selectedCampaignKeys, setSelectedCampaignKeys] = useState<Set<string>>(new Set());
   const [campaignsLoading, setCampaignsLoading] = useState(false);
   const [campaignsError, setCampaignsError] = useState<string | null>(null);
+  const [campaignsPartial, setCampaignsPartial] = useState<string[]>([]);
   // One fetch per dialog open — never auto-retry on error/empty (manual Retry instead)
   const [campaignsAttempted, setCampaignsAttempted] = useState(false);
   // Campaign-picker upgrades (client req #7)
@@ -162,16 +163,32 @@ export function ColumnSelector({
   // force = true asks the server to bypass its cache (?fresh=1) and re-read the
   // Bison installs live. That is what the "Sync" button does: a campaign created
   // in Bison seconds ago is otherwise only picked up when the cache lapses.
-  const loadCampaigns = useCallback((force = false) => {
+  const loadCampaigns = useCallback((force = false, scope?: string) => {
     setCampaignsAttempted(true);
     setCampaignsLoading(true);
     setCampaignsError(null);
-    fetch(force ? "/api/bison/campaigns?fresh=1" : "/api/bison/campaigns")
+    setCampaignsPartial([]);
+    // A client scope is sent to the server so each Bison install is queried by
+    // NAME rather than enumerated. Bison caps pages at 15 rows and ignores
+    // per_page, so enumerating a large install runs out of the per-instance
+    // time budget and silently drops it from the picker — facilityreach's
+    // CCGCT campaigns lived on page 17+ and never appeared. A scoped search
+    // returns every match in one page.
+    const term = (scope ?? "").trim();
+    const url = term
+      ? `/api/bison/campaigns?search=${encodeURIComponent(term)}${force ? "&fresh=1" : ""}`
+      : force ? "/api/bison/campaigns?fresh=1" : "/api/bison/campaigns";
+    fetch(url)
       .then(async (r) => {
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
         return r.json();
       })
-      .then((d) => setCampaigns(Array.isArray(d.campaigns) ? d.campaigns : []))
+      .then((d) => {
+        setCampaigns(Array.isArray(d.campaigns) ? d.campaigns : []);
+        // Surface per-instance failures/truncation instead of quietly showing
+        // an incomplete list.
+        setCampaignsPartial(Array.isArray(d.errors) ? d.errors : []);
+      })
       .catch((e) => setCampaignsError(e instanceof Error ? e.message : String(e)))
       .finally(() => setCampaignsLoading(false));
     // Best-effort side loads — the picker works without either.
@@ -211,7 +228,12 @@ export function ColumnSelector({
   // Auto-scope the campaign list to the selected client (until the user picks
   // a different scope themselves).
   useEffect(() => {
-    if (open && detectedTag && !scopeTouchedRef.current) setTagScope(detectedTag);
+    if (open && detectedTag && !scopeTouchedRef.current) {
+      setTagScope(detectedTag);
+      // Re-query by name so every install is covered — enumeration can drop one.
+      loadCampaigns(false, detectedTag);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, detectedTag]);
 
   // Per-tag "already exported" stats for the confirm summary.
@@ -327,7 +349,7 @@ export function ColumnSelector({
               </label>
               <button
                 type="button"
-                onClick={() => loadCampaigns(true)}
+                onClick={() => loadCampaigns(true, tagScope)}
                 disabled={campaignsLoading}
                 className="ml-auto inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline disabled:opacity-50"
                 title="Re-read the campaign list from Bison now, instead of waiting for the cached copy to lapse. Use this after creating a campaign."
@@ -341,7 +363,7 @@ export function ColumnSelector({
             ) : campaignsError ? (
               <div className="flex items-center gap-2">
                 <p className="flex-1 text-xs text-destructive">Couldn&apos;t load campaigns: {campaignsError}</p>
-                <Button variant="outline" size="sm" className="h-7 text-xs shrink-0" onClick={() => loadCampaigns(true)}>
+                <Button variant="outline" size="sm" className="h-7 text-xs shrink-0" onClick={() => loadCampaigns(true, tagScope)}>
                   Retry
                 </Button>
               </div>
@@ -377,7 +399,7 @@ export function ColumnSelector({
                   />
                   <select
                     value={tagScope}
-                    onChange={(e) => { scopeTouchedRef.current = true; setTagScope(e.target.value); }}
+                    onChange={(e) => { scopeTouchedRef.current = true; setTagScope(e.target.value); loadCampaigns(false, e.target.value); }}
                     className="h-8 max-w-[130px] rounded-md border bg-transparent px-2 text-xs"
                     title="Only show campaigns named for this client tag. Pre-set from the client you selected — change it to All clients, or pick another, at any time."
                   >
@@ -528,6 +550,12 @@ export function ColumnSelector({
               </div>
               );
             })()}
+            {campaignsPartial.length > 0 && (
+              <div className="mb-2 rounded-lg bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-700">
+                Some Bison installs returned an incomplete list, so campaigns may be missing:{" "}
+                {campaignsPartial.join("; ")}. Try Sync, or pick a client to query each install directly.
+              </div>
+            )}
             {detectedTag && (
               <div className="mt-2 rounded-lg bg-muted/50 p-2">
                 {pushStats ? (

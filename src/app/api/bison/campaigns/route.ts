@@ -15,7 +15,57 @@ const STALE_OK_MS = 15 * 60_000;     // served while a refresh runs behind it
 const MAX_PAGES = 50;                // pagination safety cap per instance
 const PAGE_TIMEOUT_MS = 8_000;       // per HTTP request
 const INSTANCE_BUDGET_MS = 20_000;   // per instance, across all its pages
-const PER_PAGE = 100;                // fewer round trips than Bison's default
+// Bison HARD-CAPS pages at 15 rows and ignores per_page/limit entirely
+// (measured 2026-08-25), so a 330-campaign install costs 22 round trips and a
+// 750+ one exceeds MAX_PAGES. Kept only so the intent is on record.
+const PER_PAGE = 100;
+
+// Server-side search — the escape hatch from that pagination. Bison's
+// ?search= returns every match in ONE page (measured: 9 CCGCT campaigns in
+// 1.8s vs 22 paged requests), so a client-scoped picker asks for exactly the
+// campaigns it needs instead of trying to enumerate the whole install and
+// silently running out of budget.
+const searchCache = new Map<string, { at: number; data: Array<Record<string, unknown>>; errors: string[] }>();
+
+async function searchInstances(
+  instances: ReturnType<typeof bisonInstances>,
+  term: string
+): Promise<{ data: Array<Record<string, unknown>>; errors: string[] }> {
+  const data: Array<Record<string, unknown>> = [];
+  const errors: string[] = [];
+  await Promise.all(
+    instances.map(async ({ domain, key }) => {
+      const startedAt = Date.now();
+      try {
+        let url: string | null =
+          `https://${domain}/api/campaigns?search=${encodeURIComponent(term)}`;
+        for (let page = 0; url && page < MAX_PAGES; page++) {
+          const res: Response = await fetch(url, {
+            headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+            cache: "no-store",
+            signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
+          });
+          if (!res.ok) { errors.push(`${domain}: HTTP ${res.status}`); return; }
+          const json = await res.json();
+          const list = Array.isArray(json?.data) ? json.data : [];
+          for (const c of list) data.push({ ...c, instance_url: domain });
+          if (list.length === 0) break;
+          url = typeof json?.links?.next === "string" ? json.links.next : null;
+          if (url && Date.now() - startedAt > INSTANCE_BUDGET_MS) {
+            errors.push(`${domain}: partial — stopped after ${Math.round((Date.now() - startedAt) / 1000)}s`);
+            break;
+          }
+        }
+      } catch (err) {
+        const msg = err instanceof Error && err.name === "TimeoutError"
+          ? `timed out after ${PAGE_TIMEOUT_MS / 1000}s`
+          : err instanceof Error ? err.message : "fetch failed";
+        errors.push(`${domain}: ${msg}`);
+      }
+    })
+  );
+  return { data, errors };
+}
 let cache: { at: number; data: Array<Record<string, unknown>>; errors: string[] } | null = null;
 let inFlight: Promise<void> | null = null;
 // Errors from the most recent attempt, kept even when it failed outright — a
@@ -102,7 +152,28 @@ export async function GET(request: Request) {
     );
   }
 
-  const fresh = new URL(request.url).searchParams.get("fresh") === "1";
+  const params = new URL(request.url).searchParams;
+  const fresh = params.get("fresh") === "1";
+  const search = (params.get("search") ?? "").trim();
+
+  // Scoped read: ask each instance for just this client's campaigns. This is
+  // the only path that is guaranteed COMPLETE — the unscoped enumeration below
+  // can hit MAX_PAGES or the per-instance time budget and drop an entire
+  // install from the picker (facilityreach's CCGCT campaigns sat on page 17+).
+  if (search) {
+    const key = search.toLowerCase();
+    const hit = searchCache.get(key);
+    if (!fresh && hit && Date.now() - hit.at < CACHE_TTL_MS) {
+      return NextResponse.json({ campaigns: hit.data, errors: hit.errors, cached: true, scoped: search });
+    }
+    const { data, errors } = await searchInstances(instances, search);
+    if (data.length > 0 || errors.length === 0) {
+      searchCache.set(key, { at: Date.now(), data, errors });
+      if (searchCache.size > 50) searchCache.delete(searchCache.keys().next().value as string);
+    }
+    return NextResponse.json({ campaigns: data, errors, cached: false, scoped: search });
+  }
+
   const age = cache ? Date.now() - cache.at : Infinity;
 
   if (!fresh && cache) {
