@@ -12,13 +12,13 @@ import { bisonInstances } from "@/lib/bison/keys";
 
 const CACHE_TTL_MS = 60_000;          // considered fresh
 const STALE_OK_MS = 15 * 60_000;     // served while a refresh runs behind it
-const MAX_PAGES = 50;                // pagination safety cap per instance
+const MAX_PAGES = 300;               // safety cap per instance (~4,500 campaigns)
 const PAGE_TIMEOUT_MS = 8_000;       // per HTTP request
-const INSTANCE_BUDGET_MS = 20_000;   // per instance, across all its pages
-// Bison HARD-CAPS pages at 15 rows and ignores per_page/limit entirely
-// (measured 2026-08-25), so a 330-campaign install costs 22 round trips and a
-// 750+ one exceeds MAX_PAGES. Kept only so the intent is on record.
-const PER_PAGE = 100;
+const INSTANCE_BUDGET_MS = 60_000;   // per instance, across all its pages
+const PAGE_CONCURRENCY = 8;          // pages fetched in parallel per instance
+// NOTE: Bison HARD-CAPS a page at 15 rows and ignores per_page/limit entirely
+// (measured 2026-08-25), so page COUNT is the cost driver — hence the parallel
+// page fetch in refresh() and the search path below.
 
 // Server-side search — the escape hatch from that pagination. Bison's
 // ?search= returns every match in ONE page (measured: 9 CCGCT campaigns in
@@ -79,38 +79,55 @@ async function refresh(instances: ReturnType<typeof bisonInstances>): Promise<vo
   await Promise.all(
     instances.map(async ({ domain, key }) => {
       const startedAt = Date.now();
+      const get = async (page?: number) => {
+        const url = `https://${domain}/api/campaigns${page ? `?page=${page}` : ""}`;
+        const res = await fetch(url, {
+          headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+          cache: "no-store",
+          signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
+        });
+        if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
+        return res.json();
+      };
       try {
-        // Bison paginates Laravel-style (data + links.next/meta) — follow
-        // links.next until exhausted so instances with many campaigns aren't
-        // silently truncated to the first page. per_page widens each hop so a
-        // busy install costs a handful of round trips rather than dozens.
-        let url: string | null = `https://${domain}/api/campaigns?per_page=${PER_PAGE}`;
-        for (let page = 0; url && page < MAX_PAGES; page++) {
-          // EVERY request is bounded. Without this a single unresponsive Bison
-          // install held the whole picker on "Loading campaigns…" indefinitely —
-          // Promise.all waits for the slowest, and nothing here ever gave up.
-          const res: Response = await fetch(url, {
-            headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
-            cache: "no-store",
-            signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
-          });
-          if (!res.ok) {
-            errors.push(`${domain}: HTTP ${res.status}`);
-            return;
-          }
-          const json = await res.json();
-          const list = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
-          for (const c of list) {
-            campaigns.push({ ...c, instance_url: domain });
-          }
-          if (list.length === 0) break;
-          url = typeof json?.links?.next === "string" ? json.links.next : null;
-          // Stop paginating a slow install rather than let it dominate the
-          // response; what we already have from it is still returned.
-          if (url && Date.now() - startedAt > INSTANCE_BUDGET_MS) {
-            errors.push(`${domain}: partial — stopped after ${Math.round((Date.now() - startedAt) / 1000)}s`);
-            break;
-          }
+        // Bison caps a page at 15 rows no matter what per_page says, so the
+        // page COUNT is what costs time: outboundhero is 1,429 campaigns over
+        // 96 pages. Chaining links.next serially blew the time budget and
+        // truncated silently. meta.last_page is known from page 1, so fetch
+        // the rest concurrently instead — all 96 pages land in ~9s.
+        const first = await get();
+        const list = Array.isArray(first?.data) ? first.data : [];
+        for (const c of list) campaigns.push({ ...c, instance_url: domain });
+        const expected: number | null = typeof first?.meta?.total === "number" ? first.meta.total : null;
+        const lastPage = Math.min(Number(first?.meta?.last_page) || 1, MAX_PAGES);
+
+        if (lastPage > 1) {
+          const pages = Array.from({ length: lastPage - 1 }, (_, i) => i + 2);
+          let next = 0;
+          let aborted = false;
+          await Promise.all(
+            Array.from({ length: Math.min(PAGE_CONCURRENCY, pages.length) }, async () => {
+              while (next < pages.length && !aborted) {
+                const page = pages[next++];
+                if (Date.now() - startedAt > INSTANCE_BUDGET_MS) { aborted = true; break; }
+                try {
+                  const json = await get(page);
+                  const rows = Array.isArray(json?.data) ? json.data : [];
+                  for (const c of rows) campaigns.push({ ...c, instance_url: domain });
+                } catch {
+                  aborted = true; // one bad page means the list is incomplete
+                }
+              }
+            })
+          );
+          if (aborted) errors.push(`${domain}: partial — stopped after ${Math.round((Date.now() - startedAt) / 1000)}s`);
+        }
+
+        // Say so when the install holds more than we fetched, instead of
+        // handing back a short list that looks complete.
+        const got = campaigns.filter((c) => c.instance_url === domain).length;
+        if (expected != null && got < expected) {
+          errors.push(`${domain}: ${got} of ${expected} campaigns (list incomplete)`);
         }
       } catch (err) {
         const msg = err instanceof Error && err.name === "TimeoutError"
@@ -129,7 +146,6 @@ async function refresh(instances: ReturnType<typeof bisonInstances>): Promise<vo
   }
 }
 
-/** One refresh at a time; concurrent callers share it. */
 function refreshOnce(instances: ReturnType<typeof bisonInstances>): Promise<void> {
   if (!inFlight) {
     inFlight = refresh(instances).finally(() => { inFlight = null; });

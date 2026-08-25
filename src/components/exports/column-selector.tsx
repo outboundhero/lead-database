@@ -225,6 +225,23 @@ export function ColumnSelector({
     setPushStats(null);
   }, [open]);
 
+  // Typing in the campaign box queries every Bison install by name rather than
+  // filtering the cached list. The cache can be incomplete for a big install
+  // (Bison pages 15 at a time), so client-side filtering alone can hide real
+  // matches; a server search always sees all of them.
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!open || destination !== "bison" || !campaignsAttempted) return;
+    const term = campaignSearch.trim();
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => {
+      // Cleared -> fall back to the client scope (or the full list).
+      loadCampaigns(false, term.length >= 2 ? term : tagScope);
+    }, 400);
+    return () => { if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [campaignSearch, open, destination]);
+
   // Auto-scope the campaign list to the selected client (until the user picks
   // a different scope themselves).
   useEffect(() => {

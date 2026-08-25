@@ -400,6 +400,35 @@ does NOT upsert — duplicate email errors are handled via find-by-search + PUT
 refresh in both the sync lib and push-worker. Cross-workspace routing rules
 (item 6) are pending the client call.
 
+## ⚠ Bison caps every page at 15 rows — enumerate in PARALLEL (2026-08-25)
+
+`/api/campaigns` ignores `per_page` and `limit` and always returns 15 rows, so
+the page COUNT drives the cost. Measured install sizes:
+
+| Install | Campaigns | Pages |
+|---|---|---|
+| `app.outboundhero.co` | 1,429 | 96 |
+| `personal.cleaningoutbound.com` | 457 | 31 |
+| `app.facilityreach.com` | 330 | 22 |
+| `personal.outboundclean.com` | 315 | 21 |
+
+`/api/bison/campaigns` used to chain `links.next` serially with a 20s
+per-instance budget and `MAX_PAGES = 50`. Both limits were hit silently:
+facilityreach stopped at page 16 (so its CCGCT campaigns, which sit later, were
+absent from the picker entirely — the reported "why do I only see 3 installs?"),
+and outboundhero was cut at page 50 of 96. The picker showed 1,777 of 2,531
+campaigns and looked complete.
+
+Now: read `meta.last_page` from page 1 and fetch the rest with
+`PAGE_CONCURRENCY = 8`. All four installs, 2,531 campaigns, **12s, zero errors**.
+Anything still short of `meta.total` is reported per instance and rendered
+above the picker list — an incomplete list must never look complete.
+
+**Prefer `?search=<term>`** where possible: it returns every match in ONE page
+(9 CCGCT campaigns in 1.8s vs 22 paged requests). Both the client-tag scope and
+the picker's free-text box use it, so those paths are always complete regardless
+of install size.
+
 ## Queued Bison pushes (NEW — the default push path)
 
 The export popup's Bison destination is a **multi-select** (workspace-grouped;
