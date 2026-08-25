@@ -4,7 +4,6 @@ import React from "react";
 import {
   useReactTable,
   getCoreRowModel,
-  getSortedRowModel,
   flexRender,
   type ColumnDef,
   type RowSelectionState,
@@ -16,6 +15,7 @@ import {
   TableCell,
   TableRow,
 } from "@/components/ui/table";
+import { ColumnControlsProvider, type ColumnControls } from "./column-header-controls";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { leadColumns, mainCampaignsColumn } from "./lead-columns";
@@ -60,6 +60,9 @@ interface LeadTableProps {
   pushedLoaded?: boolean;
   /** Only show the Main Campaigns column when a client is selected. */
   showMainCampaigns?: boolean;
+  /** Header sorting + per-column value filters, applied server-side over the
+   *  entire filtered set (not just the loaded page). */
+  columnControls?: ColumnControls;
 }
 
 export function LeadTable({
@@ -76,6 +79,7 @@ export function LeadTable({
   pushedLeadIds,
   pushedLoaded = false,
   showMainCampaigns = false,
+  columnControls,
 }: LeadTableProps) {
   const allColumns = React.useMemo(
     () => [
@@ -87,16 +91,22 @@ export function LeadTable({
     ],
     [showMainCampaigns, pushedLeadIds, pushedLoaded]
   );
-  const [sorting, setSorting] = React.useState<SortingState>([]);
+  // manualSorting: the server orders the whole filtered set (fn_filter_leads_v2
+  // p_sort_by, widened in migration 088). getSortedRowModel() used to reorder
+  // only the rows already fetched, so a "sort by state" reshuffled one page
+  // while page 2 started over — the reason header sorting looked broken.
+  const sorting: SortingState = React.useMemo(
+    () => (columnControls?.sortBy ? [{ id: columnControls.sortBy, desc: columnControls.sortDir === "desc" }] : []),
+    [columnControls?.sortBy, columnControls?.sortDir]
+  );
   const table = useReactTable({
     data,
     columns: allColumns,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
+    manualSorting: true,
     enableRowSelection: true,
     getRowId: (row) => row.id,
     state: { rowSelection, sorting },
-    onSortingChange: setSorting,
     onRowSelectionChange: (updater: Updater<RowSelectionState>) => {
       const next = typeof updater === "function" ? updater(rowSelection) : updater;
       onRowSelectionChange(next);
@@ -183,6 +193,9 @@ export function LeadTable({
   }
 
   return (
+    // Headers read sort + column-filter state from here. Null is tolerated:
+    // every header degrades to a plain label rather than throwing.
+    <ColumnControlsProvider value={columnControls ?? null}>
     <div className="flex h-full flex-col">
       <div className="relative flex-1 overflow-auto">
         <table className="w-full caption-bottom text-[14px]">
@@ -258,5 +271,6 @@ export function LeadTable({
         onPageSizeChange={onPageSizeChange}
       />
     </div>
+    </ColumnControlsProvider>
   );
 }

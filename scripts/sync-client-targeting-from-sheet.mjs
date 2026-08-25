@@ -822,11 +822,17 @@ async function main(job = null) {
         if (!allOk) partial.push(c.tag);
 
         await client.query(
+          // commercial_cleaning is set ON INSERT ONLY, from the client's type in
+          // the Client Tracker (col F): cleaning clients exclude the
+          // commercial-cleaning title list by default (client rule 2026-08-25).
+          // It is deliberately ABSENT from the DO UPDATE list below — the sheet
+          // has no column for it, so a re-sync must never undo a manual toggle.
           `INSERT INTO client_targeting (client_tag, countries, include_locations, include_industries, include_keywords,
                                          exclude_industries, exclude_keywords, exclude_terms, include_terms,
-                                         sheet_raw, sheet_synced_at, source, updated_at)
+                                         sheet_raw, sheet_synced_at, source, updated_at, commercial_cleaning)
            VALUES ($1, $2::text[], $3::jsonb, $4::text[], $5::text[], $6::text[], $7::text[], $9::text[], '{}',
-                   $8::jsonb, now(), 'sheet', now())
+                   $8::jsonb, now(), 'sheet', now(),
+                   coalesce((SELECT ct.client_type = 'Cleaning' FROM client_tags ct WHERE ct.tag = $1), false))
            ON CONFLICT (client_tag) DO UPDATE SET
              countries = $2::text[],
              include_locations = $3::jsonb,

@@ -52,6 +52,7 @@ export default function LeadsPage() {
     setPage,
     setPageSize,
     setSort,
+    setColumnFilter,
     loadPreset,
     setLocationTargets,
     setCategoryCascade,
@@ -552,6 +553,14 @@ export default function LeadsPage() {
           onRowClick={setSelectedLead}
           rowSelection={rowSelection}
           onRowSelectionChange={handleSelectionChange}
+          columnControls={{
+            sortBy: filters.sortBy,
+            sortDir: filters.sortDir,
+            setSort,
+            columnFilters: filters.columnFilters ?? {},
+            setColumnFilter,
+            filters,
+          }}
         />
       </div>
 

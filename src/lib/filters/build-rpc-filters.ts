@@ -119,6 +119,14 @@ export function buildRpcFilters(filters: FilterState) {
     ...((filters.locationTargets?.include?.length || filters.locationTargets?.exclude?.length)
       ? { locationTargets: { include: filters.locationTargets.include, exclude: filters.locationTargets.exclude } }
       : {}),
+    // Header column filters — same rule: only sent when something is actually
+    // constrained, so an untouched table sends the exact payload it always did.
+    ...(() => {
+      const cf = Object.fromEntries(
+        Object.entries(filters.columnFilters ?? {}).filter(([, v]) => v?.length > 0)
+      );
+      return Object.keys(cf).length ? { columnFilters: cf } : {};
+    })(),
     companySize: { buckets: filters.companySize?.buckets || [], includeUnknown: filters.companySize?.includeUnknown || false, customMin: filters.companySize?.customMin ?? null, customMax: filters.companySize?.customMax ?? null },
     revenue: { buckets: filters.revenue?.buckets || [], includeUnknown: filters.revenue?.includeUnknown || false },
     fullName: filters.fullName || "",

@@ -44,7 +44,12 @@ export async function GET(request: NextRequest) {
   if (tag) {
     const { data, error } = await admin.from("client_targeting").select("*").eq("client_tag", tag).maybeSingle();
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    return NextResponse.json({ targeting: data });
+    // client_type ("Cleaning" / "Non-Cleaning", Onboarding col F) rides along so
+    // a client with no saved config yet can default the commercial-cleaning
+    // exclusions the way that client type expects, rather than always to off.
+    const { data: tagRow } = await admin
+      .from("client_tags").select("client_type").eq("tag", tag).maybeSingle();
+    return NextResponse.json({ targeting: data, client_type: tagRow?.client_type ?? null });
   }
   const { data, error } = await admin.from("client_targeting").select("*");
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

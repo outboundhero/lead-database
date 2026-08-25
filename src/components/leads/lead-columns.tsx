@@ -1,24 +1,12 @@
 "use client";
 
 import { ColumnDef } from "@tanstack/react-table";
-import { ArrowUpDown } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import type { Lead } from "@/types/database";
-
-function SortHeader({ column, label }: { column: any; label: string }) {
-  return (
-    <Button
-      variant="ghost"
-      size="sm"
-      className="-ml-3 h-8 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
-      onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-    >
-      {label}
-      <ArrowUpDown className="ml-1 size-3" strokeWidth={2} />
-    </Button>
-  );
-}
+// Sorting and the per-column value filter both live here now, and both act on
+// the WHOLE filtered set rather than the loaded page. The old local SortHeader
+// called column.toggleSorting(), which only reordered the ~50 rows on screen.
+import { SortHeader } from "./column-header-controls";
 
 export const leadColumns: ColumnDef<Lead>[] = [
   {

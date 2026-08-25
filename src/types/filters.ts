@@ -143,6 +143,13 @@ export interface FilterState {
   // Commercial cleaning client: exclude ~230 default job titles (whole-word).
   commercialCleaning?: boolean;
 
+  // Spreadsheet-style per-column header filters: { state: ["Nevada","Utah"] }.
+  // The array is a KEEP-list of ticked values, so an absent or empty entry
+  // means "no constraint on this column" — never "match nothing". '__BLANK__'
+  // is the sentinel for rows with no value. Handled by fn_lead_filter_conditions
+  // (migration 088), which also whitelists the permitted column names.
+  columnFilters: Record<string, string[]>;
+
   // Pagination
   page: number;
   pageSize: number;
@@ -191,6 +198,7 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   emailType: { personal: true, general: true },
   includeBounced: false,
   commercialCleaning: false,
+  columnFilters: {},
   page: 1,
   pageSize: 50,
   sortBy: "created_at",
@@ -290,7 +298,21 @@ export function normalizeFilterState(partial: unknown): FilterState {
     globalSearch: typeof p.globalSearch === "string" ? p.globalSearch : d.globalSearch,
     emailType: { ...d.emailType, ...(p.emailType ?? {}) },
     commercialCleaning: p.commercialCleaning === true,
+    // Keep only string arrays with at least one value: an empty array is not a
+    // constraint, so carrying it forward would just be noise in saved presets.
+    columnFilters: sanitizeColumnFilters(p.columnFilters),
   };
+}
+
+function sanitizeColumnFilters(v: unknown): Record<string, string[]> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [col, values] of Object.entries(v as Record<string, unknown>)) {
+    if (!Array.isArray(values)) continue;
+    const clean = values.filter((x): x is string => typeof x === "string");
+    if (clean.length > 0) out[col] = clean;
+  }
+  return out;
 }
 
 export function countActiveFilters(filters: FilterState): number {
@@ -325,5 +347,8 @@ export function countActiveFilters(filters: FilterState): number {
   if (!(filters.emailType.personal && filters.emailType.general)) count++;
   if (filters.includeBounced) count++;
   if (filters.commercialCleaning) count++;
+  // One per constrained column, so the badge reflects header filters too —
+  // otherwise a table narrowed from its headers looks unfiltered.
+  count += Object.values(filters.columnFilters ?? {}).filter((v) => v.length > 0).length;
   return count;
 }

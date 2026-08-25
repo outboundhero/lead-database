@@ -75,10 +75,14 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
       .then((r) => r.json())
       .then((d) => {
         const t = d.targeting;
+        // Cleaning clients exclude the commercial-cleaning title list by
+        // default (client rule 2026-08-25) — every existing cleaning client was
+        // backfilled to match, so a brand-new one must not start out different.
+        const isCleaning = d.client_type === "Cleaning";
         if (!t) { // fresh config defaults
           setCountries(["US"]); setInclude([]); setExclude([]);
           setExcludeTerms([]); setIncludeTerms([]);
-          setRequireLocation(false); setAllowInferred(true); setCommercialCleaning(false);
+          setRequireLocation(false); setAllowInferred(true); setCommercialCleaning(isCleaning);
           setSheetSyncedAt(null);
           return;
         }

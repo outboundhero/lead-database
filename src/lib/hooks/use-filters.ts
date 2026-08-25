@@ -108,6 +108,8 @@ type FilterAction =
   | { type: "SET_PAGE"; value: number }
   | { type: "SET_PAGE_SIZE"; value: number }
   | { type: "SET_SORT"; sortBy: string; sortDir: "asc" | "desc" }
+  | { type: "SET_COLUMN_FILTER"; column: string; values: string[] }
+  | { type: "CLEAR_COLUMN_FILTERS" }
   | { type: "LOAD_PRESET"; filters: FilterState }
   | { type: "SET_LOCATION_TARGETS"; value: LocationTargetsFilter }
   | { type: "SET_CATEGORY_CASCADE"; value: { enabled: boolean; includeCompany: boolean } }
@@ -159,6 +161,17 @@ export function filterReducer(state: FilterState, action: FilterAction): FilterS
       return { ...state, pageSize: action.value, page: 1 };
     case "SET_SORT":
       return { ...state, sortBy: action.sortBy, sortDir: action.sortDir, page: 1 };
+    case "SET_COLUMN_FILTER": {
+      // An empty keep-list means "no constraint", so the key is REMOVED rather
+      // than stored as [] — otherwise every column ever opened would linger in
+      // saved presets and in the active-filter count.
+      const next = { ...(state.columnFilters ?? {}) };
+      if (action.values.length > 0) next[action.column] = action.values;
+      else delete next[action.column];
+      return { ...state, columnFilters: next, page: 1 };
+    }
+    case "CLEAR_COLUMN_FILTERS":
+      return { ...state, columnFilters: {}, page: 1 };
     case "LOAD_PRESET":
       // Stored presets may predate newer FilterState keys — merge onto defaults
       return { ...normalizeFilterState(action.filters), page: 1 };
@@ -315,6 +328,14 @@ export function useFilters() {
     dispatch({ type: "SET_SORT", sortBy, sortDir });
   }, []);
 
+  const setColumnFilter = useCallback((column: string, values: string[]) => {
+    dispatch({ type: "SET_COLUMN_FILTER", column, values });
+  }, []);
+
+  const clearColumnFilters = useCallback(() => {
+    dispatch({ type: "CLEAR_COLUMN_FILTERS" });
+  }, []);
+
   const setFilterOperator = useCallback((value: "AND" | "OR") => {
     dispatch({ type: "SET_FILTER_OPERATOR", value });
   }, []);
@@ -402,6 +423,8 @@ export function useFilters() {
       setPage,
       setPageSize,
       setSort,
+      setColumnFilter,
+      clearColumnFilters,
       loadPreset,
       setLocationTargets,
       setCategoryCascade,
@@ -431,6 +454,8 @@ export function useFilters() {
       setPage,
       setPageSize,
       setSort,
+      setColumnFilter,
+      clearColumnFilters,
       loadPreset,
       setLocationTargets,
       setCategoryCascade,
