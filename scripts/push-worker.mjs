@@ -44,6 +44,14 @@ const env = process.env;
 const POLL_MS = Number(env.PUSH_POLL_MS) || 4000;
 const CLAIM_BATCH = Math.min(200, Number(env.PUSH_CLAIM_BATCH) || 50);
 const RATE = Math.max(1, Number(process.env.PUSH_RATE) || 5); // per-instance Bison requests/sec (per process)
+// Leads processed at once. The per-item work is almost entirely WAITING — a
+// ~274ms lead lookup, then a create — so doing them one at a time left the
+// process idle nearly all the time. Each item is independently fenced by its
+// claim token, so concurrent items cannot tread on each other; the per-instance
+// rate gate above still decides how hard any single Bison install is hit.
+const CONCURRENCY = Math.max(1, Math.min(32, Number(env.PUSH_CONCURRENCY) || 8));
+// How often the batch counters are recomputed (see the note in the main loop).
+const REFRESH_MS = Math.max(5_000, Number(env.PUSH_REFRESH_MS) || 20_000);
 const STALE_MIN = Math.max(10, Number(process.env.PUSH_STALE_MIN) || 30); // reclaim items stuck in 'pushing' after this long
 const MAX_ATTEMPTS = 3;
 const ATTACH_CHUNK = 100;
@@ -553,39 +561,63 @@ async function pushCycle() {
     return where;
   }
 
-  for (let n = 0; n < items.length; n++) {
-    const item = items[n];
-    if (shuttingDown) {
-      // Release what we haven't touched, but still run attach/finalize below for
-      // items whose leads were already created — abandoning them mid-claim would
-      // park them as 'pushing' until the stale-reclaim window.
-      await releaseItems(items.slice(n), token);
-      break;
+  // ONE eligibility query per client tag per cycle, not one per lead.
+  //
+  // These WHERE clauses are enormous — JPCA's is 23,595 characters (a 230-title
+  // regex, plus every targeted city as a geoname id array). The cost is Postgres
+  // PLANNING that string, which is paid per statement and is almost independent
+  // of how many leads it checks. Measured 2026-08-26: 313ms per lead one at a
+  // time, 280ms for FIFTY in one statement — 5.6ms a lead, ~56x cheaper.
+  //
+  // Same guarantee as before: still evaluated at push time, immediately before
+  // any Bison write, against the CURRENT rules.
+  const eligibleIds = new Set();
+  const ineligible = new Set();
+  {
+    const byTag = new Map();
+    for (const it of items) {
+      const b = batchOf.get(it.batch_id);
+      if (!b?.client_tag) continue;
+      if (!byTag.has(b.client_tag)) byTag.set(b.client_tag, []);
+      byTag.get(b.client_tag).push(it.lead_id);
     }
+    for (const [tag, leadIds] of byTag) {
+      const where = await eligibilityWhere(tag);
+      if (!where) { for (const id of leadIds) eligibleIds.add(`${tag}|${id}`); continue; }
+      const { rows } = await pool.query(
+        `select l.id from leads l where l.id = any($1::uuid[]) and ${where}`,
+        [[...new Set(leadIds)]]
+      );
+      const ok = new Set(rows.map((r) => r.id));
+      for (const id of leadIds) (ok.has(id) ? eligibleIds : ineligible).add(`${tag}|${id}`);
+    }
+  }
+
+  // CONCURRENT, not serial. Each lead is mostly WAITING on Bison (a ~274ms
+  // lookup, then a create), so one-at-a-time left the process idle for most of
+  // every second. Items are independent — each write is fenced on its own claim
+  // token — and the per-instance rate gate still bounds how hard any single
+  // install is hit, so this raises utilisation rather than the request rate.
+  let cursor = 0;
+  const processItem = async (item) => {
     const batch = batchOf.get(item.batch_id);
     if (!batch || batch.status !== "processing" || fatalBatches.has(item.batch_id)) {
       await releaseItems([item], token); // cancelled/errored mid-flight — leave untouched
-      continue;
+      return;
     }
     const lead = leads.get(item.lead_id);
     if (!lead || !lead.email) {
       await setItem(item, token, { status: "failed", error: !lead ? "lead no longer exists" : "lead has no email", claimed_at: null });
-      continue;
+      return;
     }
     // FINAL ELIGIBILITY GATE: immediately before any Bison write, re-validate
     // the lead against the client's targeting rules (supported country,
     // include/exclude locations, industry/keyword exclusions). The lead or the
     // rules may have changed since the batch was queued — never push on stale
     // eligibility.
-    const eligWhere = await eligibilityWhere(batch.client_tag);
-    if (eligWhere) {
-      const { rows: eligOk } = await pool.query(
-        `select 1 from leads l where l.id = $1 and ${eligWhere}`, [item.lead_id]
-      );
-      if (eligOk.length === 0) {
-        await setItem(item, token, { status: "skipped", error: "ineligible per client targeting at push time", claimed_at: null });
-        continue;
-      }
+    if (batch.client_tag && ineligible.has(`${batch.client_tag}|${item.lead_id}`)) {
+      await setItem(item, token, { status: "skipped", error: "ineligible per client targeting at push time", claimed_at: null });
+      return;
     }
     // Target campaigns are decided once and persisted — a retry reuses them.
     // ESP ROUTING (client req #9): when the batch's campaigns carry buckets,
@@ -641,7 +673,7 @@ async function pushCycle() {
       } else {
         await setItem(item, token, { status: "failed", error: "batch has no campaigns", claimed_at: null });
       }
-      continue;
+      return;
     }
     const bisonIds = { ...(item.bison_ids ?? {}) };
     try {
@@ -667,7 +699,7 @@ async function pushCycle() {
       }
       // Persist BEFORE any attach — crash recovery must never duplicate creates.
       const ok = await setItem(item, token, { bison_ids: bisonIds, target_campaigns: targets });
-      if (!ok) continue; // lost the claim — another worker owns this item now
+      if (!ok) return; // lost the claim — another worker owns this item now
       item.bison_ids = bisonIds;
       item.target_campaigns = targets;
 
@@ -698,7 +730,25 @@ async function pushCycle() {
         }
       }
     }
-  }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, items.length) }, async () => {
+      while (cursor < items.length) {
+        const n = cursor++;
+        if (shuttingDown) {
+          // Release everything not yet started, then let the attach/finalize
+          // below still run for items whose leads were already created —
+          // abandoning those mid-claim would park them as 'pushing' until the
+          // stale-reclaim window.
+          await releaseItems(items.slice(n), token);
+          cursor = items.length;
+          return;
+        }
+        await processItem(items[n]);
+      }
+    })
+  );
 
   // Attach per campaign in chunks; tally per-item successes across campaigns.
   // Bison 422s a WHOLE chunk with "No leads were added because they are either
@@ -786,10 +836,12 @@ async function pushCycle() {
 // idle) and exits; otherwise polls forever.
 // ---------------------------------------------------------------------------
 console.log(
-  `push-worker up — rate ${RATE}/s/instance, claim ${CLAIM_BATCH}, poll ${POLL_MS}ms, stale ${STALE_MIN}m, ` +
+  `push-worker up — rate ${RATE}/s/instance, concurrency ${CONCURRENCY}, claim ${CLAIM_BATCH}, ` +
+  `poll ${POLL_MS}ms, stale ${STALE_MIN}m, refresh ${REFRESH_MS / 1000}s, ` +
   `keys: ${Object.keys(KEY_MAP).length} mapped${DEFAULT_KEY ? " + default" : ""}${ONCE ? ", once" : ""}`
 );
 let lastSweep = 0;
+let lastRefresh = 0;
 while (!shuttingDown) {
   try {
     if (Date.now() - lastSweep > 60_000) {
@@ -799,7 +851,14 @@ while (!shuttingDown) {
     }
     const didGather = await gatherCycle();
     const didPush = await pushCycle();
-    if (didGather || didPush) await refreshActiveBatches();
+    // The counter refresh aggregates every row of every active batch — ~1M
+    // rows, 0.48s measured — and only feeds the progress display. Running it
+    // after EVERY cycle taxed each lead with a share of that. The 60s sweep
+    // above still calls it, so a finished batch is detected either way.
+    if ((didGather || didPush) && Date.now() - lastRefresh > REFRESH_MS) {
+      await refreshActiveBatches();
+      lastRefresh = Date.now();
+    }
     else if (ONCE) break;
     else await sleep(POLL_MS);
   } catch (e) {
