@@ -529,6 +529,13 @@ async function gatherCycle() {
 // item is attached to ALL its target campaigns.
 // ---------------------------------------------------------------------------
 async function pushCycle() {
+  // PUSH_TIMING=1 logs where a cycle's wall clock actually goes. Throughput
+  // work should be driven by these numbers, not by guesses about which stage
+  // looks expensive.
+  const TIMING = env.PUSH_TIMING === "1";
+  const t = { start: Date.now(), claim: 0, prep: 0, elig: 0, items: 0, attach: 0, final: 0 };
+  const mark = (k, from) => { if (TIMING) t[k] = Date.now() - from; };
+  const tClaim = Date.now();
   const token = randomUUID();
   const { rows: items } = await pool.query(
     `update push_items i
@@ -549,6 +556,8 @@ async function pushCycle() {
     [CLAIM_BATCH, token]
   );
   if (items.length === 0) return false;
+  mark("claim", tClaim);
+  const tPrep = Date.now();
 
   const { rows: leadRows } = await pool.query(
     `select id, email, first_name, last_name, title, company, notes, category, subcategory,
@@ -592,6 +601,8 @@ async function pushCycle() {
   //
   // Same guarantee as before: still evaluated at push time, immediately before
   // any Bison write, against the CURRENT rules.
+  mark("prep", tPrep);
+  const tElig = Date.now();
   const eligibleIds = new Set();
   const ineligible = new Set();
   {
@@ -622,6 +633,8 @@ async function pushCycle() {
   // every second. Items are independent — each write is fenced on its own claim
   // token — and the per-instance rate gate still bounds how hard any single
   // install is hit, so this raises utilisation rather than the request rate.
+  mark("elig", tElig);
+  const tItems = Date.now();
   let cursor = 0;
   const processItem = async (item) => {
     const batch = batchOf.get(item.batch_id);
@@ -792,6 +805,8 @@ async function pushCycle() {
     if (!blockedByItem.has(keyOf(item))) blockedByItem.set(keyOf(item), new Set());
     blockedByItem.get(keyOf(item)).add(String(campaignId));
   };
+  mark("items", tItems);
+  const tAttach = Date.now();
   // Campaigns are attached CONCURRENTLY. They are independent, frequently on
   // different installs, and this loop used to run one campaign at a time behind
   // the rate gate — so a cycle spanning 13 campaigns paid all of them in series.
@@ -833,6 +848,8 @@ async function pushCycle() {
     }
   });
 
+  mark("attach", tAttach);
+  const tFinal = Date.now();
   // Finalize: 'sent' once attached to ALL target campaigns; partial progress is
   // persisted in attached_ids so a retry only re-attaches what's missing.
   for (const item of finals) {
@@ -857,6 +874,16 @@ async function pushCycle() {
     } else {
       await failOrRetry(item, token, errByItem.get(keyOf(item)) ?? new Error("attach incomplete"), { attached_ids: attachedArr });
     }
+  }
+  mark("final", tFinal);
+  if (TIMING) {
+    const total = Date.now() - t.start;
+    console.log(
+      `cycle: ${items.length} items in ${(total / 1000).toFixed(1)}s ` +
+      `(${(items.length / (total / 1000) * 60).toFixed(0)}/min) — ` +
+      `claim ${t.claim}ms, prep ${t.prep}ms, elig ${t.elig}ms, items ${t.items}ms, ` +
+      `attach ${t.attach}ms, final ${t.final}ms, campaigns ${toAttach.size}`
+    );
   }
   return true;
 }
