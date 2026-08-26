@@ -42,7 +42,12 @@ dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname });
 
 const env = process.env;
 const POLL_MS = Number(env.PUSH_POLL_MS) || 4000;
-const CLAIM_BATCH = Math.min(200, Number(env.PUSH_CLAIM_BATCH) || 50);
+// Leads claimed per cycle. Bigger is materially cheaper per lead: the fixed
+// per-cycle costs (claim, lead/batch fetch, one eligibility statement per
+// client) amortise, and — the bigger effect — each attach call carries more
+// leads. At 100 claimed the cycle touched 43 campaigns, so an attach POST
+// moved barely 2 leads; the same call moves ~8 at 400. Ceiling raised from 200.
+const CLAIM_BATCH = Math.min(1000, Number(env.PUSH_CLAIM_BATCH) || 50);
 const RATE = Math.max(1, Number(process.env.PUSH_RATE) || 5); // per-instance Bison requests/sec (per process)
 // Leads processed at once. The per-item work is almost entirely WAITING — a
 // ~274ms lead lookup, then a create — so doing them one at a time left the
@@ -852,10 +857,13 @@ async function pushCycle() {
   const tFinal = Date.now();
   // Finalize: 'sent' once attached to ALL target campaigns; partial progress is
   // persisted in attached_ids so a retry only re-attaches what's missing.
-  for (const item of finals) {
+  // Finalizing is one small UPDATE per item, but each is a round trip to
+  // Supabase (~210ms from Railway), and doing 100 of them in series cost 21s of
+  // a 56s cycle — 37% of the time, for writes that do not depend on each other.
+  await runPool(finals, CONCURRENCY, async (item) => {
     if (fatalBatches.has(item.batch_id)) {
       await releaseItems([item], token);
-      continue;
+      return;
     }
     const attached = new Set(item.attached_ids ?? []);
     for (const cid of okByItem.get(keyOf(item)) ?? []) attached.add(cid);
@@ -874,7 +882,7 @@ async function pushCycle() {
     } else {
       await failOrRetry(item, token, errByItem.get(keyOf(item)) ?? new Error("attach incomplete"), { attached_ids: attachedArr });
     }
-  }
+  });
   mark("final", tFinal);
   if (TIMING) {
     const total = Date.now() - t.start;
