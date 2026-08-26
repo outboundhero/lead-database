@@ -62,7 +62,13 @@ if (!env.DATABASE_URL) {
   console.error("DATABASE_URL is not set");
   process.exit(1);
 }
-const pool = new pg.Pool({ connectionString: env.DATABASE_URL, max: 5 });
+// Enough connections for the concurrent item tasks plus the cycle's own
+// queries. At the old fixed 5, ten in-flight leads queued on the pool and
+// undid much of the concurrency.
+const pool = new pg.Pool({
+  connectionString: env.DATABASE_URL,
+  max: Math.max(6, Math.min(24, CONCURRENCY + 4)),
+});
 pool.on("error", (e) => console.error("pg pool idle-client error:", e.message)); // never crash the loop
 
 let shuttingDown = false;
@@ -70,6 +76,21 @@ process.on("SIGTERM", () => { shuttingDown = true; console.log("SIGTERM — rele
 process.on("SIGINT", () => { shuttingDown = true; });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Run `fn` over `list` with at most `limit` in flight. Used wherever the work
+// is Bison round-trips: the per-instance rate gate still decides how hard any
+// one install is hit, so this only stops the process idling between calls.
+async function runPool(list, limit, fn) {
+  let i = 0;
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(limit, list.length)) }, async () => {
+      while (i < list.length) {
+        const n = i++;
+        await fn(list[n], n);
+      }
+    })
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Multi-instance keys (mirrors src/lib/bison/keys.ts / bounce-worker):
@@ -581,16 +602,19 @@ async function pushCycle() {
       if (!byTag.has(b.client_tag)) byTag.set(b.client_tag, []);
       byTag.get(b.client_tag).push(it.lead_id);
     }
-    for (const [tag, leadIds] of byTag) {
+    // One statement per tag, and the tags run together — a 100-lead claim can
+    // span a dozen clients, and a dozen ~280ms statements in series was most of
+    // a second per cycle for no reason.
+    await runPool([...byTag.entries()], 4, async ([tag, leadIds]) => {
       const where = await eligibilityWhere(tag);
-      if (!where) { for (const id of leadIds) eligibleIds.add(`${tag}|${id}`); continue; }
+      if (!where) { for (const id of leadIds) eligibleIds.add(`${tag}|${id}`); return; }
       const { rows } = await pool.query(
         `select l.id from leads l where l.id = any($1::uuid[]) and ${where}`,
         [[...new Set(leadIds)]]
       );
       const ok = new Set(rows.map((r) => r.id));
       for (const id of leadIds) (ok.has(id) ? eligibleIds : ineligible).add(`${tag}|${id}`);
-    }
+    });
   }
 
   // CONCURRENT, not serial. Each lead is mostly WAITING on Bison (a ~274ms
@@ -768,7 +792,10 @@ async function pushCycle() {
     if (!blockedByItem.has(keyOf(item))) blockedByItem.set(keyOf(item), new Set());
     blockedByItem.get(keyOf(item)).add(String(campaignId));
   };
-  for (const { auth, campaignId, entries } of toAttach.values()) {
+  // Campaigns are attached CONCURRENTLY. They are independent, frequently on
+  // different installs, and this loop used to run one campaign at a time behind
+  // the rate gate — so a cycle spanning 13 campaigns paid all of them in series.
+  await runPool([...toAttach.values()], CONCURRENCY, async ({ auth, campaignId, entries }) => {
     for (let i = 0; i < entries.length; i += ATTACH_CHUNK) {
       const chunk = entries.slice(i, i + ATTACH_CHUNK).filter((e) => !fatalBatches.has(e.item.batch_id));
       if (chunk.length === 0) continue;
@@ -786,8 +813,11 @@ async function pushCycle() {
           continue;
         }
         if (e.status === 422 && BISON_BLOCKED_RE.test(e.message)) {
-          // per-lead separation: attach one at a time
-          for (const entry of chunk) {
+          // Per-lead separation, CONCURRENTLY. Roughly one lead in ten is
+          // already in another sequence, which is enough to 422 a whole
+          // hundred-lead chunk — and this then re-attached all hundred one at a
+          // time to find them. Same calls, no longer in series.
+          await runPool(chunk, CONCURRENCY, async (entry) => {
             try {
               await bison(auth, "POST", `/api/campaigns/${campaignId}/leads/attach-leads`, { lead_ids: [entry.leadId] });
               markOk(entry.item, campaignId);
@@ -795,13 +825,13 @@ async function pushCycle() {
               if (e2.status === 422 && BISON_BLOCKED_RE.test(e2.message)) markBlocked(entry.item, campaignId);
               else errByItem.set(keyOf(entry.item), e2);
             }
-          }
+          });
           continue;
         }
         for (const { item } of chunk) errByItem.set(keyOf(item), e);
       }
     }
-  }
+  });
 
   // Finalize: 'sent' once attached to ALL target campaigns; partial progress is
   // persisted in attached_ids so a retry only re-attaches what's missing.
