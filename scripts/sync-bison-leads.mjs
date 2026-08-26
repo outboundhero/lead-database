@@ -30,6 +30,11 @@ const has = (n) => args.includes(`--${n}`);
 const SHARDS = Math.max(1, Math.min(16, Number(flag("shards")) || 8));
 const MAX_ROWS = Number(flag("max")) || Infinity;
 const RESUME = has("resume");
+// Only fetch leads newer than the highest id already mirrored. This is what the
+// every-3-days job runs; a full pass is hours, this is seconds.
+const INCREMENTAL = has("incremental");
+// Skip promoting new leads into the leads table (mirror only).
+const NO_IMPORT = has("no-import");
 const WRITE_CHUNK = 500;          // rows per upsert statement
 const PAGE_TIMEOUT_MS = 30_000;
 const MAX_RETRIES = 4;
@@ -88,38 +93,92 @@ const ts = (v) => (v ? new Date(String(v).replace(" ", "T") + (String(v).endsWit
 
 async function writeRows(rows) {
   if (rows.length === 0) return 0;
-  const cols = 10;
+  const cols = 14;
   const values = [];
   const params = [];
   rows.forEach((r, i) => {
     const b = i * cols;
-    values.push(`($${b+1},$${b+2},$${b+3},$${b+4},$${b+5}::jsonb,$${b+6},$${b+7},$${b+8},$${b+9},$${b+10})`);
+    values.push(`($${b+1},$${b+2},$${b+3},$${b+4},$${b+5}::jsonb,$${b+6},$${b+7},$${b+8},$${b+9},$${b+10},$${b+11},$${b+12},$${b+13},$${b+14})`);
     params.push(
       r.instance_url, r.bison_id, r.email, r.status, JSON.stringify(r.campaigns ?? null),
-      r.emails_sent, r.opens, r.replies, r.bison_created_at, r.bison_updated_at
+      r.emails_sent, r.opens, r.replies, r.bison_created_at, r.bison_updated_at,
+      r.first_name, r.last_name, r.company, r.title
     );
   });
   // Last write wins: a re-sync refreshes campaign membership and engagement.
+  // imported_at is NOT touched — a refreshed row must not look un-imported.
   await pool.query(
     `insert into bison_leads (instance_url, bison_id, email, status, campaigns,
-                              emails_sent, opens, replies, bison_created_at, bison_updated_at)
+                              emails_sent, opens, replies, bison_created_at, bison_updated_at,
+                              first_name, last_name, company, title)
      values ${values.join(",")}
      on conflict (instance_url, bison_id) do update set
        email = excluded.email, status = excluded.status, campaigns = excluded.campaigns,
        emails_sent = excluded.emails_sent, opens = excluded.opens, replies = excluded.replies,
        bison_created_at = excluded.bison_created_at, bison_updated_at = excluded.bison_updated_at,
+       first_name = excluded.first_name, last_name = excluded.last_name,
+       company = excluded.company, title = excluded.title,
        synced_at = now()`,
     params
   );
   return rows.length;
 }
 
+// Promote mirrored leads that our own database does not have yet.
+//
+// Matching is a plain equality on email: every address in leads is already
+// lowercase (0 of 82,001 sampled were not) and the mirror lowercases on the way
+// in, so this uses leads_email_key. Wrapping it in lower() does not — that
+// version timed out at 120s where this answers in ~2s.
+//
+// DISTINCT ON (email) because the same person legitimately exists on several
+// installs, and one INSERT cannot touch the same conflict target twice.
+async function importNew(batchSize = 5000) {
+  let imported = 0;
+  for (;;) {
+    const { rows } = await pool.query(
+      `with picked as (
+         select instance_url, bison_id, email, first_name, last_name, company, title
+           from bison_leads
+          where imported_at is null and email is not null
+          order by instance_url, bison_id desc
+          limit $1
+       ), fresh as (
+         select distinct on (p.email) p.email, p.first_name, p.last_name, p.company, p.title
+           from picked p
+          where not exists (select 1 from leads l where l.email = p.email)
+          order by p.email
+       ), ins as (
+         insert into leads (email, first_name, last_name, company, title, source)
+         select email, first_name, last_name, company, title, 'Email Bison' from fresh
+         on conflict (email) do nothing
+         returning 1
+       ), mark as (
+         update bison_leads b set imported_at = now()
+           from picked p
+          where b.instance_url = p.instance_url and b.bison_id = p.bison_id
+          returning 1
+       )
+       select (select count(*) from ins) as inserted, (select count(*) from mark) as marked`,
+      [batchSize]
+    );
+    const inserted = Number(rows[0]?.inserted ?? 0);
+    const marked = Number(rows[0]?.marked ?? 0);
+    imported += inserted;
+    if (marked === 0) break;
+    if (inserted > 0) console.log(`   imported ${imported.toLocaleString()} new lead(s)…`);
+  }
+  return imported;
+}
+
+const str = (v) => { const s = String(v ?? "").trim(); return s ? s.slice(0, 500) : null; };
+
 function mapLead(domain, r) {
   const st = r.overall_stats ?? {};
   return {
     instance_url: domain,
     bison_id: Number(r.id),
-    email: (r.email ?? "").toLowerCase() || null,
+    email: (r.email ?? "").toLowerCase().trim() || null,
     status: r.status ?? null,
     campaigns: r.lead_campaign_data ?? null,
     emails_sent: num(st.emails_sent),
@@ -127,6 +186,10 @@ function mapLead(domain, r) {
     replies: num(st.replies),
     bison_created_at: ts(r.created_at),
     bison_updated_at: ts(r.updated_at),
+    first_name: str(r.first_name),
+    last_name: str(r.last_name),
+    company: str(r.company),
+    title: str(r.title),
   };
 }
 
@@ -190,6 +253,28 @@ async function syncInstance(domain, key) {
   const started = Date.now();
   const top = await topId(domain, key);
   if (!top) { console.log(`${domain}: no leads`); return 0; }
+
+  // INCREMENTAL (what the 3-day job runs): ids only ever increase, and the walk
+  // goes downward, so everything newer than the highest id we already hold is
+  // exactly the set of new leads. One shard, stop on arrival — seconds instead
+  // of hours, and no re-reading of millions of unchanged rows.
+  if (INCREMENTAL) {
+    const { rows } = await pool.query(
+      `select coalesce(max(bison_id), 0)::bigint as known from bison_leads where instance_url = $1`, [domain]);
+    const known = Number(rows[0]?.known ?? 0);
+    if (!known) {
+      console.log(`\n=== ${domain} — nothing mirrored yet, run a full sync first ===`);
+      return 0;
+    }
+    if (top <= known) { console.log(`\n=== ${domain} — no new leads (top ${top.toLocaleString()}) ===`); return 0; }
+    console.log(`\n=== ${domain} — incremental: ids ${(known + 1).toLocaleString()}..${top.toLocaleString()} ===`);
+    const budget = { used: 0, max: MAX_ROWS };
+    const n = await runShard(domain, key, 0, top + 1, known, budget);
+    const secs = (Date.now() - started) / 1000;
+    console.log(`${domain}: ${n.toLocaleString()} new rows in ${secs.toFixed(0)}s`);
+    return n;
+  }
+
   console.log(`\n=== ${domain} — top id ${top.toLocaleString()}, ${SHARDS} shards ===`);
 
   // Split the id space evenly. Ids are not contiguous (deleted leads), so
@@ -218,9 +303,27 @@ async function syncInstance(domain, key) {
 }
 
 const list = instances();
-console.log(`syncing ${list.length} instance(s), ${SHARDS} shards each${MAX_ROWS !== Infinity ? `, max ${MAX_ROWS} rows` : ""}`);
+console.log(
+  `${INCREMENTAL ? "incremental" : "full"} sync of ${list.length} instance(s)` +
+  `${INCREMENTAL ? "" : `, ${SHARDS} shards each`}${MAX_ROWS !== Infinity ? `, max ${MAX_ROWS} rows` : ""}`
+);
 let grand = 0;
 for (const [domain, key] of list) grand += await syncInstance(domain, key);
-const { rows: tot } = await pool.query(`select count(*)::bigint n from bison_leads`);
-console.log(`\ndone: ${grand.toLocaleString()} rows this run; bison_leads now holds ${Number(tot[0].n).toLocaleString()}`);
+
+let imported = 0;
+if (!NO_IMPORT) {
+  console.log("\nimporting leads Bison has that we don't…");
+  imported = await importNew();
+}
+
+const { rows: tot } = await pool.query(
+  `select (select count(*) from bison_leads)::bigint as mirrored,
+          (select count(*) from bison_leads where imported_at is null and email is not null)::bigint as pending`);
+console.log(
+  `\ndone: ${grand.toLocaleString()} rows fetched, ${imported.toLocaleString()} new lead(s) added to the database.\n` +
+  `bison_leads holds ${Number(tot[0].mirrored).toLocaleString()} (${Number(tot[0].pending).toLocaleString()} not yet checked for import).`
+);
+// New leads arrive with no location and no category, so they are invisible to
+// targeting until the location and categorize workers reach them — expected,
+// and worth remembering when a client's available count does not move.
 await pool.end();
