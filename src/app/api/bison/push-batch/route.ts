@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isNurtureCampaign } from "@/lib/bison/campaigns";
+import { suggestBucketFromName } from "@/lib/bison/esp-bucket";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeFilterState } from "@/types/filters";
@@ -28,6 +29,12 @@ interface PushBatchCampaign {
   // provider — outlook (Microsoft/Outlook), seg (security gateways), default
   // (Google/custom/everything else). Bucket-less batches attach to all.
   bucket?: "outlook" | "seg" | "default";
+  // WORKSPACE ROUTING: which of the client's two Bison installs this campaign
+  // belongs to. Business emails are sent from the B2B install and personal
+  // ones from the B2C install, so a lead must only attach to campaigns on its
+  // own side. Absent = campaign is on neither of this client's instances, and
+  // is left open to any lead.
+  side?: "b2b" | "b2c";
 }
 
 interface PushBatchPayload {
@@ -194,7 +201,7 @@ export async function POST(request: NextRequest) {
     clientTag = body.clientTag.trim();
     const { data: tagRow, error: tagErr } = await admin
       .from("client_tags")
-      .select("tag")
+      .select("tag, b2b_instance, b2c_instance")
       .eq("tag", clientTag)
       .maybeSingle();
     if (tagErr) {
@@ -202,6 +209,34 @@ export async function POST(request: NextRequest) {
     }
     if (!tagRow) {
       return NextResponse.json({ error: `Unknown client tag "${clientTag}"` }, { status: 400 });
+    }
+
+    // ROUTING IS DECIDED HERE, ONCE, AND STORED ON THE BATCH.
+    //
+    // Until 2026-08-26 only the send-to-Bison wizard did this; the export popup
+    // sent campaigns with no labels at all, and the worker's fallback for
+    // unlabelled campaigns is "attach the lead to every one of them". Measured
+    // consequence: 100% of sent leads on those batches landed in BOTH the B2B
+    // and the B2C workspace, and in 2.33-5.98 campaigns each, instead of one.
+    //
+    //   side   — which workspace, from the campaign's install vs this client's
+    //            b2b/b2c instances. Business emails go to the B2B install,
+    //            personal ones to the B2C install.
+    //   bucket — which campaign within that workspace, from the campaign NAME
+    //            ("JPCA: SEGs" -> seg). A caller-supplied bucket still wins, so
+    //            the wizard's explicit choice is never overridden.
+    const b2b = normalizeDomain(String(tagRow.b2b_instance ?? ""));
+    const b2c = normalizeDomain(String(tagRow.b2c_instance ?? ""));
+    for (const c of campaigns) {
+      if (!c.bucket) {
+        const guess = suggestBucketFromName(c.name);
+        if (guess) c.bucket = guess;
+      }
+      if (b2b && c.instance_url === b2b) c.side = "b2b";
+      else if (b2c && c.instance_url === b2c) c.side = "b2c";
+      // No side when the campaign is on neither of this client's instances —
+      // the worker then leaves that campaign open to any lead rather than
+      // silently dropping it.
     }
   }
 

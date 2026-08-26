@@ -524,7 +524,7 @@ async function pushCycle() {
   const { rows: leadRows } = await pool.query(
     `select id, email, first_name, last_name, title, company, notes, category, subcategory,
             additional_category, city, state, tags, person_linkedin, domain, address, question,
-            company_phone, google_maps_url, esp
+            company_phone, google_maps_url, esp, email_type
        from leads where id = any($1::uuid[])`,
     [[...new Set(items.map((i) => i.lead_id))]]
   );
@@ -593,8 +593,15 @@ async function pushCycle() {
     //   outlook  — ESP is Microsoft/Outlook
     //   seg      — ESP is a recognized security email gateway
     //   default  — Google, custom mail servers, unknown, everything else
-    const routed = (batch.campaigns ?? []).some((c) => c.bucket);
+    const allCampaigns = batch.campaigns ?? [];
+    const routed = allCampaigns.some((c) => c.bucket);
     const bucket = routed ? espBucket(lead.esp) : null;
+    // WORKSPACE SPLIT (2026-08-26): business addresses send from the client's
+    // B2B install, personal ones from its B2C install. Batches queued before
+    // this carry no `side` at all, and those still attach to every campaign —
+    // which is how 100% of their leads ended up in BOTH workspaces.
+    const sided = allCampaigns.some((c) => c.side);
+    const side = lead.email_type === "personal" ? "b2c" : "b2b";
     // De-duplicate by instance+id: the same campaign listed twice would be
     // attached twice, and Bison rejects the second attach as "already in
     // another sequence" — turning a clean push into a partial failure. Batches
@@ -605,7 +612,10 @@ async function pushCycle() {
     const targets = (
       item.target_campaigns?.length
         ? item.target_campaigns
-        : (batch.campaigns ?? [])
+        : allCampaigns
+            // A campaign with no side sits on neither of this client's
+            // instances; it stays open to any lead rather than being dropped.
+            .filter((c) => !sided || !c.side || c.side === side)
             .filter((c) => !routed || (c.bucket ?? "default") === bucket)
             .map((c) => ({ id: String(c.id), instance_url: c.instance_url }))
     ).filter((t) => {
@@ -615,8 +625,19 @@ async function pushCycle() {
       return true;
     });
     if (targets.length === 0) {
-      if (routed) {
-        await setItem(item, token, { status: "skipped", error: `no campaign for ${bucket} bucket (esp: ${lead.esp ?? "unknown"})`, claimed_at: null });
+      // NEVER fall back to "send it somewhere". A lead with no campaign of its
+      // own is parked with the reason spelled out (client req #5: surface the
+      // failure instead of silently putting the lead in the wrong place).
+      if (sided || routed) {
+        const why = [
+          sided ? `no ${side.toUpperCase()} campaign on this batch` : null,
+          routed ? `no campaign for the "${bucket}" bucket` : null,
+        ].filter(Boolean).join("; ");
+        await setItem(item, token, {
+          status: "skipped",
+          error: `${why} (email: ${lead.email_type ?? "unknown"}, esp: ${lead.esp ?? "unknown"})`,
+          claimed_at: null,
+        });
       } else {
         await setItem(item, token, { status: "failed", error: "batch has no campaigns", claimed_at: null });
       }

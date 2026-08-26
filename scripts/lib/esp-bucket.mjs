@@ -31,6 +31,11 @@ export function suggestBucketFromName(name) {
   const n = String(name ?? "").toLowerCase();
   if (/\bseg s?\b|\bsegs?\b|gateway/.test(n)) return "seg";
   if (/outlook|microsoft|o365/.test(n)) return "outlook";
-  if (/google|custom|gsuite|workspace/.test(n)) return "default";
+  // "Gmail + Others" is the OLDER naming for the default bucket and was being
+  // missed entirely: across all four installs it left 165 of 1,158 main
+  // campaigns unlabelled (measured 2026-08-26). Adding it drops that to 34,
+  // and those 34 are genuinely bespoke campaigns with no ESP split
+  // ("JMCC: Golf Tournament Ask", "SSP: Deans") which correctly get none.
+  if (/google|gmail|custom|gsuite|workspace/.test(n)) return "default";
   return null;
 }
