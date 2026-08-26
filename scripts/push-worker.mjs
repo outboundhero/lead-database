@@ -57,6 +57,12 @@ const RATE = Math.max(1, Number(process.env.PUSH_RATE) || 5); // per-instance Bi
 const CONCURRENCY = Math.max(1, Math.min(32, Number(env.PUSH_CONCURRENCY) || 8));
 // How often the batch counters are recomputed (see the note in the main loop).
 const REFRESH_MS = Math.max(5_000, Number(env.PUSH_REFRESH_MS) || 20_000);
+// How many of the OLDEST batches a cycle draws from. 0 = the old behaviour of
+// spreading across every active batch at once. See the note in pushCycle.
+// NB Number(undefined) is NaN, and `?? 2` does NOT catch NaN — an unset
+// variable would silently mean "no focus" and undo the change.
+const rawFocus = Number(env.PUSH_BATCH_FOCUS);
+const BATCH_FOCUS = Math.max(0, Math.min(20, Number.isFinite(rawFocus) ? rawFocus : 2));
 const STALE_MIN = Math.max(10, Number(process.env.PUSH_STALE_MIN) || 30); // reclaim items stuck in 'pushing' after this long
 const MAX_ATTEMPTS = 3;
 const ATTACH_CHUNK = 100;
@@ -542,23 +548,64 @@ async function pushCycle() {
   const mark = (k, from) => { if (TIMING) t[k] = Date.now() - from; };
   const tClaim = Date.now();
   const token = randomUUID();
+
+  // OLDEST BATCHES FIRST, and only a few of them at a time.
+  //
+  // The claim used to order by lead_id across every active batch, so all of
+  // them advanced together and none finished: 16 clients all sat around 11%
+  // while the earliest had been queued for six days.
+  //
+  // Draining oldest-first is also FASTER, which is the non-obvious part. A
+  // 400-lead cycle spread over 18 batches touches 93 campaigns, so an attach
+  // POST carries ~4 leads; the same 400 taken from the two oldest batches touch
+  // 9 campaigns and carry ~44. Attach is the stage that swings between 14s and
+  // 116s a cycle, and this cuts the number of those calls by roughly ten times.
+  //
+  // Two batches rather than one so more than one Bison install is still in
+  // play — a single client uses one instance pair, and the rate gate is
+  // per-instance. PUSH_BATCH_FOCUS=0 restores the old spread-everything
+  // behaviour if a client ever needs to jump the queue.
+  let focusIds = null;
+  if (BATCH_FOCUS > 0) {
+    const { rows } = await pool.query(
+      `select b.id from push_batches b
+        where b.status = 'processing'
+          and exists (select 1 from push_items i
+                       where i.batch_id = b.id and i.status = 'pending')
+        order by b.created_at
+        limit $1`,
+      [BATCH_FOCUS]
+    );
+    focusIds = rows.map((r) => r.id);
+    if (focusIds.length === 0) return false; // nothing pending anywhere
+  }
+
   const { rows: items } = await pool.query(
-    `update push_items i
-        set status = 'pushing', claim_token = $2, claimed_at = now()
-      where (i.batch_id, i.lead_id) in (
-        select p.batch_id, p.lead_id
-          from push_items p
-          join push_batches b on b.id = p.batch_id
-         where p.status = 'pending' and b.status = 'processing'
-         -- lead_id order interleaves concurrent batches, so pushes to
-         -- DIFFERENT Bison instances proceed in parallel instead of one
-         -- batch fully draining before the next starts.
-         order by p.lead_id
-         limit $1
-         for update of p skip locked
-      )
-      returning i.*`,
-    [CLAIM_BATCH, token]
+    focusIds
+      ? `update push_items i
+            set status = 'pushing', claim_token = $2, claimed_at = now()
+          where (i.batch_id, i.lead_id) in (
+            select p.batch_id, p.lead_id
+              from push_items p
+             where p.status = 'pending' and p.batch_id = any($3::uuid[])
+             order by p.batch_id, p.lead_id
+             limit $1
+             for update of p skip locked
+          )
+          returning i.*`
+      : `update push_items i
+            set status = 'pushing', claim_token = $2, claimed_at = now()
+          where (i.batch_id, i.lead_id) in (
+            select p.batch_id, p.lead_id
+              from push_items p
+              join push_batches b on b.id = p.batch_id
+             where p.status = 'pending' and b.status = 'processing'
+             order by p.lead_id
+             limit $1
+             for update of p skip locked
+          )
+          returning i.*`,
+    focusIds ? [CLAIM_BATCH, token, focusIds] : [CLAIM_BATCH, token]
   );
   if (items.length === 0) return false;
   mark("claim", tClaim);
@@ -903,6 +950,7 @@ async function pushCycle() {
 console.log(
   `push-worker up — rate ${RATE}/s/instance, concurrency ${CONCURRENCY}, claim ${CLAIM_BATCH}, ` +
   `poll ${POLL_MS}ms, stale ${STALE_MIN}m, refresh ${REFRESH_MS / 1000}s, ` +
+  `focus ${BATCH_FOCUS === 0 ? "all batches" : `${BATCH_FOCUS} oldest`}, ` +
   `keys: ${Object.keys(KEY_MAP).length} mapped${DEFAULT_KEY ? " + default" : ""}${ONCE ? ", once" : ""}`
 );
 let lastSweep = 0;
