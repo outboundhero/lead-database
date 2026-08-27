@@ -85,6 +85,28 @@ const TAB_GID = 581954884;
 // prunes explicit city lists. Taxonomy matching + include phrases stay on mini.
 const MODEL = "gpt-4o-mini";
 const TEXT_MODEL = process.env.TARGETING_TEXT_MODEL || "gpt-4o";
+
+// A cleaning company must never be pitched to another cleaning company. Applied
+// to every client whose Client Tracker type is "Cleaning" (col F), on top of
+// whatever the sheet's own exclusion column says.
+//
+// Kept in code, not in the database: this sync REWRITES exclude_terms from the
+// sheet on every run (the cron is every six hours) and the sheet has no column
+// for these, so a row edited directly in the database would lose them silently.
+//
+// Matched whole-word and plural-tolerant like every other exclusion, so
+// "cleaning" catches "Cleaning", "cleanings" and "ABC Cleaning Co" — see
+// fn_whole_term_regex.
+const CLEANING_INDUSTRY_EXCLUSIONS = [
+  "cleaning", "janitorial", "custodial", "janitors", "janitor", "cleaners",
+  "building services", "building maintenance", "building solutions",
+  "facility services", "facilities services",
+  "facility maintenance", "facilities maintenance",
+  "facility solutions", "facilities solutions",
+  "facility cleaning", "facilities cleaning",
+  "commercial cleaning", "commercial janitorial", "commercial maintenance",
+  "property maintenance", "property services",
+];
 const PRICES = { "gpt-4o-mini": [0.15 / 1e6, 0.6 / 1e6], "gpt-4o": [2.5 / 1e6, 10 / 1e6] };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const usage = { cost: 0, calls: 0 };
@@ -640,8 +662,14 @@ async function main(job = null) {
 
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
   try {
-    const { rows: tagRows } = await pool.query(`SELECT tag FROM client_tags`);
+    const { rows: tagRows } = await pool.query(`SELECT tag, client_type FROM client_tags`);
     const knownTags = new Set(tagRows.map((r) => r.tag));
+    // Cleaning clients must not be sold to their own industry. These terms are
+    // appended to every cleaning client's exclusions HERE rather than written
+    // straight to the database, because this sync rewrites exclude_terms from
+    // the sheet every six hours — a database-only edit would silently vanish on
+    // the next run. The sheet has no column for them, so the code is the source.
+    const cleaningTags = new Set(tagRows.filter((r) => r.client_type === "Cleaning").map((r) => r.tag));
     // Second-chance split for unspaced compounds ("TM&VC", "K&LCS"): only when
     // EVERY part is a known client tag — "JPC&A" stays whole because "A" isn't.
     for (const [tag, data] of [...sheetClients]) {
@@ -853,7 +881,11 @@ async function main(job = null) {
           // 079 stays rollback-able; drop them once that's no longer needed.
           [c.tag, countries, JSON.stringify(locs), [], [], exclInd, exclKw,
            sheetRaw === null ? null : JSON.stringify(sheetRaw),
-           [...new Set([...exclInd, ...exclKw].map((x) => String(x).trim().toLowerCase()).filter(Boolean))].sort()]
+           [...new Set([
+             ...exclInd, ...exclKw,
+             // Cleaning clients also exclude their own industry (2026-08-27).
+             ...(cleaningTags.has(c.tag) ? CLEANING_INDUSTRY_EXCLUSIONS : []),
+           ].map((x) => String(x).trim().toLowerCase()).filter(Boolean))].sort()]
         );
         written++;
         const line = `${c.tag}: ${locFail ? "locations kept" : `${locs.length} locations`}, ${exclInd.length} excl-cats, ${exclKw.length} excl-keywords${allOk ? "" : "  [PARTIAL — will retry next run]"}`;

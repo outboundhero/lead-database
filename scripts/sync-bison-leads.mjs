@@ -147,6 +147,13 @@ async function importNew(batchSize = 5000) {
          select distinct on (p.email) p.email, p.first_name, p.last_name, p.company, p.title
            from picked p
           where not exists (select 1 from leads l where l.email = p.email)
+            -- SUPPRESSED ADDRESSES ARE NEVER RE-CREATED (091). This is the whole
+            -- reason the list is keyed on the address rather than the lead row:
+            -- deleting a lead does not stop Bison still holding it, so without
+            -- this the next sync would add it straight back and it would go into
+            -- a client campaign again. They are still marked imported_at below,
+            -- so they are not reconsidered on every future run.
+            and not exists (select 1 from suppressed_emails s where s.email = p.email)
           order by p.email
        ), ins as (
          insert into leads (email, first_name, last_name, company, title, source)
