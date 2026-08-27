@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ExternalLink, Pencil, Trash2 } from "lucide-react";
+import { Ban, ExternalLink, Pencil, Trash2 } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { LeadHistory } from "./lead-history";
+import { SuppressLeadsDialog } from "./suppress-leads-dialog";
 import { useRole, useHasPermission } from "@/lib/context/role-context";
 import { createClient } from "@/lib/supabase/client";
 import { toast } from "sonner";
@@ -160,6 +161,7 @@ export function LeadDetailPanel({
   const isOwner = role === "owner";
   const canEdit = useHasPermission("manager");
   const [deleting, setDeleting] = useState(false);
+  const [suppressOpen, setSuppressOpen] = useState(false);
 
   // The panel keeps its own copy so a save is reflected immediately, whether or
   // not the parent list refetches.
@@ -280,6 +282,18 @@ export function LeadDetailPanel({
                     {saving ? "Saving…" : "Save"}
                   </Button>
                 </>
+              )}
+              {canEdit && !editing && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-destructive hover:text-destructive h-8"
+                  title="Never contact this address again — blocked from every client campaign, and the Bison sync cannot add it back"
+                  onClick={() => setSuppressOpen(true)}
+                >
+                  <Ban className="h-4 w-4 mr-1" />
+                  Never contact
+                </Button>
               )}
               {isOwner && !editing && (
                 <Button
@@ -460,6 +474,13 @@ export function LeadDetailPanel({
           <div className="h-4" />
         </div>
       </SheetContent>
+
+      <SuppressLeadsDialog
+        open={suppressOpen}
+        onClose={() => setSuppressOpen(false)}
+        ids={[current.id]}
+        onDone={onClose}
+      />
     </Sheet>
   );
 }

@@ -228,9 +228,18 @@ export function filterReducer(state: FilterState, action: FilterAction): FilterS
           exclude: mergeStrings(state.categorySearch.exclude, action.patch.categorySearchExclude),
           ...(action.patch.categorySearchInclude.length && state.categorySearch.include.length === 0
             ? { includeMode: "contains" as const } : {}),
-          // Whole-term so "retail" can't nuke "Retail Solutions Corp" by substring.
+          // CONTAINS (client decision 2026-08-27). This used to be "exact"
+          // (whole-term) so "retail" could not catch "Retail Solutions Corp" by
+          // substring. The client wants the broader match: "cleaning" has to
+          // catch "drycleaning" and "CleaningCo" for competitor exclusion.
+          //
+          // The push gate matches the same way as of migration 093, so the
+          // count in the Leads view and what the push actually sends agree.
+          // Cost, measured before the change: ~2.2% fewer eligible leads per
+          // client, because short terms now match inside longer words — "bar"
+          // catches "Barbershop".
           ...(action.patch.categorySearchExclude.length && state.categorySearch.exclude.length === 0
-            ? { excludeMode: "exact" as const } : {}),
+            ? { excludeMode: "contains" as const } : {}),
         },
         keyword: {
           ...state.keyword,

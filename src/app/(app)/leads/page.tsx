@@ -14,8 +14,9 @@ import { LeadTable } from "@/components/leads/lead-table";
 import { LeadDetailPanel } from "@/components/leads/lead-detail-panel";
 import { ExportButton } from "@/components/exports/export-button";
 import { DeleteLeadsDialog } from "@/components/leads/delete-leads-dialog";
+import { SuppressLeadsDialog } from "@/components/leads/suppress-leads-dialog";
 import { Button } from "@/components/ui/button";
-import { ArrowUpDown, X, Trash2, Link2 } from "lucide-react";
+import { ArrowUpDown, X, Trash2, Link2, Ban } from "lucide-react";
 import { useHasPermission } from "@/lib/context/role-context";
 import { countActiveFilters } from "@/types/filters";
 import { LocationCoverageNotice, type LocationCoverage } from "@/components/clients/location-coverage-notice";
@@ -96,6 +97,7 @@ export default function LeadsPage() {
   // the checked visible rows. Delete/actions resolve it server-side via filters.
   const [selectAllFiltered, setSelectAllFiltered] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [suppressOpen, setSuppressOpen] = useState(false);
   const selectedIds = Object.keys(rowSelection).filter((k) => rowSelection[k]);
 
   const canDelete = useHasPermission("admin");
@@ -543,6 +545,23 @@ export default function LeadsPage() {
               variant="ghost"
               size="sm"
               className="text-destructive hover:text-destructive disabled:opacity-40"
+              disabled={selectedIds.length === 0}
+              title={
+                selectedIds.length === 0
+                  ? "Select leads to block them from every campaign"
+                  : "Never contact these addresses again — survives the Bison sync"
+              }
+              onClick={() => setSuppressOpen(true)}
+            >
+              <Ban className="h-4 w-4 mr-1" />
+              Never contact
+            </Button>
+          )}
+          {canDelete && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-destructive hover:text-destructive disabled:opacity-40"
               disabled={!deleteEnabled}
               onClick={() => setDeleteOpen(true)}
             >
@@ -583,6 +602,14 @@ export default function LeadsPage() {
       </div>
 
       {canDelete && (
+        <>
+        <SuppressLeadsDialog
+          open={suppressOpen}
+          onClose={() => setSuppressOpen(false)}
+          ids={selectedIds}
+          onDone={() => { clearSelection(); fetchLeads(); }}
+        />
+
         <DeleteLeadsDialog
           open={deleteOpen}
           onClose={() => setDeleteOpen(false)}
@@ -596,6 +623,7 @@ export default function LeadsPage() {
             fetchLeads();
           }}
         />
+        </>
       )}
 
       {/* Which of this client's preferred locations are short of leads.

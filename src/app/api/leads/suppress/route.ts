@@ -17,6 +17,7 @@ import { getPool } from "@/lib/db/pool";
 // the address still cannot come back.
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_EMAILS = 5000;
 
 async function requireManager(request: NextRequest) {
@@ -44,13 +45,26 @@ export async function POST(request: NextRequest) {
   const auth = await requireManager(request);
   if ("error" in auth) return auth.error;
 
-  let body: { emails?: unknown; email?: unknown; reason?: string; notes?: string; delete?: boolean };
+  let body: { emails?: unknown; email?: unknown; ids?: unknown; reason?: string; notes?: string; delete?: boolean };
   try { body = await request.json(); } catch { return NextResponse.json({ error: "Invalid JSON" }, { status: 400 }); }
-  const emails = readEmails(body);
-  if (!emails) return NextResponse.json({ error: `Provide 1-${MAX_EMAILS} email addresses` }, { status: 400 });
-  if (emails.length === 0) return NextResponse.json({ error: "No valid email addresses" }, { status: 400 });
 
   const pool = getPool();
+
+  // Selections in the table are lead ids, and the pages a user selected across
+  // are not all loaded client-side — so ids are resolved to addresses here
+  // rather than making the browser find them.
+  let emails: string[] | null;
+  if (Array.isArray(body.ids) && body.ids.length > 0) {
+    const ids = [...new Set(body.ids.map((i) => String(i)).filter((i) => UUID_RE.test(i)))].slice(0, MAX_EMAILS);
+    if (ids.length === 0) return NextResponse.json({ error: "No valid lead ids" }, { status: 400 });
+    const { rows } = await pool.query(
+      `select email from leads where id = any($1::uuid[]) and email is not null`, [ids]);
+    emails = [...new Set(rows.map((r) => String(r.email).toLowerCase()))];
+  } else {
+    emails = readEmails(body);
+  }
+  if (!emails) return NextResponse.json({ error: `Provide 1-${MAX_EMAILS} leads` }, { status: 400 });
+  if (emails.length === 0) return NextResponse.json({ error: "No valid email addresses" }, { status: 400 });
   const who = auth.profile.full_name || auth.profile.email || "Unknown user";
   let flagged = 0;
   for (const email of emails) {
