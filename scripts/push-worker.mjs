@@ -54,7 +54,13 @@ const RATE = Math.max(1, Number(process.env.PUSH_RATE) || 5); // per-instance Bi
 // process idle nearly all the time. Each item is independently fenced by its
 // claim token, so concurrent items cannot tread on each other; the per-instance
 // rate gate above still decides how hard any single Bison install is hit.
-const CONCURRENCY = Math.max(1, Math.min(32, Number(env.PUSH_CONCURRENCY) || 8));
+// Ceiling raised 32 -> 96 (2026-08-29). With the rate gate at 45/s/instance the
+// gate stopped being the constraint and this cap became it: per-lead work is
+// ~1.5s of waiting (lookup, create, two Supabase round trips), so 400 leads at
+// 32 in flight is ~19s — exactly the "items" figure observed. Concurrency is
+// what converts waiting into throughput; the gate still bounds how hard any one
+// install is hit.
+const CONCURRENCY = Math.max(1, Math.min(96, Number(env.PUSH_CONCURRENCY) || 8));
 // How often the batch counters are recomputed (see the note in the main loop).
 const REFRESH_MS = Math.max(5_000, Number(env.PUSH_REFRESH_MS) || 20_000);
 // How many of the OLDEST batches a cycle draws from. 0 = the old behaviour of
@@ -78,7 +84,11 @@ if (!env.DATABASE_URL) {
 // undid much of the concurrency.
 const pool = new pg.Pool({
   connectionString: env.DATABASE_URL,
-  max: Math.max(6, Math.min(24, CONCURRENCY + 4)),
+  // Must keep pace with CONCURRENCY: each in-flight lead makes its own writes,
+  // and a pool smaller than the concurrency re-serialises them on the way out.
+  // Capped well below Supabase's connection limit, which the app and the other
+  // workers also draw on.
+  max: Math.max(6, Math.min(40, CONCURRENCY + 4)),
 });
 pool.on("error", (e) => console.error("pg pool idle-client error:", e.message)); // never crash the loop
 
