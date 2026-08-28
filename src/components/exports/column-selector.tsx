@@ -159,6 +159,11 @@ export function ColumnSelector({
   }, [clientTag, tagIncludes, clientTagOptions]);
   const [includeAlreadyPushed, setIncludeAlreadyPushed] = useState(false);
   const [pushStats, setPushStats] = useState<{ matching: number; alreadyPushed: number; notPushed: number } | null>(null);
+  const [forecast, setForecast] = useState<{
+    matching: number; alreadyInCampaigns: number; netNew: number;
+    coverage: { known: string[]; unknown: string[]; complete: boolean };
+  } | null>(null);
+  const [forecastLoading, setForecastLoading] = useState(false);
 
   // force = true asks the server to bypass its cache (?fresh=1) and re-read the
   // Bison installs live. That is what the "Sync" button does: a campaign created
@@ -267,6 +272,44 @@ export function ColumnSelector({
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, destination, detectedTag]);
+
+  // NET NEW: how many of these leads are not already in the CHOSEN campaigns.
+  // Re-runs when the campaign selection changes, because the answer depends on
+  // which campaigns you picked, not just on the client.
+  //
+  // Costs nothing extra: the count over the client's eligible set is 4.4s on its
+  // own and 4.3s with the membership check folded in — the planner does both in
+  // one pass. Deliberately not awaited anywhere, so the dialog stays usable.
+  const selectedCampaignList = useMemo(
+    () => campaigns.filter((c) => selectedCampaignKeys.has(campaignKey(c)))
+      .map((c) => ({ id: c.id, instance_url: c.instance_url })),
+    [campaigns, selectedCampaignKeys]
+  );
+  useEffect(() => {
+    if (!open || destination !== "bison" || selectedCampaignList.length === 0 || (!statsFilters && !statsSelectedIds)) {
+      setForecast(null);
+      return;
+    }
+    setForecastLoading(true);
+    const ctl = new AbortController();
+    fetch("/api/bison/push-forecast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clientTag: detectedTag ?? null,
+        campaigns: selectedCampaignList,
+        filters: statsFilters,
+        selectedIds: statsSelectedIds,
+      }),
+      signal: ctl.signal,
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && !d.error && setForecast(d))
+      .catch(() => {})
+      .finally(() => setForecastLoading(false));
+    return () => ctl.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, destination, detectedTag, selectedCampaignList]);
 
   // Load live Bison campaigns when the Bison destination is chosen — refetched
   // each dialog open (the server route has a 30s cache) so new campaigns appear.
@@ -585,6 +628,26 @@ export function ColumnSelector({
                   </p>
                 ) : (
                   <p className="text-[11px] text-muted-foreground">Checking what&apos;s already been pushed for {detectedTag}…</p>
+                )}
+                {/* NET NEW. The line above is our own push history, which cannot
+                    see a lead that reached a campaign any other way — a Clay
+                    import, a manual upload, an older tool. This reads Bison's
+                    own campaign membership, so it is what will actually land. */}
+                {forecast && (
+                  <p className="mt-1 border-t pt-1 text-[11px]">
+                    <span className="font-semibold tabular-nums text-foreground">{forecast.netNew.toLocaleString()}</span>
+                    {" net new to these campaigns · "}
+                    <span className="tabular-nums">{forecast.alreadyInCampaigns.toLocaleString()}</span>
+                    {" already in them"}
+                    {!forecast.coverage.complete && (
+                      <span className="text-muted-foreground">
+                        {" "}(membership unknown for {forecast.coverage.unknown.join(", ")} — those may add fewer)
+                      </span>
+                    )}
+                  </p>
+                )}
+                {forecastLoading && !forecast && (
+                  <p className="mt-1 text-[11px] text-muted-foreground">Working out how many are net new…</p>
                 )}
                 <label className="mt-1 flex items-center gap-2 text-[11px]">
                   <input
