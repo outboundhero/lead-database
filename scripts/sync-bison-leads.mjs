@@ -30,6 +30,9 @@ const has = (n) => args.includes(`--${n}`);
 const SHARDS = Math.max(1, Math.min(16, Number(flag("shards")) || 8));
 const MAX_ROWS = Number(flag("max")) || Infinity;
 const RESUME = has("resume");
+// bison_sync_state row that records "everything up to this id is accounted for",
+// separate from the real shard rows (0..n). Negative so it can never collide.
+const WATERMARK_SHARD = -1;
 // Only fetch leads newer than the highest id already mirrored. This is what the
 // every-3-days job runs; a full pass is hours, this is seconds.
 const INCREMENTAL = has("incremental");
@@ -266,19 +269,66 @@ async function syncInstance(domain, key) {
   // exactly the set of new leads. One shard, stop on arrival — seconds instead
   // of hours, and no re-reading of millions of unchanged rows.
   if (INCREMENTAL) {
+    // The floor is the highest id we have ever ACCOUNTED FOR — either mirrored,
+    // or recorded as a watermark. Keeping them separate is what lets "pull the
+    // new leads" work without first pulling 12.7M old ones.
     const { rows } = await pool.query(
-      `select coalesce(max(bison_id), 0)::bigint as known from bison_leads where instance_url = $1`, [domain]);
+      `select greatest(
+                coalesce((select max(bison_id) from bison_leads where instance_url = $1), 0),
+                coalesce((select cursor_id from bison_sync_state
+                           where instance_url = $1 and shard = ${WATERMARK_SHARD}), 0)
+              )::bigint as known`, [domain]);
     const known = Number(rows[0]?.known ?? 0);
+
+    // SEEDING: an install nobody has mirrored gets its watermark set to today's
+    // top id and NOTHING is fetched. From the next run on it collects only what
+    // is genuinely new. The alternative — refusing until someone runs a full
+    // sync — meant three of four installs were simply never watched.
+    //
+    // A full sync remains worth doing for a different purpose: campaign
+    // membership for the net-new forecast needs the back catalogue. New-lead
+    // collection does not, and should not wait for it.
     if (!known) {
-      console.log(`\n=== ${domain} — nothing mirrored yet, run a full sync first ===`);
+      await pool.query(
+        `insert into bison_sync_state (instance_url, shard, from_id, to_id, cursor_id, done, started_at)
+         values ($1, ${WATERMARK_SHARD}, $2, $2, $2, true, now())
+         on conflict (instance_url, shard) do update set cursor_id = excluded.cursor_id, updated_at = now()`,
+        [domain, top]);
+      console.log(`\n=== ${domain} — first run: watermark set at id ${top.toLocaleString()}, ` +
+                  `new leads collected from the next run on (no back catalogue fetched) ===`);
       return 0;
     }
+
     if (top <= known) { console.log(`\n=== ${domain} — no new leads (top ${top.toLocaleString()}) ===`); return 0; }
-    console.log(`\n=== ${domain} — incremental: ids ${(known + 1).toLocaleString()}..${top.toLocaleString()} ===`);
+
+    // SHARD THE DELTA. This ran as a single walk and took 2.8 HOURS for 382,790
+    // rows (~38/sec) — because our own pushes create leads in Bison far faster
+    // than "a few new ones since last time". Split it the same way a full sync
+    // splits the id space; a small delta still collapses to one shard.
+    const span = top - known;
+    const shards = Math.max(1, Math.min(SHARDS, Math.ceil(span / 20000)));
+    console.log(`\n=== ${domain} — incremental: ids ${(known + 1).toLocaleString()}..${top.toLocaleString()} ` +
+                `(${span.toLocaleString()} ids, ${shards} shard${shards === 1 ? "" : "s"}) ===`);
     const budget = { used: 0, max: MAX_ROWS };
-    const n = await runShard(domain, key, 0, top + 1, known, budget);
+    const bounds = Array.from({ length: shards }, (_, i) => ({
+      shard: i,
+      from: Math.floor(top - (i * span) / shards) + 1,
+      to: Math.floor(top - ((i + 1) * span) / shards),
+    }));
+    const counts = await Promise.all(
+      bounds.map((b) => runShard(domain, key, b.shard, b.from, Math.max(b.to, known), budget)
+        .catch((e) => { console.log(`   shard ${b.shard} failed: ${e.message}`); return 0; }))
+    );
+    const n = counts.reduce((a, b) => a + b, 0);
+    // Advance the watermark even if nothing came back, so a quiet install does
+    // not re-walk the same empty range every three days.
+    await pool.query(
+      `insert into bison_sync_state (instance_url, shard, from_id, to_id, cursor_id, done, started_at)
+       values ($1, ${WATERMARK_SHARD}, $2, $2, $2, true, now())
+       on conflict (instance_url, shard) do update set cursor_id = greatest(bison_sync_state.cursor_id, excluded.cursor_id), updated_at = now()`,
+      [domain, top]);
     const secs = (Date.now() - started) / 1000;
-    console.log(`${domain}: ${n.toLocaleString()} new rows in ${secs.toFixed(0)}s`);
+    console.log(`${domain}: ${n.toLocaleString()} new rows in ${secs.toFixed(0)}s (${(n / Math.max(secs, 1)).toFixed(0)}/sec)`);
     return n;
   }
 
