@@ -15,6 +15,7 @@
     "sync-taxonomy": "node scripts/sync-taxonomy-from-sheet.mjs",
     "sync-clients": "node scripts/sync-clients-from-sheet.mjs",
     "sync-bison-leads": "node scripts/sync-bison-leads.mjs",
+    "coverage-refresh": "node scripts/refresh-location-coverage.mjs",
     "location-worker": "node scripts/backfill-lead-locations.mjs && node scripts/infer-company-locations.mjs",
     "location-backfill": "node scripts/backfill-lead-locations.mjs",
     "location-inference": "node scripts/infer-company-locations.mjs",

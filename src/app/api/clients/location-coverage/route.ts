@@ -46,6 +46,23 @@ export async function GET(request: NextRequest) {
   }
 
   const pool = getPool();
+
+  // PRECOMPUTED FIRST (client decision 2026-09-02): the client-sync cron runs
+  // scripts/refresh-location-coverage.mjs after every targeting sync and stores
+  // one row per client, so selecting a client reads a stored answer instantly
+  // instead of triggering a 7-10s grouped scan. The live computation below
+  // remains only for fresh=1 (the popup's Recheck button) and for a client the
+  // cron has not covered yet.
+  if (!fresh) {
+    const { rows } = await pool.query(
+      `select payload, computed_at from client_location_coverage where client_tag = $1`, [tag]);
+    if (rows.length) {
+      const payload = { ...(rows[0].payload as object), computedAt: new Date(rows[0].computed_at).toISOString() };
+      cache.set(key, { at: Date.now(), payload });
+      return NextResponse.json({ ...payload, cached: false, precomputed: true });
+    }
+  }
+
   try {
     const admin = createAdminClient();
     const { data: targeting } = await admin
@@ -169,6 +186,16 @@ export async function GET(request: NextRequest) {
     };
     cache.set(key, { at: Date.now(), payload });
     if (cache.size > 40) cache.delete(cache.keys().next().value as string);
+    // A live recompute (Recheck, or a client the cron missed) refreshes the
+    // stored row too, so the next selection gets this answer instantly.
+    await pool.query(
+      `insert into client_location_coverage (client_tag, threshold, total_available, payload, computed_at)
+       values ($1, $2, $3, $4::jsonb, now())
+       on conflict (client_tag) do update set
+         threshold = excluded.threshold, total_available = excluded.total_available,
+         payload = excluded.payload, computed_at = now()`,
+      [tag, threshold, totalAvailable, JSON.stringify({ ...payload, computedAt: new Date().toISOString() })]
+    ).catch(() => {});
     return NextResponse.json({ ...payload, cached: false });
   } catch (e) {
     return NextResponse.json(
