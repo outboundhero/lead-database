@@ -43,8 +43,38 @@ const PAGE_TIMEOUT_MS = 30_000;
 const MAX_RETRIES = 4;
 
 if (!env.DATABASE_URL) { console.error("DATABASE_URL is not set"); process.exit(1); }
-const pool = new pg.Pool({ connectionString: env.DATABASE_URL, max: 6 });
+const pool = new pg.Pool({
+  connectionString: env.DATABASE_URL,
+  max: 6,
+  keepAlive: true,
+  // Retire connections rather than letting the far end drop them mid-statement.
+  idleTimeoutMillis: 30_000,
+});
+// A pool with no error listener throws on an idle client dying and takes the
+// whole process with it — during an hours-long sync that is the difference
+// between a hiccup and losing the run.
+pool.on("error", (e) => console.log(`   pg pool: ${e.message}`));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Every database call in the sync goes through here.
+//
+// The first full facilityreach run died after 790k rows with SEVEN of eight
+// shards reporting "Connection terminated unexpectedly" — a dropped Postgres
+// connection, not a Bison problem. Without a retry, one dropped connection
+// aborts an entire shard's remaining range, and 1.4M leads went unfetched.
+// pg.Pool opens a fresh connection on the next call, so a retry is all this
+// needs; the work itself is idempotent (upserts keyed on instance+id).
+const TRANSIENT = /Connection terminated|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|terminating connection|server closed|Client has encountered a connection error/i;
+async function dbQuery(text, params, attempts = 5) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await pool.query(text, params);
+    } catch (e) {
+      if (attempt >= attempts || !TRANSIENT.test(String(e?.message ?? ""))) throw e;
+      await sleep(400 * attempt * attempt); // 0.4s, 1.6s, 3.6s, 6.4s
+    }
+  }
+}
 
 function instances() {
   const map = env.EMAILBISON_KEYS ? JSON.parse(env.EMAILBISON_KEYS) : {};
@@ -110,7 +140,7 @@ async function writeRows(rows) {
   });
   // Last write wins: a re-sync refreshes campaign membership and engagement.
   // imported_at is NOT touched — a refreshed row must not look un-imported.
-  await pool.query(
+  await dbQuery(
     `insert into bison_leads (instance_url, bison_id, email, status, campaigns,
                               emails_sent, opens, replies, bison_created_at, bison_updated_at,
                               first_name, last_name, company, title)
@@ -139,7 +169,7 @@ async function writeRows(rows) {
 async function importNew(batchSize = 5000) {
   let imported = 0;
   for (;;) {
-    const { rows } = await pool.query(
+    const { rows } = await dbQuery(
       `with picked as (
          select instance_url, bison_id, email, first_name, last_name, company, title
            from bison_leads
@@ -208,12 +238,12 @@ async function runShard(domain, key, shard, fromId, toId, budget) {
   let cursorId = fromId;
   let seen = 0;
   let buffer = [];
-  const { rows: st } = await pool.query(
+  const { rows: st } = await dbQuery(
     `select cursor_id, done from bison_sync_state where instance_url=$1 and shard=$2`, [domain, shard]);
   if (RESUME && st[0] && !st[0].done && st[0].cursor_id != null) cursorId = Number(st[0].cursor_id);
   if (RESUME && st[0]?.done) return 0;
 
-  await pool.query(
+  await dbQuery(
     `insert into bison_sync_state (instance_url, shard, from_id, to_id, cursor_id, started_at)
      values ($1,$2,$3,$4,$5, now())
      on conflict (instance_url, shard) do update set
@@ -247,12 +277,12 @@ async function runShard(domain, key, shard, fromId, toId, budget) {
     // Re-apply pagination_type: Bison's own next-link drops it.
     url = next ? pageUrl(domain, { cursor: new URL(next).searchParams.get("cursor") }) : null;
 
-    await pool.query(
+    await dbQuery(
       `update bison_sync_state set cursor_id=$3, rows_seen=$4, updated_at=now()
         where instance_url=$1 and shard=$2`, [domain, shard, cursorId, seen]);
   }
   if (buffer.length) await writeRows(buffer);
-  await pool.query(
+  await dbQuery(
     `update bison_sync_state set cursor_id=$3, rows_seen=$4, done=$5, updated_at=now()
       where instance_url=$1 and shard=$2`,
     [domain, shard, cursorId, seen, budget.used < budget.max]);
@@ -272,7 +302,7 @@ async function syncInstance(domain, key) {
     // The floor is the highest id we have ever ACCOUNTED FOR — either mirrored,
     // or recorded as a watermark. Keeping them separate is what lets "pull the
     // new leads" work without first pulling 12.7M old ones.
-    const { rows } = await pool.query(
+    const { rows } = await dbQuery(
       `select greatest(
                 coalesce((select max(bison_id) from bison_leads where instance_url = $1), 0),
                 coalesce((select cursor_id from bison_sync_state
@@ -289,7 +319,7 @@ async function syncInstance(domain, key) {
     // membership for the net-new forecast needs the back catalogue. New-lead
     // collection does not, and should not wait for it.
     if (!known) {
-      await pool.query(
+      await dbQuery(
         `insert into bison_sync_state (instance_url, shard, from_id, to_id, cursor_id, done, started_at)
          values ($1, ${WATERMARK_SHARD}, $2, $2, $2, true, now())
          on conflict (instance_url, shard) do update set cursor_id = excluded.cursor_id, updated_at = now()`,
@@ -322,7 +352,7 @@ async function syncInstance(domain, key) {
     const n = counts.reduce((a, b) => a + b, 0);
     // Advance the watermark even if nothing came back, so a quiet install does
     // not re-walk the same empty range every three days.
-    await pool.query(
+    await dbQuery(
       `insert into bison_sync_state (instance_url, shard, from_id, to_id, cursor_id, done, started_at)
        values ($1, ${WATERMARK_SHARD}, $2, $2, $2, true, now())
        on conflict (instance_url, shard) do update set cursor_id = greatest(bison_sync_state.cursor_id, excluded.cursor_id), updated_at = now()`,
@@ -373,7 +403,7 @@ if (!NO_IMPORT) {
   imported = await importNew();
 }
 
-const { rows: tot } = await pool.query(
+const { rows: tot } = await dbQuery(
   `select (select count(*) from bison_leads)::bigint as mirrored,
           (select count(*) from bison_leads where imported_at is null and email is not null)::bigint as pending`);
 console.log(

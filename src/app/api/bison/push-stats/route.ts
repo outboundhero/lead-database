@@ -71,6 +71,23 @@ export async function POST(request: NextRequest) {
          from leads l where ${where}`,
       params);
 
+    // LIFETIME history for this client tag, independent of what is selected now.
+    //
+    // Everything above is scoped to the CURRENT selection, which is correct for
+    // "how many of these are new" but reads as "nothing has ever been pushed"
+    // whenever today's filter does not happen to include last week's leads.
+    // That is exactly what was reported for CCHS: 59,332 leads had been sent
+    // across two batches and the panel showed none of it. Cheap to answer
+    // (370ms for CCHS, under a second for the largest clients).
+    const { rows: [lifetime] } = await pool.query(
+      `select count(distinct pi.lead_id)::bigint as leads,
+              count(distinct pb.id)::bigint as batches,
+              max(pb.completed_at) as last_completed
+         from push_items pi
+         join push_batches pb on pb.id = pi.batch_id
+        where pb.client_tag = $1 and pi.status = 'sent'`,
+      [clientTag]);
+
     const matching = Number(stats?.matching ?? 0);
     const alreadyPushed = Number(stats?.already_pushed ?? 0);
     return NextResponse.json({
@@ -81,6 +98,10 @@ export async function POST(request: NextRequest) {
       newSinceLast: lastAt ? Number(stats?.new_since_last ?? 0) : matching,
       failedForTag: Number(stats?.failed_for_tag ?? 0),
       lastExportAt: lastAt,
+      everPushed: Number(lifetime?.leads ?? 0),
+      everBatches: Number(lifetime?.batches ?? 0),
+      lastPushCompletedAt: lifetime?.last_completed
+        ? new Date(lifetime.last_completed).toISOString() : null,
     });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "stats failed" }, { status: 500 });

@@ -158,7 +158,10 @@ export function ColumnSelector({
     return null;
   }, [clientTag, tagIncludes, clientTagOptions]);
   const [includeAlreadyPushed, setIncludeAlreadyPushed] = useState(false);
-  const [pushStats, setPushStats] = useState<{ matching: number; alreadyPushed: number; notPushed: number } | null>(null);
+  const [pushStats, setPushStats] = useState<{
+    matching: number; alreadyPushed: number; notPushed: number;
+    everPushed?: number; everBatches?: number; lastPushCompletedAt?: string | null;
+  } | null>(null);
   const [forecast, setForecast] = useState<{
     matching: number; alreadyInCampaigns: number; netNew: number;
     coverage: { known: string[]; unknown: string[]; complete: boolean };
@@ -270,8 +273,12 @@ export function ColumnSelector({
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => d && setPushStats(d))
       .catch(() => {});
+    // Primitives, not the objects themselves: the guard above bails when neither
+    // input is present, and without these in the deps a late-arriving selection
+    // never triggered a retry — the panel just sat on "Checking…". The objects
+    // are deliberately NOT dependencies; the parent rebuilds them every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, destination, detectedTag]);
+  }, [open, destination, detectedTag, !!statsFilters, statsSelectedIds?.length ?? 0]);
 
   // NET NEW: how many of these leads are not already in the CHOSEN campaigns.
   // Re-runs when the campaign selection changes, because the answer depends on
@@ -628,6 +635,28 @@ export function ColumnSelector({
                   </p>
                 ) : (
                   <p className="text-[11px] text-muted-foreground">Checking what&apos;s already been pushed for {detectedTag}…</p>
+                )}
+                {/* LIFETIME history. The line above only counts leads inside the
+                    CURRENT selection, so it reads as "nothing has ever been
+                    pushed" whenever today's filter does not overlap last week's
+                    — which is how CCHS looked untouched despite 59,332 sent. */}
+                {pushStats && (pushStats.everPushed ?? 0) > 0 && (
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    All time for {detectedTag}:{" "}
+                    <span className="font-medium tabular-nums text-foreground">
+                      {(pushStats.everPushed ?? 0).toLocaleString()}
+                    </span>{" "}
+                    lead{pushStats.everPushed === 1 ? "" : "s"} pushed across {pushStats.everBatches} export
+                    {pushStats.everBatches === 1 ? "" : "s"}
+                    {pushStats.lastPushCompletedAt && (
+                      <> · last {new Date(pushStats.lastPushCompletedAt).toLocaleDateString()}</>
+                    )}
+                  </p>
+                )}
+                {pushStats && (pushStats.everPushed ?? 0) === 0 && (
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    All time for {detectedTag}: nothing has ever been pushed.
+                  </p>
                 )}
                 {/* NET NEW. The line above is our own push history, which cannot
                     see a lead that reached a campaign any other way — a Clay
