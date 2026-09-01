@@ -124,18 +124,44 @@ async function topId(domain, key) {
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
 const ts = (v) => (v ? new Date(String(v).replace(" ", "T") + (String(v).endsWith("Z") ? "" : "Z")) : null);
 
+// Bison's custom_variables carry the enrichment: city and state on ~100% of
+// leads, category/sub-category/additional category on ~5%. 089 dropped this and
+// that is why 368,907 imported leads had no location at all.
+//
+// Names are lowercase with inconsistent separators — "sub-category" hyphenated,
+// "additional category" spaced — so every plausible spelling is accepted.
+// Arrives as [{name, value}]; an object form is tolerated too.
+const CV_KEYS = {
+  cv_city: ["city"],
+  cv_state: ["state"],
+  cv_category: ["category"],
+  cv_subcategory: ["sub-category", "subcategory", "sub category"],
+  cv_additional_category: ["additional category", "additional-category", "additional_category"],
+  cv_domain: ["domain"],
+  cv_address: ["address"],
+  cv_phone: ["company phone", "phone", "company phone number"],
+  cv_google_maps_url: ["google maps url", "google_maps_url", "maps url"],
+  cv_question: ["question"],
+};
+
+const CV_COLS = Object.keys(CV_KEYS); // cv_city, cv_state, cv_category, …
+
 async function writeRows(rows) {
   if (rows.length === 0) return 0;
-  const cols = 14;
+  const cols = 15 + CV_COLS.length; // 14 base + cv_fetched_at + the flattened vars
   const values = [];
   const params = [];
   rows.forEach((r, i) => {
     const b = i * cols;
-    values.push(`($${b+1},$${b+2},$${b+3},$${b+4},$${b+5}::jsonb,$${b+6},$${b+7},$${b+8},$${b+9},$${b+10},$${b+11},$${b+12},$${b+13},$${b+14})`);
+    const ph = Array.from({ length: cols }, (_, k) => `$${b + k + 1}`);
+    ph[4] = `${ph[4]}::jsonb`;
+    values.push(`(${ph.join(",")})`);
     params.push(
       r.instance_url, r.bison_id, r.email, r.status, JSON.stringify(r.campaigns ?? null),
       r.emails_sent, r.opens, r.replies, r.bison_created_at, r.bison_updated_at,
-      r.first_name, r.last_name, r.company, r.title
+      r.first_name, r.last_name, r.company, r.title,
+      ...CV_COLS.map((k) => r[k] ?? null),
+      new Date()  // cv_fetched_at — these rows carry freshly-read variables
     );
   });
   // Last write wins: a re-sync refreshes campaign membership and engagement.
@@ -143,7 +169,8 @@ async function writeRows(rows) {
   await dbQuery(
     `insert into bison_leads (instance_url, bison_id, email, status, campaigns,
                               emails_sent, opens, replies, bison_created_at, bison_updated_at,
-                              first_name, last_name, company, title)
+                              first_name, last_name, company, title,
+                              ${CV_COLS.join(", ")}, cv_fetched_at)
      values ${values.join(",")}
      on conflict (instance_url, bison_id) do update set
        email = excluded.email, status = excluded.status, campaigns = excluded.campaigns,
@@ -151,6 +178,8 @@ async function writeRows(rows) {
        bison_created_at = excluded.bison_created_at, bison_updated_at = excluded.bison_updated_at,
        first_name = excluded.first_name, last_name = excluded.last_name,
        company = excluded.company, title = excluded.title,
+       ${CV_COLS.map((k) => `${k} = coalesce(excluded.${k}, bison_leads.${k})`).join(", ")},
+       cv_fetched_at = excluded.cv_fetched_at,
        synced_at = now()`,
     params
   );
@@ -171,13 +200,17 @@ async function importNew(batchSize = 5000) {
   for (;;) {
     const { rows } = await dbQuery(
       `with picked as (
-         select instance_url, bison_id, email, first_name, last_name, company, title
+         select instance_url, bison_id, email, first_name, last_name, company, title,
+                cv_city, cv_state, cv_category, cv_subcategory, cv_additional_category,
+                cv_domain, cv_address, cv_phone, cv_google_maps_url, cv_question
            from bison_leads
           where imported_at is null and email is not null
           order by instance_url, bison_id desc
           limit $1
        ), fresh as (
-         select distinct on (p.email) p.email, p.first_name, p.last_name, p.company, p.title
+         select distinct on (p.email) p.email, p.first_name, p.last_name, p.company, p.title,
+                p.cv_city, p.cv_state, p.cv_category, p.cv_subcategory, p.cv_additional_category,
+                p.cv_domain, p.cv_address, p.cv_phone, p.cv_google_maps_url, p.cv_question
            from picked p
           where not exists (select 1 from leads l where l.email = p.email)
             -- SUPPRESSED ADDRESSES ARE NEVER RE-CREATED (091). This is the whole
@@ -189,8 +222,20 @@ async function importNew(batchSize = 5000) {
             and not exists (select 1 from suppressed_emails s where s.email = p.email)
           order by p.email
        ), ins as (
-         insert into leads (email, first_name, last_name, company, title, source)
-         select email, first_name, last_name, company, title, 'Email Bison' from fresh
+         -- The enrichment arrives WITH the lead (client request 2026-09-02):
+         -- custom_variables carry city/state on ~100% of leads and the three
+         -- category fields on some, so a new lead lands enriched instead of
+         -- waiting for a separate backfill to find it. category_source='bison'
+         -- only when a category actually came along.
+         insert into leads (email, first_name, last_name, company, title, source,
+                            city, state, category, subcategory, additional_category,
+                            domain, address, company_phone, google_maps_url, question,
+                            category_source)
+         select email, first_name, last_name, company, title, 'Email Bison',
+                cv_city, cv_state, cv_category, cv_subcategory, cv_additional_category,
+                cv_domain, cv_address, cv_phone, cv_google_maps_url, cv_question,
+                case when cv_category is not null then 'bison' end
+           from fresh
          on conflict (email) do nothing
          returning 1
        ), mark as (
@@ -213,6 +258,22 @@ async function importNew(batchSize = 5000) {
 
 const str = (v) => { const s = String(v ?? "").trim(); return s ? s.slice(0, 500) : null; };
 
+function customVars(raw) {
+  const flat = {};
+  if (Array.isArray(raw)) {
+    for (const v of raw) if (v?.name != null) flat[String(v.name).trim().toLowerCase()] = v.value;
+  } else if (raw && typeof raw === "object") {
+    for (const [k, v] of Object.entries(raw)) flat[String(k).trim().toLowerCase()] = v;
+  }
+  const out = {};
+  for (const [col, names] of Object.entries(CV_KEYS)) {
+    let hit = null;
+    for (const n of names) if (flat[n] != null && String(flat[n]).trim() !== "") { hit = flat[n]; break; }
+    out[col] = str(hit);
+  }
+  return out;
+}
+
 function mapLead(domain, r) {
   const st = r.overall_stats ?? {};
   return {
@@ -230,6 +291,7 @@ function mapLead(domain, r) {
     last_name: str(r.last_name),
     company: str(r.company),
     title: str(r.title),
+    ...customVars(r.custom_variables),
   };
 }
 
