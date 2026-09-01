@@ -20,6 +20,10 @@ const ELIGIBLE =
   "l.email is not null and l.email <> '' and l.is_bounced = false " +
   "and (l.validation_status in ('valid','catch_all') or l.validation_status is null)";
 
+// Values interpolated into the state pre-filter come from client_targeting
+// (sheet-synced), but are quoted defensively all the same.
+const escapeLiteral = (v: string) => `'${String(v).replace(/'/g, "''")}'`;
+
 const CACHE_TTL_MS = 15 * 60_000;
 type Entry = { country: string; state?: string; city?: string };
 type Row = { label: string; kind: "city" | "state"; country: string; state: string | null; city: string | null; available: number; resolved: boolean };
@@ -63,10 +67,44 @@ export async function GET(request: NextRequest) {
 
     // ONE grouped scan. Counting each location with its own query would mean
     // 105 scans of an 8.2M-row table for a client like JPCA.
-    const { rows: agg } = await pool.query(
-      `select l.country_code, l.state_code, l.location_id, count(*)::int as n
-         from leads l where ${where}
-        group by 1, 2, 3`, [tag]);
+    //
+    // STATE PRE-FILTER: when every include entry names a state (they all do for
+    // sheet-synced clients), restrict the scan to those states via the
+    // state_code index BEFORE the expensive per-lead regex conditions run.
+    // Without it UJ's scan blew past a 180s timeout as the table grew; with it,
+    // 7.6s. The trade-off is that leads with no resolved state stop counting
+    // toward totalAvailable — acceptable, because a lead with no state can
+    // never satisfy a city entry anyway, so the per-location numbers (what the
+    // popup exists for) are identical.
+    const everyEntryHasState = entries.every((e) => e.state);
+    const stateCond = everyEntryHasState
+      ? "(" + [...new Set(entries.map((e) => `${e.country}|${String(e.state).toUpperCase()}`))]
+          .map((s) => { const [co, st] = s.split("|");
+            return `(l.country_code = ${escapeLiteral(co)} and l.state_code = ${escapeLiteral(st)})`; })
+          .join(" or ") + ")"
+      : null;
+    const fullWhere = stateCond ? `${stateCond} and ${where}` : where;
+
+    // The pool's default statement_timeout is too tight for the largest
+    // clients; run the scan in its own transaction with an explicit budget so
+    // it either answers or fails loudly within it.
+    const client = await pool.connect();
+    let agg: Array<{ country_code: string | null; state_code: string | null; location_id: string | null; n: number }>;
+    try {
+      await client.query("begin");
+      await client.query("set local statement_timeout = '110s'");
+      const res = await client.query(
+        `select l.country_code, l.state_code, l.location_id, count(*)::int as n
+           from leads l where ${fullWhere}
+          group by 1, 2, 3`, [tag]);
+      await client.query("commit");
+      agg = res.rows;
+    } catch (e) {
+      await client.query("rollback").catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
 
     const byLocation = new Map<string, number>();
     const byState = new Map<string, number>();

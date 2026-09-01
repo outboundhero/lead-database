@@ -38,10 +38,14 @@ export interface LocationCoverage {
 export function LocationCoverageNotice({
   coverage,
   loading,
+  error,
   onRefresh,
 }: {
   coverage: LocationCoverage | null;
   loading: boolean;
+  /** The check failed — say so. A silent failure looks exactly like "all
+   *  locations are fine", which is how a timed-out scan hid the popup. */
+  error?: string | null;
   onRefresh: () => void;
 }) {
   const [open, setOpen] = React.useState(false);
@@ -60,6 +64,17 @@ export function LocationCoverageNotice({
       <div className="fixed bottom-4 right-4 z-40 flex items-center gap-2 rounded-full border bg-card px-3 py-2 text-xs shadow-lg">
         <Loader2 className="size-3 animate-spin" /> Checking location coverage…
       </div>
+    );
+  }
+  if (error && !coverage) {
+    return (
+      <button
+        type="button"
+        onClick={onRefresh}
+        className="fixed bottom-4 right-4 z-40 flex items-center gap-2 rounded-full border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive shadow-lg hover:bg-destructive/20"
+      >
+        <RefreshCw className="size-3" /> Location coverage check failed — retry
+      </button>
     );
   }
   if (!coverage || coverage.low.length === 0) return null;

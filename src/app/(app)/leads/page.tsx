@@ -147,6 +147,7 @@ export default function LeadsPage() {
   // only). Survives dismissal as a pill — see LocationCoverageNotice.
   const [coverage, setCoverage] = useState<LocationCoverage | null>(null);
   const [coverageLoading, setCoverageLoading] = useState(false);
+  const [coverageError, setCoverageError] = useState<string | null>(null);
 
   // Low-availability popup (client req: warn when a client has <250 fresh leads).
   const [lowAvail, setLowAvail] = useState<{
@@ -227,10 +228,16 @@ export default function LeadsPage() {
       // client switch on it would freeze the page.
       setCoverage(null);
       setCoverageLoading(true);
+      setCoverageError(null);
       fetch(`/api/clients/location-coverage?tag=${encodeURIComponent(tag)}&threshold=500`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d: LocationCoverage | null) => { if (d?.hasTargeting) setCoverage(d); })
-        .catch(() => {})
+        .then(async (r) => {
+          const d = await r.json().catch(() => null);
+          if (!r.ok || d?.error) throw new Error(d?.error ?? `HTTP ${r.status}`);
+          if (d?.hasTargeting) setCoverage(d as LocationCoverage);
+        })
+        // A failed check must be VISIBLE — swallowed, it looks identical to
+        // "every location has plenty", which is how a timeout hid UJ's popup.
+        .catch((e) => setCoverageError(e instanceof Error ? e.message : "check failed"))
         .finally(() => setCoverageLoading(false));
 
       // Availability afterwards, independently — informational only.
@@ -631,13 +638,20 @@ export default function LeadsPage() {
       <LocationCoverageNotice
         coverage={coverage}
         loading={coverageLoading}
+        error={coverageError}
         onRefresh={() => {
           if (!coverage) return;
           setCoverageLoading(true);
-          fetch(`/api/clients/location-coverage?tag=${encodeURIComponent(coverage.tag)}&threshold=${coverage.threshold}&fresh=1`)
-            .then((r) => (r.ok ? r.json() : null))
-            .then((d: LocationCoverage | null) => { if (d?.hasTargeting) setCoverage(d); })
-            .catch(() => {})
+          setCoverageError(null);
+          const tag = coverage?.tag ?? filters.clientTag;
+          if (!tag) { setCoverageLoading(false); return; }
+          fetch(`/api/clients/location-coverage?tag=${encodeURIComponent(tag)}&threshold=${coverage?.threshold ?? 500}&fresh=1`)
+            .then(async (r) => {
+              const d = await r.json().catch(() => null);
+              if (!r.ok || d?.error) throw new Error(d?.error ?? `HTTP ${r.status}`);
+              if (d?.hasTargeting) setCoverage(d as LocationCoverage);
+            })
+            .catch((e) => setCoverageError(e instanceof Error ? e.message : "check failed"))
             .finally(() => setCoverageLoading(false));
         }}
       />
