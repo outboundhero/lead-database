@@ -34,7 +34,7 @@ const pool = new pg.Pool({ connectionString: env.DATABASE_URL, max: 12, keepAliv
 pool.on("error", (e) => console.log(`   pg pool: ${e.message}`));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const TRANSIENT = /Connection terminated|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|terminating connection|server closed/i;
+const TRANSIENT = /Connection terminated|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|terminating connection|server closed|deadlock detected/i;
 async function dbQuery(text, params, attempts = 5) {
   for (let a = 1; ; a++) {
     try { return await pool.query(text, params); }
@@ -102,19 +102,51 @@ async function fetchLead(domain, email) {
 let scanned = 0, fetched = 0, cvFound = 0, leadsFilled = 0, catFilled = 0, locFilled = 0;
 
 async function round() {
-  // Leads that are missing enrichment AND that we can locate in Bison.
-  const { rows } = await dbQuery(
-    `select b.instance_url, b.email, b.bison_id, l.id as lead_id,
-            l.city is null as need_city, l.state is null as need_state,
-            (l.category is null or btrim(l.category) = '') as need_category
+  // CLAIM FROM THE PARTIAL INDEX ALONE. The first version joined bison_leads to
+  // leads and filtered on "still needs enrichment" — which re-scanned every
+  // already-enriched pair on every round, got slower as work completed, and
+  // finally blew the statement timeout at 426k with the Clay import hammering
+  // the same table. Claim cheap, decide afterwards.
+  const { rows: claimed } = await dbQuery(
+    `select b.instance_url, b.email, b.bison_id
        from bison_leads b
-       join leads l on l.email = b.email
-      where b.cv_fetched_at is null
-        and (l.city is null or l.state is null or l.category is null or btrim(l.category) = '')
+      where b.cv_fetched_at is null and b.email is not null
       limit $1`,
     [Math.min(BATCH, MAX - scanned)]
   );
-  if (rows.length === 0) return 0;
+  if (claimed.length === 0) return 0;
+
+  // Which of these actually need anything from Bison?
+  const { rows: leadRows } = await dbQuery(
+    `select id, email, city is null as need_city, state is null as need_state,
+            (category is null or btrim(category) = '') as need_category
+       from leads where email = any($1::text[])`,
+    [[...new Set(claimed.map((r) => r.email))]]
+  );
+  const byEmail = new Map(leadRows.map((l) => [l.email, l]));
+  const rows = [];
+  const doneAlready = [];
+  for (const r of claimed) {
+    const l = byEmail.get(r.email);
+    if (l && (l.need_city || l.need_state || l.need_category)) {
+      rows.push({ ...r, lead_id: l.id, need_city: l.need_city, need_state: l.need_state, need_category: l.need_category });
+    } else {
+      // No lead, or nothing to fill — spend no Bison call, and mark it so the
+      // claim never revisits it. (A future full sync still refreshes its vars.)
+      doneAlready.push(r);
+    }
+  }
+  if (doneAlready.length > 0 && !DRY) {
+    for (let k = 0; k < doneAlready.length; k += 1000) {
+      const chunk = doneAlready.slice(k, k + 1000);
+      await dbQuery(
+        `update bison_leads b set cv_fetched_at = now()
+           from unnest($1::text[], $2::bigint[]) as v(instance_url, bison_id)
+          where b.instance_url = v.instance_url and b.bison_id = v.bison_id`,
+        [chunk.map((r) => r.instance_url), chunk.map((r) => r.bison_id)]);
+    }
+  }
+  if (rows.length === 0) { scanned += claimed.length; return claimed.length; }
 
   const updates = [];
   let i = 0;
@@ -133,8 +165,8 @@ async function round() {
     const withCity = updates.filter(u => u.cv.cv_city).length;
     const withCat = updates.filter(u => u.cv.cv_category).length;
     console.log(`   [dry] ${updates.length} leads: ${withCity} have city, ${withCat} have category`);
-    scanned += rows.length;
-    return rows.length;
+    scanned += claimed.length;
+    return claimed.length;
   }
 
   // Mirror first, so a crash never re-fetches what was already read.
@@ -161,7 +193,8 @@ async function round() {
   // 3 leads/sec (each UPDATE is a ~200ms round trip to Supabase — the same
   // mistake as the push worker's finalize stage), which put 368k leads at 34
   // hours. Batched, the round trip is paid once per 500.
-  const toWrite = updates.filter((u) => Object.values(u.cv).some(Boolean));
+  const toWrite = updates.filter((u) => Object.values(u.cv).some(Boolean))
+    .sort((a, b) => String(a.lead_id).localeCompare(String(b.lead_id))); // consistent lock order vs the Clay import
   for (let k = 0; k < toWrite.length; k += 500) {
     const chunk = toWrite.slice(k, k + 500);
     const vals = [], params = [];
@@ -204,8 +237,8 @@ async function round() {
     );
   }
 
-  scanned += rows.length;
-  return rows.length;
+  scanned += claimed.length;
+  return claimed.length;
 }
 
 const started = Date.now();

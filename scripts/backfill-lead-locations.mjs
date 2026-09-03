@@ -133,6 +133,58 @@ console.log("pass 1: leads with state...");
   console.log("");
 }
 
+// ── pass 1b: leads whose state is a FULL NAME ("Illinois", "Ontario") ──
+// Bison's custom_variables write full state names, and the 3-day import plus
+// the custom-vars backfill copy them in verbatim — so this cohort refills
+// forever and pass 1 (2-letter codes only) never touches it. Resolution is by
+// geo_admin1.name with the same country priority as codes.
+//
+// Text that matches NO state name (the old junk: "North America", "your area")
+// is left EXACTLY as it is — not marked unresolved, because unresolved leads
+// are hidden from browse and campaigns, and silently hiding ~50k
+// currently-visible leads is not this pass's call to make.
+console.log("pass 1b: full state names...");
+{
+  const admin1ByName = new Map(); // lower(name) -> {country, code, name}
+  for (const pref of ["US", "CA", "AU", "NZ", "GB", "IE"]) {
+    for (const [k, v] of admin1ByCode) {
+      const [country] = k.split("|");
+      if (country !== pref) continue;
+      const key = v.name.toLowerCase();
+      if (!admin1ByName.has(key)) admin1ByName.set(key, { country, code: k.split("|")[1], name: v.name });
+    }
+  }
+  let lastId = "00000000-0000-0000-0000-000000000000"; let seen = 0;
+  const cond = ALL ? "" : "AND l.state_code IS NULL";
+  for (;;) {
+    const rs = (await q(`
+      SELECT id, city, state FROM leads l
+      WHERE state IS NOT NULL AND length(btrim(state)) > 2 ${cond} AND id > $1
+      ORDER BY id LIMIT 5000`, [lastId])).rows;
+    if (!rs.length) break;
+    for (const r of rs) {
+      lastId = r.id;
+      const hit = admin1ByName.get(r.state.trim().toLowerCase());
+      if (!hit) continue; // junk or foreign — leave untouched
+      const a1 = admin1ByCode.get(`${hit.country}|${hit.code}`);
+      if (!a1) continue;
+      const base = { id: r.id, stateName: a1.name, stateCode: hit.code, countryDisp: countries.get(hit.country), countryCode: hit.country };
+      if (r.city && r.city.trim()) {
+        const g = geo.get(`${ck(r.city)}|${hit.country}|${a1.admin1}`);
+        if (g) { updates.push({ ...base, cityDisp: g.city, locId: g.id, status: "resolved" }); counts.resolved++; }
+        else { updates.push({ ...base, status: "partial" }); counts.partial++; counts.cityMiss++; }
+      } else {
+        updates.push({ ...base, status: "partial" }); counts.partial++;
+      }
+    }
+    seen += rs.length;
+    await flush();
+    process.stdout.write(`\r  scanned ${seen}  resolved=${counts.resolved} partial=${counts.partial}`);
+  }
+  await flush(true);
+  console.log("");
+}
+
 // ── pass 2: city but no state — unique-city resolution across the reference ──
 console.log("pass 2: city-only leads...");
 {

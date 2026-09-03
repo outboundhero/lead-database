@@ -65,7 +65,7 @@ async function poolQuery(text, params, tries = 4) {
     try {
       return await pool.query(text, params);
     } catch (err) {
-      const transient = /ECONNRESET|termin|Connection terminated|timeout|socket|EPIPE|server closed/i.test(err.message || "");
+      const transient = /ECONNRESET|termin|Connection terminated|timeout|socket|EPIPE|server closed|deadlock detected/i.test(err.message || "");
       if (!transient || attempt >= tries) throw err;
       console.warn(`  transient DB error (attempt ${attempt}/${tries}): ${err.message} — retrying in ${attempt}s`);
       await new Promise((r) => setTimeout(r, 1000 * attempt));
@@ -81,6 +81,9 @@ if (!folder) {
 }
 const DRY = args.includes("--dry-run");
 const TAG_ONLY = args.includes("--tag-only-if-matched");
+// Fill categories only where none exists; never rewrite. See the note at the
+// decision site — without this the 2026-09-02 dump meant 8.3M row updates.
+const BLANKS_ONLY = args.includes("--blanks-only");
 const ONLY = (() => {
   const a = args.find((x) => x.startsWith("--only="));
   return a ? new Set(a.slice(7).split(",").map((t) => t.trim().toUpperCase()).filter(Boolean)) : null;
@@ -255,7 +258,7 @@ async function main() {
   console.log(`Folder: ${folder}`);
   console.log(`Files: ${allFiles.length}  |  mode: ${DRY ? "DRY-RUN (no writes)" : "WRITE"}${TAG_ONLY ? " (tag-only)" : ""}  |  category_source: ${CATEGORY_SOURCE}${fallback ? " (fallback)" : ""}${ONLY ? `  |  only: ${[...ONLY].join(",")}` : ""}`);
 
-  const tot = { files: 0, skippedFiles: 0, rows: 0, matched: 0, unmatched: 0, categorized: 0, manual: 0, tagged: 0, errors: 0 };
+  const tot = { files: 0, skippedFiles: 0, rows: 0, matched: 0, unmatched: 0, categorized: 0, manual: 0, tagged: 0, errors: 0, blanksSkipped: 0 };
   const perTag = new Map();
 
   for (const file of allFiles) {
@@ -286,7 +289,7 @@ async function main() {
     const recs = [...byEmail.values()];
     tot.files++; tot.rows += rows.length - 1;
 
-    let fMatched = 0, fUnmatched = 0, fCat = 0, fManual = 0, fTag = 0, fErr = 0;
+    let fMatched = 0, fUnmatched = 0, fCat = 0, fManual = 0, fTag = 0, fErr = 0, fBlanksSkipped = 0;
     for (let i = 0; i < recs.length; i += CHUNK) {
       const chunk = recs.slice(i, i + CHUNK);
       let existing;
@@ -312,6 +315,13 @@ async function main() {
         if (!TAG_ONLY && (rec.category || rec.subcategory || rec.additional)) {
           if (ex.category_source === "manual") {
             fManual++;
+          } else if (BLANKS_ONLY && ex.category && String(ex.category).trim() !== "") {
+            // --blanks-only: never rewrite an existing category. Without it the
+            // 2026-09-02 dump would have updated 8.3M leads — mostly trivial
+            // spelling differences ("day_care_center" vs "Day care center") —
+            // and a mass UPDATE on leads is the write-amplified pattern (48
+            // indexes) that exhausted the disk-IO budget on 2026-08-07.
+            fBlanksSkipped++;
           } else {
             let catChanged = false;
             if (rec.category && rec.category !== ex.category) { fin.category = rec.category; catChanged = true; }
@@ -326,8 +336,13 @@ async function main() {
             if (changed) fCat++;
           }
         }
-        const newTags = appendTag(ex.tags, meta.tag);
-        if (newTags !== null) { fin.tags = newTags; fTag++; changed = true; }
+        // Under --blanks-only the tag append rides along ONLY on rows already
+        // being updated: appending alone would have touched 12M rows in the
+        // 2026-09-02 dump — the same IO blowout by another door.
+        if (!BLANKS_ONLY || changed) {
+          const newTags = appendTag(ex.tags, meta.tag);
+          if (newTags !== null) { fin.tags = newTags; fTag++; changed = true; }
+        }
         if (changed) batch.push(fin);
       }
 
@@ -374,7 +389,7 @@ async function main() {
     agg.matched += fMatched; agg.categorized += fCat; agg.tagged += fTag;
     perTag.set(meta.tag, agg);
     tot.matched += fMatched; tot.unmatched += fUnmatched; tot.categorized += fCat;
-    tot.manual += fManual; tot.tagged += fTag; tot.errors += fErr;
+    tot.manual += fManual; tot.tagged += fTag; tot.errors += fErr; tot.blanksSkipped += fBlanksSkipped;
   }
 
   console.log("\n─────────────────────────────────────");
@@ -384,6 +399,7 @@ async function main() {
   console.log(`Unmatched (skipped):  ${tot.unmatched}`);
   console.log(`Categorized (clay):   ${tot.categorized}`);
   console.log(`Manual-protected:     ${tot.manual}`);
+  if (BLANKS_ONLY) console.log(`Existing kept (blanks-only): ${tot.blanksSkipped ?? 0}`);
   console.log(`Tags appended:        ${tot.tagged}`);
   console.log(`Errors:               ${tot.errors}`);
   console.log(`Client tags touched:  ${perTag.size}`);
