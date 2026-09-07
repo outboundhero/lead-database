@@ -1,0 +1,54 @@
+# Deploy EVERY Railway service from the latest commit on each push to main.
+#
+# Why this exists: Railway's per-service auto-deploy is off for this project
+# and the project token cannot enable it (account-level permission). Without
+# it, worker services silently run stale code until someone notices — measured
+# consequences on 2026-09-07: bison-sync imported 116,578 leads WITHOUT the
+# enrichment a 5-day-old commit already carried, and location-worker left
+# 79,943 states unresolved that a deployed pass would have handled.
+#
+# This is a push-triggered deploy hook, not a scheduled job — scheduled work
+# stays on Railway cron services.
+name: railway-deploy
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: railway-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy all services from latest commit
+        env:
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_PROJECT_TOKEN }}
+        run: |
+          node - <<'JS'
+          const T = process.env.RAILWAY_PROJECT_TOKEN;
+          const PROJECT = "aa4d6c76-7b8b-4f29-9212-3c04c42de333";
+          const ENV = "80ed7802-75ee-453c-a8d6-b92e233de258";
+          const gql = async (query, variables) => {
+            const r = await fetch("https://backboard.railway.com/graphql/v2", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Project-Access-Token": T },
+              body: JSON.stringify({ query, variables }),
+            });
+            const j = await r.json();
+            if (j.errors) throw new Error(JSON.stringify(j.errors[0]).slice(0, 300));
+            return j.data;
+          };
+          const main = async () => {
+            const p = await gql(`query($id:String!){ project(id:$id){ services { edges { node { id name } } } } }`, { id: PROJECT });
+            let failed = 0;
+            for (const { node } of p.project.services.edges) {
+              try {
+                await gql(`mutation($e:String!,$s:String!){ serviceInstanceDeploy(environmentId:$e, serviceId:$s, latestCommit:true) }`,
+                  { e: ENV, s: node.id });
+                console.log(`deploy requested: ${node.name}`);
+              } catch (e) { failed++; console.log(`FAILED ${node.name}: ${e.message}`); }
+            }
+            if (failed) process.exit(1);
+          };
+          main();
+          JS
