@@ -365,10 +365,26 @@ async function refreshFilterCache(client) {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function syncCompanies(client, label) {
-  const { rows } = await client.query("SELECT * FROM fn_sync_companies()");
-  const r = rows[0];
+  // LOOP until a round propagates fewer than the limit. One bounded call
+  // (default 50k, migration 074) propagates at most 50k leads and used to be
+  // called ONCE — after a large enrichment (the Clay import categorized 4.35M
+  // leads) a single round leaves almost all of the propagation undone, and the
+  // worker then reports success. This was the open TODO that kept the worker
+  // parked after the 2026-08-17 incident.
+  const LIMIT = 50000;
+  let rounds = 0, propagated = 0, inserted = 0, seeded = 0;
+  for (;;) {
+    const { rows } = await client.query("SELECT * FROM fn_sync_companies($1)", [LIMIT]);
+    const r = rows[0];
+    rounds++;
+    propagated += Number(r.leads_propagated ?? 0);
+    inserted += Number(r.companies_inserted ?? 0);
+    seeded += Number(r.companies_seeded ?? 0);
+    if (Number(r.leads_propagated ?? 0) < LIMIT) break;
+    if (rounds >= 80) { console.log("  sync: safety stop at 80 rounds"); break; }
+  }
   console.log(
-    `  sync (${label}): companies+${r.companies_inserted} seeded=${r.companies_seeded} leads-propagated=${r.leads_propagated}`
+    `  sync (${label}): companies+${inserted} seeded=${seeded} leads-propagated=${propagated} over ${rounds} round(s)`
   );
 }
 
