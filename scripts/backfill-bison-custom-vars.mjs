@@ -34,7 +34,7 @@ const pool = new pg.Pool({ connectionString: env.DATABASE_URL, max: 12, keepAliv
 pool.on("error", (e) => console.log(`   pg pool: ${e.message}`));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const TRANSIENT = /Connection terminated|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|terminating connection|server closed|deadlock detected/i;
+const TRANSIENT = /Connection terminated|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|terminating connection|server closed|deadlock detected|canceling statement due to statement timeout/i;
 async function dbQuery(text, params, attempts = 5) {
   for (let a = 1; ; a++) {
     try { return await pool.query(text, params); }
