@@ -24,6 +24,7 @@ export default function ClientsPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [syncingGroups, setSyncingGroups] = useState(false);
+  const [syncingSheet, setSyncingSheet] = useState(false);
   const [savingTag, setSavingTag] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
@@ -91,6 +92,33 @@ export default function ClientsPage() {
     }
   }
 
+  // Full sheet sync — the same merge the 6-hourly cron runs (roster, names,
+  // statuses, types, group mappings), on demand.
+  async function syncSheet() {
+    setSyncingSheet(true);
+    const id = toast.loading("Syncing clients from the sheets…");
+    try {
+      const res = await fetch("/api/clients/sync-sheet", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Sheet sync failed");
+
+      const parts: string[] = [];
+      if (data.added?.length) parts.push(`${data.added.length} new (${data.added.join(", ")})`);
+      if (data.statusChanged?.length) parts.push(`${data.statusChanged.length} status change${data.statusChanged.length === 1 ? "" : "s"}`);
+      if (data.removed) parts.push(`${data.removed} removed`);
+      toast.success(
+        parts.length ? `Synced ${data.total} clients — ${parts.join(" · ")}` : `Synced ${data.total} clients — nothing changed`,
+        { id, duration: parts.length ? 8000 : 4000 }
+      );
+      for (const w of data.warnings ?? []) toast.warning(w, { duration: 8000 });
+      await load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Sheet sync failed", { id });
+    } finally {
+      setSyncingSheet(false);
+    }
+  }
+
   async function patchClient(tag: string, body: Record<string, unknown>) {
     setSavingTag(tag);
     // Optimistic update.
@@ -144,13 +172,18 @@ export default function ClientsPage() {
         </div>
         {canRefresh && (
           <div className="flex shrink-0 gap-2">
-            <Button variant="outline" size="sm" onClick={syncGroups} disabled={syncingGroups || refreshing} className="gap-2"
+            <Button variant="outline" size="sm" onClick={syncSheet} disabled={syncingSheet || syncingGroups || refreshing} className="gap-2"
+              title="Runs the full client sync from the sheets right now (same as the 6-hourly cron): new clients, names, active/churned statuses, client types, and group mappings.">
+              <RefreshCw className={`h-4 w-4 ${syncingSheet ? "animate-spin" : ""}`} />
+              {syncingSheet ? "Syncing…" : "Sync with sheet"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={syncGroups} disabled={syncingSheet || syncingGroups || refreshing} className="gap-2"
               title="Re-reads the Groups tab of the Client Tracker sheet and applies Bison group changes now, instead of waiting for the 6-hourly sync. Groups only — never changes names, statuses, or which clients exist, and never removes an existing mapping.">
               <Users className={`h-4 w-4 ${syncingGroups ? "animate-pulse" : ""}`} />
               {syncingGroups ? "Syncing…" : "Sync groups"}
             </Button>
             <RulesSyncButton canRun={canRefresh} />
-            <Button variant="outline" size="sm" onClick={refreshStats} disabled={refreshing || syncingGroups} className="gap-2"
+            <Button variant="outline" size="sm" onClick={refreshStats} disabled={refreshing || syncingGroups || syncingSheet} className="gap-2"
               title="Recomputes each client's lead counts from the database (can take ~30s). Client names/statuses sync automatically from the Client Tracker sheet.">
               <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
               Refresh stats
