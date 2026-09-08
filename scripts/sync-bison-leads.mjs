@@ -38,6 +38,11 @@ const WATERMARK_SHARD = -1;
 const INCREMENTAL = has("incremental");
 // Skip promoting new leads into the leads table (mirror only).
 const NO_IMPORT = has("no-import");
+// --pace <ms>: minimum gap between page fetches PER SHARD. 8 unpaced shards
+// sustained ~150 rows/sec for hours and eventually drew a blanket HTTP 429
+// from Bison; 8 shards at --pace 800 is ~120 pages/min each, ~150 rows/sec
+// aggregate ceiling but with breathing room the throttle tolerates.
+const PACE_MS = Math.max(0, Number(flag("pace")) || 0);
 const WRITE_CHUNK = 500;          // rows per upsert statement
 const PAGE_TIMEOUT_MS = 30_000;
 const MAX_RETRIES = 4;
@@ -98,13 +103,24 @@ function pageUrl(domain, { cursor } = {}) {
 }
 
 async function getPage(url, key) {
+  let throttled = 0;
   for (let attempt = 1; ; attempt++) {
     try {
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
         signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
       });
-      if (res.status === 429 || res.status >= 500) throw new Error(`HTTP ${res.status}`);
+      // 429 is Bison saying SLOW DOWN, not a transient blip: after hours of
+      // sustained full-speed syncing it throttled every shard at once, the old
+      // 3-strikes-in-9-seconds retry gave up, and a 7.9M-row install died with
+      // 189k fetched. Wait properly and keep waiting — patience costs minutes,
+      // a dead shard costs the run.
+      if (res.status === 429) {
+        if (++throttled > 12) throw new Error("HTTP 429 (still throttled after 12 waits)");
+        await sleep(45_000);
+        continue;
+      }
+      if (res.status >= 500) throw new Error(`HTTP ${res.status}`);
       if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { fatal: res.status < 500 });
       return await res.json();
     } catch (e) {
@@ -317,6 +333,7 @@ async function runShard(domain, key, shard, fromId, toId, budget) {
   let url = pageUrl(domain, { cursor: cursorFor(cursorId) });
   while (url) {
     if (budget.used >= budget.max) break;
+    if (PACE_MS) await sleep(PACE_MS);
     const j = await getPage(url, key);
     const rows = Array.isArray(j.data) ? j.data : [];
     if (rows.length === 0) break;
