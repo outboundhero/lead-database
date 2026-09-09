@@ -13,20 +13,27 @@
 
 **Current state:** LIVE IN PRODUCTION on Railway. All phases shipped: validation,
 email-type detection, bounce classification, category enrichment, location
-intelligence, client targeting, and queued Bison pushes. Migrations run to **074**.
+intelligence, client targeting, queued Bison pushes, the Bison lead mirror, and
+never-contact suppression. Migrations run to **097**.
 
-**Actual production scale** (measured 2026-08-17 — not estimates):
+**Actual production scale** (measured 2026-09-09 — not estimates):
 
 | Table | Rows | Size |
 |---|---|---|
-| `leads` | 8.19M | 13 GB |
-| `lead_history` | 8.04M | 1.5 GB |
-| `companies` | **1.32M** | 796 MB |
-| `lead_job_titles` | 958k | 195 MB |
-| `company_locations` | 892k | 140 MB |
+| `leads` | 8.72M | 14 GB |
+| `bison_leads` | **12.2M** | 12 GB |
+| `lead_history` | 8.71M | 1.6 GB |
+| `companies` | **4.68M** | 2.8 GB |
+| `push_items` | 3.32M | 1.4 GB |
+| `lead_job_titles` | 1.22M | 234 MB |
+| `company_locations` | 938k | 143 MB |
 | `geo_locations` | 293k | 51 MB |
-| `push_items` | 90k | 42 MB |
-| `client_tags` / `client_targeting` | 196 / 187 | small |
+| `client_tags` / `client_targeting` | 209 / 187 | small |
+
+Enrichment coverage (same measurement): **85.2%** of leads have a category
+(6.85M clay / 523k bison / 47k keyword) and **69.3%** have a resolved
+`location_id`. See the Bison mirror section — those numbers moved from 27% and
+~50% by mirroring Bison's own custom variables back into `leads`.
 
 `leads` carries ~48 indexes, so **any mass UPDATE on it is extremely
 write-amplified** — every row rewrite touches every index. This is the single
@@ -139,14 +146,26 @@ Backfill: `scripts/backfill-email-type.mjs` (10K-row chunks, idempotent).
 
 **Layout shell:** sidebar uses grouped-list cells; top nav is a frosted `ios-toolbar`; on mobile, sidebar collapses into a fixed bottom tab bar.
 
+**Dialogs scroll as a whole.** `DialogContent` carries `max-h-[85vh]` +
+`overflow-y-auto` in [dialog.tsx](src/components/ui/dialog.tsx), so any dialog
+taller than the viewport scrolls instead of clipping its bottom off-screen. Fix
+overflow **there**, not per-dialog: the export popup was unreachable below the
+fold for months while only `add-lead-modal` had patched it locally. Inner
+scrollers (`max-h-[40vh] overflow-y-auto` on long lists) still compose fine.
+
 ---
 
 ## RPC functions
 
 | Function | Purpose | Timeout |
 |---|---|---|
-| `fn_filter_leads_v2(p_filters, p_sort_by, p_sort_dir, p_limit, p_offset)` | Main filter — extended for `email_type`, `exclude_keywords`, silent `is_bounced` filter (migration 032) | 120s |
+| `fn_filter_leads_v2(p_filters, p_sort_by, p_sort_dir, p_limit, p_offset)` | Main filter — extended for `email_type`, `exclude_keywords`, silent `is_bounced` filter (migration 032); honours `skipCount` inside `p_filters` (086) | 120s |
+| `fn_filter_leads_count(p_filters)` | Total run concurrently with the rows query (086) | 15s, then estimate |
+| `fn_lead_column_values(p_filters, p_column, p_search, p_limit, p_scan_cap)` | Per-column filter dropdown values (088); 20-name allowlist, `'__BLANK__'` sentinel | 25s |
 | `fn_export_leads(p_filters, p_cursor, p_limit, p_skip)` | Export — enforces `validation_status IN ('valid','catch_all') AND is_bounced = false` (migration 033) | 300s |
+| `fn_lead_filter_conditions(p_filters)` | Shared WHERE builder — browse/export gate, suppression escapable | n/a |
+| `fn_client_eligibility_conditions(...)` | Client send gate — suppression NOT escapable, exclusions match by CONTAINS | n/a |
+| `fn_sync_companies(p_propagate_limit)` | Upsert companies → seed → propagate; **call in a loop** until under the limit | bounded |
 | `fn_dashboard_stats()` | Full GROUP BY for dashboard | 300s |
 | `fn_refresh_filter_cache()` | Repopulates `filter_options_cache` | 300s |
 
@@ -185,14 +204,31 @@ OPENAI_API_KEY                # gpt-4o-mini — categorize worker AI tier (prefe
 ANTHROPIC_API_KEY             # claude-haiku-4-5 — alternative categorize provider
 CATEGORIZE_PROVIDER           # optional force: openai | anthropic
 CATEGORIZE_MODEL              # optional model override
+GOOGLE_SERVICE_ACCOUNT_B64    # base64 service-account JSON (Sheets, readonly scope)
+CLIENTS_SHEET_ID              # client-groups workbook ("Sheet1" = the two group columns)
+CLIENT_TRACKER_SHEET_ID       # roster + statuses + onboarding tabs — needed by the WEB service too
+ONBOARDING_SHEET_ID           # optional; Groups-tab workbook for /api/clients/sync-groups
+TAXONOMY_SHEET_ID             # category taxonomy workbook
+PUSH_RATE / PUSH_CONCURRENCY / PUSH_CLAIM_BATCH / PUSH_BATCH_FOCUS / PUSH_REFRESH_MS
+                              # push-worker throughput knobs (see Push throughput)
 ```
+
+⚠ **Env vars are per-service on Railway.** A var the crons have is not
+automatically on the web service — `CLIENT_TRACKER_SHEET_ID` was missing there
+until 2026-09-09, which would have made the new full sheet sync silently skip the
+roster merge. When a route starts doing work a script used to do, diff the two
+services' variables.
 
 ---
 
 ## Storage & compute
 
-Target scale: 15–20M leads. Currently at **8.19M leads / 13 GB** (plus 1.5 GB
-history, 796 MB companies).
+Target scale: 15–20M leads. Currently at **8.72M leads / 14 GB**, plus 1.6 GB
+history, 2.8 GB companies, 1.4 GB `push_items` — and **12 GB of `bison_leads`**,
+which nearly doubled the database. The mirror is the single largest object after
+`leads`; budget for it when sizing the plan, and note that `shared_buffers`
+(4,096 MB) is now a far smaller fraction of the working set than when the cache
+analysis below was done.
 
 ⚠ **Disk I/O budget is the real constraint, not storage.** Supabase compute
 tiers have a burst IOPS budget; exhaust it and the whole project — app
@@ -283,7 +319,30 @@ src/lib/validation/cache-policy.ts         — 45-day TTL check (NEW)
 src/types/filters.ts                       — FilterState (extended for emailType + exclude_keywords + includeBounced)
 src/types/database.ts                      — Lead type (extended for new columns)
 scripts/backfill-email-type.mjs            — One-off classification backfill (NEW)
+
+── Bison mirror, routing, suppression, coverage ──
+scripts/sync-bison-leads.mjs               — THE Bison mirror sync (shards, cursors, watermark, --pace)
+scripts/backfill-bison-custom-vars.mjs     — per-email cv fetch (targeted; bulk goes through the mirror)
+scripts/refresh-location-coverage.mjs      — precomputes client_location_coverage (npm run coverage-refresh)
+src/lib/bison/esp-bucket.ts                — suggestBucketFromName + espBucket (campaign routing)
+src/lib/db/pool.ts                         — shared pg pool for routes that bypass PostgREST
+src/lib/google/sheets.ts                   — service-account Sheets reader, READONLY scope only
+src/app/api/bison/push-batch/route.ts      — queues a push; STAMPS side + bucket on campaigns
+src/app/api/bison/push-forecast/route.ts   — net-new vs chosen campaigns (bison_leads.campaign_ids)
+src/app/api/bison/push-stats/route.ts      — per-client push memory incl. lifetime block
+src/app/api/leads/suppress/route.ts        — never-contact: POST suppress, DELETE unsuppress
+src/app/api/clients/sync-sheet/route.ts    — full on-demand client sheet sync (the cron's merge)
+src/app/api/clients/location-coverage/route.ts — reads precomputed coverage; ?fresh=1 recomputes
+src/components/leads/suppress-leads-dialog.tsx — "Never contact" dialog
 ```
+
+⚠ **Legacy vs live scripts.** `scripts/` also holds ~20 one-off and
+Renaissance-era importers (`import-leads.mjs`, `import-final.mjs`,
+`merge-*.mjs`, `update-*.mjs`, `upload-to-staging.mjs`, the `clean-*-column.mjs`
+location passes, `location-round2.mjs`, `ai-state-pass.mjs`). They are historical
+records of one-time data repairs, **not** maintained entry points — do not treat
+their presence as evidence of a live pipeline. The scripts wired to npm/Railway
+are the ones in `package.json`.
 
 ---
 
@@ -340,9 +399,15 @@ leads, (2) seeds company categories from categorized leads, (3) propagates
 cached company categories to uncategorized leads.
 Legacy `UNIQUE(domain)` was dropped (many businesses share gmail.com).
 
-⚠ **"Expected ≤50k companies" was wrong by 26×** — production has **1.32M**
-companies, 284k of them still uncategorized. Plan cost and runtime against the
-real number.
+⚠ **"Expected ≤50k companies" was wrong by 26×** — and it has grown again. As of
+2026-09-09 production has **4.68M** companies, **932k** of them still
+uncategorized (that is the AI tier's remaining bill, ~$37 at 4o-mini rates).
+Plan cost and runtime against the real number, and re-measure — it moves.
+
+**Precedence is Bison/Clay > keyword > AI.** Current lead coverage: 85.2%
+categorized — 6.85M `clay`, 523k `bison`, 47k `keyword`, **0 `ai`** (the tier has
+never run in production). The cheap sources did most of the work; run them to
+exhaustion *before* paying for AI.
 
 ⚠ **`fn_sync_companies` signature history — read before touching it.**
 Migration 049 created the 0-arg form; 050 created `(p_propagate_limit integer)`.
@@ -370,6 +435,17 @@ Taxonomy lives in `lead_categories` (seed: `npm run seed-categories file.json
 Filter chips: Category + Subcategory (include/exclude, mirror ESP; migrations
 048/049 wired them into `fn_filter_leads_v2` + `fn_export_leads` +
 `fn_refresh_filter_cache`).
+
+⚠ **`syncCompanies()` now loops** on `SELECT * FROM fn_sync_companies($1)`
+[50000] until a round returns `leads_propagated < LIMIT` (80-round safety cap).
+The function returns `TABLE(companies_inserted, companies_seeded,
+leads_propagated)` — read the right column. Selecting a nonexistent column
+yielded `NaN`, an infinite loop, and an unhandled pg error.
+
+**To turn the AI tier on** (pending client cost approval): drop `--keyword-only`
+from the Railway start command, confirm `OPENAI_API_KEY` is set on
+`categorize-worker`, then `DELETE FROM worker_locks WHERE key='categorize-worker'`.
+The loop fix is already shipped, so the historical blocker is gone.
 
 ## Live Bison read (NEW)
 
@@ -452,6 +528,203 @@ poll while active) with per-batch progress + cancel
 (`POST /api/bison/push-batches/cancel`). The synchronous `/api/bison/push`
 remains for API consumers.
 
+### Push throughput — what actually made it fast (2026-08-28)
+
+Sustained rate is **~450–700 leads/min**. Four fixes got it there, in order of
+impact; the first two were found only after adding `PUSH_TIMING=1` (per-cycle
+breakdown) because **two prior hypotheses were wrong**. Measure before tuning.
+
+1. **The eligibility WHERE is ~23,595 characters** and was re-planned *per lead*
+   — 313 ms/lead of pure planning. Batched to one statement per client tag per
+   cycle: **5.6 ms/lead**.
+2. **FIFO batch focus.** `PUSH_BATCH_FOCUS=3` claims only from the N oldest
+   batches. This both clears the old queue first (what the client asked for) and
+   fattens the attach payloads — calls went from ~4 leads to ~44 leads each,
+   because leads bound for the same campaign now arrive in the same claim.
+3. Bounded-concurrency pools (`runPool`) for `processItem` / attach / finalize —
+   finalize was serial round-trips.
+4. Attach 422 "No leads were added" is a **blanket** error, so per-lead
+   separation runs concurrently rather than serially.
+
+Railway vars: `PUSH_RATE=45`, `PUSH_CONCURRENCY=64` (cap 96),
+`PUSH_CLAIM_BATCH=400` (cap 1000), `PUSH_BATCH_FOCUS=3`, `PUSH_REFRESH_MS=20000`.
+
+⚠ `Number(undefined) ?? 2` is `NaN`, not `2` — `PUSH_BATCH_FOCUS` was silently
+off. Guard env-var defaults with `Number.isFinite`.
+
+## ⚠ Campaign routing: side + bucket (read before touching pushes)
+
+Routing has **two independent axes**, both stamped onto the campaign objects at
+**queue time** and matched against the lead at **attach time**. Nothing about
+routing is decided by the database, and a lead is never re-homed: no match means
+it is skipped with a reason.
+
+| Axis | Means | Decided by |
+|---|---|---|
+| `side` | which of the client's two installs (b2b / b2c) | the campaign's **install** vs `client_tags.b2b_instance` / `b2c_instance` |
+| `bucket` | which campaign inside that install (`seg` / `outlook` / `default`) | the campaign **NAME**, via `suggestBucketFromName` |
+
+**Stamping** — [push-batch/route.ts](src/app/api/bison/push-batch/route.ts) — runs
+only inside `if (body.clientTag !== undefined)`. A caller-supplied bucket wins;
+otherwise the name is parsed ([esp-bucket.ts](src/lib/bison/esp-bucket.ts)):
+`\bsegs?\b|gateway` → `seg`, `outlook|microsoft|o365` → `outlook`,
+`google|gmail|custom|gsuite|workspace` → `default`, else **no bucket**. Adding
+"Gmail + Others" to the naming convention cut unlabelled main campaigns from
+165/1,158 to 34, and those 34 are genuinely bespoke.
+
+**Matching** — [push-worker.mjs](scripts/push-worker.mjs) — the lead's side is
+`email_type === "personal" ? "b2c" : "b2b"`; its bucket is `espBucket(lead.esp)`:
+
+```js
+targets = allCampaigns
+  .filter(c => !sided  || !c.side || c.side === side)
+  .filter(c => !routed || (c.bucket ?? "default") === bucket)
+```
+
+⚠ **Both flags are per-BATCH, not per-campaign.** If *any* campaign in the batch
+carries a bucket, every bucket-less campaign in that batch is treated as
+`default`. If *any* carries a side, only side-less campaigns stay open to
+everyone. Targets are then de-duplicated by `instance_url|id` — a campaign listed
+twice is attached twice and Bison rejects the second as "already in another
+sequence", turning a clean push into a partial failure.
+
+**Why this exists:** until 2026-08-26 only the wizard labelled campaigns and the
+export popup sent none — and the worker's unlabelled fallback is *attach to every
+campaign*. So 100% of those batches' leads landed in **both** workspaces, in
+2.33–5.98 campaigns each. The export popup still sends no bucket and no
+`emailSide`, only the detected `clientTag`; all inference happens in the route.
+
+⚠ On the `selectedIds` path the worker never re-reads filters, so the route
+narrows the id list itself with the freemail split and returns **400** rather
+than let an empty subset fall through — empty `selected_ids` + null filters would
+gather the ENTIRE table.
+
+## The Bison lead mirror (`bison_leads`) — migrations 089/090/094/095
+
+`scripts/sync-bison-leads.mjs` mirrors every Bison install's `/api/leads` into
+`bison_leads` (~12.2M rows across four installs), then promotes into `leads` any
+mirrored address we do not already hold. It is deliberately a **mirror, not a
+merge** — merging would rewrite 8.7M rows on a disk-I/O-bound instance.
+
+It answers three questions the app could not answer before: which Bison leads we
+are missing, which campaigns a lead is *already* in (net-new forecast), and what
+enrichment Bison holds that we do not (`cv_*`).
+
+### ⚠ What the Bison API forces on you (measured 2026-08-26)
+
+- **A page is 15 rows and cannot be changed.** `per_page`, `limit`, `page_size`,
+  `perPage`, `size`, `count` are all accepted and all **ignored**. Page *count*
+  drives cost.
+- **Page-NUMBER pagination dies past ~1000 pages** with a 422 telling you to use
+  cursors — it cannot enumerate a 7.9M-lead install at all.
+- **Cursor pagination needs `pagination_type=cursor`, and Bison drops that
+  parameter from its own `links.next`.** Follow the link as given and you get
+  nothing usable. Every hop must re-apply it. The campaigns endpoint drops
+  `search` the same way — **assume any parameter is dropped** and rebuild the URL
+  from scratch, keeping only the `cursor` value out of Bison's link.
+- **The cursor is base64 `{"id":N,"_pointsToNextItems":true}` walking DOWNWARD by
+  id.** That is what makes it shardable: craft a cursor at any id and a walk
+  starts there. 8 shards sustained **569 leads/sec**.
+- Installs can switch page-mode ↔ keyset mid-day (`meta.last_page` disappears) —
+  follow `links.next` in both modes.
+- `GET /api/leads/{email}` is **~0.25s and case-insensitive**; `?search=` on
+  leads is 34s+/timeout. Never use `?search=` on the leads endpoint.
+
+### ⚠ Sustained throughput earns a blanket 429
+
+Running ~150 rows/s for hours got **every shard** 429'd at once (the sync died at
+188,761 of 8.05M). Three quick retries are not enough — a 429 is an instruction
+to *wait*: `getPage` now sleeps **45s per 429, up to 12 times**, and `--pace <ms>`
+adds a per-shard gap between pages. At `--pace 800` the same install ran for days
+at ~85 rows/s with **zero** 429s. Slower and finishing beats faster and blocked.
+
+### Sharding, resume, and the watermark
+
+`bison_sync_state (instance_url, shard, from_id, to_id, cursor_id, rows_seen,
+done, …)` holds one row per (instance, shard), updated after every page;
+`--resume` restarts each shard from its stored `cursor_id` and skips shards
+already `done`. A shard that throws logs and returns 0 rather than killing the
+run — ⚠ **so a summary line can report a large row count while shards silently
+failed.** Check for `shard N failed` before trusting a total.
+
+`--incremental` (what the 3-day cron runs) uses shard **`-1`** as a pseudo-row
+watermark — negative so it can never collide with real shards. The floor is
+`greatest(max(bison_id), watermark)`; because ids only increase, everything above
+it is exactly the new leads. **An install nobody has mirrored gets its watermark
+seeded to today's top id and fetches nothing** — it collects only genuinely new
+leads from the next run on, rather than refusing until someone runs a full sync.
+The delta is itself sharded (~1 shard per 20k ids): as a single walk, 382,790 rows
+took 2.8 hours.
+
+⚠ `npm run sync-bison-leads` with no flags is a **full** 8-shard sync of all four
+installs. The routine job must pass `--incremental` (the Railway service does).
+
+### Custom variables (`cv_*`) — where the enrichment came from
+
+Bison's `custom_variables` are `[{name, value}]` with **lowercase, mixed-separator**
+keys: `city`, `state`, `category`, `"sub-category"` (hyphen), `"additional
+category"` (space), `domain`, `address`, `company phone`, `google maps url`,
+`question`. Migration 095 flattens them into 10 `cv_*` columns (raw jsonb averages
+471 bytes/lead ≈ 1.8 GB).
+
+This reversed 089's decision to skip them, which was wrong: 368,907 Bison-imported
+leads had arrived with **no location and no category** — invisible to client
+targeting — while Bison held city/state for ~100% of them. Applying the mirror's
+`cv_*` back onto blank `leads` rows (set-based, per instance, in id ranges)
+filled **916,344 leads**. Category coverage went 27% → 85%.
+
+⚠ Clay's CSV headers for the same concepts are title-cased and *different*:
+`Industry` → category, `Company Short Description` → subcategory, `Company SEO
+Description` → additional category. Clay's unrelated **"Call Category"** column
+must not be confused with them.
+
+## Never-contact suppression (migrations 091/092)
+
+Keyed on the **email address**, not the lead row — that is the whole point: a
+suppressed address stays suppressed after the lead is deleted, so the Bison sync
+cannot resurrect it on the next run. Verified end-to-end (delete → sync → still
+absent).
+
+- `suppressed_emails` (PK `email`) + `leads.is_suppressed` + partial index.
+- `trg_leads_apply_suppression` fires BEFORE INSERT OR UPDATE OF email, so
+  *anything* that writes a lead is covered — import, sync, manual edit.
+- `fn_suppress_email(...)` / `fn_unsuppress_email(...)`, both SECURITY DEFINER,
+  `EXECUTE` granted to `service_role` only.
+- Enforced in **both** gates, asymmetrically by design: browse/export has an
+  `includeSuppressed: true` escape hatch; **client eligibility has none.**
+- UI: "Never contact" (Ban icon) beside Delete in the leads toolbar and in the
+  lead detail panel; `POST /api/leads/suppress` takes `{emails|ids, reason?,
+  delete?}`, `DELETE` unsuppresses.
+
+## Precomputed client location coverage (migration 096)
+
+"Which locations does this client have fewer than 500 leads in?" was a 7–10s
+grouped scan of `leads` run **on client select**, and it silently exceeded the
+180s statement timeout for the widest clients — swallowed by a `.catch(() => {})`,
+so the operator just saw nothing.
+
+Now `client_location_coverage` stores the exact `{locations, low}` payload the
+route used to compute, refreshed by `scripts/refresh-location-coverage.mjs` on
+the `client-sync` cron (that is the third step appended to its start command).
+`/api/clients/location-coverage` reads the stored row; `?fresh=1` computes live
+and stores the result back. Live compute uses a `country_code`/`state_code`
+pre-filter before the regex conditions (7.6s instead of >180s) inside a
+transaction with `set local statement_timeout`. Failures now surface as a red
+retry pill instead of nothing.
+
+## Net-new forecast on export
+
+After choosing campaigns, the export popup shows how many of the selected leads
+are **not already in those campaigns** — `POST /api/bison/push-forecast` uses
+`bison_leads.campaign_ids && ARRAY[...]` (GIN, migration 094). It reports per
+instance and is honest about its own blind spot: coverage is `known` / `unknown`
+/ `complete`, because a campaign we have not mirrored cannot be checked. For SBTB
+it found 53,764 leads already in the chosen campaigns.
+
+`/api/bison/push-stats` also carries a **lifetime** block (`everPushed`,
+`everBatches`, `lastPushCompletedAt`) per client tag — the "did CCHS ever receive
+anything?" question.
+
 ## Phase 1-3 (Spencer Loom, 2026-07-22)
 
 Filters (migration 053; all in the shared fn_lead_filter_conditions helper —
@@ -488,19 +761,47 @@ category_source='clay' (never over 'manual', diff-aware), appends the client
 tag to leads.tags. Category enrichment precedence stays Bison/Clay > keyword >
 AI (AI fallback still OFF pending green-light).
 
-## Railway services (production topology, verified 2026-08-17)
+## Railway services (production topology, verified 2026-09-09)
 
-Railway project `extraordinary-spirit`, environment `production`. Every service
-deploys from THIS repo, so a push to `main` rebuilds all of them.
+Railway project `extraordinary-spirit` (`aa4d6c76-7b8b-4f29-9212-3c04c42de333`),
+environment `production` (`80ed7802-75ee-453c-a8d6-b92e233de258`). All **8**
+services deploy from THIS repo. Single replica everywhere.
 
 | Service | Type | Schedule | Start command |
 |---|---|---|---|
 | `lead-database` | web | always on | (default Next.js) |
 | `push-worker` | worker | always on | `node scripts/push-worker.mjs` |
+| `targeting-worker` | worker | always on | `npm run targeting-worker` |
 | `bounce-worker` | cron | `0 */6 * * *` | `node scripts/bounce-worker.mjs` |
-| `client-sync` | cron | `0 */6 * * *` | `npm run sync-clients && npm run sync-targeting` |
+| `client-sync` | cron | `0 */6 * * *` | `npm run sync-clients && npm run sync-targeting && npm run coverage-refresh` |
 | `categorize-worker` | cron | `0 3 * * *` | `node scripts/categorize-worker.mjs --keyword-only` |
 | `location-worker` | cron | `*/30 * * * *` | `npm run location-backfill` |
+| `bison-sync` | cron | `0 3 */3 * *` | `npm run sync-bison-leads -- --incremental` |
+
+Also scheduled, but NOT a Railway cron:
+`.github/workflows/daily-dashboard-refresh.yml` POSTs `/api/dashboard/refresh`
+at `0 2 * * *` UTC. It contradicts the standing "crons live in Railway" rule and
+is believed to be a silent no-op (see Known issues) — resolve, don't copy it.
+
+### ⚠ A push to `main` does NOT auto-deploy — a workflow does it
+
+Per-service auto-deploy is **off** for this project, and the project token lacks
+the account-level permission to turn it on (`serviceInstanceUpdate` →
+"Bad Access"). Worker services therefore ran **stale code for days** without any
+visible failure. Measured on 2026-09-07: `bison-sync` imported 116,578 leads with
+no enrichment from a 5-day-old commit, `location-worker` left 79,943 states
+unresolved, and `client-sync` never ran the coverage refresh that had been added
+to its start command.
+
+`.github/workflows/railway-deploy.yml` closes this: on push to `main` it
+enumerates every service and calls
+`serviceInstanceDeploy(environmentId, serviceId, latestCommit: true)` for each,
+failing the job if any service fails. It needs repo secret
+`RAILWAY_PROJECT_TOKEN`. Full run takes ~20s.
+
+⚠ Use `serviceInstanceDeploy(latestCommit: true)`, **never**
+`serviceInstanceRedeploy` — the latter replays the OLD build and looks like a
+successful deploy while changing nothing.
 
 ### ⚠ The location pass is SPLIT — never put both halves on a frequent cron
 
@@ -554,9 +855,16 @@ ON CONFLICT (key) DO UPDATE
 DELETE FROM worker_locks WHERE key = 'categorize-worker';
 ```
 
-**A lease is currently held (set 2026-08-17, ~30 days).** Do not release it
-until `categorize-worker.mjs` loops on `fn_sync_companies(p_propagate_limit)`
-until a round returns fewer rows than the limit. No other worker uses this table.
+**A lease is currently held (set 2026-08-17, renewed since).** The blocker it was
+set for — the unbounded `fn_sync_companies` call — is **fixed**; the worker now
+loops until a round returns fewer rows than the limit. The lease is now held for
+a different reason: releasing it turns on categorization, and the AI tier is
+still awaiting the client's cost green-light. Release it (and drop
+`--keyword-only`) only once that decision is made. No other worker uses this table.
+
+⚠ Since migration 097, `worker_locks` has RLS enabled — the lease is reachable
+from the `DATABASE_URL` connection (table owner) and the service-role key, but
+**not** from a browser session any more.
 
 ---
 
@@ -612,6 +920,55 @@ until a round returns fewer rows than the limit. No other worker uses this table
 | **075** | **Empties `client_targeting.include_industries` / `include_keywords`** |
 | **076** | Drops un-split comma lists from `exclude_industries` (the `TagInput` paste bug) |
 
+## Migrations 077–097
+
+| # | What it adds |
+|---|---|
+| 077 | `fn_lead_filter_conditions`: `categorySearch` widens 3 → 7 columns (adds `company`, `general_industry`, `specific_industry`, `company_overview`), include and exclude symmetrically |
+| 078 | `client_targeting.exclude_terms` + `include_terms` `text[]`; backfilled as the lower-cased de-duped union of the four old lists |
+| 079 | `fn_client_eligibility_conditions` switches to `exclude_terms`: one alternation regex per column across 6 columns |
+| 080 | `targeting_sync_jobs` table + `fn_touch_targeting_sync_job()` trigger — queue for on-demand rules syncs (same durability model as `push_batches`) |
+| 081 | `targeting_sync_jobs.snapshot` + `reverted_at` — undo for rules syncs |
+| **082** | **DROP INDEX CONCURRENTLY on 9 provably-unusable `leads` indexes (reclaims 1,448 MB)** + `ANALYZE leads` |
+| **083** | **DROP 3 strict-prefix-redundant `leads` indexes** (~380 MB) |
+| **084** | **per-table autovacuum**: `leads` vacuum scale 0.2→0.05, analyze 0.1→0.02 |
+| **085** | `fn_lead_filter_conditions` collapses per-term `categorySearch` into one alternation regex per column; the bounded count gets its own subtransaction |
+| **086** | new `fn_filter_leads_count(jsonb)`; `skipCount` flag so rows + total run concurrently |
+| **087** | data-only: `client_targeting.require_location = true` for every row |
+| **088** | `columnFilters` keep-list; sort whitelist 7 → 27 columns; new `fn_lead_column_values(...)` |
+| **089** | **new `bison_leads` mirror** (PK `instance_url`,`bison_id`) + `bison_sync_state` |
+| **090** | `bison_leads` identity columns + `imported_at`; partial index `idx_bison_leads_pending_import` |
+| **091** | **`suppressed_emails` + `leads.is_suppressed`** + trigger + `fn_suppress_email()` / `fn_unsuppress_email()` |
+| **092** | Suppression enforced in `fn_lead_filter_conditions` (escapable) and `fn_client_eligibility_conditions` (not) |
+| **093** | **Client exclusion terms match by CONTAINS** — `fn_regex_escape` replaces `fn_whole_term_regex` |
+| **094** | `bison_leads.campaign_ids` bigint[] + GIN, trigger-maintained |
+| **095** | **`bison_leads` gains 10 flattened `cv_*` columns** + `cv_fetched_at` (reverses 089's "skip custom_variables" call) |
+| **096** | `client_location_coverage` — precomputed coverage payload per client |
+| **097** | **RLS enabled on the last 8 tables**; authenticated-read on `api_logs` / `audit_logs` |
+
+Detail worth carrying forward from these:
+
+- **085/086 — the count path is the slow path.** 91 exclude terms × 7 columns =
+  637 regex evaluations per row; collapsing 97 conditions into 7 took an exact
+  count from **466s → 4.7s**. And the `SET LOCAL statement_timeout` bound did NOT
+  hold: the `OTHERS` handler re-ran the same `COUNT` **unbounded**. Both now
+  degrade to the planner estimate and never retry unbounded. `skipCount` rides
+  **inside `p_filters`**, not as a new parameter — a new parameter would create a
+  second overload instead of replacing the function (the documented trap).
+- **087 — `require_location` is a 44× lever.** The `OR l.country_code IS NULL`
+  escapes admitted 2.8M unlocated leads; BBS availability went 58,918ms → 1,335ms
+  and its advertised count 2,611,332 → 154,406. Reversible with
+  `UPDATE client_targeting SET require_location = false`.
+- **091 — `is_suppressed` is `NOT NULL DEFAULT false`**, which is metadata-only in
+  modern Postgres, so adding it did **not** rewrite the 8.4 GB table. Both
+  suppression functions are `SECURITY DEFINER` with `EXECUTE` granted to
+  `service_role` only.
+- **093 — contains matching has a known, accepted cost.** `"bar"` now matches
+  "Barbershop" (~34,000 leads that whole-word kept). That is the client's call, so
+  that they get `"cleaning"` catching "drycleaning"/"CleaningCo" for competitor
+  exclusion. `fn_commercial_cleaning_condition` deliberately stays **whole-word**
+  for its 230 job titles.
+
 ---
 
 ## Permissions — enforce SERVER-side, always
@@ -637,9 +994,69 @@ could stream all 8.19M leads, contradicting the `viewer` row in the table above.
 When adding a route, copy an existing gated one; the audit above found 16 routes
 with role checks and 4 relying on middleware position alone.
 
+### RLS is on for every table (migration 097, 2026-09-09)
+
+All **37** public tables now have `ROW LEVEL SECURITY` enabled. Eight had it off:
+`api_logs`, `audit_logs`, `dashboard_top_job_titles`, `filter_presets`,
+`freemail_domains`, `lead_job_titles`, `validation_jobs`, `worker_locks` — so any
+authenticated browser session could read **and write** them straight through
+PostgREST, including parking/unparking the categorize worker and tampering with
+the audit trail.
+
+Nothing server-side changed: the service-role client bypasses RLS, and scripts
+connect via `DATABASE_URL` as the table owner (RLS is **not** `FORCE`d). Only two
+of the eight are read from the browser, so only they got a policy:
+
+```sql
+CREATE POLICY "Authenticated read api logs"   ON api_logs   FOR SELECT TO authenticated USING (true);
+CREATE POLICY "Authenticated read audit logs" ON audit_logs FOR SELECT TO authenticated USING (true);
+```
+
+The other six are default-deny outside the server. **When adding a table, enable
+RLS in the same migration**; a table with no policy is server-only by default,
+which is the safe direction. Verify with:
+
+```sql
+SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND NOT rowsecurity;
+```
+
+⚠ Enabling RLS is invisible to server code, so it will NOT show up in testing
+through the app — probe with the anon key to confirm enforcement is real.
+
 ---
 
-## Clients page: "Sync groups" button
+## Clients page: client status and the sync buttons
+
+**Status lives in the sheet, not the app.** `client_tags.status` is whatever the
+sheet says; anything containing "churn" renders as Churned (greyed row, excluded
+from the Active filter). Precedence during a sync: **Onboarding Form Responses
+col E** (authoritative) > Client Tracker col H (health) > the owner/status tab.
+
+The Active/Churned badge on each row IS a button (`PATCH /api/clients`, writes
+"Confirmed Churn" / "Healthy"), but ⚠ **a sheet-stamped status overwrites that
+toggle within 6 hours.** The toggle only sticks for tags whose sheet status is
+blank. To churn a client permanently, change the sheet.
+
+Three buttons, each doing a *different* amount of work:
+
+| Button | Route | Scope |
+|---|---|---|
+| **Sync with sheet** | `POST /api/clients/sync-sheet` | **Full** — the same merge as the cron: new clients, names, statuses, types, group mappings |
+| Sync groups | `POST /api/clients/sync-groups` | Bison group/instance mappings only — never inserts a tag, never clears a mapping |
+| Refresh stats | `POST /api/clients/refresh` | Recomputes lead counts from the DB; touches no sheet |
+
+`sync-sheet` (owner/admin/manager) mirrors `sync-clients-from-sheet.mjs` exactly —
+same COALESCE upsert (a roster-only tracker row can never NULL out an instance
+mapping), same delete-absent-tags step, one transaction — so running it and the
+cron concurrently converges to the same rows. It reports what changed
+(`added`, `statusChanged`, `removed`) rather than just "done". It needs
+`CLIENT_TRACKER_SHEET_ID` on the **web** service, which was missing until
+2026-09-09 (the crons had it, the web service did not).
+
+⚠ Statuses drift in bulk. A single manual sync on 2026-09-09 applied **73**
+status flips that had accumulated in the sheet — that is normal, not a bug.
+
+### "Sync groups" specifics
 
 `POST /api/clients/sync-groups` (owner/admin/manager) re-reads the **Groups tab**
 of the tracker workbook (gid `239723744`) and applies Bison group changes on
@@ -746,6 +1163,44 @@ and now warns instead of silently discarding the overflow.
 Pass `splitOn={null}` where a comma belongs to the value — the two **location**
 fields in the targeting dialog (`"Spokane, WA"` must stay one chip).
 
+## Running long jobs against production (hard-won)
+
+These cost real hours. Read before starting anything that runs longer than a
+coffee break.
+
+- **Use the transaction-pooler pattern for bulk SQL:**
+  `begin; set local statement_timeout='560s'; …; commit`. Batch in id ranges
+  (`STEP=100000`), and **retry each batch** (3 attempts, `20s × attempt` backoff)
+  — a timeout mid-run is normal, not a reason to restart from zero.
+- **Retry on TRANSIENT, always.** Connection drops, `deadlock detected`, and
+  `statement timeout` all recur under sustained load. `sync-bison-leads.mjs` lost
+  7 of 8 shards to "Connection terminated unexpectedly" before it grew a retry
+  wrapper + pool `keepAlive` + an `error` handler.
+- **Take the lock order seriously.** The cv backfill and the Clay import
+  deadlocked against each other until updates were sorted by `lead_id`.
+- **`caffeinate -dims`, not `-i`.** `-i` does not stop lid-close sleep, and after
+  a sleep Node's timers can hang with the process at 0% CPU — the job looks alive
+  and does nothing. If a run flatlines, kill and resume rather than waiting.
+- **`dotenv/config` loads `.env`, not `.env.local`.** Either
+  `DOTENV_CONFIG_PATH=.env.local` or `node --env-file=.env.local`. Several
+  scripts (`sync-clients-from-sheet.mjs`) load no dotenv at all and expect the
+  environment to be populated — that is why they work on Railway and fail
+  locally with a bare `npm run`.
+- **A failed shard returns 0, so summaries lie.** "365,324 rows" was reported by
+  a run where 7 of 8 shards had died. Grep the log for failures before believing
+  a total.
+- **Don't extrapolate from consecutive samples.** 900 consecutive leads ≈ 60
+  independent observations; a confidence interval built from them predicted
+  225k–335k against an actual 164,644. Sample randomly or don't quote a range.
+- **Prefer set-based SQL to per-row API calls.** The custom-variable backfill ran
+  at 3 rows/s per-lead; the same work as one `UPDATE … FROM (VALUES …)` per
+  batch, sourced from the mirror, did 916,344 rows in an afternoon.
+- **Check the plan before a mass UPDATE.** A `lower(email)` join defeated
+  `leads_email_key` and timed out at 120s; plain equality (emails are already
+  lower-cased) ran in 2.4s.
+- **`node --input-type=module /dev/stdin` fails** (`ERR_INPUT_TYPE_NOT_ALLOWED`).
+  Use `node - < file.mjs`.
+
 ## Known issues / TODO
 
 - [ ] Reoon bulk endpoint batch size — confirm exact cap from docs before tuning `VALIDATION_BATCH_SIZE`
@@ -755,15 +1210,18 @@ fields in the targeting dialog (`"Spokane, WA"` must stay one chip).
 
 ### Open after the 2026-08-17 incident
 
-- [ ] **Loop `categorize-worker` on `fn_sync_companies(p_propagate_limit)`** until a
-      round returns < limit, then `DELETE FROM worker_locks WHERE key='categorize-worker'`.
-      Until then the worker is parked and no categorization happens (284k companies pending).
+- [x] ~~Loop `categorize-worker` on `fn_sync_companies(p_propagate_limit)`~~ — **DONE.**
+      `syncCompanies()` now loops on `SELECT * FROM fn_sync_companies($1)` [50000],
+      accumulating until `leads_propagated < LIMIT` (80-round safety cap). ⚠ The
+      `worker_locks` lease is **still held** — the worker stays parked until the AI
+      tier is green-lit (see Category enrichment).
+- [x] ~~Refresh the bounce classifier test corpus~~ — **DONE.** The three
+      policy-block NDRs now expect `policy`; `--test-classifier` is 30/30.
 - [ ] **Make the 4 module-scope Supabase clients lazy** so no worker service can be
       broken again by a web-route env var (see Railway services above).
 - [ ] **Fix `infer-company-locations.mjs` C1 OFFSET-over-GROUP-BY pagination** (keyset
       instead), add a LIMIT to the cohort query, and stop setting `statement_timeout = 0`.
-- [ ] **Refresh the bounce classifier test corpus** — 3/30 expectations predate the
-      `policy` verdict added in migration 072.
+      Lower priority now: the Bison mirror resolved most of the no-location cohort.
 - [ ] **`/api/dashboard/refresh` has no auth of its own** and is behind the session
       middleware, so the GitHub Action that curls it gets a 307 to `/login` and silently
       no-ops (`curl --fail` treats a redirect as success). The dashboard is presumably
