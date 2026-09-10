@@ -69,7 +69,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // aborts an entire shard's remaining range, and 1.4M leads went unfetched.
 // pg.Pool opens a fresh connection on the next call, so a retry is all this
 // needs; the work itself is idempotent (upserts keyed on instance+id).
-const TRANSIENT = /Connection terminated|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|terminating connection|server closed|Client has encountered a connection error/i;
+// "canceling statement due to statement timeout" and "deadlock detected" belong
+// here too: under concurrent enrichment writes both recur, and neither means the
+// work is impossible — a retry of an idempotent upsert is exactly right. Leaving
+// them out is what turned one slow claim into a dead run with the mirror already
+// complete.
+const TRANSIENT = /Connection terminated|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|terminating connection|server closed|Client has encountered a connection error|statement timeout|deadlock detected/i;
 async function dbQuery(text, params, attempts = 5) {
   for (let attempt = 1; ; attempt++) {
     try {
@@ -211,6 +216,14 @@ async function writeRows(rows) {
 //
 // DISTINCT ON (email) because the same person legitimately exists on several
 // installs, and one INSERT cannot touch the same conflict target twice.
+//
+// ⚠ THE ORDER BY MUST MATCH idx_bison_leads_pending_import, WHICH IS ASCENDING
+// ON BOTH COLUMNS. This claim was `order by instance_url, bison_id desc` — a
+// MIXED direction no btree scan can serve, so Postgres sorted every pending row
+// to return 5,000 of them. That is invisible at 188k pending and fatal at 7.86M:
+// the claim stopped completing at all (>170s), and it killed the outboundhero
+// run after the mirror had finished. Backward scan (both DESC) is the same
+// newest-first-within-instance order and plans as a plain index scan: 46 ms.
 async function importNew(batchSize = 5000) {
   let imported = 0;
   for (;;) {
@@ -221,7 +234,7 @@ async function importNew(batchSize = 5000) {
                 cv_domain, cv_address, cv_phone, cv_google_maps_url, cv_question
            from bison_leads
           where imported_at is null and email is not null
-          order by instance_url, bison_id desc
+          order by instance_url desc, bison_id desc
           limit $1
        ), fresh as (
          select distinct on (p.email) p.email, p.first_name, p.last_name, p.company, p.title,
