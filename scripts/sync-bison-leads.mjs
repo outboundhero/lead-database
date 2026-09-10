@@ -495,13 +495,31 @@ if (!NO_IMPORT) {
   imported = await importNew();
 }
 
-const { rows: tot } = await dbQuery(
-  `select (select count(*) from bison_leads)::bigint as mirrored,
-          (select count(*) from bison_leads where imported_at is null and email is not null)::bigint as pending`);
-console.log(
-  `\ndone: ${grand.toLocaleString()} rows fetched, ${imported.toLocaleString()} new lead(s) added to the database.\n` +
-  `bison_leads holds ${Number(tot[0].mirrored).toLocaleString()} (${Number(tot[0].pending).toLocaleString()} not yet checked for import).`
-);
+// ⚠ THIS IS A COSMETIC SUMMARY — IT MUST NEVER FAIL THE RUN. An exact
+// `count(*)` over a 12.2M-row / 12 GB table stopped fitting in the statement
+// timeout, and because it runs AFTER the sync and the import, it turned two
+// fully-successful multi-day runs into non-zero exits with an alarming stack
+// trace. The mirror was complete and the import fully drained both times.
+// Estimate from the catalog instead, and swallow anything that goes wrong.
+try {
+  const { rows: tot } = await dbQuery(
+    `select reltuples::bigint as mirrored from pg_class where relname = 'bison_leads'`
+  );
+  const { rows: pend } = await dbQuery(
+    `select exists (select 1 from bison_leads
+                     where imported_at is null and email is not null) as any_pending`
+  );
+  console.log(
+    `\ndone: ${grand.toLocaleString()} rows fetched, ${imported.toLocaleString()} new lead(s) added to the database.\n` +
+    `bison_leads holds ~${Number(tot[0]?.mirrored ?? 0).toLocaleString()} rows` +
+    `${pend[0]?.any_pending ? " (some still pending import)" : " (nothing pending import)"}.`
+  );
+} catch (e) {
+  console.log(
+    `\ndone: ${grand.toLocaleString()} rows fetched, ${imported.toLocaleString()} new lead(s) added to the database.` +
+    `\n(summary counts unavailable: ${String(e?.message ?? e).slice(0, 80)})`
+  );
+}
 // New leads arrive with no location and no category, so they are invisible to
 // targeting until the location and categorize workers reach them — expected,
 // and worth remembering when a client's available count does not move.
