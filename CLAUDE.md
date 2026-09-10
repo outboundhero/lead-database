@@ -659,6 +659,27 @@ took 2.8 hours.
 ⚠ `npm run sync-bison-leads` with no flags is a **full** 8-shard sync of all four
 installs. The routine job must pass `--incremental` (the Railway service does).
 
+### ⚠ An ORDER BY that half-matches its index is a time bomb
+
+`importNew`'s claim ordered by `instance_url ASC, bison_id DESC` while
+`idx_bison_leads_pending_import` is **ascending on both columns**. No btree scan
+can serve a mixed direction, so Postgres sorted *every* pending row to return
+5,000. At 188k pending that was unnoticeable; at 7.86M it stopped completing at
+all (>170s) and killed the run **after** the mirror had finished — the expensive
+work was already done and banked, and the cheap step threw it away.
+
+Backward scan (`instance_url DESC, bison_id DESC`) is the same
+newest-first-within-instance order and plans as a plain index scan: **46 ms**.
+
+Two lessons worth generalising:
+
+- **A composite index only serves an ORDER BY that is all-same-direction or
+  all-reversed.** Mixed directions need a matching mixed index (`(a, b DESC)`).
+  `EXPLAIN` any claim query that will run against a growing table — a `Sort` node
+  above millions of rows is the tell.
+- **A batched claim can be the slow part, not the batch.** The work per batch was
+  fine; selecting *which* rows to work on was not.
+
 ### Custom variables (`cv_*`) — where the enrichment came from
 
 Bison's `custom_variables` are `[{name, value}]` with **lowercase, mixed-separator**
