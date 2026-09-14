@@ -102,21 +102,94 @@ New indexes: `idx_leads_email_type`, `idx_leads_validation_status`, `idx_leads_v
 
 ---
 
-## Email validation flow (NEW)
+## Email validation — background queue on Reoon daily credits (2026-09-14)
 
-**Trigger:** at export time, NOT at filter preview.
+⚠ **The export-time validation pass is GONE.** It ran Reoon on up to 2,000
+addresses *before streaming a row* — ~20 min of silence at power-mode speed. On
+2026-09-11 an 8,451-lead export had validated 1,400 after 15 min with zero rows
+sent when the user cancelled; the largest CSV ever completed through that path
+was **50 rows**. Exports now stream immediately and queue their addresses at
+priority 1 (fire-and-forget; a queue failure can never delay the download).
 
-**Logic** (in `/api/exports/stream`):
+**Why a queue at all:** 8.96M of 8.97M leads had never been validated. The Reoon
+account is on **daily credits** (balance API 2026-09-14: 84,698 daily, **0
+instant**). At ~85k/day the full backlog is ~3 months, so the work is spread
+over replenishing credit instead of paid up front (~$7.9k at instant rates).
 
-1. Pre-pass query: `SELECT id, email FROM leads WHERE <filters> AND (validation_status IS NULL OR validated_at < now() - INTERVAL '45 days')`
-2. Create a `validation_jobs` row, then call `validateLeads(ids)` in batches of ~100 with `p-limit` concurrency of 5
-3. Reoon in POWER mode (real SMTP). Findymail (verify endpoint ONLY, never the finder) is the second layer, called only when Reoon's native status is catch_all / risky / unknown / error — a clean valid/invalid spends no Findymail credit. Findymail verified:true→valid, false→invalid. Genuine double-outage rows are left unwritten to retry. Persist status/provider/validated_at/validation_response
-4. Client polls `/api/exports/validation-progress?jobId=...` for the iOS-sheet progress modal
-5. Once validation completes, run the existing streaming export — the RPC enforces `validation_status IN ('valid','catch_all') AND is_bounced = false` (admin can override `is_bounced` filter via `includeBounced` flag)
+`scripts/validation-worker.mjs` — Railway cron `validation-worker`, `17 * * * *`:
 
-**Env vars:** `REOON_API_KEY`, `FINDEMAIL_API_KEY`, `REOON_MODE` (default `power`), `REOON_CONCURRENCY` (default 12), `VALIDATION_BATCH_SIZE` (default 100), `VALIDATION_REVALIDATE_DAYS` (default 45). Power mode is ~3s/email (SMTP); concurrency hides it.
+1. **Reconcile** — poll submitted Reoon bulk tasks; apply finished ones.
+2. **Refill** (once per 24h, time-boxed 15 min, resumable) — queue unvalidated
+   leads eligible for each of the ~69 active clients via
+   `fn_client_eligibility_conditions` (cap `VALIDATION_CLIENT_REFILL_CAP`, 10k).
+3. **Submit** — only if no task is in flight: read the balance, budget =
+   `remaining_daily_credits − VALIDATION_DAILY_RESERVE` (2,000), claim up to
+   `VALIDATION_TASK_SIZE` (25k; Reoon max 50k) and create ONE bulk task.
 
-**Cost guard:** validation is gated by `if (process.env.REOON_API_KEY)`. If no key is set the pre-pass no-ops and export proceeds without validation (dev convenience).
+**First production run (2026-09-14 16:19 UTC, 337s, exit 0):** refill took
+5.5 min for all 69 clients and **every client hit the 10k cap** — 690,000 queue
+rows = **483,141 distinct addresses** (clients overlap). That priority-2 backlog
+alone is ~6 days of daily credit; the refill tops it up every 24h. The run then
+claimed 25,000 and submitted them as one Reoon task. `leads.validation_status`
+count stayed at exactly 2,720 (the pre-existing export-time verdicts).
+
+Claim order: `validation_queue` by priority (1 export, 2 client-eligible,
+3 retry), then a **cursor walk over `leads` by id in bounded 100k-id windows**
+(priority 4). The bounded window is deliberate — see the location-worker and
+Bison-import incidents: a claim that filters a thinning cohort off an unbounded
+scan eventually stops completing.
+
+### ⚠ Results go to `email_validations`, NOT `leads.validation_status`
+
+**Client decision 2026-09-14:** campaign push logic stays exactly as it is until
+the backfill is complete. The push gate is `is_bounced = false AND
+(validation_status IN ('valid','catch_all') OR validation_status IS NULL)`;
+writing `invalid`/`unknown` onto leads would silently change who gets emailed
+mid-backfill. `email_validations` (keyed on the address, like `suppressed_emails`)
+uses the same status vocabulary, so the eventual rule change is a straight swap.
+Nothing in the push or export path reads it yet. Done = the backfill cursor
+wraps (`validation_worker_state.cursor.wraps ≥ 1`) with the queue empty.
+
+### Reoon facts that shaped this (docs + probes, 2026-09-14)
+
+- **Single-address endpoint: "no more than 5 threads".** The old export path ran
+  12. Bulk tasks (≤50,000 addresses) are paced server-side, power mode.
+- `GET /api/v1/check-account-balance/?key=` → `remaining_daily_credits`,
+  `remaining_instant_credits`. Budget is computed from **daily only**, so the
+  worker can never spend pay-as-you-go credit.
+- Reoon documents **neither the daily reset time nor the allotment size** — every
+  balance read lands in `validation_balance_log`; learn both from that table.
+- A 20-address task lowered the balance by exactly 20, **including its 2
+  `unknown` verdicts** — Reoon's pricing page says unknowns are refunded, but no
+  refund was visible in the balance afterwards. Whether credits are deducted at
+  submission or on completion is not yet established.
+- **This API key is shared.** The balance fell 69 credits (84,698 → 84,629)
+  before the worker had submitted anything — other usage draws from the same
+  daily pool, which is what `VALIDATION_DAILY_RESERVE` protects.
+- Bulk statuses `disabled` and `inbox_full` are not in the single endpoint's
+  mapper: worker maps disabled → `invalid`, inbox_full → `risky`, role_account →
+  `valid`, anything unrecognised → `unknown`.
+- Observed verdict mix on the first 24 addresses: safe 9, catch_all 7,
+  role_account 5, unknown 3. Tiny sample — re-measure from `email_validations`
+  before drawing conclusions about the eventual gate switch.
+
+### Crash safety (each tested)
+
+A task is written as `claimed` before Reoon sees it; a claim older than 15 min
+with no Reoon id is **abandoned and its addresses requeued** (attempts counted,
+dropped after 5). A crash mid-apply leaves the task `submitted`, so the next run
+re-applies — the upsert is idempotent. Only one task is ever in flight. Watchdog
+exits 0 at 50 min so an hourly firing is never skipped.
+
+**Env vars:** `REOON_API_KEY`, `DATABASE_URL` (the only two the worker needs),
+optional `VALIDATION_DAILY_RESERVE`, `VALIDATION_TASK_SIZE`,
+`VALIDATION_REVALIDATE_DAYS` (90), `VALIDATION_CLIENT_REFILL_CAP`,
+`VALIDATION_QUEUE_MAX`. Local: `--dry-run` (no writes, no spend), `--max=N`,
+`--no-refill`.
+
+The old single-address providers (`src/lib/validation/`) remain for small ad-hoc
+checks, now with a 30s per-call timeout and a hard 5-thread cap. `validateLeads`
+currently has no callers.
 
 ---
 
@@ -785,7 +858,7 @@ AI (AI fallback still OFF pending green-light).
 ## Railway services (production topology, verified 2026-09-09)
 
 Railway project `extraordinary-spirit` (`aa4d6c76-7b8b-4f29-9212-3c04c42de333`),
-environment `production` (`80ed7802-75ee-453c-a8d6-b92e233de258`). All **8**
+environment `production` (`80ed7802-75ee-453c-a8d6-b92e233de258`). All **9**
 services deploy from THIS repo. Single replica everywhere.
 
 | Service | Type | Schedule | Start command |
@@ -798,6 +871,7 @@ services deploy from THIS repo. Single replica everywhere.
 | `categorize-worker` | cron | `0 3 * * *` | `node scripts/categorize-worker.mjs --keyword-only` |
 | `location-worker` | cron | `*/30 * * * *` | `npm run location-backfill` |
 | `bison-sync` | cron | `0 3 */3 * *` | `npm run sync-bison-leads -- --incremental` |
+| `validation-worker` | cron | `17 * * * *` | `npm run validation-worker` (added 2026-09-14) |
 
 Also scheduled, but NOT a Railway cron:
 `.github/workflows/daily-dashboard-refresh.yml` POSTs `/api/dashboard/refresh`
