@@ -67,7 +67,10 @@ function mapStatus(resp: ReoonResponse): { status: ValidationStatus | null; nati
 async function verifyOne(email: string, apiKey: string, signal?: AbortSignal): Promise<ValidationResult> {
   const url = `${REOON_BASE}?email=${encodeURIComponent(email)}&key=${encodeURIComponent(apiKey)}&mode=${encodeURIComponent(MODE)}`;
   try {
-    const res = await fetch(url, { method: "GET", signal });
+    // Hard 30s cap: a power-mode SMTP check that never returns would otherwise
+    // have no exit — the caller's signal only fires on browser disconnect.
+    const timeout = AbortSignal.timeout(30_000);
+    const res = await fetch(url, { method: "GET", signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
     if (!res.ok) {
       return { email, status: null, provider: "reoon", nativeStatus: "error", raw: { httpStatus: res.status } };
     }
@@ -95,9 +98,12 @@ export async function validateBatch(
   }
   const apiKey: string = envKey;
   // Power mode is SMTP-bound (~3s/email); concurrency hides the latency.
+  // Reoon's docs: "You should not verify continuously in more than 5 threads
+  // using this endpoint" — this ran 12. Bulk work belongs on the bulk-task API
+  // (scripts/validation-worker.mjs); this path is for small ad-hoc checks.
   // Guard NaN/0 (bad REOON_CONCURRENCY) — zero workers would return all holes.
-  const requested = options?.concurrency ?? parseInt(process.env.REOON_CONCURRENCY ?? "12", 10);
-  const concurrency = Number.isInteger(requested) && requested > 0 ? requested : 12;
+  const requested = options?.concurrency ?? parseInt(process.env.REOON_CONCURRENCY ?? "5", 10);
+  const concurrency = Math.min(5, Number.isInteger(requested) && requested > 0 ? requested : 5);
   const results: ValidationResult[] = new Array(emails.length);
   let nextIdx = 0;
 

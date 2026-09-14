@@ -7,7 +7,7 @@ import type { Lead } from "@/types/database";
 import { buildRpcFilters } from "@/lib/filters/build-rpc-filters";
 import { findCursorForRangeStart } from "@/lib/exports/skip-cursor";
 import { getPool } from "@/lib/db/pool";
-import { validateLeads, isValidationEnabled } from "@/lib/validation/validate-leads";
+import { isValidationEnabled } from "@/lib/validation/validate-leads";
 import { getTtlDays } from "@/lib/validation/cache-policy";
 
 // Kept for the auth/markJobError path. The actual export RPC calls go through
@@ -126,18 +126,53 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Whether the slow pre-export validation pass will run. When it will, the
-  // response is NOT gzip-compressed: CompressionStream buffers small chunks,
-  // which would swallow the keepalive bytes that stop the edge proxy from
-  // killing the silent connection ("upstream error" on big searches).
-  const willValidate = isValidationEnabled() && !!jobId && !isSelectedExport;
+  // ─── Validation never blocks the download (2026-09-14) ─────────────────
+  // This route used to run Reoon on up to 2,000 addresses BEFORE streaming a
+  // row. At power-mode SMTP speed that is ~20 minutes of silence: on 2026-09-11
+  // an 8,451-lead export had validated 1,400 of 2,000 after 15 minutes with zero
+  // rows sent ("0.0 MB") when the user cancelled. The largest CSV ever
+  // completed through that path was 50 rows.
+  //
+  // Now the export's addresses are queued at priority 1 for the background
+  // validation-worker (Reoon bulk tasks on daily credits) and the file streams
+  // immediately. Fire-and-forget: the queue insert catches its own errors and
+  // must never delay or fail the download. The export gate is unchanged —
+  // results land in email_validations, not leads.validation_status, until the
+  // client switches the rule once the backfill completes.
+  const willQueue = isValidationEnabled() && !!jobId && !isSelectedExport;
+
+  async function queueForValidation(): Promise<void> {
+    try {
+      const ttl = getTtlDays();
+      const cutoff = new Date(Date.now() - ttl * 24 * 60 * 60 * 1000).toISOString();
+      const cap = Math.min(
+        Math.max(1, parseInt(process.env.VALIDATION_MAX_PER_EXPORT ?? "", 10) || 10000),
+        maxRows,
+      );
+      const { rowCount } = await getPool().query(
+        `insert into validation_queue (email, priority, source)
+         select c->>'email', 1, $4
+           from jsonb_array_elements(fn_leads_needing_validation($1::jsonb, $2::timestamptz, $3)) c
+          where coalesce(c->>'email', '') <> ''
+            and not exists (select 1 from email_validations v
+                             where v.email = c->>'email' and v.validated_at > $2::timestamptz)
+            and not exists (select 1 from validation_task_items ti
+                              join validation_tasks t on t.id = ti.task_id and t.status in ('claimed','submitted')
+                             where ti.email = c->>'email')
+         on conflict (email) do update set priority = least(validation_queue.priority, excluded.priority)`,
+        [JSON.stringify(p_filters), cutoff, cap, `export:${jobId}`],
+      );
+      console.log(`export ${jobId}: ${rowCount ?? 0} address(es) queued for background validation`);
+    } catch (e) {
+      console.error(`export ${jobId}: queueing addresses for validation failed:`, e);
+    }
+  }
 
   const stream = new ReadableStream({
     async start(controller) {
       let closed = false;
       let errored = false;
       let aborted = false;
-      let keepalive: ReturnType<typeof setInterval> | null = null;
       const safeClose = () => {
         if (closed) return;
         closed = true;
@@ -173,94 +208,10 @@ export async function POST(request: NextRequest) {
       });
 
       try {
-        // FIRST BYTES IMMEDIATELY: the CSV header goes out before the (slow)
-        // validation pre-pass, and a keepalive newline flows every 15s during
-        // it — otherwise the edge proxy sees minutes of silence before the
-        // first byte and kills the response ("upstream error"). Blank lines
-        // between header and data are ignored by every CSV parser. Only
-        // effective because compression is disabled when willValidate.
         safeEnqueue(encoder.encode(columnSelection.join(",") + "\n"));
-        if (willValidate) keepalive = setInterval(() => safeEnqueue(encoder.encode("\n")), 15000);
 
-        // ─── Pre-export validation pass ─────────────────────────────────
-        // Validate ONLY leads inside THIS export's filtered set (the RPC reuses
-        // fn_export_leads' filter builder) that are unvalidated or older than
-        // VALIDATION_REVALIDATE_DAYS. Hard-capped: Reoon power mode is a paid
-        // SMTP check (~250ms/email at pool concurrency), so the cap both bounds
-        // credit spend and keeps the pre-pass inside the route's 600s budget.
-        // Rows beyond the cap export with validation_status NULL — the export
-        // gate deliberately lets NULL through (see fn_export_leads).
-        if (isValidationEnabled() && jobId && !isSelectedExport) {
-          try {
-            const adminDb = createAdminClient();
-            const ttl = getTtlDays();
-            const cutoff = new Date(Date.now() - ttl * 24 * 60 * 60 * 1000).toISOString();
-            const pool = getPool();
-            const VALIDATION_CAP = Math.max(
-              1,
-              parseInt(process.env.VALIDATION_MAX_PER_EXPORT ?? "", 10) || 2000,
-            );
-            const cap = Math.min(VALIDATION_CAP, maxRows);
-            const preScan = await pool.query(
-              "SELECT fn_leads_needing_validation($1::jsonb, $2::timestamptz, $3) AS data",
-              [JSON.stringify(p_filters), cutoff, cap],
-            );
-            const candidates = ((preScan.rows[0]?.data ?? []) as { id: string; email: string }[]);
-            if (candidates.length === cap) {
-              console.warn(`Pre-export validation capped at ${cap} leads for job ${jobId} — remainder exports unvalidated.`);
-            }
-            if (candidates.length > 0) {
-              // Create the validation_jobs row so the UI can poll progress.
-              const { data: vjob } = await adminDb
-                .from("validation_jobs")
-                .insert({
-                  export_job_id: jobId,
-                  total: candidates.length,
-                  status: "running",
-                  started_at: new Date().toISOString(),
-                })
-                .select("id")
-                .single();
-              const vjobId = vjob?.id as string | undefined;
-
-              const outcome = await validateLeads(candidates, {
-                signal: request.signal,
-                onProgress: async (done, creditsUsed) => {
-                  if (!vjobId) return;
-                  await adminDb
-                    .from("validation_jobs")
-                    .update({ completed: done, credits_used: creditsUsed })
-                    .eq("id", vjobId);
-                },
-              });
-              if (vjobId) {
-                // A user abort mid-validation must not be recorded as 'complete'.
-                const finalStatus = request.signal.aborted
-                  ? "cancelled"
-                  : outcome.errors > 0 && outcome.errors === outcome.total
-                    ? "error"
-                    : "complete";
-                await adminDb
-                  .from("validation_jobs")
-                  .update({
-                    status: finalStatus,
-                    completed: outcome.validated,
-                    credits_used: outcome.creditsUsed,
-                    completed_at: new Date().toISOString(),
-                  })
-                  .eq("id", vjobId);
-              }
-            }
-          } catch (vErr) {
-            // Don't fail the whole export if validation breaks — log and proceed.
-            // NOTE: the export gate excludes 'invalid'/'risky'/'unknown' and
-            // bounced rows but deliberately LETS NULL THROUGH, so anything this
-            // pass didn't reach exports unvalidated rather than silently vanishing.
-            console.error("Pre-export validation pass failed:", vErr);
-          }
-        }
-        // ────────────────────────────────────────────────────────────────
-        if (keepalive) { clearInterval(keepalive); keepalive = null; }
+        // Background: queue this export's addresses for validation. Not awaited.
+        if (willQueue) void queueForValidation();
 
         let totalRows = 0;
         let hasMore = true;
@@ -415,7 +366,6 @@ export async function POST(request: NextRequest) {
 
         safeClose();
       } catch (err) {
-        if (keepalive) clearInterval(keepalive);
         const msg = err instanceof Error ? err.message : "Unknown error";
         console.error("Stream export failed:", err);
         await markJobError(msg);
@@ -430,15 +380,14 @@ export async function POST(request: NextRequest) {
   // repetitive ASCII. The browser auto-decompresses based on the
   // Content-Encoding header, so the user gets a regular .csv file but
   // the bytes-over-the-wire are 5-10× smaller. Big win on slower networks.
-  // Validated exports stream UNcompressed so the keepalive bytes actually
-  // reach the proxy during the silent validation phase (CompressionStream
-  // buffers small chunks). Everything else keeps the 5-10× gzip win.
-  const responseBody = willValidate ? stream : stream.pipeThrough(new CompressionStream("gzip"));
+  // (Exports briefly streamed uncompressed so keepalive bytes could survive
+  // the blocking validation phase; with that phase gone, all get gzip again.)
+  const responseBody = stream.pipeThrough(new CompressionStream("gzip"));
 
   return new Response(responseBody, {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
-      ...(willValidate ? {} : { "Content-Encoding": "gzip" }),
+      "Content-Encoding": "gzip",
       "Content-Disposition": `attachment; filename="export_${timestamp}.csv"`,
       "Cache-Control": "no-cache",
     },

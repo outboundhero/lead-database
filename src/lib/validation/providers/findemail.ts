@@ -34,7 +34,9 @@ async function verifyOne(email: string, apiKey: string, signal?: AbortSignal): P
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({ email }),
-      signal,
+      // Hard 30s cap: a call that never returns must become an error, not a
+      // wedge (the caller's signal only fires if the browser disconnects).
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
     });
     if (!res.ok) {
       return { email, status: "invalid", provider: "findemail", nativeStatus: "error", raw: { httpStatus: res.status } };

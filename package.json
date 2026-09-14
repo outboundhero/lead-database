@@ -21,7 +21,8 @@
     "location-inference": "node scripts/infer-company-locations.mjs",
     "load-geo": "node scripts/load-geo-reference.mjs",
     "sync-targeting": "node scripts/sync-client-targeting-from-sheet.mjs",
-    "targeting-worker": "node scripts/sync-client-targeting-from-sheet.mjs --serve"
+    "targeting-worker": "node scripts/sync-client-targeting-from-sheet.mjs --serve",
+    "validation-worker": "node scripts/validation-worker.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
