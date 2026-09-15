@@ -384,6 +384,21 @@ async function submit() {
   const { daily, instant } = await balance();
   const budget = daily - RESERVE;
   log(`reoon balance: ${daily.toLocaleString()} daily, ${instant.toLocaleString()} instant (reserve ${RESERVE})`);
+
+  // HARD STOP — client instruction 2026-09-15: spend ONLY the daily refresh
+  // credits the plan already pays for, NEVER paid instant credits. Reoon does
+  // not document which pool a task draws from when both hold a balance, so
+  // capping the task at the daily balance is not a guarantee. The only safe
+  // rule is to submit nothing at all while ANY instant credit exists — and
+  // nothing when the response cannot prove the instant balance is zero.
+  // Exit nonzero so the Railway card turns red and someone notices; the cron's
+  // restart policy is NEVER, so this cannot crash-loop.
+  if (!Number.isFinite(instant) || instant !== 0) {
+    console.error(ts(), `REFUSING TO SUBMIT: paid instant credits = ${instant}. ` +
+      "This worker only spends daily refresh credits. Nothing was submitted.");
+    process.exitCode = 1;
+    return;
+  }
   if (budget < MIN_TASK) { log("daily credits exhausted for now — waiting for them to replenish"); return; }
 
   const want = Math.max(0, Math.min(budget, TASK_SIZE, MAX_OVERRIDE > 0 ? MAX_OVERRIDE : Infinity));

@@ -122,7 +122,8 @@ over replenishing credit instead of paid up front (~$7.9k at instant rates).
 2. **Refill** (once per 24h, time-boxed 15 min, resumable) — queue unvalidated
    leads eligible for each of the ~69 active clients via
    `fn_client_eligibility_conditions` (cap `VALIDATION_CLIENT_REFILL_CAP`, 10k).
-3. **Submit** — only if no task is in flight: read the balance, budget =
+3. **Submit** — only if no task is in flight and the account holds **zero paid
+   instant credits** (hard stop, see below): budget =
    `remaining_daily_credits − VALIDATION_DAILY_RESERVE` (2,000), claim up to
    `VALIDATION_TASK_SIZE` (25k; Reoon max 50k) and create ONE bulk task.
 
@@ -155,17 +156,31 @@ wraps (`validation_worker_state.cursor.wraps ≥ 1`) with the queue empty.
 - **Single-address endpoint: "no more than 5 threads".** The old export path ran
   12. Bulk tasks (≤50,000 addresses) are paced server-side, power mode.
 - `GET /api/v1/check-account-balance/?key=` → `remaining_daily_credits`,
-  `remaining_instant_credits`. Budget is computed from **daily only**, so the
-  worker can never spend pay-as-you-go credit.
-- Reoon documents **neither the daily reset time nor the allotment size** — every
-  balance read lands in `validation_balance_log`; learn both from that table.
-- A 20-address task lowered the balance by exactly 20, **including its 2
-  `unknown` verdicts** — Reoon's pricing page says unknowns are refunded, but no
-  refund was visible in the balance afterwards. Whether credits are deducted at
-  submission or on completion is not yet established.
+  `remaining_instant_credits`.
+- ⚠ **HARD RULE (client, 2026-09-15): daily refresh credits ONLY — never paid
+  instant credits.** Budget = daily balance, and the worker **refuses to submit
+  anything** (exit 1, red Railway card) while `remaining_instant_credits` is
+  anything but exactly 0 — including when the field is missing. Capping a task at
+  the daily balance is not enough on its own: Reoon does not document which pool
+  a task draws from when both are non-zero. Instant credits read 0 on all 27
+  balance checks through 2026-09-15, so no paid credit has ever been spent.
+  Tested with a mocked balance: instant=5 → refused, field missing → refused,
+  instant=0 → normal.
+- **Daily credits reset around 00:00 UTC** (1,881 at 23:17 → 92,383 at 00:19 on
+  2026-09-15). Allotment is ~**92,000/day**. Measured from `validation_balance_log`.
+- **`unknown` verdicts ARE refunded**, after the task completes. A 25,000-address
+  task cost ~22,000 credits — the difference matches its unknown count within a
+  few hundred (e.g. 84,515 → 62,329 across a task with 2,977 unknowns). That is
+  why a 92k allotment validated **102,545** addresses on 2026-09-15.
+- **Credits are the bottleneck, not Reoon.** Every 25,000-address task finished
+  within its hour, so the day's allotment is spent by ~05:00 UTC and the worker
+  then idles until the reset. Raising `VALIDATION_TASK_SIZE` would only spend the
+  same credits sooner.
 - **This API key is shared.** The balance fell 69 credits (84,698 → 84,629)
-  before the worker had submitted anything — other usage draws from the same
-  daily pool, which is what `VALIDATION_DAILY_RESERVE` protects.
+  before the worker had submitted anything. On 2026-09-15 the balance reached
+  **0** despite the 2,000 `VALIDATION_DAILY_RESERVE`, so the other consumer
+  likely used the reserve and then had nothing until the reset. Raise the reserve
+  if that other usage matters.
 - Bulk statuses `disabled` and `inbox_full` are not in the single endpoint's
   mapper: worker maps disabled → `invalid`, inbox_full → `risky`, role_account →
   `valid`, anything unrecognised → `unknown`.
