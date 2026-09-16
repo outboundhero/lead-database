@@ -161,6 +161,31 @@ function ie(operator: "OR" | "AND" = "OR"): IncludeExclude {
   return { include: [], exclude: [], operator };
 }
 
+// Mimecast is excluded BY DEFAULT (client request, 2026-09-16): a fresh Leads
+// page, Reset, and every client selection start with this chip in place, and
+// an operator who actually wants Mimecast accounts removes the chip (✕ / Clear).
+// Removal sticks for the session: normalizeFilterState keeps an explicit
+// `exclude: []` (mergeIE only falls back to this default when the key is
+// absent), so presets, shared links, exports and pushes carry what the chip
+// shows. The literal must match leads.esp byte-for-byte — ESP matching is exact
+// (buildRpcFilters passes no Contains/Exact mode for esp) and the column holds
+// exactly "Mimecast". The SQL exclusion is NULL-safe
+// (`esp IS NULL OR esp <> ALL(...)`), so leads with no ESP are NOT dropped.
+// This is deliberately NOT in fn_client_eligibility_conditions: the push-worker
+// re-checks eligibility per lead at send time, so a rule there would strip
+// Mimecast even after the operator removed the chip.
+export const DEFAULT_ESP_EXCLUDE: readonly string[] = ["Mimecast"];
+
+/** True when the ESP filter is still exactly the shipped default (nothing the operator chose). */
+export function isDefaultEsp(esp: IncludeExclude): boolean {
+  return (
+    esp.include.length === 0 &&
+    !esp.includeUnknown &&
+    esp.exclude.length === DEFAULT_ESP_EXCLUDE.length &&
+    esp.exclude.every((v, i) => v === DEFAULT_ESP_EXCLUDE[i])
+  );
+}
+
 export const DEFAULT_FILTER_STATE: FilterState = {
   filterOperator: "AND",
   fullName: "",
@@ -173,7 +198,7 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   seniority: ie(),
   generalIndustry: ie(),
   specificIndustry: ie(),
-  esp: ie(),
+  esp: { include: [], exclude: [...DEFAULT_ESP_EXCLUDE], operator: "OR" },
   company: ie(),
   category: ie(),
   subcategory: ie(),
@@ -325,7 +350,13 @@ export function countActiveFilters(filters: FilterState): number {
   if (filters.seniority.include.length || filters.seniority.exclude.length || filters.seniority.includeUnknown) count++;
   if (filters.generalIndustry.include.length || filters.generalIndustry.exclude.length || filters.generalIndustry.includeUnknown) count++;
   if (filters.specificIndustry.include.length || filters.specificIndustry.exclude.length || filters.specificIndustry.includeUnknown) count++;
-  if (filters.esp.include.length || filters.esp.exclude.length || filters.esp.includeUnknown) count++;
+  // ESP counts as "active" only when it DIFFERS from the shipped default. The
+  // default Mimecast exclusion must not make a fresh page report an active
+  // filter: that would show Reset with nothing to reset and — the real hazard —
+  // enable the toolbar Delete button with no selection in "filtered" mode
+  // (deleteEnabled = … || activeFilterCount > 0 on the leads page). Removing the
+  // chip DOES count, so Reset appears and restores the default.
+  if (!isDefaultEsp(filters.esp)) count++;
   if (filters.company.include.length || filters.company.exclude.length || filters.company.includeUnknown) count++;
   if (filters.category.include.length || filters.category.exclude.length || filters.category.includeUnknown) count++;
   if (filters.subcategory.include.length || filters.subcategory.exclude.length || filters.subcategory.includeUnknown) count++;

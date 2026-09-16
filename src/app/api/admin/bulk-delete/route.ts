@@ -3,7 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { logAudit } from "@/lib/api/log-audit";
 import { getPool } from "@/lib/db/pool";
-import { normalizeFilterState } from "@/types/filters";
+import { normalizeFilterState, countActiveFilters } from "@/types/filters";
 import { buildRpcFilters } from "@/lib/filters/build-rpc-filters";
 
 const MAX_DELETE_PER_REQUEST = 100000; // Safety cap
@@ -99,6 +99,20 @@ export async function POST(request: NextRequest) {
     if (hasFilters) {
       const pool = getPool();
       const normalized = normalizeFilterState(filters);
+
+      // Never allow an unfiltered "delete everything". The `conds.length === 0`
+      // check further down cannot catch this: fn_lead_filter_conditions always
+      // appends the silent gates (location_status, is_suppressed), and since
+      // 2026-09-16 the default filter state itself carries an ESP exclusion
+      // (Mimecast). So test what the OPERATOR chose, the same way the Leads
+      // page decides whether its Delete button is enabled.
+      if (countActiveFilters(normalized) === 0) {
+        return NextResponse.json(
+          { error: "Refusing to delete with no active filter conditions. Add at least one filter." },
+          { status: 400 }
+        );
+      }
+
       const p_filters = buildRpcFilters(normalized);
 
       // fn_lead_filter_conditions returns trusted SQL fragments (the same helper

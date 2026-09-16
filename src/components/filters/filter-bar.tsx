@@ -144,7 +144,9 @@ const HIDEABLE_CHIPS: { key: string; label: string }[] = [
   { key: "customTags", label: "Custom Tags" },
   { key: "emailType", label: "Email Type" },
   { key: "bounced", label: "Bounced" },
-  { key: "esp", label: "Email Service Provider" },
+  // "esp" is deliberately NOT hideable: it ships with a default exclusion
+  // (Mimecast — see DEFAULT_ESP_EXCLUDE), and a hidden chip would be a filter
+  // the operator can neither see nor remove.
   // category / subcategory / additionalCategory were removed here on 2026-08-19 —
   // the three chips are merged into "Category" above. Leaving them listed would
   // offer a toggle for chips that no longer render.
@@ -774,20 +776,20 @@ export function FilterBar({
           </FilterChip>
         )}
 
-        {/* ESP — dynamic from DB */}
-        {!isHidden("esp") && (
-          <FilterChip
-            label="Email Service Provider"
-            activeCount={filters.esp.include.length + filters.esp.exclude.length + (filters.esp.includeUnknown ? 1 : 0)}
-            onOpen={() => loadDistinctFor("esp")}
-          >
-            <FilterMultiSelect
-              options={espValues}
-              value={filters.esp}
-              onChange={(v) => onIncludeExcludeChange("esp", v)}
-            />
-          </FilterChip>
-        )}
+        {/* ESP — dynamic from DB. Always rendered (not hideable): it carries the
+            default Mimecast exclusion, which the operator must be able to see
+            and remove. The badge counts values, so a fresh page shows "1". */}
+        <FilterChip
+          label="Email Service Provider"
+          activeCount={filters.esp.include.length + filters.esp.exclude.length + (filters.esp.includeUnknown ? 1 : 0)}
+          onOpen={() => loadDistinctFor("esp")}
+        >
+          <FilterMultiSelect
+            options={espValues}
+            value={filters.esp}
+            onChange={(v) => onIncludeExcludeChange("esp", v)}
+          />
+        </FilterChip>
 
         {/* Client — single-select roster dropdown (synced from the sheets).
             Selecting applies the client's targeting to the other filters;

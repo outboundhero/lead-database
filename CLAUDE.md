@@ -1262,6 +1262,50 @@ Regression test: `DATABASE_URL=... npx tsx scripts/test-client-targeting.mts`
 drives the real reducer + `buildRpcFilters` + `fn_lead_filter_conditions`
 against every client with location targeting.
 
+## Mimecast is excluded by default (client request, 2026-09-16)
+
+`DEFAULT_FILTER_STATE.esp` ships as `exclude: ["Mimecast"]`
+(`DEFAULT_ESP_EXCLUDE` in [filters.ts](src/types/filters.ts)). That one constant
+seeds a fresh Leads page, is what **Reset** restores, and survives selecting,
+switching and clearing a client (client selection never touches `esp`). An
+operator who wants Mimecast accounts removes the chip (✕ / Clear); nothing
+re-seeds it during the session — `mergeIE` keeps an explicit `exclude: []`, so
+presets, shared links, exports and queued pushes carry what the chip shows. A
+reload starts fresh with Mimecast excluded again. Regression test:
+`npx tsx --env-file=.env.local scripts/test-esp-default.mts`.
+
+Facts this relies on (measured 2026-09-16):
+
+- `leads.esp` holds exactly 7 title-case values and no variants — the literal
+  must be `"Mimecast"` (263,938 leads). ESP matching is **exact**: the chip's
+  Contains/Exact toggle is a no-op for esp (`buildRpcFilters` passes no mode).
+- The SQL exclusion is NULL-safe — `(l.esp IS NULL OR l.esp <> ALL(...))` — so
+  the **824,501** leads with no ESP are kept. Never hand-write it as
+  `esp <> 'Mimecast'`, and never express it with the `__UNKNOWN__` sentinel
+  (that sets `includeUnknown`, which drops the NULL rows).
+- The default is deliberately **not** in `fn_client_eligibility_conditions`: the
+  push-worker re-checks eligibility per lead at send time, so a rule there
+  would strip Mimecast even after the operator removed the chip. Consequence:
+  the low-availability popup and `client_location_coverage` (eligibility-based,
+  no ESP concept) run ~2–3% above the Leads table for the same client.
+- `countActiveFilters` counts esp only when it **differs from the default**
+  (`isDefaultEsp`). Otherwise a fresh page would report 1 active filter, show
+  Reset with nothing to reset, and — the hazard — enable the toolbar Delete with
+  no selection in "delete everything matching filters" mode. Removing the chip
+  does count, so Reset appears and restores the default. The bulk-delete route
+  applies the same test server-side (its `conds.length === 0` guard was already
+  dead: the silent gates always append conditions).
+- The ESP chip is **not hideable** any more, and a one-time stamp un-hides it
+  for anyone who had hidden it — a hidden chip would be a filter the operator
+  can neither see nor remove (hiding never clears a value).
+- Mimecast heads the **SEG** routing bucket (`espBucket`), ~17% of that bucket.
+  With the default on, SEG campaigns receive Mimecast only when the operator
+  removes the chip before queueing. Selected-row actions (Export Selected, push
+  from a selection) and already-queued batches ignore/keep their own filters.
+- Stored payloads are not rewritten: every existing preset, shared search and
+  push batch already carries an `esp` key, so `normalizeFilterState` leaves them
+  alone; only a payload with **no** esp key gets the default injected.
+
 ## `TagInput` splits lists by default
 
 [tag-input.tsx](src/components/ui/ios/tag-input.tsx) splits committed values on

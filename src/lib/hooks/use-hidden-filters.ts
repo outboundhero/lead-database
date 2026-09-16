@@ -27,6 +27,13 @@ const RETIRED_KEYS = ["category", "subcategory", "additionalCategory"];
 const KEYWORDS_MIGRATION_KEY = "outboundhero.hiddenFilters.retiredKeywords";
 const KEYWORDS_RETIRED_KEYS = ["keywords"];
 
+// Third one-time cleanup, 2026-09-16: the Email Service Provider chip now
+// carries a DEFAULT exclusion (Mimecast) and is no longer hideable. Anyone who
+// had hidden it would otherwise be running an exclusion they can neither see
+// nor remove — hiding never clears a value. Own stamp, same reasoning as above.
+const ESP_MIGRATION_KEY = "outboundhero.hiddenFilters.espAlwaysVisible";
+const ESP_UNHIDE_KEYS = ["esp"];
+
 function readStored(): string[] {
   if (typeof window === "undefined") return [];
   try {
@@ -55,6 +62,15 @@ function readStored(): string[] {
         values = cleaned;
       }
       window.localStorage.setItem(KEYWORDS_MIGRATION_KEY, "1");
+    }
+
+    if (!window.localStorage.getItem(ESP_MIGRATION_KEY)) {
+      const cleaned = values.filter((v) => !ESP_UNHIDE_KEYS.includes(v));
+      if (cleaned.length !== values.length) {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
+        values = cleaned;
+      }
+      window.localStorage.setItem(ESP_MIGRATION_KEY, "1");
     }
     return values;
   } catch {
