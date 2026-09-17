@@ -224,7 +224,11 @@ if (!DRY) {
 
 console.log(`done: resolved=${counts.resolved} partial=${counts.partial} (city-miss=${counts.cityMiss})`
   + ` stateless-resolved=${counts.statelessResolved} unresolved=${counts.unresolved}`);
-if (!DRY) {
+// The closing status breakdown is a full GROUP BY over leads: ~1 GB of reads
+// and ~2.5 s on EVERY 30-minute cron run, for a log line nobody reads. The
+// 2026-09-16 audit found this pipeline behind 66% of all disk reads since
+// Aug 1. Opt in with --verbose when the breakdown is actually wanted.
+if (!DRY && process.argv.includes("--verbose")) {
   const after = (await q(`
     SELECT location_status, count(*) n FROM leads GROUP BY 1 ORDER BY 2 DESC`)).rows;
   console.log("status:", after.map((r) => `${r.location_status ?? "none"}=${r.n}`).join("  "));

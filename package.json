@@ -22,7 +22,8 @@
     "load-geo": "node scripts/load-geo-reference.mjs",
     "sync-targeting": "node scripts/sync-client-targeting-from-sheet.mjs",
     "targeting-worker": "node scripts/sync-client-targeting-from-sheet.mjs --serve",
-    "validation-worker": "node scripts/validation-worker.mjs"
+    "validation-worker": "node scripts/validation-worker.mjs",
+    "filter-cache-refresh": "node scripts/refresh-filter-cache.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

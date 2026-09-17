@@ -243,8 +243,10 @@ export default function LeadsPage() {
       // Availability afterwards, independently — informational only.
       fetch(`/api/clients/availability?tag=${encodeURIComponent(tag)}`)
         .then((r) => (r.ok ? r.json() : null))
-        .then((a: { available: number } | null) => {
-          if (!a) return;
+        .then((a: { available: number | null } | null) => {
+          // available is null when the client has no location targeting (no
+          // precomputed coverage row) — no popup; `null < 250` would be true.
+          if (!a || typeof a.available !== "number") return;
           // The "N available for TAG" badge was removed 2026-08-20 (client
           // request). The count is still fetched because the low-availability
           // warning below depends on it.

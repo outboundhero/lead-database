@@ -200,7 +200,15 @@ async function writeRows(rows) {
        first_name = excluded.first_name, last_name = excluded.last_name,
        company = excluded.company, title = excluded.title,
        ${CV_COLS.map((k) => `${k} = coalesce(excluded.${k}, bison_leads.${k})`).join(", ")},
-       cv_fetched_at = excluded.cv_fetched_at,
+       -- Keep the FIRST fetch time. cv_fetched_at sits in a partial-index
+       -- predicate (idx_bison_leads_cv_pending); rewriting it on a re-upsert
+       -- rules out HOT updates for the whole row (measured 0.09% HOT across
+       -- 23.4M updates, 2.19M dead tuples — 2026-09-16 audit). This matters for
+       -- FULL re-syncs (--instance/--resume without --incremental), which
+       -- re-upsert already-mirrored rows; the 3-day --incremental cron only
+       -- inserts ids above the watermark and never reaches this branch. The
+       -- only reader tests IS NULL (backfill-bison-custom-vars.mjs).
+       cv_fetched_at = coalesce(bison_leads.cv_fetched_at, excluded.cv_fetched_at),
        synced_at = now()`,
     params
   );

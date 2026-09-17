@@ -347,8 +347,14 @@ async function persistLeads(client, rows) {
   );
 }
 
+// NOTE: the routine dropdown refresh no longer lives here — this worker has
+// been parked by its worker_locks lease since 2026-08-17, so nothing refreshed
+// filter_options_cache for 7 weeks. scripts/refresh-filter-cache.mjs (last
+// step of the client-sync cron) now does it via fn_refresh_filter_cache().
+// "subcategory" is deliberately gone: nothing reads that row since the merged
+// Category chip (2026-08-19), and it alone was 121 MB of TOAST.
 async function refreshFilterCache(client) {
-  for (const col of ["category", "subcategory"]) {
+  for (const col of ["category"]) {
     await client.query(
       `INSERT INTO filter_options_cache (col_name, options, updated_at)
        SELECT '${col}', COALESCE(ARRAY(

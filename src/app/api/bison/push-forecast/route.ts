@@ -70,11 +70,16 @@ export async function POST(request: NextRequest) {
     }
 
     // Which of the target installs do we actually hold campaign data for?
+    // An existence probe, NOT a count: this used to `count(*) ... group by
+    // instance_url`, an index-only scan of all 14.1M bison_leads rows (5.65 s,
+    // ~85 MB of disk reads per click) to compute a number nothing below reads.
+    // The probe is a few index pages (2026-09-16 audit).
     const instances = [...byInstance.keys()];
     const { rows: covRows } = await pool.query(
-      `select instance_url, count(*)::bigint n from bison_leads
-        where instance_url = any($1::text[]) group by 1`, [instances]);
-    const covered = new Map(covRows.map((r) => [r.instance_url as string, Number(r.n)]));
+      `select i.instance_url from unnest($1::text[]) as i(instance_url)
+        where exists (select 1 from bison_leads b where b.instance_url = i.instance_url)`,
+      [instances]);
+    const covered = new Set(covRows.map((r) => r.instance_url as string));
     const unknownInstances = instances.filter((i) => !covered.has(i));
 
     const memberClauses: string[] = [];
@@ -107,7 +112,7 @@ export async function POST(request: NextRequest) {
       campaignCount: campaigns.length,
       // Never let a partially-mirrored answer read as a complete one.
       coverage: {
-        known: [...covered.keys()],
+        known: [...covered],
         unknown: unknownInstances,
         complete: unknownInstances.length === 0,
       },

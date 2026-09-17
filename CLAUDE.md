@@ -1322,6 +1322,21 @@ fields in the targeting dialog (`"Spokane, WA"` must stay one chip).
 These cost real hours. Read before starting anything that runs longer than a
 coffee break.
 
+- ⚠ **NEVER issue a session-level `SET` over `DATABASE_URL` (port 6543).**
+  Supavisor's transaction mode hands the backend to the next client WITHOUT
+  resetting GUCs, so `SET statement_timeout = '60s'` or
+  `SET default_transaction_read_only = on` from any script — an audit runner, a
+  one-off, an investigator — lands on the push-worker's next connection. On
+  2026-09-16 exactly that took the push-worker down for **51 minutes**
+  (`cannot execute UPDATE in a read-only transaction`) and crashed one
+  validation-worker and one location-worker run. Always the transaction form:
+  `begin; set local statement_timeout = '60s'; …; commit` (or `rollback`).
+  Known in-repo offenders that still do session-level `SET statement_timeout = 0`
+  on 6543: `scripts/infer-company-locations.mjs`, `scripts/resolve-unresolved-locations.mjs`
+  — manual-only, but a manual run leaks `timeout=0` into the shared pool. If a
+  leak is suspected, open ~20 connections and `RESET` both GUCs on each
+  (`reset default_transaction_read_only; reset statement_timeout`) until every
+  live Supavisor backend reads defaults.
 - **Use the transaction-pooler pattern for bulk SQL:**
   `begin; set local statement_timeout='560s'; …; commit`. Batch in id ranges
   (`STEP=100000`), and **retry each batch** (3 attempts, `20s × attempt` backoff)
@@ -1354,6 +1369,77 @@ coffee break.
   lower-cased) ran in 2.4s.
 - **`node --input-type=module /dev/stdin` fails** (`ERR_INPUT_TYPE_NOT_ALLOWED`).
   Use `node - < file.mjs`.
+
+## Performance audit 2026-09-16 — what was found, what is done
+
+Six read-only investigators + adversarial review (every top item challenged by
+an independent skeptic). Measured, not guessed:
+
+| Cause | Measured |
+|---|---|
+| Leads page runs TWO regex-heavy scans per filter change (rows + count) | pair 20.7 s vs 10.7 s single; 24 of 70 sampled requests aborted at 100 s |
+| Client select fired a live availability COUNT (full seq scan for the 12 `require_location=false` clients) | median 85 s, max 121 s |
+| Push forecast counted all 14.1M `bison_leads` rows for a value never read | 5.65 s/click |
+| location-worker (every 30 min): three whole-table passes returning nothing | **66% of all disk reads** since Aug 1 |
+| coverage refresh recomputes all 196 clients every 6 h | 12.4% of all exec time, 1.96 TB read |
+| `fn_sync_companies` sorts 9M rows twice per call | 5 min, 5.25 GB temp, after every upload |
+| `leads` indexes 4.3 GB → 10 GB in 4 weeks (12.7M non-HOT updates) | 85% heap cache hit vs 4 GB shared_buffers / 40 GB DB |
+| Supabase is in **ap-southeast-2 (Sydney)**; Railway is in the US | ~1.0–1.6 s floor on every API call |
+| `filter_options_cache` last refreshed 2026-07-28 | dropdowns 7 weeks stale; 121 MB unread subcategory row |
+
+**Batch 1 — shipped 2026-09-17** (all app-code/trivial, reversible):
+push-forecast existence probe instead of the 14.1M-row count;
+`/api/clients/availability` reads `client_location_coverage.total_available`
+(live count only behind `?fresh=1`, 30 s `SET LOCAL`; `available: null` when the
+client has no coverage row); location-worker's closing `GROUP BY` gated behind
+`--verbose`; bison sync keeps the first `cv_fetched_at` (matters for FULL
+re-syncs only — the 3-day incremental never reaches the upsert branch) +
+migration 100 per-table autovacuum on `bison_leads`; migration 101 rebuilds
+`fn_refresh_filter_cache` without the subcategory block; migration 102 adds
+**quality gates** to it; `scripts/refresh-filter-cache.mjs` (last step of
+`client-sync`, ≥20 h gate on the OLDEST row) restores the dropdown refresh.
+
+⚠ **Lesson from the first refresh (2026-09-17 13:18 UTC):** running the
+July-era function against September data pushed **13,156 "states"** into a
+chip that renders its whole list locally — phone numbers, street addresses, a
+JSON blob, "Калифорния", sales questions — because `leads.state`/`city` now
+carry raw Bison custom-variable text and the function had no filter. Caught by
+the adversarial review ~40 minutes later, fixed by 102: state restricted to
+`geo_admin1` names/codes (**124** options, 98.2% of leads), city ≥5 leads / no
+digits / 2–60 chars (**10,296**, 99.5%), title ≥3 leads / ≤120 chars
+(**21,921**). The script now refreshes inside a transaction and **rolls back**
+if state > 200, city > 20,000 or title > 100,000. Rare values still work by
+typing (City/Title chips search the live column). Apply function migrations
+BEFORE running `--force`, and never trust a cache refresh you have not sampled.
+
+Also fixed from the review: `/api/clients/availability` surfaces PostgREST
+errors as 500 (supabase-js returns `{error}` instead of throwing) and treats a
+NULL `total_available` as "no popup" (`Number(null)` is 0). Known, accepted:
+for the 13 `require_location=false` clients the precomputed number is the
+state-filtered total (UJ 767 vs ~209k live) — none is below the 250 popup
+threshold today; `?fresh=1` for those clients exceeds its 30 s cap.
+
+**Still open, in recommended order** (the reviewers' corrections applied):
+1. Leads filter path: ONE materialized scan feeding both rows and count, plus
+   cancelling superseded requests — measured 20.7 s → ~11 s for the heaviest
+   clients. Do NOT add the proposed 8 s count cap: it would replace exact totals
+   with planner estimates (wrong header, pagination, select-all/export/delete counts).
+2. location-worker stages 2–3: index-driven pass 2/3 and draining the 142k
+   junk-state cohort. The proposed `'unrecognized'` status **violates the live
+   `leads_location_status_check` constraint** — needs a constraint change and a
+   design decision, not a quick edit.
+3. coverage refresh: skip clients whose targeting is unchanged; one nightly
+   full run. (Not adversarially verified.)
+4. `fn_sync_companies(p_since)` incremental seeds + function-local `work_mem`. (Not verified.)
+5. REINDEX: only the `leads` btrees after the enrichment backlogs drain and
+   only when the I/O budget is healthy. The reviewer **rejected** reindexing
+   `bison_leads`' drained partial indexes: ~53 GB of reads to reclaim 0.9 GB.
+6. 759 MB of `leads` indexes cover columns that are 100% NULL
+   (`annual_revenue`, `company_size`, `general_industry`, `job_title_normalized`,
+   `seniority`) — product decision: drop, or rebuild as partial.
+7. Region: measure the Railway→Supabase RTT from inside the container before
+   spending on a move; free mitigations first (verify the session JWT locally
+   instead of `auth.getUser()` per request, dedupe the double client-tags fetch).
 
 ## Known issues / TODO
 
