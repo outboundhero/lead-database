@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -52,13 +51,13 @@ const STRATEGIES: { value: Strategy; label: string; description: string }[] = [
     value: "skip",
     label: "Skip Duplicates",
     description:
-      "If a lead with the same email already exists, skip the new row entirely.",
+      "If a lead with the same email already exists, skip the new row entirely (no fields filled, no extra location added).",
   },
   {
     value: "merge",
     label: "Merge (Fill Blanks)",
     description:
-      "Keep existing data, only fill in fields that are currently empty.",
+      "Keep existing data, only fill in fields that are currently empty. City and state are filled together (a state is never added to a different city). A row for an existing person at a different city/state adds that place as an extra location — the existing location is never changed.",
   },
   {
     value: "replace",

@@ -1,10 +1,35 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { normalizeRow, type FieldMapping } from "@/lib/uploads/normalize-row";
+import { createClient } from "@/lib/supabase/server";
+import { getPool } from "@/lib/db/pool";
+import { importRows, type ImportCounters } from "@/lib/uploads/import-rows";
 import { normalizeBisonRow } from "@/lib/uploads/parse-bison";
+import type { FieldMapping } from "@/lib/uploads/normalize-row";
 import { parse } from "csv-parse/sync";
 
+// POST /api/uploads/process — CSV import.
+//
+// Generic CSVs go through the bulk engine in src/lib/uploads/import-rows.ts
+// (set-based, chunked, transactional; see its header for the rules: holdbacks
+// for rows without an email, merge/replace/skip for duplicates, additional
+// locations for the same person at a different place, MX-based ESP detection).
+// The request returns { batchId } as soon as the batch row exists; the import
+// itself runs after the response (Next `after()` — the Railway process is
+// long-lived, so a 10k-row file's ~3 minutes never meet an HTTP timeout) and
+// the Uploads page follows it by polling upload_batches. A batch that dies
+// without a final status is marked 'error' by the sweep at the top of the
+// next upload.
+// The Email Bison export format keeps its original per-row path below — it is
+// used rarely now that the Bison mirror exists, and its semantics (never
+// downgrade is_bounced, keep DB timestamps) are worth not disturbing.
+//
+// Deliberately NOT here any more: the inline `fn_sync_companies` call. The
+// 2026-09-16 audit measured it at ~5 min and 5 GB of temp per call; it belongs
+// to the categorize worker, which loops it correctly.
+
 export const maxDuration = 300;
+const STRATEGIES = new Set(["skip", "merge", "replace"]);
+const STALE_AFTER_MS = 3 * 3600_000;
 
 interface UploadConfig {
   headers: string[];
@@ -12,303 +37,184 @@ interface UploadConfig {
   duplicateStrategy: "skip" | "merge" | "replace";
   overrideFields?: string[];
   filename: string;
-  format?: "generic" | "bison"; // bison = use the Email Bison parser, ignore fieldMapping
+  format?: "generic" | "bison";
+  delimiter?: string;
 }
 
-const CHUNK_SIZE = 500;
+const norm = (s: string) => s.trim().toLowerCase();
 
 export async function POST(request: NextRequest) {
-  // Auth check
-  const { createClient: createServerClient } = await import("@/lib/supabase/server");
-  const serverSupabase = await createServerClient();
+  const serverSupabase = await createClient();
   const { data: { user } } = await serverSupabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const supabase = createAdminClient();
+  // Role gate (was missing): importing writes to the whole database.
+  const { data: profile } = await supabase.from("user_profiles").select("role").eq("id", user.id).single();
+  if (!profile || !["owner", "admin", "manager"].includes(profile.role)) {
+    return NextResponse.json({ error: "Forbidden: your role cannot import leads" }, { status: 403 });
+  }
 
   let config: UploadConfig;
   let csvText: string;
-
   try {
-    const configStr = request.headers.get("X-Upload-Config");
-    if (!configStr) {
-      return NextResponse.json(
-        { error: "Missing X-Upload-Config header" },
-        { status: 400 }
-      );
-    }
-    config = JSON.parse(configStr);
-    csvText = await request.text();
+    const raw = request.headers.get("X-Upload-Config");
+    if (!raw) return NextResponse.json({ error: "Missing X-Upload-Config header" }, { status: 400 });
+    // Sent URI-encoded (header values must be Latin-1; filenames and CSV
+    // headers are not). A bare JSON object is still accepted.
+    config = JSON.parse(raw.trimStart().startsWith("{") ? raw : decodeURIComponent(raw));
+    // NUL bytes (present in 2 of the client's 20 files) cannot be stored in
+    // text or jsonb — Postgres rejects the whole 2,000-row payload (22P05).
+    csvText = (await request.text()).split("\0").join("");
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    return NextResponse.json(
-      { error: `Failed to read upload: ${msg}` },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: `Failed to read upload: ${err instanceof Error ? err.message : "Unknown error"}` }, { status: 400 });
   }
 
-  const { headers, fieldMapping, duplicateStrategy, overrideFields = [], filename, format = "generic" } = config;
-
+  const { headers, fieldMapping, duplicateStrategy, overrideFields = [], filename, format = "generic", delimiter } = config;
   const isBison = format === "bison";
   if ((!fieldMapping && !isBison) || !duplicateStrategy) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
   }
-
-  // Parse CSV server-side. Use csv-parse (same as the bulk import script + bounce
-  // route) so every ingestion path treats quoting/escaping identically.
-  const allRows = parse(csvText, {
-    skip_empty_lines: true,
-    relax_quotes: true,
-    relax_column_count: true,
-  }) as string[][];
-
-  // Skip header row
-  const rows = allRows.slice(1);
-
-  if (rows.length === 0) {
-    return NextResponse.json({ error: "CSV has no data rows" }, { status: 400 });
+  if (!STRATEGIES.has(duplicateStrategy) || !Array.isArray(overrideFields) || !Array.isArray(headers) || !headers.every((h) => typeof h === "string")) {
+    return NextResponse.json({ error: "Invalid duplicate strategy or mapping" }, { status: 400 });
   }
 
-  // Create upload batch record
+  // csv-parse, as every ingestion path uses, so quoting/escaping is identical.
+  // The delimiter is whatever the browser-side parser detected for this file.
+  let allRows: string[][];
+  try {
+    allRows = parse(csvText, {
+      skip_empty_lines: true, relax_quotes: true, relax_column_count: true, bom: true,
+      delimiter: typeof delimiter === "string" && delimiter.length === 1 ? delimiter : ",",
+    }) as string[][];
+  } catch (err) {
+    return NextResponse.json({ error: `CSV parse failed: ${err instanceof Error ? err.message : "Unknown error"}` }, { status: 400 });
+  }
+  const sourceHeaders = allRows[0] ?? [];
+  const rows = allRows.slice(1);
+  if (rows.length === 0) return NextResponse.json({ error: "CSV has no data rows" }, { status: 400 });
+
+  // The mapping was built from the first file's header row in the browser.
+  // Refuse a file whose columns sit elsewhere instead of importing them into
+  // the wrong fields.
+  if (!isBison) {
+    if (sourceHeaders.length !== headers.length) {
+      return NextResponse.json({ error: `Column count differs from the mapped file (${sourceHeaders.length} vs ${headers.length}) — map this file separately` }, { status: 400 });
+    }
+    for (const idx of Object.keys(fieldMapping).map(Number)) {
+      if (norm(sourceHeaders[idx] ?? "") !== norm(headers[idx] ?? "")) {
+        return NextResponse.json({ error: `Column ${idx + 1} is "${sourceHeaders[idx]}" here but "${headers[idx]}" in the mapped file — map this file separately` }, { status: 400 });
+      }
+    }
+  }
+
+  // Batches that never got a final status (process restart, crash) would poll
+  // forever in the UI; anything still 'processing' after 3 h is dead.
+  await supabase.from("upload_batches")
+    .update({ status: "error", error_log: ["Stalled: no final status after 3 hours (server restarted?). Rows imported before that point are kept."], completed_at: new Date().toISOString() })
+    .eq("status", "processing").lt("created_at", new Date(Date.now() - STALE_AFTER_MS).toISOString());
+
   const { data: batch, error: batchError } = await supabase
     .from("upload_batches")
     .insert({
       filename,
       total_rows: rows.length,
       status: "processing",
+      uploaded_by: user.id,
+      duplicate_strategy: duplicateStrategy,
+      field_mapping: isBison ? null : fieldMapping,
+      source_headers: sourceHeaders,
+      batch_type: "leads",
     })
     .select()
     .single();
-
   if (batchError || !batch) {
-    return NextResponse.json(
-      { error: batchError?.message ?? "Failed to create batch" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: batchError?.message ?? "Failed to create batch" }, { status: 500 });
   }
+  const batchId = batch.id as string;
 
-  const batchId = batch.id;
-  let inserted = 0;
-  let skipped = 0;
-  let merged = 0;
-  let replaced = 0;
-  let errors = 0;
+  if (isBison) return processBisonLegacy(supabase, rows, headers, batchId, filename);
 
-  // Process in chunks
+  const writeProgress = async (c: ImportCounters, status?: "complete" | "error") => {
+    const patch = {
+      processed_rows: c.processed,
+      inserted_rows: c.inserted,
+      merged_rows: c.merged,
+      replaced_rows: c.replaced,
+      skipped_rows: c.skipped,
+      no_email_rows: c.no_email,
+      in_file_duplicates: c.in_file_duplicates,
+      locations_added: c.locations_added,
+      esp_detected: c.esp_detected,
+      error_rows: c.errors,
+      error_log: c.error_log.length ? c.error_log : null,
+      ...(status ? { status, completed_at: new Date().toISOString() } : {}),
+    };
+    // The final write is what stops the UI polling: retry it.
+    for (let attempt = 1; ; attempt++) {
+      const { error } = await supabase.from("upload_batches").update(patch).eq("id", batchId);
+      if (!error) return;
+      if (!status || attempt >= 3) { console.error(`[uploads] progress write failed for ${batchId}: ${error.message}`); return; }
+      await new Promise((r) => setTimeout(r, 2000 * attempt));
+    }
+  };
+
+  after(async () => {
+    try {
+      const counters = await importRows(getPool(), rows, {
+        batchId, filename, headers, fieldMapping, duplicateStrategy, overrideFields,
+        onProgress: (c) => writeProgress(c),
+      });
+      const nothingLanded = counters.inserted + counters.merged + counters.replaced + counters.skipped === 0;
+      await writeProgress(counters, counters.errors > 0 && nothingLanded ? "error" : "complete");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      console.error(`[uploads] import ${batchId} failed: ${msg}`);
+      await supabase.from("upload_batches").update({ status: "error", error_log: [msg], completed_at: new Date().toISOString() }).eq("id", batchId);
+    }
+  });
+
+  return NextResponse.json({ batchId, totalRows: rows.length }, { status: 202 });
+}
+
+// ── Email Bison export format: original per-row upsert, unchanged semantics ──
+async function processBisonLegacy(
+  supabase: ReturnType<typeof createAdminClient>,
+  rows: string[][],
+  headers: string[],
+  batchId: string,
+  filename: string,
+) {
+  const CHUNK_SIZE = 500;
+  let inserted = 0, skipped = 0, merged = 0, errors = 0;
   for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
     const chunk = rows.slice(i, i + CHUNK_SIZE);
-    const historyBatch: {
-      lead_id: string;
-      event_type: string;
-      changed_fields: Record<string, { old: unknown; new: unknown }> | null;
-      notes: string;
-    }[] = [];
-
     for (const row of chunk) {
       try {
-        const normalized = isBison
-          ? normalizeBisonRow(row, headers)
-          : normalizeRow(row, headers, fieldMapping);
-        if (!normalized || !normalized.email) {
-          skipped++;
-          continue;
-        }
-
+        const normalized = normalizeBisonRow(row, headers);
+        if (!normalized || !normalized.email) { skipped++; continue; }
         const email = normalized.email as string;
-
-        // Email Bison path: full upsert so engagement/esp/validation-relevant fields
-        // are always refreshed (findings 5). Never downgrade is_bounced: once a lead
-        // has bounced it stays bounced even if a later export shows 0 bounces (finding 6).
-        if (isBison) {
-          const { data: existingBison } = await supabase
-            .from("leads")
-            .select("id, is_bounced")
-            .eq("email", email)
-            .maybeSingle();
-          if (existingBison) {
-            if (existingBison.is_bounced) {
-              normalized.is_bounced = true;
-              delete normalized.bounced_at; // keep original bounce timestamp/source
-              delete normalized.bounce_source;
-            }
-            // Never regress DB timestamps on a re-upload: the Bison export
-            // carries its own created_at/updated_at (parse-bison), and the
-            // row's true creation time must survive.
-            delete normalized.created_at;
-            delete normalized.updated_at;
-            const { error: updErr } = await supabase.from("leads").update(normalized).eq("id", existingBison.id);
-            if (updErr) errors++;
-            else merged++;
-          } else {
-            const { error: insErr } = await supabase.from("leads").insert(normalized).select("id").single();
-            if (insErr) errors++;
-            else inserted++;
-          }
-          continue;
-        }
-
-        // Check if lead exists
-        const { data: existing } = await supabase
-          .from("leads")
-          .select("id")
-          .eq("email", email)
-          .maybeSingle();
-
+        // Full upsert so engagement/esp/validation-relevant fields are always
+        // refreshed. Never downgrade is_bounced; never regress DB timestamps.
+        const { data: existing } = await supabase.from("leads").select("id, is_bounced").eq("email", email).maybeSingle();
         if (existing) {
-          // Duplicate found
-          switch (duplicateStrategy) {
-            case "skip":
-              skipped++;
-              break;
-            case "merge": {
-              // Only fill blank fields
-              const { data: current } = await supabase
-                .from("leads")
-                .select("*")
-                .eq("id", existing.id)
-                .single();
-              if (current) {
-                const updates: Record<string, unknown> = {};
-                const changedFields: Record<string, { old: unknown; new: unknown }> = {};
-                for (const [key, val] of Object.entries(normalized)) {
-                  if (key === "email") continue;
-                  if (val && !current[key]) {
-                    updates[key] = val;
-                    changedFields[key] = { old: current[key] ?? null, new: val };
-                  }
-                }
-                if (Object.keys(updates).length > 0) {
-                  updates.updated_at = new Date().toISOString();
-                  const { error: mergeErr } = await supabase
-                    .from("leads")
-                    .update(updates)
-                    .eq("id", existing.id);
-                  if (mergeErr) {
-                    errors++;
-                    break;
-                  }
-                  historyBatch.push({
-                    lead_id: existing.id,
-                    event_type: "updated",
-                    changed_fields: changedFields,
-                    notes: `Merged from upload: ${filename}`,
-                  });
-                }
-              }
-              merged++;
-              break;
-            }
-            case "replace": {
-              // Only override fields the user selected
-              const { data: current } = await supabase
-                .from("leads")
-                .select("*")
-                .eq("id", existing.id)
-                .single();
-              if (current) {
-                const updates: Record<string, unknown> = {};
-                const changedFields: Record<string, { old: unknown; new: unknown }> = {};
-                for (const [key, val] of Object.entries(normalized)) {
-                  if (key === "email") continue;
-                  if (!overrideFields.includes(key)) continue;
-                  if (val && val !== current[key]) {
-                    updates[key] = val;
-                    changedFields[key] = { old: current[key] ?? null, new: val };
-                  }
-                }
-                if (Object.keys(updates).length > 0) {
-                  updates.updated_at = new Date().toISOString();
-                  const { error: replaceErr } = await supabase
-                    .from("leads")
-                    .update(updates)
-                    .eq("id", existing.id);
-                  if (replaceErr) {
-                    errors++;
-                    break;
-                  }
-                  historyBatch.push({
-                    lead_id: existing.id,
-                    event_type: "updated",
-                    changed_fields: Object.keys(changedFields).length > 0 ? changedFields : null,
-                    notes: `Replaced fields [${overrideFields.join(", ")}] from upload: ${filename}`,
-                  });
-                }
-              }
-              replaced++;
-              break;
-            }
-          }
+          if (existing.is_bounced) { normalized.is_bounced = true; delete normalized.bounced_at; delete normalized.bounce_source; }
+          delete normalized.created_at; delete normalized.updated_at;
+          const { error } = await supabase.from("leads").update(normalized).eq("id", existing.id);
+          if (error) errors++; else merged++;
         } else {
-          // New lead — insert
-          const { data: insertedLead, error: insertError } = await supabase
-            .from("leads")
-            .insert(normalized)
-            .select("id")
-            .single();
-          if (insertError) {
-            errors++;
-          } else {
-            inserted++;
-            if (insertedLead) {
-              historyBatch.push({
-                lead_id: insertedLead.id,
-                event_type: "created",
-                changed_fields: null,
-                notes: `Created from upload: ${filename}`,
-              });
-            }
-          }
+          const { error } = await supabase.from("leads").insert(normalized);
+          if (error) errors++; else inserted++;
         }
-      } catch {
-        errors++;
-      }
+      } catch { errors++; }
     }
-
-    // Flush history records for this chunk
-    if (historyBatch.length > 0) {
-      await supabase.from("lead_history").insert(historyBatch);
-    }
-
-    // Update batch progress after each chunk
-    await supabase
-      .from("upload_batches")
-      .update({
-        processed_rows: Math.min(i + CHUNK_SIZE, rows.length),
-        skipped_rows: skipped,
-        merged_rows: merged,
-        replaced_rows: replaced,
-      })
-      .eq("id", batchId);
+    await supabase.from("upload_batches").update({
+      processed_rows: Math.min(i + CHUNK_SIZE, rows.length), inserted_rows: inserted, skipped_rows: skipped, merged_rows: merged, error_rows: errors,
+    }).eq("id", batchId);
   }
-
-  // Mark complete
-  await supabase
-    .from("upload_batches")
-    .update({
-      status: "complete",
-      processed_rows: rows.length,
-      skipped_rows: skipped,
-      merged_rows: merged,
-      replaced_rows: replaced,
-      completed_at: new Date().toISOString(),
-    })
-    .eq("id", batchId);
-
-  // Keep the companies table + category cache in sync (name+city+state
-  // identity; seeds company categories from Bison-provided lead categories,
-  // propagates cached categories to new leads). Best-effort — an import
-  // shouldn't fail because the sync did.
-  const { error: syncError } = await supabase.rpc("fn_sync_companies");
-  if (syncError) console.error("fn_sync_companies failed:", syncError.message);
-
-  return NextResponse.json({
-    batchId,
-    inserted,
-    skipped,
-    merged,
-    replaced,
-    errors,
-  });
+  await supabase.from("upload_batches").update({
+    status: "complete", processed_rows: rows.length, inserted_rows: inserted, skipped_rows: skipped, merged_rows: merged, error_rows: errors,
+    completed_at: new Date().toISOString(),
+  }).eq("id", batchId);
+  return NextResponse.json({ batchId, inserted, skipped, merged, replaced: 0, errors, filename });
 }

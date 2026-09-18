@@ -4,6 +4,37 @@ export interface LeadField {
   aliases: string[];
 }
 
+// Rows per no-email download part (client works in Clay, whose CSV limit is
+// 50k rows; asked for ≤45k, 49,999 keeps the part count minimal). Shared by
+// the holdbacks route and the UI links so the part maths never diverges.
+export const HOLDBACK_PART_SIZE = 49_999;
+
+// Cell values that mean "nothing here". Dropped from incoming rows and treated
+// as blank in the database by the merge (1,773,590 leads carry company_phone =
+// 'there', Bison's template fallback; 11,279 carry '--').
+export const BLANKISH_VALUES = ["", "--", "-", "there", "#ERROR!", "N/A", "n/a", "NA", "null", "NULL", "None", "none"];
+const BLANKISH_SET = new Set(BLANKISH_VALUES.map((v) => v.toLowerCase()));
+export const isBlankish = (v: unknown): boolean => v == null || BLANKISH_SET.has(String(v).trim().toLowerCase());
+
+// The seven ESP labels Bison writes (the ESP chip matches exactly, the Mimecast
+// default exclusion and espBucket() depend on them). A file's own ESP column is
+// folded onto these; anything unrecognised is dropped so the MX lookup fills it.
+const ESP_LABELS: Array<[RegExp, string]> = [
+  [/mimecast/i, "Mimecast"],
+  [/pphosted|proofpoint/i, "Proofpoint"],
+  [/barracuda/i, "Barracuda"],
+  [/google|gmail|g ?suite|workspace/i, "Google"],
+  [/outlook|office ?365|o365|microsoft|exchange|hotmail/i, "Microsoft"],
+  [/zoho/i, "Zoho"],
+  [/^(custom|other|self.?hosted|private)$/i, "Custom"],
+];
+export function normalizeEspLabel(raw: string): string | null {
+  const v = raw.trim();
+  if (!v) return null;
+  for (const [re, label] of ESP_LABELS) if (re.test(v)) return label;
+  return null;
+}
+
 // Canonical field set — only the fields present in the Email Bison CSV export
 // (plus OutboundHero product fields: source, esp, email_type). Anything not here
 // is intentionally excluded so the app surfaces only data we actually have.

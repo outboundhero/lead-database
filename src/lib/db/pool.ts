@@ -13,6 +13,9 @@ export function getPool(): Pool {
       connectionTimeoutMillis: 120000,  // queue waits up to 2 min for a free connection
       ssl: { rejectUnauthorized: false },
     });
+    // An idle client's socket error is emitted here; without a listener it is
+    // an unhandled 'error' event and takes the web process down.
+    pool.on("error", (err) => console.error(`[pg pool] idle client error: ${err.message}`));
   }
   return pool;
 }

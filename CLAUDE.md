@@ -1262,6 +1262,139 @@ Regression test: `DATABASE_URL=... npx tsx scripts/test-client-targeting.mts`
 drives the real reducer + `buildRpcFilters` + `fn_lead_filter_conditions`
 against every client with location targeting.
 
+## One lead, many locations (migrations 103/104, 2026-09-18)
+
+A person who covers several offices must be findable under EACH place
+(client decision 2026-09-17). Email stays the identity — a second `leads` row
+for the same email is impossible (`leads_email_key`) and every `ON CONFLICT
+(email)` depends on it — so extra places are rows in **`lead_locations`**
+(`city_text`/`state_text` exactly as imported, plus the resolver's
+`city/state/state_code/country_code/location_id/location_status`, `source`,
+`upload_batch_id`; `UNIQUE (lead_id, location_key)` where the key is
+`lower(city_text) | coalesce(state_code, upper(state_text))` — 107 — so
+"Lincoln, CA" and "Lincoln, California" are one row; a code-less spelling
+("Calif.") is a separate key until the resolver fills `state_code`, and the
+resolver must then dedupe against a sibling with the same resulting key). A
+side row must carry a city or a state (`lead_locations_has_place`). The PRIMARY
+location stays in the existing `leads` columns and is never overwritten by an
+import; the merge fills a blank primary only when city and state agree (see
+the import engine section).
+
+**How predicates see them — read before touching any location SQL.** A
+subquery against the side table inside an OR with the primary predicate was
+measured to make the planner abandon the location index and walk 4.2M rows
+(24 s for one client). So `trg_lead_locations_sync` keeps denormalised arrays
+on `leads` — `alt_location_ids bigint[]`, `alt_state_keys text[]` ('US|TX'),
+`alt_cities text[]` (lower-cased), `alt_states text[]` (lower-cased names and
+codes), `alt_location_text` — each with a partial GIN index (`WHERE … IS NOT
+NULL`, 104). Predicates add one `&&`/`@>`/trigram probe per branch; the arrays
+are NULL on the ~9M single-location leads, so the indexes stay tiny. The
+side-table write is one non-HOT `UPDATE leads` per location row — bulk loaders
+sort by `lead_id`. The trigger locks the `leads` row (`FOR NO KEY UPDATE`)
+BEFORE aggregating, otherwise two concurrent writers for the same lead could
+each aggregate their own snapshot and the second would drop the first's row
+(107). The resolver's cohort index is `idx_lead_locations_pending … WHERE
+location_id IS NULL` (a state-only row keeps `state_code` forever, so that
+column was the wrong predicate).
+
+Rules (client defaults): exclusions apply if ANY location matches; the primary
+is the best-resolved location; a push sends the location that matched the
+client's targeting (fallback: primary). **Status of the wiring:** the table,
+arrays, trigger and indexes exist and the import writes rows; the filter and
+eligibility functions do NOT read the arrays yet (stage 2 — until then an
+extra location is stored but not searchable). `lead_locations` has no
+`'unresolved'` status by design ("never unknown").
+
+## CSV import engine (2026-09-18) — `src/lib/uploads/import-rows.ts`
+
+The Uploads page used to drive a per-row PostgREST loop (2–3 sequential
+US→Sydney round trips per row) that could not finish an 88k-row file inside any
+request budget — and `upload_batches` was **empty in production**: the UI
+importer had never been used. Every lead arrived via scripts and the Bison
+mirror. The engine is now set-based, in chunks of 2,000 rows, one transaction
+per chunk (`SET LOCAL` only), sorted by email / lead_id for lock order:
+
+| Row | Becomes |
+|---|---|
+| no usable email (empty, `N/A`, `--`, no `@…`) | `upload_holdbacks` row, cells verbatim (`raw jsonb`), dense `seq` → `/api/uploads/holdbacks?batch=&part=` streams parts of **49,999** rows (`HOLDBACK_PART_SIZE`, client: "under 50k for Clay"), non-overlapping by construction; one link per part on the Uploads page; managers only for their own batches |
+| new email | `INSERT … jsonb_populate_recordset(null::leads, …) ON CONFLICT (email) DO NOTHING` |
+| existing email | `skip` (nothing written, no extra location) / `merge` (fill blanks — **placeholder junk counts as blank**, see below) / `replace` (chosen fields). Only rows where a chosen column actually changes are rewritten (`WHERE … IS DISTINCT FROM`, `RETURNING` drives `lead_history` and the counters) — a re-upload of the same file merges 0 |
+| existing email, different city/state | + `lead_locations` row; primary untouched |
+| same email twice in one file | second occurrence at another place → `lead_locations`; counted in `in_file_duplicates` |
+
+**City and state are ONE fact** (`decidePlace`/`samePlace`, review finding
+2026-09-18 — the first version filled them independently and gave Denver the
+state of Lincoln, CA). Merge fills `city` only when the stored state is blank,
+junk, or the row's state; fills `state` only when the stored city is blank or
+is the row's city; a stored state with no code (`local`, `New`, `North
+America`…) counts as blank when the row brings a coded state. Whether the row's
+place becomes an extra location is judged against the primary AFTER that
+write, so a place that just became the primary is never stored twice.
+Cities decide when both sides have one (a code conflict — Portland OR vs ME —
+still splits); otherwise states; with nothing comparable the row's place is
+kept as an extra rather than dropped. 32 unit cases:
+`npx tsx scripts/test-merge-location.mts`.
+
+Also at import: `category_source = 'upload'` when a category is present (105
+extends the leads CHECK, **107 the companies one** — `fn_sync_companies` copies
+it and would have aborted); **ESP via MX lookup** (`esp-lookup.ts`, 40-way
+concurrent, 2.5 s timeout, process-wide cache, same seven labels Bison writes)
+— before this every ESP value in the database came from Bison's tags and an
+upload left it NULL, which routes Mimecast/Proofpoint mailboxes to the
+"default" campaign bucket; websites normalised to bare domains; titles kept
+readable; company cut at the first `|`; typed columns (`is_bounced`, dates,
+`validation_status`, `category_source`, `category_confidence`, `email_type`)
+coerced or dropped per cell, because one bad value would fail a 2,000-row
+statement. Counters live on `upload_batches` (`inserted_rows`, `merged_rows`,
+`replaced_rows`, `skipped_rows`, `no_email_rows`, `in_file_duplicates`,
+`locations_added`, `esp_detected`, `error_rows`, `error_log`).
+
+**The route returns `{batchId}` (202) at once and runs the import in Next
+`after()`** — ~18 ms/row measured, so a 10k-row file is ~3 min and the 88k set
+~26 min; the page and `UploadProgress` follow `upload_batches`. A chunk that
+fails on deadlock / serialization / statement timeout / dropped connection is
+retried (3×, backoff); a data error bisects the chunk down to 100-row blocks
+(counters are deltas applied only after commit, so a rolled-back chunk counts
+nothing). The final status write retries; any batch still `processing` after
+3 h is marked `error` by the next upload ("stalled"). The route 400s a file
+whose columns differ from the mapped file (multi-file uploads reuse file 1's
+mapping), takes the browser-detected delimiter, and reads `X-Upload-Config`
+URI-encoded (header values must be Latin-1). It has a role gate (it had none)
+and **no longer calls `fn_sync_companies` inline** (5 min / 5 GB temp per call —
+the categorize worker's job). The Email Bison export format keeps its
+original per-row path.
+
+**Rehearse before importing:** `npx tsx --env-file=.env.local
+scripts/test-upload-import.mts <file.csv> --rows=10 [--emails=a@x,b@y]
+[--strategy=merge|skip|replace] [--override=city,state] [--twice]` runs the
+real engine on real rows inside one transaction and rolls back, printing every
+stored field (`--twice` re-runs the chunks: the second pass must insert, merge
+and add nothing); `--commit` performs the small import for real. Verified
+2026-09-18 after the review fixes: merge/skip/replace on the three rows the
+review used (Denver stays stateless with Lincoln as an extra; Orangevale
+becomes the primary once; one Greater-Sacramento extra), second pass 0/0/0.
+
+⚠ **Placeholder junk in production:** 1,773,590 leads have `company_phone =
+'there'` and 11,279 `'--'` — Bison's template fallback for its "company phone"
+variable (5,025,020 mirror rows carry it), copied in by the custom-variable
+fill. The merge treats these as blank so a real phone from a file replaces
+them; a one-off `→ NULL` cleanup is pending (1.77M-row UPDATE: batch it,
+off-peak). Mirror addresses carry "(No Address Available)" ×354,157 the same way.
+
+## Titles split, company taglines cut (migration 106)
+
+`fn_sync_lead_job_titles` now splits plain text on `\s*[|;]\s*` (JSON arrays as
+before) — `President | CEO` stays readable in `leads.title` (exports, Bison
+pushes) and becomes two `lead_job_titles` rows (Title chip, its search, the
+cache). **Not** on `/` or `&` (52,039 and 64,673 titles: "Owner/Operator",
+"Founder & CEO" are single roles). Backfill added 5,456 title rows for ~4.6k
+leads without touching `leads.title`. `fn_clean_company_name` (BEFORE INSERT OR
+UPDATE OF company) keeps the first non-empty `|`-part on every write path (107;
+the first version turned "| Acme" into NULL) — the client chose this knowing
+"Radoslovich | Shapiro, PC" loses its second partner. `companies.name` still
+holds the old "X | Y" spellings for those ~1k rows; `fn_sync_companies` keys on
+the cleaned lead company, so those rows go stale rather than wrong.
+
 ## Mimecast is excluded by default (client request, 2026-09-16)
 
 `DEFAULT_FILTER_STATE.esp` ships as `exclude: ["Mimecast"]`

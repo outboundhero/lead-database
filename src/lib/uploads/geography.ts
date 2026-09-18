@@ -29,6 +29,17 @@ const VALID_CODES = new Set([
   ...Object.values(CA_PROVINCES),
 ]);
 
+const CA_CODES = new Set(Object.values(CA_PROVINCES));
+
+/** 'US' | 'CA' for a normalized 2-letter code, else null. */
+export function countryForStateCode(code: string | null | undefined): string | null {
+  if (!code) return null;
+  const upper = code.toUpperCase();
+  if (CA_CODES.has(upper)) return "CA";
+  if (VALID_CODES.has(upper)) return "US";
+  return null;
+}
+
 export function normalizeStateValue(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;

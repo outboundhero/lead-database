@@ -111,11 +111,18 @@ export interface UploadBatch {
   filename: string | null;
   total_rows: number | null;
   processed_rows: number;
+  inserted_rows: number | null;
   skipped_rows: number;
   merged_rows: number;
   replaced_rows: number;
+  error_rows: number | null;
+  no_email_rows: number;          // held back verbatim for the chunked download (105)
+  in_file_duplicates: number;
+  locations_added: number;        // lead_locations rows created (103)
+  esp_detected: number;
+  source_headers: string[] | null;
   status: "pending" | "processing" | "complete" | "error";
-  error_log: Record<string, unknown> | null;
+  error_log: Record<string, unknown> | string[] | null;
   created_at: string;
   completed_at: string | null;
 }

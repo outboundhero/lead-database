@@ -17,8 +17,8 @@ import { Upload } from "lucide-react";
 import { CSVDropzone } from "@/components/uploads/csv-dropzone";
 import { FieldMapper } from "@/components/uploads/field-mapper";
 import { DuplicateStrategy } from "@/components/uploads/duplicate-strategy";
-import { UploadProgress } from "@/components/uploads/upload-progress";
-import type { ParseResult } from "@/lib/uploads/parse-csv";
+import { UploadProgress, HoldbackLinks } from "@/components/uploads/upload-progress";
+import { detectDelimiter, type ParseResult } from "@/lib/uploads/parse-csv";
 import type { FieldMapping } from "@/lib/uploads/normalize-row";
 import { detectBisonFormat } from "@/lib/uploads/parse-bison";
 import type { UploadBatch } from "@/types/database";
@@ -75,25 +75,49 @@ export default function UploadsPage() {
   }
 
   async function uploadFile(file: File, mapping: FieldMapping, headers: string[]) {
-    const csvText = await file.text();
+    const [csvText, delimiter] = await Promise.all([file.text(), detectDelimiter(file)]);
     const res = await fetch("/api/uploads/process", {
       method: "POST",
       headers: {
         "Content-Type": "text/csv",
-        "X-Upload-Config": JSON.stringify({
+        // URI-encoded: header values must be Latin-1, filenames/CSV headers often are not.
+        "X-Upload-Config": encodeURIComponent(JSON.stringify({
           headers,
           fieldMapping: mapping,
           duplicateStrategy: strategy,
           overrideFields: strategy === "replace" ? overrideFields : [],
           filename: file.name,
           format,
-        }),
+          delimiter,
+        })),
       },
       body: csvText,
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
+    // A proxy/timeout error page is not JSON; surface its text instead of a SyntaxError.
+    const isJson = (res.headers.get("content-type") ?? "").includes("application/json");
+    const data = isJson ? await res.json() : { error: (await res.text()).slice(0, 300) || res.statusText };
+    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
     return data.batchId as string;
+  }
+
+  // Wait for a batch's final status. The import runs on the server after the
+  // POST returns; if its progress stops moving for STALL_MS (server restarted
+  // mid-import) give up polling rather than spin forever.
+  const STALL_MS = 15 * 60_000;
+  async function waitForBatch(id: string): Promise<void> {
+    const supabase = createClient();
+    let lastProcessed = -1, lastChange = Date.now();
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const { data } = await supabase.from("upload_batches").select("status, processed_rows").eq("id", id).single();
+      if (!data) continue;
+      if (data.status === "complete" || data.status === "error") return;
+      if (data.processed_rows !== lastProcessed) { lastProcessed = data.processed_rows; lastChange = Date.now(); }
+      else if (Date.now() - lastChange > STALL_MS) {
+        toast.error("This import has not progressed for 15 minutes — it may have stalled. Check Upload history later; rows imported so far are kept.");
+        return;
+      }
+    }
   }
 
   async function handleStartUpload() {
@@ -101,35 +125,25 @@ export default function UploadsPage() {
     setStep("processing");
     setCurrentFileIndex(0);
 
-    // Process files sequentially
+    // Process files sequentially; the panel follows the batch that is running.
+    let lastId: string | null = null;
     for (let i = 0; i < csvFiles.length; i++) {
       setCurrentFileIndex(i);
+      setBatchId(null);
       try {
         const id = await uploadFile(csvFiles[i], fieldMapping, parseResult.headers);
         setBatchId(id);
-        // Wait for this batch to finish before starting next
-        // UploadProgress handles polling; for multi-file we await via a Promise
-        await new Promise<void>((resolve) => {
-          const interval = setInterval(async () => {
-            const supabase = (await import("@/lib/supabase/client")).createClient();
-            const { data } = await supabase
-              .from("upload_batches")
-              .select("status")
-              .eq("id", id)
-              .single();
-            if (data?.status === "complete" || data?.status === "error") {
-              clearInterval(interval);
-              resolve();
-            }
-          }, 2000);
-        });
+        lastId = id;
+        await waitForBatch(id);
       } catch (err) {
         toast.error(`Failed on ${csvFiles[i].name}: ${err instanceof Error ? err.message : "Unknown error"}`);
       }
     }
 
     loadHistory();
-    resetWizard();
+    // Leave the last batch's result on screen ("Upload Another" resets);
+    // if nothing was even started there is nothing to show.
+    if (!lastId) resetWizard();
   }
 
   function resetWizard() {
@@ -218,7 +232,7 @@ export default function UploadsPage() {
                   Processing file {currentFileIndex + 1} of {csvFiles.length}: {csvFiles[currentFileIndex]?.name}
                 </p>
               )}
-              <UploadProgress batchId={batchId} onDone={() => {}} />
+              <UploadProgress batchId={batchId} onDone={currentFileIndex >= csvFiles.length - 1 ? resetWizard : undefined} />
             </div>
           )}
           {step === "processing" && !batchId && (
@@ -240,8 +254,10 @@ export default function UploadsPage() {
                     <TableHead>File</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Total</TableHead>
-                    <TableHead>Skipped</TableHead>
+                    <TableHead>New</TableHead>
                     <TableHead>Merged</TableHead>
+                    <TableHead>Locations</TableHead>
+                    <TableHead>No email</TableHead>
                     <TableHead>Date</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -268,10 +284,21 @@ export default function UploadsPage() {
                         {batch.total_rows?.toLocaleString() ?? "—"}
                       </TableCell>
                       <TableCell className="tabular-nums">
-                        {batch.skipped_rows.toLocaleString()}
+                        {(batch.inserted_rows ?? 0).toLocaleString()}
                       </TableCell>
                       <TableCell className="tabular-nums">
                         {batch.merged_rows.toLocaleString()}
+                      </TableCell>
+                      <TableCell className="tabular-nums">
+                        {(batch.locations_added ?? 0).toLocaleString()}
+                      </TableCell>
+                      <TableCell className="tabular-nums">
+                        {(batch.no_email_rows ?? 0) > 0 ? (
+                          <span className="inline-flex items-center gap-2">
+                            {batch.no_email_rows.toLocaleString()}
+                            <HoldbackLinks batch={batch} compact />
+                          </span>
+                        ) : "0"}
                       </TableCell>
                       <TableCell className="text-muted-foreground">
                         {new Date(batch.created_at).toLocaleDateString()}

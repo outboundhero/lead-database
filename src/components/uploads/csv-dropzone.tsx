@@ -2,7 +2,7 @@
 
 import { useCallback } from "react";
 import { useDropzone } from "react-dropzone";
-import { Upload, FileText } from "lucide-react";
+import { Upload } from "lucide-react";
 import type { ParseResult } from "@/lib/uploads/parse-csv";
 import { parseCSVFile } from "@/lib/uploads/parse-csv";
 
