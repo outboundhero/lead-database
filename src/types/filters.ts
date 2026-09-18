@@ -75,6 +75,14 @@ export interface CategorySearchFilter {
 export interface CustomTagsFilter { include: string[]; exclude: string[]; includeMode?: MatchMode; excludeMode?: MatchMode; }
 export interface WebsiteFilter { include: string[]; exclude: string[]; includeMode?: MatchMode; excludeMode?: MatchMode; }
 
+// "Ends with" filters (client request 2026-09-18): lower(email) / lower(domain)
+// ends with each value — ".in", ".org", ".co", "@gmail.com". OR within include,
+// every exclude is an AND-NOT. No modes. Domain falls back to the email's
+// domain where the domain column is unset (same rule as the Website chip).
+export interface SuffixFilter { include: string[]; exclude: string[]; }
+const suffixList = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim()) : [];
+
 // New for OutboundHero — email type segmented control. Default: both true.
 export interface EmailTypeFilter {
   personal: boolean;
@@ -132,6 +140,8 @@ export interface FilterState {
   categorySearch: CategorySearchFilter;
   customTags: CustomTagsFilter;
   website: WebsiteFilter;
+  emailSuffix: SuffixFilter;    // email ends with (.in / .org / @gmail.com)
+  domainSuffix: SuffixFilter;   // domain ends with
 
   // One-box search: comma-separated terms OR'd across email, company,
   // first/last name, domain, category, subcategory.
@@ -219,6 +229,8 @@ export const DEFAULT_FILTER_STATE: FilterState = {
   categorySearch: { include: [], exclude: [], matchMode: "contains" },
   customTags: { include: [], exclude: [] },
   website: { include: [], exclude: [] },
+  emailSuffix: { include: [], exclude: [] },
+  domainSuffix: { include: [], exclude: [] },
   globalSearch: "",
   emailType: { personal: true, general: true },
   includeBounced: false,
@@ -320,6 +332,12 @@ export function normalizeFilterState(partial: unknown): FilterState {
       includeMode: mode(p.website?.includeMode),
       excludeMode: mode(p.website?.excludeMode),
     },
+    // Only non-blank strings survive: the SQL skips blank suffixes (a blank
+    // would match every row), so a blank-only value must not count as an
+    // active filter either (it would satisfy the bulk-delete guard with no
+    // real condition behind it).
+    emailSuffix: { include: suffixList(p.emailSuffix?.include), exclude: suffixList(p.emailSuffix?.exclude) },
+    domainSuffix: { include: suffixList(p.domainSuffix?.include), exclude: suffixList(p.domainSuffix?.exclude) },
     globalSearch: typeof p.globalSearch === "string" ? p.globalSearch : d.globalSearch,
     emailType: { ...d.emailType, ...(p.emailType ?? {}) },
     commercialCleaning: p.commercialCleaning === true,
@@ -373,6 +391,8 @@ export function countActiveFilters(filters: FilterState): number {
   if (filters.categorySearch.include.length || filters.categorySearch.exclude.length) count++;
   if (filters.customTags.include.length || filters.customTags.exclude.length) count++;
   if (filters.website.include.length || filters.website.exclude.length) count++;
+  if (filters.emailSuffix.include.length || filters.emailSuffix.exclude.length) count++;
+  if (filters.domainSuffix.include.length || filters.domainSuffix.exclude.length) count++;
   if (filters.globalSearch.trim()) count++;
   // emailType counts as active only when not both selected (i.e. user has restricted)
   if (!(filters.emailType.personal && filters.emailType.general)) count++;

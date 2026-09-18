@@ -33,9 +33,15 @@ interface Row { client_tag: string; states: string[] }
 async function main() {
   const db = new Client({ connectionString: DB });
   await db.connect();
-  await db.query("set statement_timeout = 0");
+  // Transaction-scoped timeout: DATABASE_URL is the 6543 TRANSACTION pooler, where a
+  // session-level SET leaks onto a shared backend (2026-09-16 push-worker outage).
+  const tq = async <R extends import("pg").QueryResultRow = any>(sql: string, params?: unknown[]) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+    await db.query("begin");
+    try { await db.query("set local statement_timeout = 0"); const r = await db.query<R>(sql, params); await db.query("commit"); return r; }
+    catch (e) { await db.query("rollback").catch(() => {}); throw e; }
+  };
 
-  const { rows } = await db.query<Row>(`
+  const { rows } = await tq<Row>(`
     select t.client_tag,
            array_agg(distinct upper(e->>'state')) filter (where e->>'state' is not null) as states
       from client_targeting t, jsonb_array_elements(t.include_locations::jsonb) e
@@ -51,7 +57,7 @@ async function main() {
 
   for (const t of targets) {
     // Exactly what the Leads page sends when this client is selected.
-    const { rows: [f] } = await db.query<{ filters: unknown }>(`
+    const { rows: [f] } = await tq<{ filters: unknown }>(`
       select jsonb_build_object(
         'locationTargets', jsonb_build_object('include',
            (select jsonb_agg(e) from client_targeting t2, jsonb_array_elements(t2.include_locations::jsonb) e where t2.client_tag=$1),
@@ -77,12 +83,12 @@ async function main() {
     let total = "?", exact = "?", rowsMs = 0, countMs = 0;
     try {
       let t0 = Date.now();
-      await db.query(`select fn_filter_leads_v2($1::jsonb,'','desc',50,0)`,
+      await tq(`select fn_filter_leads_v2($1::jsonb,'','desc',50,0)`,
         [JSON.stringify({ ...(f.filters as object), skipCount: true })]);
       rowsMs = Date.now() - t0;
 
       t0 = Date.now();
-      const { rows: [c] } = await db.query<{ total: string; approx: string }>(
+      const { rows: [c] } = await tq<{ total: string; approx: string }>(
         `select r #>> '{totalCount}' as total, r #>> '{isApproximate}' as approx
            from fn_filter_leads_count($1::jsonb) r`, [js]);
       countMs = Date.now() - t0;
@@ -100,12 +106,12 @@ async function main() {
     // of false positives.
     let oos = 0;
     try {
-      const { rows: [w] } = await db.query<{ w: string }>(
+      const { rows: [w] } = await tq<{ w: string }>(
         `select array_to_string(fn_lead_filter_conditions($1::jsonb), ' AND ') as w`,
         [JSON.stringify(f.filters)]);
       if (!w.w) { oos = -1; }
       else {
-        const { rows: [c] } = await db.query<{ n: string }>(
+        const { rows: [c] } = await tq<{ n: string }>(
           `select count(*) n from leads l
             where ${w.w} and l.is_bounced = false
               and l.state_code is not null and upper(l.state_code) <> all($1::text[])`,

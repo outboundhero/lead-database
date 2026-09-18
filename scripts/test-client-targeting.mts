@@ -57,9 +57,15 @@ async function main() {
   const only = process.argv.slice(2).map((s) => s.toUpperCase());
   const db = new Client({ connectionString: DB });
   await db.connect();
-  await db.query("set statement_timeout = '180s'");
+  // Transaction-scoped timeout: DATABASE_URL is the 6543 TRANSACTION pooler, where a
+  // session-level SET leaks onto a shared backend (2026-09-16 push-worker outage).
+  const tq = async <R extends import("pg").QueryResultRow = any>(sql: string, params?: unknown[]) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+    await db.query("begin");
+    try { await db.query("set local statement_timeout = '180s'"); const r = await db.query<R>(sql, params); await db.query("commit"); return r; }
+    catch (e) { await db.query("rollback").catch(() => {}); throw e; }
+  };
 
-  const { rows } = await db.query<TargetingRow>(
+  const { rows } = await tq<TargetingRow>(
     `select client_tag, include_locations, exclude_locations, include_terms, exclude_terms
        from client_targeting
       where jsonb_array_length(coalesce(include_locations::jsonb,'[]'::jsonb)) > 0
@@ -116,7 +122,7 @@ async function main() {
       location: { ...DEFAULT_FILTER_STATE.location, state: s.location.state, city: s.location.city },
     } as never));
 
-    const { rows: [{ w }] } = await db.query<{ w: string }>(
+    const { rows: [{ w }] } = await tq<{ w: string }>(
       `select array_to_string(fn_lead_filter_conditions($1::jsonb), ' AND ') as w`, [JSON.stringify(rpc)]
     );
     if (!w) { ok(`${t.client_tag}: produced a location condition`, false, "empty WHERE"); continue; }
@@ -130,7 +136,7 @@ async function main() {
     const pairs = (t.include_locations ?? []).filter((e) => e.city)
       .map((e) => `${(e.city as string).toLowerCase().replace(/[^a-z]/g, "")}|${(e.state as string ?? "").toUpperCase()}`);
 
-    const { rows: [r] } = await db.query<{ total: string; out_of_state: string; off_target: string }>(
+    const { rows: [r] } = await tq<{ total: string; out_of_state: string; off_target: string }>(
       `with m as (
          select l.state_code, g.city_key, a.state_code as geo_state
            from leads l

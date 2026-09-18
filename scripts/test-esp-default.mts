@@ -47,8 +47,14 @@ ok("isDefaultEsp distinguishes default / removed / customised",
 if (process.env.DATABASE_URL) {
   const c = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await c.connect();
-  await c.query("set statement_timeout='60s'");
-  const { rows } = await c.query("select fn_lead_filter_conditions($1::jsonb) as conds", [JSON.stringify(rpc)]);
+  // Transaction-scoped timeout: DATABASE_URL is the 6543 TRANSACTION pooler, where a
+  // session-level SET leaks onto a shared backend (2026-09-16 push-worker outage).
+  const tq = async <R extends import("pg").QueryResultRow = any>(sql: string, params?: unknown[]) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+    await c.query("begin");
+    try { await c.query("set local statement_timeout = '60s'"); const r = await c.query<R>(sql, params); await c.query("commit"); return r; }
+    catch (e) { await c.query("rollback").catch(() => {}); throw e; }
+  };
+  const { rows } = await tq("select fn_lead_filter_conditions($1::jsonb) as conds", [JSON.stringify(rpc)]);
   const frag = (rows[0].conds as string[]).find((s) => s.includes("Mimecast"));
   ok("live SQL fragment is NULL-safe", !!frag && frag.includes("l.esp IS NULL OR") && frag.includes("<> ALL"), frag);
   await c.end();

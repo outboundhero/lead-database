@@ -18,6 +18,7 @@ import type {
   IncludeExclude,
   CustomTagsFilter,
   WebsiteFilter,
+  SuffixFilter,
   RangeFilter,
   EmailTypeFilter,
   EmailContainsFilter,
@@ -47,6 +48,8 @@ interface FilterBarProps {
   onCategorySearchChange: (value: CategorySearchFilter) => void;
   onCustomTagsChange: (value: CustomTagsFilter) => void;
   onWebsiteChange: (value: WebsiteFilter) => void;
+  onEmailSuffixChange: (value: SuffixFilter) => void;
+  onDomainSuffixChange: (value: SuffixFilter) => void;
   onGlobalSearchChange: (value: string) => void;
   onIncludeBouncedChange: (value: boolean) => void;
   onLoadPreset?: (filters: FilterState) => void;
@@ -140,6 +143,8 @@ const HIDEABLE_CHIPS: { key: string; label: string }[] = [
   { key: "state", label: "State" },
   { key: "categorySearch", label: "Category" },
   { key: "emailContains", label: "Email Contains" },
+  { key: "emailSuffix", label: "Email Ends With" },
+  { key: "domainSuffix", label: "Domain Ends With" },
   { key: "website", label: "Website / Domain" },
   { key: "customTags", label: "Custom Tags" },
   { key: "emailType", label: "Email Type" },
@@ -209,6 +214,8 @@ export function FilterBar({
   onCategorySearchChange,
   onCustomTagsChange,
   onWebsiteChange,
+  onEmailSuffixChange,
+  onDomainSuffixChange,
   onGlobalSearchChange,
   onIncludeBouncedChange,
   onLoadPreset,
@@ -717,6 +724,82 @@ export function FilterBar({
               </div>
               <p className="px-1 text-[11px] text-muted-foreground">
                 Substring match against the lead&apos;s email address / domain.
+              </p>
+            </div>
+          </FilterChip>
+        )}
+
+        {/* Email ends with — suffix include/exclude on the email address (.in, .org, @gmail.com) */}
+        {!isHidden("emailSuffix") && (
+          <FilterChip
+            label="Email Ends With"
+            activeCount={filters.emailSuffix.include.length + filters.emailSuffix.exclude.length}
+          >
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Include
+                </label>
+                <TagInput
+                  values={filters.emailSuffix.include}
+                  placeholder="e.g. .org, .co, @gmail.com"
+                  onChange={(arr) =>
+                    onEmailSuffixChange({ ...filters.emailSuffix, include: arr })
+                  }
+                />
+              </div>
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Exclude
+                </label>
+                <TagInput
+                  values={filters.emailSuffix.exclude}
+                  placeholder="e.g. .in"
+                  onChange={(arr) =>
+                    onEmailSuffixChange({ ...filters.emailSuffix, exclude: arr })
+                  }
+                />
+              </div>
+              <p className="px-1 text-[11px] text-muted-foreground">
+                The email address must end with one of these (case-insensitive). &quot;.co&quot; does not match &quot;.com&quot;.
+              </p>
+            </div>
+          </FilterChip>
+        )}
+
+        {/* Domain ends with — suffix include/exclude on the company domain (falls back to the email's domain) */}
+        {!isHidden("domainSuffix") && (
+          <FilterChip
+            label="Domain Ends With"
+            activeCount={filters.domainSuffix.include.length + filters.domainSuffix.exclude.length}
+          >
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Include
+                </label>
+                <TagInput
+                  values={filters.domainSuffix.include}
+                  placeholder="e.g. .org, .co.uk"
+                  onChange={(arr) =>
+                    onDomainSuffixChange({ ...filters.domainSuffix, include: arr })
+                  }
+                />
+              </div>
+              <div>
+                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Exclude
+                </label>
+                <TagInput
+                  values={filters.domainSuffix.exclude}
+                  placeholder="e.g. .in"
+                  onChange={(arr) =>
+                    onDomainSuffixChange({ ...filters.domainSuffix, exclude: arr })
+                  }
+                />
+              </div>
+              <p className="px-1 text-[11px] text-muted-foreground">
+                The company domain must end with one of these; leads without a domain use their email&apos;s domain.
               </p>
             </div>
           </FilterChip>

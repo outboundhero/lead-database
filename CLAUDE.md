@@ -1386,6 +1386,21 @@ and add nothing); `--commit` performs the small import for real. Verified
 review used (Denver stays stateless with Lincoln as an extra; Orangevale
 becomes the primary once; one Greater-Sacramento extra), second pass 0/0/0.
 
+**Folder driver for a delivery:** `npx tsx --env-file=.env.local
+scripts/import-csv-folder.mts <folder> [--files=a.csv,b.csv] [--only=1,3]
+[--tag-from-filename | --tag=X] [--dry]` — one `upload_batches` row per file,
+sequential (never run two imports at once), byte-identical files skipped by
+checksum, NUL stripped, live counters. Runs on 2026-09-18 (both 0 errors):
+the Sep-15 delivery — 18 unique files of 20 (7≡6, 10≡8), 37 min, **46,820 new
+· 39,012 merged · 22,001 extra locations · 83,043 no-email held back**; the
+client-tagged files (JPDET, CCGHTX, CCGEN, CCGGC) — 10 files, 9 min, **8,532
+new · 23,392 merged · 4,009 extra locations · 38,851 no-email**, tags landed
+as JPDET 6,279 / CCGHTX 15,263 / CCGEN 7,621 / CCGGC 2,758 leads. `CCGEN
+5.csv` was 9,036 no-email rows and 16 leads (a stray no-email export). About
+18 ms/row of database work; the first file also pays the MX lookups (cached
+afterwards). Everything in one run merges into one Uploads-page history row
+per file, each with its own no-email download parts.
+
 ⚠ **Placeholder junk in production:** 1,773,590 leads have `company_phone =
 'there'` and 11,279 `'--'` — Bison's template fallback for its "company phone"
 variable (5,025,020 mirror rows carry it), copied in by the custom-variable
@@ -1406,6 +1421,48 @@ the first version turned "| Acme" into NULL) — the client chose this knowing
 "Radoslovich | Shapiro, PC" loses its second partner. `companies.name` still
 holds the old "X | Y" spellings for those ~1k rows; `fn_sync_companies` keys on
 the cleaned lead company, so those rows go stale rather than wrong.
+
+## "Email Ends With" / "Domain Ends With" filters (client request, 2026-09-18)
+
+Two chips next to Email Contains, each include + exclude, typed suffixes
+(`.in`, `.org`, `.co`, `@gmail.com`), no modes: `emailSuffix` /
+`domainSuffix` in `FilterState` (`SuffixFilter`), sent by
+`build-rpc-filters` **only when non-empty**, read by
+`fn_lead_filter_conditions` (migrations 110 + 111, rebuilt from the live body)
+as `right(lower(l.email), N) = 'v'` (OR within include) and `<> 'v'` (each
+exclude AND-ed). `.co` does not match `.com`. NULL / blank / padded values are
+skipped in SQL (`right(x, 0) = ''` would match every row) and dropped by
+`normalizeFilterState`, so a blank-only suffix is never an "active filter"
+(bulk-delete guard); a non-array value is ignored rather than raising.
+
+⚠ **The domain chip judges the HOST, not the column (111).** `leads.domain`
+is not clean: ~3.3% of rows (~290k) hold a URL — `https://x.com/`,
+`x.com/contact-us`, `x.in/usa/…?srsltid=…` — every one written by the Bison
+sync, which inserts `cv_domain` un-normalised (the CSV import normalises). A
+raw suffix test missed those on include and, being the exact negation, LET
+THEM THROUGH on exclude — and excludes ride `push_batches.filters` into the
+push-worker. The expression strips the scheme, cuts at the first `/ ? # :` or
+whitespace, drops a trailing dot, and falls back to the email's domain when
+the column is NULL/empty (Website-chip rule). Verified on a 200k slice
+against an independently written host extraction: 0 disagreements; +4,812
+`.com` / +903 `.org` rows recovered. Open follow-up: normalise `cv_domain` on
+the Bison write path and clean the existing rows (write-amplified — batch it).
+The Website chip's `exact` mode has the same blind spot. Because every wrapper reads that
+function, the filters apply to the page, header dropdowns, exports, pushes,
+saved searches and the bulk-delete guard alike; old presets/queued batches
+simply lack the key. No index: used with targeting the suffix is a cheap
+post-filter; alone it is a full scan (same class as Email Contains). If
+suffix-only searches over the whole table become common, add a
+`reverse(lower(email)) text_pattern_ops` index and rewrite the predicate to a
+prefix LIKE on `reverse(lower(l.email))` (it would not help excludes, and
+`.org` alone is ~12% of the table). Checks: `npx tsx
+scripts/test-suffix-filters.mts` (state/RPC, 14 cases) and the SQL cases run
+when 110/111 were applied. The same review found three regression scripts
+(`test-esp-default`, `test-client-targeting`, `sweep-client-filters` — the
+last with `statement_timeout = 0`) issuing a **session-level SET on the
+pooler**; they now run every statement in its own transaction with `SET
+LOCAL` (`tq()` helper). Grep for a bare `set statement_timeout` before adding
+any new script.
 
 ## Mimecast is excluded by default (client request, 2026-09-16)
 

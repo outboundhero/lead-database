@@ -141,6 +141,14 @@ export function buildRpcFilters(filters: FilterState) {
       include: filters.emailContains?.include ?? [],
       exclude: filters.emailContains?.exclude ?? [],
     },
+    // "Ends with" filters — only sent when non-empty so untouched payloads stay
+    // byte-identical (the SQL gate `p_filters ? 'emailSuffix'` skips them).
+    ...((filters.emailSuffix?.include?.length || filters.emailSuffix?.exclude?.length)
+      ? { emailSuffix: { include: filters.emailSuffix.include ?? [], exclude: filters.emailSuffix.exclude ?? [] } }
+      : {}),
+    ...((filters.domainSuffix?.include?.length || filters.domainSuffix?.exclude?.length)
+      ? { domainSuffix: { include: filters.domainSuffix.include ?? [], exclude: filters.domainSuffix.exclude ?? [] } }
+      : {}),
     categorySearch: {
       // Cascade includes OR across category/subcategory/additional via the
       // category-search field, with the Category chip's include mode.

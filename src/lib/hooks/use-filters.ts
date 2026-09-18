@@ -10,6 +10,7 @@ import {
   type CategorySearchFilter,
   type CustomTagsFilter,
   type WebsiteFilter,
+  type SuffixFilter,
   type RangeFilter,
   type LocationTargetEntry,
   type LocationTargetsFilter,
@@ -103,6 +104,8 @@ type FilterAction =
   | { type: "SET_CATEGORY_SEARCH"; value: CategorySearchFilter }
   | { type: "SET_CUSTOM_TAGS"; value: CustomTagsFilter }
   | { type: "SET_WEBSITE"; value: WebsiteFilter }
+  | { type: "SET_EMAIL_SUFFIX"; value: SuffixFilter }
+  | { type: "SET_DOMAIN_SUFFIX"; value: SuffixFilter }
   | { type: "SET_GLOBAL_SEARCH"; value: string }
   | { type: "SET_INCLUDE_BOUNCED"; value: boolean }
   | { type: "SET_PAGE"; value: number }
@@ -151,6 +154,10 @@ export function filterReducer(state: FilterState, action: FilterAction): FilterS
       return { ...state, customTags: action.value, page: 1 };
     case "SET_WEBSITE":
       return { ...state, website: action.value, page: 1 };
+    case "SET_EMAIL_SUFFIX":
+      return { ...state, emailSuffix: action.value, page: 1 };
+    case "SET_DOMAIN_SUFFIX":
+      return { ...state, domainSuffix: action.value, page: 1 };
     case "SET_GLOBAL_SEARCH":
       return { ...state, globalSearch: action.value, page: 1 };
     case "SET_INCLUDE_BOUNCED":
@@ -373,6 +380,12 @@ export function useFilters() {
   const setWebsite = useCallback((value: WebsiteFilter) => {
     dispatch({ type: "SET_WEBSITE", value });
   }, []);
+  const setEmailSuffix = useCallback((value: SuffixFilter) => {
+    dispatch({ type: "SET_EMAIL_SUFFIX", value });
+  }, []);
+  const setDomainSuffix = useCallback((value: SuffixFilter) => {
+    dispatch({ type: "SET_DOMAIN_SUFFIX", value });
+  }, []);
 
   const setGlobalSearch = useCallback((value: string) => {
     dispatch({ type: "SET_GLOBAL_SEARCH", value });
@@ -427,6 +440,8 @@ export function useFilters() {
       setCategorySearch,
       setCustomTags,
       setWebsite,
+      setEmailSuffix,
+      setDomainSuffix,
       setGlobalSearch,
       setIncludeBounced,
       setPage,
@@ -458,6 +473,8 @@ export function useFilters() {
       setCategorySearch,
       setCustomTags,
       setWebsite,
+      setEmailSuffix,
+      setDomainSuffix,
       setGlobalSearch,
       setIncludeBounced,
       setPage,
