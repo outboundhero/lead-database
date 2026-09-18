@@ -44,6 +44,13 @@ export interface ImportConfig {
   duplicateStrategy: "skip" | "merge" | "replace";
   overrideFields: string[];
   detectEsp?: boolean;          // default true: MX lookup for rows without a mapped esp
+  /**
+   * Tags stamped on EVERY imported row (client tag from the file name, e.g.
+   * 'JPDET'). Added to whatever tags a lead already has — Bison's ESP tag and
+   * earlier client tags are never dropped (fn_merge_tags, 109) — under merge
+   * AND replace; nothing under skip.
+   */
+  addTags?: string[];
   chunkSize?: number;
   onProgress?: (c: ImportCounters) => Promise<void> | void;
   /**
@@ -125,6 +132,13 @@ const coreCity = (c: string) => c.trim().toLowerCase().replace(METRO_PREFIX, "")
 /** "Greater Sacramento" / "Sacramento Area" name the same place as "Sacramento" (the client's files are full of these). */
 const sameCity = (a: string, b: string) => sameText(a, b) || ((isMetro(a) || isMetro(b)) && coreCity(a) === coreCity(b));
 
+/** JS twin of fn_merge_tags (109): union of comma-separated tag lists, order kept, case-insensitive, first spelling wins. */
+export function mergeTags(a: string | null, b: string | null): string | null {
+  const seen = new Map<string, string>();
+  for (const t of `${a ?? ""},${b ?? ""}`.split(",")) { const v = t.trim(); if (v && !seen.has(v.toLowerCase())) seen.set(v.toLowerCase(), v); }
+  return seen.size ? [...seen.values()].join(",") : null;
+}
+
 /**
  * Are two places the same? Cities decide when both are present (a state code
  * conflict — Portland OR vs Portland ME — still splits them; a metro text next
@@ -204,6 +218,7 @@ export async function prepareRows(
   const cityIdx = Number(Object.keys(cfg.fieldMapping).find((k) => cfg.fieldMapping[Number(k)] === "city") ?? -1);
   const stateIdx = Number(Object.keys(cfg.fieldMapping).find((k) => cfg.fieldMapping[Number(k)] === "state") ?? -1);
   const rawCell = (raw: string[], idx: number) => { const v = idx >= 0 ? (raw[idx] ?? "").trim() : ""; return v && !isBlankish(v) ? v : null; };
+  const addTags = (cfg.addTags ?? []).map((t) => t.trim()).filter(Boolean);
 
   rows.forEach((raw, i) => {
     const rowIndex = i + 1;
@@ -212,6 +227,7 @@ export async function prepareRows(
     if (!isImportableEmail(email)) { holdbacks.push({ rowIndex, raw }); no_email++; return; }
 
     if (lead.category && !lead.category_source) lead.category_source = "upload";
+    if (addTags.length) lead.tags = mergeTags(typeof lead.tags === "string" ? lead.tags : null, addTags.join(","));
     const stateText = rawCell(raw, stateIdx) ?? (typeof lead.state === "string" ? lead.state : null);
     const stateCode = stateText ? normalizeStateValue(stateText) : null;
     const city = rawCell(raw, cityIdx) ?? (typeof lead.city === "string" ? lead.city : null);
@@ -442,12 +458,17 @@ async function processChunk(
       d.skipped += dupes.length;
     } else {
       const updatable = cols.filter((c) => c !== "email" && c !== "id");
-      const chosen = cfg.duplicateStrategy === "replace" ? updatable.filter((c) => cfg.overrideFields.includes(c)) : updatable;
+      const chosen = cfg.duplicateStrategy === "replace"
+        ? updatable.filter((c) => cfg.overrideFields.includes(c) || (c === "tags" && (cfg.addTags?.length ?? 0) > 0))
+        : updatable;
       if (chosen.length) {
         // "Blank" for merge purposes includes placeholder junk already in the
         // database (BLANKISH_VALUES): a real value from the file replaces it.
         const expr = (c: string) => {
           const isText = TEXT_TYPES.has(types.get(c) ?? "");
+          // Tags are a list: the file's tags (client tag) are ADDED to the
+          // lead's, never replace them — under merge and replace alike.
+          if (c === "tags") return `fn_merge_tags(l.tags, r.tags)`;
           if (cfg.duplicateStrategy === "merge" && c !== "city" && c !== "state") {
             return isText
               ? `case when l.${q(c)} is null or btrim(l.${q(c)}) = any($3::text[]) then coalesce(r.${q(c)}, l.${q(c)}) else l.${q(c)} end`

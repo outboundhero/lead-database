@@ -16,7 +16,7 @@ import {
 import { Upload } from "lucide-react";
 import { CSVDropzone } from "@/components/uploads/csv-dropzone";
 import { FieldMapper } from "@/components/uploads/field-mapper";
-import { DuplicateStrategy } from "@/components/uploads/duplicate-strategy";
+import { DuplicateStrategy, parseTags } from "@/components/uploads/duplicate-strategy";
 import { UploadProgress, HoldbackLinks } from "@/components/uploads/upload-progress";
 import { detectDelimiter, type ParseResult } from "@/lib/uploads/parse-csv";
 import type { FieldMapping } from "@/lib/uploads/normalize-row";
@@ -36,6 +36,7 @@ export default function UploadsPage() {
   const [fieldMapping, setFieldMapping] = useState<FieldMapping>({});
   const [format, setFormat] = useState<"generic" | "bison">("generic");
   const [strategy, setStrategy] = useState<"skip" | "merge" | "replace">("skip");
+  const [addTags, setAddTags] = useState("");
   const [overrideFields, setOverrideFields] = useState<string[]>([]);
   const [batchId, setBatchId] = useState<string | null>(null);
   const [history, setHistory] = useState<UploadBatch[]>([]);
@@ -89,6 +90,7 @@ export default function UploadsPage() {
           filename: file.name,
           format,
           delimiter,
+          addTags: parseTags(addTags),
         })),
       },
       body: csvText,
@@ -154,6 +156,7 @@ export default function UploadsPage() {
     setFieldMapping({});
     setFormat("generic");
     setStrategy("skip");
+    setAddTags("");
     setOverrideFields([]);
     setBatchId(null);
     loadHistory();
@@ -220,6 +223,8 @@ export default function UploadsPage() {
                 overrideFields={overrideFields}
                 onOverrideFieldsChange={setOverrideFields}
                 mappedFields={Object.values(fieldMapping).filter(Boolean) as string[]}
+                addTags={addTags}
+                onAddTagsChange={setAddTags}
                 onConfirm={handleStartUpload}
                 onBack={() => setStep(format === "bison" ? "drop" : "map")}
               />

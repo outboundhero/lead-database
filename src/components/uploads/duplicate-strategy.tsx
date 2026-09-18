@@ -2,8 +2,14 @@
 
 import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 type Strategy = "skip" | "merge" | "replace";
+
+// One tag: letters/digits, then up to 39 of letters/digits/space/_ . - (same
+// rule as the upload route). Bison tags are short codes like JPDET, CCGCT.
+export const TAG_RE = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$/;
+export const parseTags = (s: string) => [...new Set(s.split(",").map((t) => t.trim()).filter(Boolean))];
 
 interface DuplicateStrategyProps {
   value: Strategy;
@@ -11,6 +17,9 @@ interface DuplicateStrategyProps {
   overrideFields: string[];
   onOverrideFieldsChange: (fields: string[]) => void;
   mappedFields: string[];
+  /** Comma-separated tags to add to every imported lead (client tag etc.). */
+  addTags: string;
+  onAddTagsChange: (value: string) => void;
   onConfirm: () => void;
   onBack: () => void;
 }
@@ -73,6 +82,8 @@ export function DuplicateStrategy({
   overrideFields,
   onOverrideFieldsChange,
   mappedFields,
+  addTags,
+  onAddTagsChange,
   onConfirm,
   onBack,
 }: DuplicateStrategyProps) {
@@ -80,6 +91,9 @@ export function DuplicateStrategy({
   const availableFields = mappedFields.filter(
     (f) => f !== "email" && FIELD_LABELS[f]
   );
+  const tagList = parseTags(addTags);
+  const badTags = tagList.filter((t) => !TAG_RE.test(t));
+  const tooMany = tagList.length > 5;
 
   function toggleField(field: string) {
     if (overrideFields.includes(field)) {
@@ -183,13 +197,31 @@ export function DuplicateStrategy({
         </div>
       )}
 
+      <div className="border rounded-lg p-3 space-y-1.5">
+        <p className="text-sm font-medium">Tags to add (optional)</p>
+        <Input
+          value={addTags}
+          onChange={(e) => onAddTagsChange(e.target.value)}
+          placeholder="e.g. JPDET — comma-separated for several"
+          aria-invalid={badTags.length > 0 || tooMany}
+        />
+        <p className="text-xs text-muted-foreground">
+          Added to every imported lead&apos;s tags — the client tag when a file was sourced for one client.
+          Existing tags (Bison&apos;s ESP tag, earlier client tags) are kept. Not applied to skipped duplicates.
+        </p>
+        {badTags.length > 0 && (
+          <p className="text-xs text-destructive">Not a valid tag: {badTags.join(", ")} (letters, digits, space, _ . - only; max 40 characters)</p>
+        )}
+        {tooMany && <p className="text-xs text-destructive">At most 5 tags per upload.</p>}
+      </div>
+
       <div className="flex gap-2">
         <Button variant="outline" onClick={onBack}>
           Back
         </Button>
         <Button
           onClick={onConfirm}
-          disabled={value === "replace" && overrideFields.length === 0}
+          disabled={(value === "replace" && overrideFields.length === 0) || badTags.length > 0 || tooMany}
         >
           Start Upload
         </Button>

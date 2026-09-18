@@ -6,7 +6,7 @@
 // that filling city and state independently invents places that do not exist
 // (Denver + a state that belonged to Lincoln, CA) and that the extra-location
 // rule compared against the PRE-merge row (Orangevale stored twice).
-import { decidePlace, samePlace, isImportableEmail, type ExistingPlace, type PlaceInput } from "../src/lib/uploads/import-rows";
+import { decidePlace, samePlace, isImportableEmail, mergeTags, type ExistingPlace, type PlaceInput } from "../src/lib/uploads/import-rows";
 import { normalizeRow, cleanCompanyName } from "../src/lib/uploads/normalize-row";
 import { normalizeEspLabel } from "../src/lib/uploads/constants";
 
@@ -83,6 +83,13 @@ eq("cleanCompanyName('|') → undefined", cleanCompanyName("|"), undefined);
 for (const [e, want] of [["Office 365", "Microsoft"], ["gmail", "Google"], ["Proofpoint Essentials", "Proofpoint"], ["mimecast", "Mimecast"], ["other", "Custom"], ["Fastmail", null]] as const) {
   eq(`normalizeEspLabel(${JSON.stringify(e)})`, normalizeEspLabel(e), want);
 }
+
+console.log("tags union (JS twin of fn_merge_tags)");
+eq("Outlook,JPC + JPDET", mergeTags("Outlook,JPC", "JPDET"), "Outlook,JPC,JPDET");
+eq("already present (case-insensitive, first spelling kept)", mergeTags("Outlook,JPDET", "jpdet"), "Outlook,JPDET");
+eq("null + ' JPDET '", mergeTags(null, " JPDET "), "JPDET");
+eq("Google + null", mergeTags("Google", null), "Google");
+eq("blanks dropped", mergeTags(" , ,", ""), null);
 
 console.log("importable emails");
 for (const [e, want] of [["a@b.co", true], ["N/A", false], ["--", false], ["", false], ["none", false], ["bob", false], ["bob@bob", false], ["a b@c.com", false], ["first.last@sub.example.co.uk", true]] as const) {

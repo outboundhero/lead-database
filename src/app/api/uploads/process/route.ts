@@ -39,7 +39,10 @@ interface UploadConfig {
   filename: string;
   format?: "generic" | "bison";
   delimiter?: string;
+  /** Tags stamped on every row (client tag), added to a lead's existing tags. */
+  addTags?: string[];
 }
+const TAG_RE = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$/;
 
 const norm = (s: string) => s.trim().toLowerCase();
 
@@ -70,13 +73,16 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: `Failed to read upload: ${err instanceof Error ? err.message : "Unknown error"}` }, { status: 400 });
   }
 
-  const { headers, fieldMapping, duplicateStrategy, overrideFields = [], filename, format = "generic", delimiter } = config;
+  const { headers, fieldMapping, duplicateStrategy, overrideFields = [], filename, format = "generic", delimiter, addTags = [] } = config;
   const isBison = format === "bison";
   if ((!fieldMapping && !isBison) || !duplicateStrategy) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
   }
   if (!STRATEGIES.has(duplicateStrategy) || !Array.isArray(overrideFields) || !Array.isArray(headers) || !headers.every((h) => typeof h === "string")) {
     return NextResponse.json({ error: "Invalid duplicate strategy or mapping" }, { status: 400 });
+  }
+  if (!Array.isArray(addTags) || addTags.length > 5 || !addTags.every((t) => typeof t === "string" && TAG_RE.test(t.trim()))) {
+    return NextResponse.json({ error: "Invalid tags (up to 5, letters/digits/space/_ . -)" }, { status: 400 });
   }
 
   // csv-parse, as every ingestion path uses, so quoting/escaping is identical.
@@ -163,6 +169,7 @@ export async function POST(request: NextRequest) {
     try {
       const counters = await importRows(getPool(), rows, {
         batchId, filename, headers, fieldMapping, duplicateStrategy, overrideFields,
+        addTags: addTags.map((t) => t.trim()),
         onProgress: (c) => writeProgress(c),
       });
       const nothingLanded = counters.inserted + counters.merged + counters.replaced + counters.skipped === 0;

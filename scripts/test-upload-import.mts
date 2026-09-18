@@ -19,7 +19,7 @@ import type { FieldMapping } from "../src/lib/uploads/normalize-row";
 
 const args = process.argv.slice(2);
 const file = args.find((a) => !a.startsWith("--"));
-const flag = (n: string) => { const h = args.find((a) => a.startsWith(`--${n}`)); return h ? (h.includes("=") ? h.split("=")[1] : "true") : undefined; };
+const flag = (n: string) => { const h = args.find((a) => a === `--${n}` || a.startsWith(`--${n}=`)); return h ? (h.includes("=") ? h.slice(h.indexOf("=") + 1) : "true") : undefined; };
 if (!file) { console.error("usage: test-upload-import.mts <file.csv> [--rows=10] [--emails=...] [--commit]"); process.exit(1); }
 const N = Number(flag("rows") ?? 10);
 const wanted = (flag("emails") ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
@@ -27,12 +27,13 @@ const COMMIT = flag("commit") === "true";
 const TWICE = flag("twice") === "true";   // dry run only: run the lead chunks a second time — must change nothing
 const STRATEGY = (flag("strategy") ?? "merge") as "skip" | "merge" | "replace";
 const OVERRIDE = (flag("override") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+const TAGS = (flag("tags") ?? "").split(",").map((s) => s.trim()).filter(Boolean);   // client tag(s) stamped on every row
 if (!["skip", "merge", "replace"].includes(STRATEGY)) { console.error("--strategy must be skip|merge|replace"); process.exit(1); }
 
-// The client's mapping (2026-09-17), keyed by the file's REAL headers.
+// The client's mapping (confirmed 2026-09-18), keyed by the file's REAL headers.
 const CLIENT_MAPPING: Record<string, string> = {
   "First Name": "first_name", "Last Name": "last_name", "Title": "title", "Email Business": "email",
-  "State": "state", "City": "city", "Company Name": "company", "Company Industry": "category",
+  "Location": "address", "State": "state", "City": "city", "Company Name": "company", "Company Industry": "category",
   "Company Description": "subcategory", "Company SEO Description": "additional_category",
   "Company Website": "domain", "Company Primary Phone": "company_phone",
 };
@@ -64,7 +65,7 @@ const { rows: [b] } = await client0.query(
   `insert into upload_batches (filename, total_rows, status, duplicate_strategy, source_headers, batch_type) values ($1, $2, 'processing', $4, $3, 'leads') returning id`,
   [`TEST ${file.split("/").pop()}`, rows.length, JSON.stringify(headers), STRATEGY]
 );
-console.log(`strategy: ${STRATEGY}${OVERRIDE.length ? ` (override ${OVERRIDE.join(", ")})` : ""}`);
+console.log(`strategy: ${STRATEGY}${OVERRIDE.length ? ` (override ${OVERRIDE.join(", ")})` : ""}${TAGS.length ? ` | tags added: ${TAGS.join(",")}` : ""}`);
 client0.release();
 const batchId = b.id as string;
 
@@ -72,7 +73,7 @@ const inspect = async (c: import("pg").PoolClient, passes: import("../src/lib/up
   passes.forEach((p, i) => console.log(`pass ${i + 1}:`, JSON.stringify(p)));
   const emails = rows.map((r) => (r[ei] ?? "").trim().toLowerCase()).filter(Boolean);
   const { rows: leads } = await c.query(
-    `select l.id, l.email, l.first_name, l.last_name, l.title, l.company, l.city, l.state, l.updated_at, l.domain, l.company_phone, l.esp, l.email_type,
+    `select l.id, l.email, l.first_name, l.last_name, l.title, l.company, l.city, l.state, l.address, l.tags, l.updated_at, l.domain, l.company_phone, l.esp, l.email_type,
             l.category, left(l.subcategory, 60) as subcategory, length(l.subcategory) as sub_len, left(l.additional_category, 60) as additional_category, l.category_source,
             (select string_agg(t.title, ' / ' order by t.title) from lead_job_titles t where t.lead_id = l.id) as job_titles,
             (select json_agg(json_build_object('city', ll.city_text, 'state', ll.state_text, 'code', ll.state_code)) from lead_locations ll where ll.lead_id = l.id) as extra_locations,
@@ -81,7 +82,7 @@ const inspect = async (c: import("pg").PoolClient, passes: import("../src/lib/up
   console.log("══ LEADS AS THEY WOULD BE STORED");
   for (const l of leads) {
     console.log(`\n  ${l.email}`);
-    for (const k of ["first_name","last_name","title","job_titles","company","city","state","extra_locations","updated_at","domain","company_phone","esp","email_type","category","category_source","subcategory","sub_len","additional_category"]) {
+    for (const k of ["first_name","last_name","title","job_titles","company","city","state","extra_locations","address","tags","updated_at","domain","company_phone","esp","email_type","category","category_source","subcategory","sub_len","additional_category"]) {
       const v = l[k]; if (v == null) continue;
       console.log(`     ${k.padEnd(20)} ${typeof v === "object" ? JSON.stringify(v) : String(v)}`);
     }
@@ -92,7 +93,7 @@ const inspect = async (c: import("pg").PoolClient, passes: import("../src/lib/up
 };
 
 const counters = await importRows(pool, rows, {
-  batchId, filename: file, headers, fieldMapping: mapping, duplicateStrategy: STRATEGY, overrideFields: OVERRIDE,
+  batchId, filename: file.split("/").pop()!, headers, fieldMapping: mapping, duplicateStrategy: STRATEGY, overrideFields: OVERRIDE, addTags: TAGS,
   chunkSize: 2000,
   ...(COMMIT ? {} : { dryRun: { inspect, passes: TWICE ? 2 : 1 } }),
 });

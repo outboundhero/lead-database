@@ -1349,6 +1349,18 @@ statement. Counters live on `upload_batches` (`inserted_rows`, `merged_rows`,
 `replaced_rows`, `skipped_rows`, `no_email_rows`, `in_file_duplicates`,
 `locations_added`, `esp_detected`, `error_rows`, `error_log`).
 
+**Tags to add (client tag).** The wizard's strategy step has a "Tags to add"
+field (≤5, `[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}`); the route passes them as
+`addTags` and the engine stamps them on every imported row. `leads.tags` is
+Bison's comma-separated tag list (ESP tag + client tags attached on push), so
+for an existing lead the tags are ADDED — `fn_merge_tags(l.tags, r.tags)`
+(109; order kept, case-insensitive, first spelling wins) — under merge and
+replace alike, never overwriting what Bison wrote; nothing under skip. The app
+never derives a tag from a file name (user decision 2026-09-18: not reliable);
+only the one-off folder driver `scripts/import-csv-folder.mts
+--tag-from-filename` does, and it refuses any tag not present in
+`client_tags`. Used once for the JPDET / CCGHTX / CCGEN / CCGGC delivery.
+
 **The route returns `{batchId}` (202) at once and runs the import in Next
 `after()`** — ~18 ms/row measured, so a 10k-row file is ~3 min and the 88k set
 ~26 min; the page and `UploadProgress` follow `upload_batches`. A chunk that
