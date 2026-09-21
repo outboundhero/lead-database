@@ -42,6 +42,9 @@ const MAX_AGE_H = Number(flag("max-age-hours")) || 20;
 // Upper bounds a healthy refresh stays well under (measured 2026-09-17 after
 // migration 102: state 125, city ~10k, title well under 100k).
 const SANE = { state: 200, city: 20000, title: 100000 };
+// The "Email / Domain Ends With" dropdown lists (migration 112): ~500 endings each.
+const SUFFIX_COLS = ["email_suffix", "domain_suffix"];
+const SANE_SUFFIX = 3000;
 const ts = () => new Date().toISOString().slice(11, 19);
 const log = (...m) => console.log(ts(), ...m);
 
@@ -58,7 +61,12 @@ try {
   // The OLDEST row decides: a single-row writer elsewhere must not make the
   // whole cache look fresh. An empty table (NULL) refreshes.
   const { rows: [age] } = await client.query(
-    `select count(*)::int as n, extract(epoch from (now() - min(updated_at)))/3600 as hours from filter_options_cache`
+    `select count(*)::int as n, extract(epoch from (now() - min(updated_at)))/3600 as hours
+       from filter_options_cache where col_name <> all($1::text[])`, [SUFFIX_COLS]
+  );
+  const { rows: [sfxAge] } = await client.query(
+    `select count(*)::int as n, extract(epoch from (now() - min(updated_at)))/3600 as hours
+       from filter_options_cache where col_name = any($1::text[])`, [SUFFIX_COLS]
   );
   await client.query("commit");
   const hours = age.hours == null ? Infinity : Number(age.hours);
@@ -87,6 +95,29 @@ try {
     await client.query("commit");
     log(`refreshed in ${((Date.now() - started) / 1000).toFixed(0)}s: ` +
         rows.map((r) => `${r.col_name}=${r.n}`).join(" "));
+  }
+
+  // Endings for the "Email / Domain Ends With" dropdowns. Own age gate and own
+  // transaction: one parallel scan of leads (~1 min); if it is slow or fails it
+  // must neither roll back the main cache nor make it look stale.
+  const sfxHours = sfxAge.n < SUFFIX_COLS.length || sfxAge.hours == null ? Infinity : Number(sfxAge.hours);
+  if (!FORCE && sfxHours < MAX_AGE_H) {
+    log(`suffix options are ${sfxHours.toFixed(1)}h old — under ${MAX_AGE_H}h, nothing to do`);
+  } else {
+    const started = Date.now();
+    await client.query("begin");
+    await client.query("set local statement_timeout = '600s'");
+    await client.query("select fn_refresh_suffix_options()");
+    const { rows } = await client.query(
+      `select col_name, cardinality(options) as n from filter_options_cache where col_name = any($1::text[]) order by col_name`, [SUFFIX_COLS]
+    );
+    const bad = rows.filter((r) => Number(r.n) === 0 || Number(r.n) > SANE_SUFFIX);
+    if (bad.length || rows.length < SUFFIX_COLS.length) {
+      await client.query("rollback");
+      throw new Error(`suffix options refresh ROLLED BACK — ` + (bad.length ? bad.map((r) => `${r.col_name}=${r.n}`).join(", ") : "rows missing") + ` (expected 1–${SANE_SUFFIX} options each)`);
+    }
+    await client.query("commit");
+    log(`suffix options refreshed in ${((Date.now() - started) / 1000).toFixed(0)}s: ` + rows.map((r) => `${r.col_name}=${r.n}`).join(" "));
   }
 } catch (e) {
   await client.query("rollback").catch(() => {});

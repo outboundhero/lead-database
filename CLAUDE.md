@@ -1424,6 +1424,26 @@ the cleaned lead company, so those rows go stale rather than wrong.
 
 ## "Email Ends With" / "Domain Ends With" filters (client request, 2026-09-18)
 
+**Searchable dropdown + free text (2026-09-19).** Both chips render
+`FilterMultiSelect` in `plain` mode (no Contains/Exact, OR/AND, "All" or
+Unknown rows — one fixed semantic) over the endings that exist, largest first
+with lead counts; anything else is typed + Enter (`.co.uk`, `@acme.com`). The
+lists are `filter_options_cache` rows `email_suffix` (TLDs, two-level endings
+like `.co.uk`, and a FIXED list of mailbox providers as `@gmail.com` …) and
+`domain_suffix` (TLDs + two-level endings of the HOST — the exact expression
+the filter uses, so a dropdown count is what an include matches before the
+visibility gates); ≥25 leads to be listed (~490 / ~480 options). Built by
+`fn_refresh_suffix_options()` (112) in ONE scan of leads. **Measured:** as an
+`INSERT … SELECT` the regex work over ~9M rows ran serially — 221 s (an
+INSERT's SELECT cannot use parallel workers); materialised with `CREATE TEMP
+TABLE … AS` it gets a Parallel Seq Scan with 2 workers — 63 s. Use that shape
+for any future full-table aggregate written from a function.
+`scripts/refresh-filter-cache.mjs` calls it after the main refresh in its OWN
+transaction with its OWN 20 h age gate (and the main gate ignores the two
+suffix rows), so a slow or failed endings scan can neither roll back the main
+cache nor make it look stale; guard: 1–3000 options each. Served by the generic
+`distinct_values` / `filter_option_counts` RPCs, loaded when the chip opens.
+
 Two chips next to Email Contains, each include + exclude, typed suffixes
 (`.in`, `.org`, `.co`, `@gmail.com`), no modes: `emailSuffix` /
 `domainSuffix` in `FilterState` (`SuffixFilter`), sent by
@@ -1613,6 +1633,18 @@ digits / 2–60 chars (**10,296**, 99.5%), title ≥3 leads / ≤120 chars
 if state > 200, city > 20,000 or title > 100,000. Rare values still work by
 typing (City/Title chips search the live column). Apply function migrations
 BEFORE running `--force`, and never trust a cache refresh you have not sampled.
+
+⚠ **One lead's title silently broke the refresh for days (2026-09-18 → 19).**
+The Title branch parsed every title matching `'^\s*\['` as a JSON array
+(`title::jsonb`). An upload brought **`[Interim] Chief Operations Officer`**,
+and from that moment every daily refresh died with `invalid input syntax for
+type json` — no alert, dropdowns just stopped updating; found only because
+migration 112 made me run the job end to end. The table holds **zero** valid
+JSON-array titles, so the branch was dead code whose only effect was to crash.
+Migration 113 guards it with `IS JSON ARRAY` (PG16+), matching what
+`fn_sync_lead_job_titles` already did (parse, catch, fall back to plain text).
+Lesson: a cron whose only failure signal is its own exit code is invisible —
+when a refresh job starts failing, nothing in the UI says the data is stale.
 
 Also fixed from the review: `/api/clients/availability` surfaces PostgREST
 errors as 500 (supabase-js returns `{error}` instead of throwing) and treats a

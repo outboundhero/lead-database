@@ -253,6 +253,9 @@ export function FilterBar({
   const [espValues, setEspValues] = useState<string[]>([]);
   const [cityValues, setCityValues] = useState<string[]>([]);
   const [companyValues, setCompanyValues] = useState<string[]>([]);
+  // Endings that exist in the database, largest first (migration 112).
+  const [emailSuffixOptions, setEmailSuffixOptions] = useState<string[]>([]);
+  const [domainSuffixOptions, setDomainSuffixOptions] = useState<string[]>([]);
   // The 36-name category taxonomy (lead_categories), used as quick-picks in the
   // merged Category chip. Deliberately NOT the distinct values from `leads` —
   // subcategory alone holds 478,631 distinct values and loading them is what
@@ -277,6 +280,8 @@ export function FilterBar({
       case "esp": setEspValues([...new Set(values)]); break;
       case "city": setCityValues(values); break;
       case "company": setCompanyValues(values); break;
+      case "email_suffix": setEmailSuffixOptions(values); break;
+      case "domain_suffix": setDomainSuffixOptions(values); break;
     }
   }, []);
 
@@ -291,8 +296,9 @@ export function FilterBar({
     const supabase = createClient();
     const { data } = await supabase.rpc("distinct_values", { col_name: col });
 
-    // State/City also carry per-option lead counts (shown in the dropdown).
-    if (col === "state" || col === "city") {
+    // State/City and the two "ends with" lists also carry per-option lead
+    // counts (shown in the dropdown).
+    if (col === "state" || col === "city" || col === "email_suffix" || col === "domain_suffix") {
       supabase.rpc("filter_option_counts", { col_name: col }).then(({ data: counts }) => {
         if (counts && typeof counts === "object") {
           setOptionCounts((prev) => ({ ...prev, [col]: counts as Record<string, number> }));
@@ -734,36 +740,23 @@ export function FilterBar({
           <FilterChip
             label="Email Ends With"
             activeCount={filters.emailSuffix.include.length + filters.emailSuffix.exclude.length}
+            onOpen={() => loadDistinctFor("email_suffix")}
           >
-            <div className="space-y-3">
-              <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Include
-                </label>
-                <TagInput
-                  values={filters.emailSuffix.include}
-                  placeholder="e.g. .org, .co, @gmail.com"
-                  onChange={(arr) =>
-                    onEmailSuffixChange({ ...filters.emailSuffix, include: arr })
-                  }
-                />
-              </div>
-              <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Exclude
-                </label>
-                <TagInput
-                  values={filters.emailSuffix.exclude}
-                  placeholder="e.g. .in"
-                  onChange={(arr) =>
-                    onEmailSuffixChange({ ...filters.emailSuffix, exclude: arr })
-                  }
-                />
-              </div>
-              <p className="px-1 text-[11px] text-muted-foreground">
-                The email address must end with one of these (case-insensitive). &quot;.co&quot; does not match &quot;.com&quot;.
-              </p>
-            </div>
+            {/* Searchable list of the endings that exist (largest first, with
+                lead counts); anything else can be typed + Enter (".co.uk",
+                "@acme.com"). One fixed semantic, so no Contains/Exact or OR/AND. */}
+            <FilterMultiSelect
+              options={emailSuffixOptions}
+              counts={optionCounts.email_suffix}
+              value={{ include: filters.emailSuffix.include, exclude: filters.emailSuffix.exclude, operator: "OR" }}
+              onChange={(v) => onEmailSuffixChange({ include: v.include, exclude: v.exclude })}
+              searchable
+              plain
+            />
+            <p className="mt-2 px-1 text-[11px] text-muted-foreground">
+              The email address must end with one of these (case-insensitive). &quot;.co&quot; does not match &quot;.com&quot;.
+              Not in the list? Type it and press Enter.
+            </p>
           </FilterChip>
         )}
 
@@ -772,36 +765,20 @@ export function FilterBar({
           <FilterChip
             label="Domain Ends With"
             activeCount={filters.domainSuffix.include.length + filters.domainSuffix.exclude.length}
+            onOpen={() => loadDistinctFor("domain_suffix")}
           >
-            <div className="space-y-3">
-              <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Include
-                </label>
-                <TagInput
-                  values={filters.domainSuffix.include}
-                  placeholder="e.g. .org, .co.uk"
-                  onChange={(arr) =>
-                    onDomainSuffixChange({ ...filters.domainSuffix, include: arr })
-                  }
-                />
-              </div>
-              <div>
-                <label className="mb-1 block px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Exclude
-                </label>
-                <TagInput
-                  values={filters.domainSuffix.exclude}
-                  placeholder="e.g. .in"
-                  onChange={(arr) =>
-                    onDomainSuffixChange({ ...filters.domainSuffix, exclude: arr })
-                  }
-                />
-              </div>
-              <p className="px-1 text-[11px] text-muted-foreground">
-                The company domain must end with one of these; leads without a domain use their email&apos;s domain.
-              </p>
-            </div>
+            <FilterMultiSelect
+              options={domainSuffixOptions}
+              counts={optionCounts.domain_suffix}
+              value={{ include: filters.domainSuffix.include, exclude: filters.domainSuffix.exclude, operator: "OR" }}
+              onChange={(v) => onDomainSuffixChange({ include: v.include, exclude: v.exclude })}
+              searchable
+              plain
+            />
+            <p className="mt-2 px-1 text-[11px] text-muted-foreground">
+              The company domain must end with one of these; leads without a domain use their email&apos;s domain.
+              Not in the list? Type it and press Enter.
+            </p>
           </FilterChip>
         )}
 

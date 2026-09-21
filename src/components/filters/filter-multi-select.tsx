@@ -20,6 +20,11 @@ interface FilterMultiSelectProps {
   defaultMode?: MatchMode;
   /** Allow typing values not in the option list (Enter / comma / pasted lines). */
   freeText?: boolean;
+  /**
+   * Plain include/exclude list: hides the Contains/Exact toggle, the OR/AND
+   * toggle and "All" — for filters with one fixed semantic ("ends with").
+   */
+  plain?: boolean;
 }
 
 export function FilterMultiSelect({
@@ -32,6 +37,7 @@ export function FilterMultiSelect({
   onSearch,
   defaultMode = "exact",
   freeText = true,
+  plain = false,
 }: FilterMultiSelectProps) {
   const [search, setSearch] = useState("");
   const [mode, setMode] = useState<"include" | "exclude">("include");
@@ -137,6 +143,7 @@ export function FilterMultiSelect({
         </Button>
 
         {/* Per-side match mode: Contains / Exact for the ACTIVE side */}
+        {!plain && (
         <div className="flex items-center gap-0.5 border rounded overflow-hidden" title={`How ${mode}d values match`}>
           {(["contains", "exact"] as const).map((m) => (
             <button
@@ -153,9 +160,10 @@ export function FilterMultiSelect({
             </button>
           ))}
         </div>
+        )}
 
         {/* Per-field OR / AND for the include list */}
-        {value.include.length > 0 && (
+        {!plain && value.include.length > 0 && (
           <div className="flex items-center gap-0.5 ml-auto border rounded overflow-hidden">
             <button
               type="button"
@@ -182,14 +190,16 @@ export function FilterMultiSelect({
           </div>
         )}
 
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-6 text-xs px-2"
-          onClick={selectAll}
-        >
-          All
-        </Button>
+        {!plain && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 text-xs px-2"
+            onClick={selectAll}
+          >
+            All
+          </Button>
+        )}
         {hasActive && (
           <Button
             variant="ghost"
@@ -285,8 +295,8 @@ export function FilterMultiSelect({
         />
       )}
 
-      {/* Unknown / Empty — pinned at top, selectable like any value */}
-      {(() => {
+      {/* Unknown / Empty — pinned at top, selectable like any value (not for plain lists) */}
+      {!plain && (() => {
         const UNKNOWN_KEY = "__UNKNOWN__";
         const isIncluded = value.include.includes(UNKNOWN_KEY);
         const isExcluded = value.exclude.includes(UNKNOWN_KEY);
@@ -318,6 +328,7 @@ export function FilterMultiSelect({
       })()}
 
       {/* Exclude Unknown / Empty checkbox */}
+      {!plain && (
       <label className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted/50 cursor-pointer border border-dashed border-muted-foreground/30">
         <input
           type="checkbox"
@@ -327,6 +338,7 @@ export function FilterMultiSelect({
         />
         <span className="text-muted-foreground">Exclude Unknown / Empty</span>
       </label>
+      )}
 
       <div className="max-h-64 overflow-y-auto space-y-0.5">
         {filteredOptions.map((option) => {
