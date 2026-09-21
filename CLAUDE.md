@@ -1230,9 +1230,26 @@ re-select or the tab regaining focus compares versions and, when they differ,
 removes the old patch before applying the new one (applying over it merges the
 two, so dropped cities would keep filtering). Unchanged rules cost one small
 request and return before the coverage/availability scans. The focus re-check
-deliberately fires only for a tag THIS page applied — a preset/shared link
-clears `appliedRef` on purpose and must not gain targeting it never had.
-Covered by the last three structural cases in `scripts/test-client-targeting.mts`.
+fires only for a tag THIS page applied, because a preset/shared link clears
+`appliedRef` on purpose.
+
+**Loading a saved search or shared link is the other half of it.** Such a
+search carries whatever targeting existed when it was saved — and one saved
+from an already-stale page carries none, so the link reproduces the failure for
+everyone who opens it. `needsClientTargeting()` (in `src/types/filters.ts`) is
+the rule: a search that names a client and has NO `locationTargets` of its own
+gets that client's targeting applied on load; one that carries targeting is
+left alone, because that is a deliberately hand-narrowed subset of the cities.
+Measured on shared search `babb4aff…` (clientTag JPCA, 107 exclusions, zero
+locations): as the link loads today the count **times out at 301 s**; with the
+rule applied it is **3.4 s**. Covered by the last seven structural cases in
+`scripts/test-client-targeting.mts`.
+
+Still open: the export path trusts the page's payload and does not enforce
+client eligibility server-side (`applyClientTargeting`, which the push path
+does pass). Until it does, a client-scoped export can still leave the territory
+if the UI state is wrong — the fixes above close the two known routes to that,
+not the class.
 
 ⚠ **An exclusion list cannot be indexed — only narrowed.** That export's
 category exclusions compile to one 107-alternation case-insensitive regex

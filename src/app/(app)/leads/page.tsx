@@ -18,7 +18,7 @@ import { SuppressLeadsDialog } from "@/components/leads/suppress-leads-dialog";
 import { Button } from "@/components/ui/button";
 import { ArrowUpDown, X, Trash2, Link2, Ban } from "lucide-react";
 import { useHasPermission } from "@/lib/context/role-context";
-import { countActiveFilters } from "@/types/filters";
+import { countActiveFilters, needsClientTargeting } from "@/types/filters";
 import { LocationCoverageNotice, type LocationCoverage } from "@/components/clients/location-coverage-notice";
 import type { Lead } from "@/types/database";
 
@@ -301,10 +301,24 @@ export default function LeadsPage() {
   // Preset load / reset replace the whole filter state — earlier tags' patches
   // must be forgotten WITHOUT dispatching removals, or the observer below
   // would strip values that legitimately belong to the loaded preset.
+  // A saved search or shared link that NAMES a client must carry that client's
+  // territory. Without it the query has nothing selective to narrow on: it
+  // scans all ~9M leads — timing out on export — and any rows it did return
+  // would be outside the client's area. Applied only when the search carries no
+  // targeting of its own, so a hand-narrowed subset of a client's cities is
+  // left exactly as it was saved.
+  // (2026-09-21: shared search babb4aff… held clientTag JPCA, 107 category
+  // exclusions and zero locations — the export off it died on the timeout.)
+  const applyMissingTargeting = useCallback((f: Parameters<typeof loadPreset>[0]) => {
+    const tag = needsClientTargeting(f);
+    if (tag) void handleClientTagSelected(tag);
+  }, [handleClientTagSelected]);
+
   const handleLoadPreset = useCallback((f: Parameters<typeof loadPreset>[0]) => {
     appliedRef.current.clear();
     loadPreset(f);
-  }, [loadPreset]);
+    applyMissingTargeting(f);
+  }, [loadPreset, applyMissingTargeting]);
   const handleReset = useCallback(() => {
     appliedRef.current.clear();
     resetFilters();
@@ -357,10 +371,11 @@ export default function LeadsPage() {
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error("Search link not found"))))
       .then((d) => {
         loadPreset(d.filters);
+        applyMissingTargeting(d.filters);
         toast.success("Shared search restored");
       })
       .catch((e) => toast.error(e instanceof Error ? e.message : "Couldn't restore the shared search"));
-  }, [loadPreset]);
+  }, [loadPreset, applyMissingTargeting]);
 
   const [copyingLink, setCopyingLink] = useState(false);
   const copySearchLink = useCallback(async () => {

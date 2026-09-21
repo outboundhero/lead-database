@@ -358,6 +358,26 @@ function sanitizeColumnFilters(v: unknown): Record<string, string[]> {
   return out;
 }
 
+/**
+ * A search that NAMES a client must carry that client's territory. Returns the
+ * tag whose targeting has to be applied, or null when there is nothing to do.
+ *
+ * Without the territory the query has nothing selective to narrow on: it scans
+ * all ~9M leads (an export off it dies on the statement timeout) and anything
+ * it returned would be outside the client's area. A search that carries
+ * targeting of its own is left alone — that is a deliberately hand-narrowed
+ * subset of the client's cities, not a missing one.
+ */
+export function needsClientTargeting(
+  f: { clientTag?: string | null; locationTargets?: { include?: unknown[]; exclude?: unknown[] } } | null | undefined,
+): string | null {
+  const tag = f?.clientTag;
+  if (typeof tag !== "string" || !tag) return null;
+  const t = f?.locationTargets;
+  const hasOwnTargeting = (t?.include?.length ?? 0) > 0 || (t?.exclude?.length ?? 0) > 0;
+  return hasOwnTargeting ? null : tag;
+}
+
 export function countActiveFilters(filters: FilterState): number {
   let count = 0;
   if (filters.fullName || filters.excludeEmptyName) count++;

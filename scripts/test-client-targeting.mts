@@ -17,7 +17,7 @@
  */
 import { Client } from "pg";
 import { filterReducer } from "../src/lib/hooks/use-filters";
-import { DEFAULT_FILTER_STATE, normalizeFilterState } from "../src/types/filters";
+import { DEFAULT_FILTER_STATE, normalizeFilterState, needsClientTargeting } from "../src/types/filters";
 import { buildRpcFilters } from "../src/lib/filters/build-rpc-filters";
 import type { TargetingPatch } from "../src/lib/hooks/use-filters";
 import type { LocationTargetEntry } from "../src/types/filters";
@@ -141,6 +141,21 @@ async function main() {
       ok("after the swap no value from the old rules survives",
         !swapped.categorySearch.exclude.includes("stale term"),
         `categorySearch.exclude still has: ${swapped.categorySearch.exclude.filter((v) => v === "stale term").join(", ")}`);
+
+      // 6. A saved search / shared link that NAMES a client but carries no
+      //    territory. Shared search babb4aff… was exactly this and its export
+      //    timed out after scanning all 9M leads; loading it must pull the
+      //    client's targeting in. A search that DID narrow the cities by hand
+      //    must be left alone.
+      const tag = withCities.client_tag;
+      ok("a client search with no territory asks for targeting",
+        needsClientTargeting({ clientTag: tag, locationTargets: { include: [], exclude: [] } }) === tag);
+      ok("a client search that narrowed the cities by hand is left alone",
+        needsClientTargeting({ clientTag: tag, locationTargets: { include: [(withCities.include_locations ?? [])[0]], exclude: [] } }) === null);
+      ok("a search with no client tag asks for nothing",
+        needsClientTargeting({ clientTag: null, locationTargets: { include: [], exclude: [] } }) === null);
+      ok("an exclude-only targeting still counts as its own",
+        needsClientTargeting({ clientTag: tag, locationTargets: { include: [], exclude: [{ country: "US", state: "AL" }] } }) === null);
     }
   }
 
