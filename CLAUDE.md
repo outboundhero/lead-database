@@ -1216,6 +1216,38 @@ the only location filter** — that is precisely the bug below. The regression
 test asserts `city.include` is non-empty only when `locationTargets.include` is
 too.
 
+⚠ **Targeting is re-checked, not applied once (2026-09-21).** The page used to
+`return` early if a tag was already in `appliedRef`, so rules edited in the
+Rules dialog — or re-synced from the sheet — never reached a page that already
+had the client selected. That is a correctness bug, not just staleness: the
+export then runs without the cities added since, i.e. outside the client's
+territory. **What it cost:** JPCA's 105 cities were saved at 16:14; a client
+export at 16:40 carried the 107 category exclusions but no locations, so it had
+nothing to narrow on, scanned all 9M leads and died on the statement timeout
+after ~2 min with 0 rows. The same export **with** targeting: **2.1 s, 42,480
+rows**. The patch is now stored with the targeting row's `updated_at`; a
+re-select or the tab regaining focus compares versions and, when they differ,
+removes the old patch before applying the new one (applying over it merges the
+two, so dropped cities would keep filtering). Unchanged rules cost one small
+request and return before the coverage/availability scans. The focus re-check
+deliberately fires only for a tag THIS page applied — a preset/shared link
+clears `appliedRef` on purpose and must not gain targeting it never had.
+Covered by the last three structural cases in `scripts/test-client-targeting.mts`.
+
+⚠ **An exclusion list cannot be indexed — only narrowed.** That export's
+category exclusions compile to one 107-alternation case-insensitive regex
+tested against **7 columns** (`category`, `subcategory`, `additional_category`,
+`company`, `general_industry`, `specific_industry`, `company_overview`), which
+measured **~41 s per 300k rows** — ~20 min over the whole table. No index can
+answer "does NOT contain any of these", so nothing about the exclusion itself
+is fixable that way: it is only ever cheap because a selective *positive*
+predicate (the client's cities, indexed) hands it a small set first. Measured
+alternatives, identical row sets on a 300k slice: `lower(col) !~ rx` **43.4 s**
+(no gain — the cost is the alternation, not case folding), `lower(col) NOT LIKE
+ALL (array)` **25.1 s** (1.7×). Condition order makes no difference (41.9 s vs
+41.4 s) — Postgres reorders quals itself. `subcategory` alone is half the cost
+because uploads map *Company Description* into it (avg 242 chars, max 3,614).
+
 The City chip stays fully usable by hand, which matters for "target the whole
 state but drop a few cities": a state-level entry plus a city exclusion works
 through either chip — measured on Utah, 125,645 leads → 118,639 after excluding

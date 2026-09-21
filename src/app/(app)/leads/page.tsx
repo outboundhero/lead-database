@@ -133,7 +133,13 @@ export default function LeadsPage() {
   // targeting rules (synced from the onboarding sheet / Rules dialog) into the
   // other filters; deselecting removes exactly what was applied. Per-tag
   // patches let two selected clients share values without premature removal.
-  const appliedRef = useRef<Map<string, TargetingPatch>>(new Map());
+  // The patch is stored with the targeting row's `updated_at`: rules edited in
+  // the Rules dialog (or by the sheet sync) while this page is open MUST replace
+  // what was applied. Keeping the first version is not just stale — a client
+  // export then runs without the cities added since, i.e. out of territory
+  // (2026-09-21: JPCA's 105 cities were saved 16:14, an export at 16:40 still
+  // carried only the category terms, scanned all 9M leads and timed out).
+  const appliedRef = useRef<Map<string, { patch: TargetingPatch; version: string | null }>>(new Map());
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
 
@@ -166,7 +172,6 @@ export default function LeadsPage() {
   } | null>(null);
 
   const handleClientTagSelected = useCallback(async (tag: string) => {
-    if (appliedRef.current.has(tag)) return;
     try {
       // Targeting is fetched on its own: the availability count scans millions
       // of rows and must never be able to swallow the targeting apply (it did —
@@ -207,12 +212,26 @@ export default function LeadsPage() {
           [...new Set([...(targeting?.exclude_industries ?? []), ...(targeting?.exclude_keywords ?? [])])],
         ...(isCleaning && !filtersRef.current.commercialCleaning ? { commercialCleaning: true } : {}),
       };
+      // Nothing to do when the rules have not changed since they were applied —
+      // this also keeps the expensive coverage/availability scans below from
+      // re-running on every focus re-check.
+      const version = (targeting as { updated_at?: string } | null)?.updated_at ?? null;
+      const prev = appliedRef.current.get(tag);
+      if (prev && prev.version === version) return;
+      if (prev) {
+        // Rules changed: take the OLD values back out first. Applying over them
+        // merges the two sets, so cities dropped from the client's list would
+        // keep filtering.
+        appliedRef.current.delete(tag);
+        removeClientTargeting(prev.patch);
+      }
+
       const n =
         patch.locations.include.length + patch.locations.exclude.length +
         patch.categorySearchInclude.length + patch.keywordExclude.length +
         patch.categorySearchExclude.length + (patch.commercialCleaning ? 1 : 0);
       if (n > 0) {
-        appliedRef.current.set(tag, patch);
+        appliedRef.current.set(tag, { patch, version });
         applyClientTargeting(patch);
         const bits = [
           patch.locations.include.length && `${patch.locations.include.length} locations → Targeting chip (city+state paired)`,
@@ -220,7 +239,7 @@ export default function LeadsPage() {
           patch.categorySearchExclude.length && `${patch.categorySearchExclude.length} excluded terms`,
           patch.commercialCleaning && "Commercial Cleaning titles on",
         ].filter(Boolean).join(", ");
-        toast.success(`${tag} targeting applied: ${bits}`);
+        toast.success(`${tag} targeting ${prev ? "updated" : "applied"}: ${bits}`);
       } else if (!targeting) {
         toast.info(`No targeting rules on file for ${tag} — filtering by tag only`);
       }
@@ -258,7 +277,26 @@ export default function LeadsPage() {
     } catch {
       /* targeting fetch failed — tag filter still applies */
     }
-  }, [applyClientTargeting]);
+  }, [applyClientTargeting, removeClientTargeting]);
+
+  // Rules edited in another tab (or re-synced from the sheet) reach this page
+  // when it regains focus. Only for a tag THIS page applied: a preset/shared
+  // link clears appliedRef on purpose, and re-applying would add targeting the
+  // saved search deliberately did not have. Unchanged rules cost one small
+  // request and return above, before the coverage/availability scans.
+  useEffect(() => {
+    const tag = filters.clientTag;
+    if (!tag) return;
+    const recheck = () => {
+      if (document.visibilityState === "visible" && appliedRef.current.has(tag)) void handleClientTagSelected(tag);
+    };
+    window.addEventListener("focus", recheck);
+    document.addEventListener("visibilitychange", recheck);
+    return () => {
+      window.removeEventListener("focus", recheck);
+      document.removeEventListener("visibilitychange", recheck);
+    };
+  }, [filters.clientTag, handleClientTagSelected]);
 
   // Preset load / reset replace the whole filter state — earlier tags' patches
   // must be forgotten WITHOUT dispatching removals, or the observer below
@@ -283,11 +321,12 @@ export default function LeadsPage() {
   // than hooked to a click handler.
   useEffect(() => {
     const selected = new Set(filters.clientTag ? [filters.clientTag] : []);
-    for (const [tag, patch] of appliedRef.current) {
+    for (const [tag, entry] of appliedRef.current) {
       if (selected.has(tag)) continue;
+      const patch = entry.patch;
       appliedRef.current.delete(tag);
       // Keep any value another still-selected client also contributes.
-      const others = [...appliedRef.current.values()];
+      const others = [...appliedRef.current.values()].map((e) => e.patch);
       const entryKey = (e: LocationTargetEntry) => `${e.country}|${e.state ?? ""}|${e.city ?? ""}`;
       const othersHaveEntry = (e: LocationTargetEntry, side: "include" | "exclude") =>
         others.some((p) => p.locations[side].some((o) => entryKey(o) === entryKey(e)));

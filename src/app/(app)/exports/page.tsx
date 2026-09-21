@@ -19,30 +19,8 @@ import type { ExportJob } from "@/types/database";
 import { useHasPermission } from "@/lib/context/role-context";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { PushBatchesPanel } from "@/components/exports/push-batches-panel";
+import { formatFilterSummary } from "@/lib/exports/filter-summary";
 
-function formatFilterSummary(filtersUsed: Record<string, unknown> | null): string {
-  if (!filtersUsed) return "—";
-  const parts: string[] = [];
-  if (filtersUsed.fullName) parts.push(`Name: "${filtersUsed.fullName}"`);
-  if (filtersUsed.companyName) parts.push(`Company: "${filtersUsed.companyName}"`);
-  const keyword = filtersUsed.keyword as { include?: string[]; exclude?: string[] } | string | undefined;
-  if (typeof keyword === "string" && keyword) {
-    parts.push(`Keyword: "${keyword}"`);
-  } else if (keyword && typeof keyword === "object") {
-    if (keyword.include?.length) parts.push(`Keyword: ${keyword.include.join(", ")}`);
-    if (keyword.exclude?.length) parts.push(`Excl: ${keyword.exclude.join(", ")}`);
-  }
-  const source = filtersUsed.source as { include?: string[] } | undefined;
-  if (source?.include?.length) parts.push(`Source: ${source.include.join(", ")}`);
-  const seniority = filtersUsed.seniority as { include?: string[] } | undefined;
-  if (seniority?.include?.length) parts.push(`Seniority: ${seniority.include.join(", ")}`);
-  const industry = filtersUsed.generalIndustry as { include?: string[] } | undefined;
-  if (industry?.include?.length) parts.push(`Industry: ${industry.include.join(", ")}`);
-  const location = filtersUsed.location as { city?: string; country?: { include?: string[] } } | undefined;
-  if (location?.city) parts.push(`City: ${location.city}`);
-  if (location?.country?.include?.length) parts.push(`Country: ${location.country.include.join(", ")}`);
-  return parts.length > 0 ? parts.join(" · ") : "All leads";
-}
 
 export default function ExportsPage() {
   const canView = useHasPermission("manager");

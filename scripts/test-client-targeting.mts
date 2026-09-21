@@ -109,6 +109,41 @@ async function main() {
   ok("every covered state is visible in the State chip", stateMissing === 0, `${stateMissing} client(s) missing states`);
   ok("deselecting a client restores a clean slate", roundTripDirty === 0, `${roundTripDirty} client(s) left residue`);
 
+  // 5. Targeting EDITED while the page is open (2026-09-21 incident: JPCA's
+  //    cities were saved at 16:14, an export at 16:40 still ran without them,
+  //    scanned all 9M leads and timed out). The page now stores the row's
+  //    updated_at with the patch and swaps remove-then-apply; this checks the
+  //    swap leaves the new rules and NONE of the old ones.
+  {
+    const withCities = targets.find((t) => (t.include_locations ?? []).some((e) => e.city));
+    if (!withCities) {
+      ok("stale-targeting swap", false, "no client with city targeting to test against");
+    } else {
+      const oldPatch: TargetingPatch = {
+        locations: { include: [], exclude: [] },      // rules BEFORE the edit: terms only, no cities
+        categorySearchInclude: [],
+        keywordExclude: [],
+        categorySearchExclude: ["stale term"],
+      };
+      const newPatch = patchFor(withCities);
+      const stale = filterReducer(DEFAULT_FILTER_STATE, { type: "APPLY_CLIENT_TARGETING", patch: oldPatch } as never);
+      ok("before the swap the page is in the broken state (terms, no cities)",
+        stale.categorySearch.exclude.includes("stale term") && stale.locationTargets.include.length === 0);
+      // What the fix does on re-check: remove the old patch, then apply the new.
+      const swapped = filterReducer(
+        filterReducer(stale, { type: "REMOVE_CLIENT_TARGETING", patch: oldPatch } as never),
+        { type: "APPLY_CLIENT_TARGETING", patch: newPatch } as never);
+      const cities = (withCities.include_locations ?? []).filter((e) => e.city);
+      const paired = new Set(swapped.locationTargets.include.map((e) => `${e.country}|${e.state ?? ""}|${e.city ?? ""}`));
+      ok("after the swap the new cities are applied",
+        cities.length > 0 && cities.every((e) => paired.has(`${e.country}|${e.state ?? ""}|${e.city ?? ""}`)),
+        `${swapped.locationTargets.include.length} targeted locations`);
+      ok("after the swap no value from the old rules survives",
+        !swapped.categorySearch.exclude.includes("stale term"),
+        `categorySearch.exclude still has: ${swapped.categorySearch.exclude.filter((v) => v === "stale term").join(", ")}`);
+    }
+  }
+
   // ---- Behavioural check against the database ------------------------------
   // Location part only, so any difference is attributable to the pairing fix.
   const sample = only.length ? targets : targets.slice(0, 6);
