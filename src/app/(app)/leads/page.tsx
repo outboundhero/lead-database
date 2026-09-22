@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { RowSelectionState } from "@tanstack/react-table";
 import { toast } from "sonner";
@@ -18,7 +18,7 @@ import { SuppressLeadsDialog } from "@/components/leads/suppress-leads-dialog";
 import { Button } from "@/components/ui/button";
 import { ArrowUpDown, X, Trash2, Link2, Ban } from "lucide-react";
 import { useHasPermission } from "@/lib/context/role-context";
-import { countActiveFilters, needsClientTargeting } from "@/types/filters";
+import { countActiveFilters, needsClientTargeting, EXCLUDE_IDS_MAX } from "@/types/filters";
 import { LocationCoverageNotice, type LocationCoverage } from "@/components/clients/location-coverage-notice";
 import type { Lead } from "@/types/database";
 
@@ -98,6 +98,14 @@ export default function LeadsPage() {
   // "Select all N filtered" mode — the whole filtered set is targeted, not just
   // the checked visible rows. Delete/actions resolve it server-side via filters.
   const [selectAllFiltered, setSelectAllFiltered] = useState(false);
+  // Rows unchecked OUT of a select-all. The selection is then "everything
+  // matching the filters, minus these", which is what every action is given
+  // (fn_lead_filter_conditions honours `excludeIds`, migration 114) — so the
+  // count in the toolbar, the export and a delete cannot disagree.
+  const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set());
+  const excludedRef = useRef(excludedIds);
+  excludedRef.current = excludedIds;
+  const atCapRef = useRef(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [suppressOpen, setSuppressOpen] = useState(false);
   const selectedIds = Object.keys(rowSelection).filter((k) => rowSelection[k]);
@@ -109,18 +117,58 @@ export default function LeadsPage() {
   // Any manual selection change (checkbox / drag / shift) exits "all filtered".
   function handleSelectionChange(next: RowSelectionState) {
     setSelectAllFiltered(false);
+    setExcludedIds(new Set());
     setRowSelection(next);
   }
   function selectAllFilteredNow() {
     const next: RowSelectionState = {};
     for (const l of leads) next[l.id] = true;
     setRowSelection(next);
+    setExcludedIds(new Set());
     setSelectAllFiltered(true);
   }
   function clearSelection() {
     setRowSelection({});
+    setExcludedIds(new Set());
     setSelectAllFiltered(false);
   }
+  // Unchecking a row inside a select-all records an exclusion instead of
+  // collapsing to "the ids this page happens to know", which would silently
+  // shrink a 42,000-lead selection to the ~100 rows on screen.
+  const toggleExcluded = useCallback((id: string, excluded: boolean) => {
+    // The cap check and its toast stay OUT of the updater — an updater must be
+    // pure (React may call it twice), and a toast fired from inside it would
+    // double up.
+    if (excluded && excludedRef.current.size >= EXCLUDE_IDS_MAX && !excludedRef.current.has(id)) {
+      atCapRef.current = true;
+      return;
+    }
+    setExcludedIds((prev) => {
+      const next = new Set(prev);
+      if (excluded) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+  // Telling the operator about the cap is a side effect, so it happens in an
+  // effect rather than in the callback (which the compiler must be free to
+  // memoize) or the updater (which must be pure).
+  useEffect(() => {
+    if (!atCapRef.current) return;
+    atCapRef.current = false;
+    toast.error(`You can uncheck at most ${EXCLUDE_IDS_MAX.toLocaleString()} rows — narrow the filters instead`);
+  });
+
+  // What the actions actually target. Kept OUT of `filters` itself so a saved
+  // search or shared link never carries someone's unchecked rows.
+  const excludeIdList = useMemo(() => [...excludedIds], [excludedIds]);
+  const actionFilters = useMemo(
+    () => (selectAllFiltered && excludeIdList.length ? { ...filters, excludeIds: excludeIdList } : filters),
+    [filters, selectAllFiltered, excludeIdList]
+  );
+  const selectedCount = selectAllFiltered
+    ? Math.max(0, totalCount - excludedIds.size)
+    : selectedIds.length;
 
   // A selection targets explicit ids; otherwise (all-filtered, or delete driven
   // purely by an active filter) we delete the whole filtered set server-side.
@@ -572,7 +620,9 @@ export default function LeadsPage() {
             <>
               <span className="text-[13px] font-medium text-muted-foreground tabular-nums">
                 {selectAllFiltered
-                  ? `All ${(isApproximate ? "~" : "") + totalCount.toLocaleString()} selected`
+                  ? excludedIds.size > 0
+                    ? `${(isApproximate ? "~" : "") + selectedCount.toLocaleString()} selected · ${excludedIds.size.toLocaleString()} unchecked`
+                    : `All ${(isApproximate ? "~" : "") + totalCount.toLocaleString()} selected`
                   : `${selectedIds.length} selected`}
               </span>
               {allPageSelected && !selectAllFiltered && totalCount > leads.length && (
@@ -612,11 +662,17 @@ export default function LeadsPage() {
               variant="ghost"
               size="sm"
               className="text-destructive hover:text-destructive disabled:opacity-40"
-              disabled={selectedIds.length === 0}
+              // Suppression is per-address and resolves the ids client-side, so
+              // it cannot act on a select-all (this page holds ~100 of the set,
+              // and acting on those silently would suppress a fraction of what
+              // the operator sees checked).
+              disabled={selectedIds.length === 0 || selectAllFiltered}
               title={
-                selectedIds.length === 0
-                  ? "Select leads to block them from every campaign"
-                  : "Never contact these addresses again — survives the Bison sync"
+                selectAllFiltered
+                  ? "Never contact works on rows you check individually — use Deselect, then pick the rows"
+                  : selectedIds.length === 0
+                    ? "Select leads to block them from every campaign"
+                    : `Never contact ${selectedIds.length.toLocaleString()} address${selectedIds.length === 1 ? "" : "es"} — survives the Bison sync`
               }
               onClick={() => setSuppressOpen(true)}
             >
@@ -636,7 +692,15 @@ export default function LeadsPage() {
               Delete
             </Button>
           )}
-          <ExportButton filters={filters} totalCount={totalCount} selectedIds={selectedIds} />
+          {/* In select-all mode the export must take the FILTERED path (with any
+              unchecked rows excluded server-side), not the ~100 ids this page
+              happens to hold — that mismatch is what showed "· 100 selected"
+              next to "All 340 selected". */}
+          <ExportButton
+            filters={actionFilters}
+            totalCount={selectedCount}
+            selectedIds={selectAllFiltered ? [] : selectedIds}
+          />
         </div>
       </div>
 
@@ -657,6 +721,9 @@ export default function LeadsPage() {
           onRowClick={setSelectedLead}
           rowSelection={rowSelection}
           onRowSelectionChange={handleSelectionChange}
+          allFilteredSelected={selectAllFiltered}
+          excludedIds={excludedIds}
+          onToggleExcluded={toggleExcluded}
           columnControls={{
             sortBy: filters.sortBy,
             sortDir: filters.sortDir,
@@ -682,8 +749,8 @@ export default function LeadsPage() {
           onClose={() => setDeleteOpen(false)}
           mode={deleteMode}
           ids={selectedIds}
-          filters={filters}
-          approxCount={deleteMode === "ids" ? selectedIds.length : totalCount}
+          filters={actionFilters}
+          approxCount={deleteMode === "ids" ? selectedIds.length : selectedCount}
           isApproximate={isApproximate}
           onDeleted={() => {
             clearSelection();

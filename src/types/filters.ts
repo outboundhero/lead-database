@@ -143,6 +143,16 @@ export interface FilterState {
   emailSuffix: SuffixFilter;    // email ends with (.in / .org / @gmail.com)
   domainSuffix: SuffixFilter;   // domain ends with
 
+  /**
+   * Rows unchecked out of a "select all N" — the selection is "everything
+   * matching, MINUS these". Attached to an ACTION (export, delete, count,
+   * push) at the point it is taken, never by the reducer and never saved in a
+   * preset or shared link: it describes a selection, not a search. Honoured by
+   * fn_lead_filter_conditions (114), so the UI and the server cannot disagree
+   * about what was selected. Capped at EXCLUDE_IDS_MAX.
+   */
+  excludeIds?: string[];
+
   // One-box search: comma-separated terms OR'd across email, company,
   // first/last name, domain, category, subcategory.
   globalSearch: string;
@@ -338,6 +348,9 @@ export function normalizeFilterState(partial: unknown): FilterState {
     // real condition behind it).
     emailSuffix: { include: suffixList(p.emailSuffix?.include), exclude: suffixList(p.emailSuffix?.exclude) },
     domainSuffix: { include: suffixList(p.domainSuffix?.include), exclude: suffixList(p.domainSuffix?.exclude) },
+    // Carried through (an export normalises before building its payload) but
+    // only ever present when an action attached it.
+    ...(sanitizeExcludeIds(p.excludeIds).length ? { excludeIds: sanitizeExcludeIds(p.excludeIds) } : {}),
     globalSearch: typeof p.globalSearch === "string" ? p.globalSearch : d.globalSearch,
     emailType: { ...d.emailType, ...(p.emailType ?? {}) },
     commercialCleaning: p.commercialCleaning === true,
@@ -368,6 +381,16 @@ function sanitizeColumnFilters(v: unknown): Record<string, string[]> {
  * targeting of its own is left alone — that is a deliberately hand-narrowed
  * subset of the client's cities, not a missing one.
  */
+// Beyond this many unchecked rows, "select all minus N" stops being the
+// sensible shape (and the SQL condition stops being small). The UI asks the
+// operator to narrow the filters instead; SQL enforces the same cap.
+export const EXCLUDE_IDS_MAX = 1000;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const sanitizeExcludeIds = (v: unknown): string[] =>
+  Array.isArray(v)
+    ? [...new Set(v.filter((x): x is string => typeof x === "string" && UUID_RE.test(x)))].slice(0, EXCLUDE_IDS_MAX)
+    : [];
+
 export function needsClientTargeting(
   f: { clientTag?: string | null; locationTargets?: { include?: unknown[]; exclude?: unknown[] } } | null | undefined,
 ): string | null {

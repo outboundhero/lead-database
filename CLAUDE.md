@@ -1533,6 +1533,32 @@ pooler**; they now run every statement in its own transaction with `SET
 LOCAL` (`tq()` helper). Grep for a bare `set statement_timeout` before adding
 any new script.
 
+## Selection is "everything matching, minus what you unchecked" (2026-09-22)
+
+The Leads page had two disconnected selection states: `rowSelection` (TanStack,
+holding only the CURRENT page's checked rows) and a `selectAllFiltered` flag.
+Paging through a select-all therefore rendered every checkbox empty while the
+toolbar said "All 340 selected", and Export reported "· 100 selected" — the
+first page. There was also no way to drop a few rows from a select-all.
+
+A row's checkbox in select-all mode now reads `!excludedIds.has(id)` rather
+than `rowSelection` (the page has never seen the rest of the set), unchecking
+records an exclusion, and drag/shift ranges and the header checkbox go through
+the same path. The ids travel with the ACTION as `excludeIds` in the filter
+JSON — **never** in `filters` itself, so a preset or shared link cannot carry
+someone's unchecked rows — and `fn_lead_filter_conditions` honours them
+(migration 114, `NOT (l.id = ANY (…))`, uuid-guarded, capped at 1,000 =
+`EXCLUDE_IDS_MAX`). Because every consumer reads that one function, an export
+cannot ship a row the operator unchecked and a delete cannot remove it.
+`normalizeFilterState` must PRESERVE the key — the export route normalises
+before building its payload, which is where a naive version loses it.
+Checked by `scripts/test-selection-exclusions.mts` (13 cases; the live ones
+assert the count drops by exactly N and the rows survive).
+
+Not covered: **Never contact** resolves ids client-side, so it is disabled in
+select-all mode rather than silently suppressing the ~100 rows this page holds.
+Suppress-by-filter is the missing piece there.
+
 ## Mimecast is excluded by default (client request, 2026-09-16)
 
 `DEFAULT_FILTER_STATE.esp` ships as `exclude: ["Mimecast"]`

@@ -22,26 +22,52 @@ import { leadColumns, mainCampaignsColumn } from "./lead-columns";
 import { LeadTablePagination } from "./lead-table-pagination";
 import type { Lead } from "@/types/database";
 
-const checkboxColumn: ColumnDef<Lead> = {
+/**
+ * In "select all N" mode the selection is the whole FILTERED set, which this
+ * page has never seen — only ~100 of it. So a row's checkbox cannot come from
+ * `rowSelection` (that holds the current page and nothing else): it is checked
+ * unless the operator unchecked it, and unchecking records an exclusion.
+ * Without this, paging through a select-all showed every row unchecked while
+ * the toolbar said "All 340 selected" (2026-09-22).
+ */
+interface SelectAllMode {
+  active: boolean;
+  excluded: Set<string>;
+  onToggleExcluded: (id: string, excluded: boolean) => void;
+}
+
+const makeCheckboxColumn = (all: SelectAllMode | null): ColumnDef<Lead> => ({
   id: "select",
-  header: ({ table }) => (
-    <Checkbox
-      checked={table.getIsAllPageRowsSelected()}
-      onCheckedChange={(v: boolean | "indeterminate") => table.toggleAllPageRowsSelected(!!v)}
-      aria-label="Select all"
-      onClick={(e: React.MouseEvent) => e.stopPropagation()}
-    />
-  ),
+  header: ({ table }) => {
+    const rows = table.getRowModel().rows;
+    const pageAllOn = all?.active
+      ? rows.length > 0 && rows.every((r) => !all.excluded.has(r.id))
+      : table.getIsAllPageRowsSelected();
+    return (
+      <Checkbox
+        checked={pageAllOn}
+        onCheckedChange={(v: boolean | "indeterminate") => {
+          if (all?.active) for (const r of rows) all.onToggleExcluded(r.id, !v);
+          else table.toggleAllPageRowsSelected(!!v);
+        }}
+        aria-label="Select all"
+        onClick={(e: React.MouseEvent) => e.stopPropagation()}
+      />
+    );
+  },
   cell: ({ row }) => (
     <Checkbox
-      checked={row.getIsSelected()}
-      onCheckedChange={(v: boolean | "indeterminate") => row.toggleSelected(!!v)}
+      checked={all?.active ? !all.excluded.has(row.id) : row.getIsSelected()}
+      onCheckedChange={(v: boolean | "indeterminate") => {
+        if (all?.active) all.onToggleExcluded(row.id, !v);
+        else row.toggleSelected(!!v);
+      }}
       aria-label="Select row"
       onClick={(e: React.MouseEvent) => e.stopPropagation()}
     />
   ),
   size: 40,
-};
+});
 
 interface LeadTableProps {
   data: Lead[];
@@ -63,6 +89,10 @@ interface LeadTableProps {
   /** Header sorting + per-column value filters, applied server-side over the
    *  entire filtered set (not just the loaded page). */
   columnControls?: ColumnControls;
+  /** "Select all N filtered" is on: rows read as checked minus `excludedIds`. */
+  allFilteredSelected?: boolean;
+  excludedIds?: Set<string>;
+  onToggleExcluded?: (id: string, excluded: boolean) => void;
 }
 
 export function LeadTable({
@@ -80,16 +110,25 @@ export function LeadTable({
   pushedLoaded = false,
   showMainCampaigns = false,
   columnControls,
+  allFilteredSelected = false,
+  excludedIds,
+  onToggleExcluded,
 }: LeadTableProps) {
+  const selectAll = React.useMemo<SelectAllMode | null>(
+    () => (allFilteredSelected && onToggleExcluded
+      ? { active: true, excluded: excludedIds ?? new Set<string>(), onToggleExcluded }
+      : null),
+    [allFilteredSelected, excludedIds, onToggleExcluded]
+  );
   const allColumns = React.useMemo(
     () => [
-      checkboxColumn,
+      makeCheckboxColumn(selectAll),
       ...leadColumns,
       ...(showMainCampaigns
         ? [mainCampaignsColumn(pushedLeadIds ?? new Set<string>(), pushedLoaded)]
         : []),
     ],
-    [showMainCampaigns, pushedLeadIds, pushedLoaded]
+    [showMainCampaigns, pushedLeadIds, pushedLoaded, selectAll]
   );
   // manualSorting: the server orders the whole filtered set (fn_filter_leads_v2
   // p_sort_by, widened in migration 088). getSortedRowModel() used to reorder
@@ -117,6 +156,13 @@ export function LeadTable({
 
   const rows = table.getRowModel().rows;
   const rowIds = React.useMemo(() => rows.map((r) => r.id), [rows]);
+  // Row highlight and the drag anchor must agree with the checkbox, which in
+  // select-all mode is "checked unless excluded".
+  const isRowChecked = React.useCallback(
+    (row: { id: string; getIsSelected: () => boolean }) =>
+      selectAll ? !selectAll.excluded.has(row.id) : row.getIsSelected(),
+    [selectAll]
+  );
 
   // Drag-to-select + shift-click range selection over the visible page rows.
   // - drag: mousedown a row, move over others → selects the contiguous range
@@ -134,6 +180,15 @@ export function LeadTable({
     (from: number, to: number, value: boolean) => {
       const lo = Math.min(from, to);
       const hi = Math.max(from, to);
+      // In select-all mode a drag adds/removes EXCLUSIONS, so dragging behaves
+      // the same way the checkboxes do rather than silently doing nothing.
+      if (selectAll) {
+        for (let i = lo; i <= hi; i++) {
+          const id = rowIds[i];
+          if (id !== undefined) selectAll.onToggleExcluded(id, !value);
+        }
+        return;
+      }
       const next: RowSelectionState = { ...rowSelection };
       for (let i = lo; i <= hi; i++) {
         const id = rowIds[i];
@@ -143,7 +198,7 @@ export function LeadTable({
       }
       onRowSelectionChange(next);
     },
-    [rowSelection, rowIds, onRowSelectionChange]
+    [rowSelection, rowIds, onRowSelectionChange, selectAll]
   );
 
   React.useEffect(() => {
@@ -242,9 +297,9 @@ export function LeadTable({
               rows.map((row, index) => (
                 <TableRow
                   key={row.id}
-                  data-state={row.getIsSelected() ? "selected" : undefined}
+                  data-state={isRowChecked(row) ? "selected" : undefined}
                   className="cursor-pointer select-none"
-                  onMouseDown={(e) => handleRowMouseDown(e, index, row.getIsSelected())}
+                  onMouseDown={(e) => handleRowMouseDown(e, index, isRowChecked(row))}
                   onMouseEnter={() => handleRowMouseEnter(index)}
                   onClick={(e) => handleRowClick(e, row.original)}
                 >

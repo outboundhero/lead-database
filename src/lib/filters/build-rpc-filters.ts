@@ -149,6 +149,9 @@ export function buildRpcFilters(filters: FilterState) {
     ...((filters.domainSuffix?.include?.length || filters.domainSuffix?.exclude?.length)
       ? { domainSuffix: { include: filters.domainSuffix.include ?? [], exclude: filters.domainSuffix.exclude ?? [] } }
       : {}),
+    // Rows unchecked out of a "select all N" (114). Only ever set by the action
+    // that carries them, so an untouched payload is byte-identical to before.
+    ...(filters.excludeIds?.length ? { excludeIds: filters.excludeIds } : {}),
     categorySearch: {
       // Cascade includes OR across category/subcategory/additional via the
       // category-search field, with the Category chip's include mode.
