@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
+import type { FilterState } from "@/types/filters";
 
 // Suppress = never contact this address again, for any client, ever.
 //
@@ -18,12 +19,22 @@ export function SuppressLeadsDialog({
   open,
   onClose,
   ids,
+  filters,
+  count,
   onDone,
 }: {
   open: boolean;
   onClose: () => void;
-  /** Selected lead ids — resolved to addresses server-side. */
+  /** Explicitly checked lead ids — resolved to addresses server-side. */
   ids: string[];
+  /**
+   * Set instead of `ids` for a "select all N" (minus any unchecked rows): the
+   * browser never holds 40,000 ids, so the server resolves the same filters the
+   * table ran and suppresses the whole set in batches.
+   */
+  filters?: FilterState | null;
+  /** How many leads the action covers — the filtered total, or ids.length. */
+  count: number;
   onDone?: () => void;
 }) {
   const [reason, setReason] = React.useState("");
@@ -42,7 +53,11 @@ export function SuppressLeadsDialog({
       const res = await fetch("/api/leads/suppress", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids, reason: reason.trim() || null, delete: alsoDelete }),
+        body: JSON.stringify(
+          filters
+            ? { filters, reason: reason.trim() || null, delete: alsoDelete }
+            : { ids, reason: reason.trim() || null, delete: alsoDelete }
+        ),
       });
       const d = await res.json();
       if (!res.ok) throw new Error(d.error ?? "Couldn't suppress");
@@ -62,7 +77,7 @@ export function SuppressLeadsDialog({
         <div className="flex items-start justify-between gap-2">
           <h2 className="flex items-center gap-2 text-[17px] font-semibold">
             <Ban className="size-4 text-destructive" />
-            Never contact {ids.length.toLocaleString()} lead{ids.length === 1 ? "" : "s"}
+            Never contact {count.toLocaleString()} lead{count === 1 ? "" : "s"}
           </h2>
           <button type="button" onClick={onClose} className="rounded-full p-1 hover:bg-muted" aria-label="Close">
             <X className="size-4" />
@@ -74,6 +89,13 @@ export function SuppressLeadsDialog({
           permanently. <span className="font-medium text-foreground">They stay blocked even if Bison
           still holds them</span> — the next sync will not add them back.
         </p>
+
+        {filters && count > 1000 && (
+          <p className="mt-2 rounded-xl bg-muted/50 p-3 text-[12px] text-muted-foreground">
+            This runs server-side in batches and may take a minute or two for {count.toLocaleString()} leads.
+            Keep this tab open until it reports back.
+          </p>
+        )}
 
         <label className="mt-4 block text-[12px] font-medium">Reason (optional)</label>
         <Input
@@ -95,7 +117,7 @@ export function SuppressLeadsDialog({
 
         <div className="mt-5 flex justify-end gap-2">
           <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>Cancel</Button>
-          <Button variant="destructive" size="sm" onClick={submit} disabled={busy || ids.length === 0}>
+          <Button variant="destructive" size="sm" onClick={submit} disabled={busy || count === 0}>
             {busy ? <><Loader2 className="mr-1 size-3 animate-spin" /> Suppressing…</> : "Never contact"}
           </Button>
         </div>

@@ -479,6 +479,7 @@ export function LeadDetailPanel({
         open={suppressOpen}
         onClose={() => setSuppressOpen(false)}
         ids={[current.id]}
+        count={1}
         onDone={onClose}
       />
     </Sheet>

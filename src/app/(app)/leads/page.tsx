@@ -662,17 +662,11 @@ export default function LeadsPage() {
               variant="ghost"
               size="sm"
               className="text-destructive hover:text-destructive disabled:opacity-40"
-              // Suppression is per-address and resolves the ids client-side, so
-              // it cannot act on a select-all (this page holds ~100 of the set,
-              // and acting on those silently would suppress a fraction of what
-              // the operator sees checked).
-              disabled={selectedIds.length === 0 || selectAllFiltered}
+              disabled={selectedCount === 0}
               title={
-                selectAllFiltered
-                  ? "Never contact works on rows you check individually — use Deselect, then pick the rows"
-                  : selectedIds.length === 0
-                    ? "Select leads to block them from every campaign"
-                    : `Never contact ${selectedIds.length.toLocaleString()} address${selectedIds.length === 1 ? "" : "es"} — survives the Bison sync`
+                selectedCount === 0
+                  ? "Select leads to block them from every campaign"
+                  : `Never contact ${selectedCount.toLocaleString()} address${selectedCount === 1 ? "" : "es"} — survives the Bison sync`
               }
               onClick={() => setSuppressOpen(true)}
             >
@@ -741,6 +735,10 @@ export default function LeadsPage() {
           open={suppressOpen}
           onClose={() => setSuppressOpen(false)}
           ids={selectedIds}
+          /* Select-all: the server resolves the same filters the table ran
+             (minus unchecked rows) instead of the ~100 ids this page holds. */
+          filters={selectAllFiltered ? actionFilters : null}
+          count={selectedCount}
           onDone={() => { clearSelection(); fetchLeads(); }}
         />
 

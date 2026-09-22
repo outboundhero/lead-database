@@ -26,6 +26,7 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { UserTable } from "@/components/admin/user-table";
+import { SuppressedPanel } from "@/components/admin/suppressed-panel";
 import { InviteUserDialog } from "@/components/admin/invite-user-dialog";
 import { BulkDeleteDialog } from "@/components/admin/bulk-delete-dialog";
 import { EmailMatchDialog } from "@/components/admin/email-match-dialog";
@@ -243,6 +244,9 @@ export default function AdminPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Never contact — suppressed addresses, grouped by reason */}
+      <SuppressedPanel canRestore={effectiveRole === "owner" || effectiveRole === "admin"} />
 
       {/* Recent Activity Logs */}
       <Card>

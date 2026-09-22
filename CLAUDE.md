@@ -1555,9 +1555,39 @@ before building its payload, which is where a naive version loses it.
 Checked by `scripts/test-selection-exclusions.mts` (13 cases; the live ones
 assert the count drops by exactly N and the rows survive).
 
-Not covered: **Never contact** resolves ids client-side, so it is disabled in
-select-all mode rather than silently suppressing the ~100 rows this page holds.
-Suppress-by-filter is the missing piece there.
+## Never contact: bulk, and reversible from Admin (2026-09-23)
+
+`fn_suppress_email` / `fn_unsuppress_email` take ONE address and the route
+looped them — one Railway→Sydney round trip each, so the route's own 5,000 cap
+was unreachable and the UI could only ever suppress the rows checked on one
+page ("Never contact 100 leads", which read as a 50/100 limit). Migration 115
+adds the set-based twins `fn_suppress_emails` / `fn_unsuppress_emails` (same
+upsert, same `is_suppressed` flip, both counts returned): **250 addresses in
+one statement, ~4 s**, vs 250 round trips.
+
+`POST /api/leads/suppress` now also takes **`filters`** — the same filters the
+table ran, `excludeIds` included — resolves them server-side and writes in
+chunks of 5,000, so "select all 42,000 → Never contact" works without the
+browser holding a single id. Guards: the same "no active filters" refusal the
+bulk delete uses, and a 100,000 ceiling.
+
+**Restoring** (`DELETE`) lifts the block *and* sets `is_suppressed = false`, so
+the lead is live again; an address whose row was deleted at suppression time
+has nothing to bring back and the reply says so. It is **owner/admin only** —
+suppression is a promise to a person, and lifting it is the direction that puts
+them back into campaigns. The Admin page lists the block list **grouped by
+reason** (reasons are free text: "Out of USA" and "out of USA" fold together,
+the most common spelling is shown), with search, per-address restore and
+"Restore all" per group. Checked by `scripts/test-suppress-bulk.mts` (16 cases
+against real rows, rolled back).
+
+⚠ **Suppression is still local to this database.** It stops OUR exports and
+pushes; it does not touch Email Bison, where the lead may sit in live
+campaigns. The mirror already records, per instance, `status` (`unsubscribed`
+is one of the values it returns) and `campaigns`/`campaign_ids` — so "where
+does this address exist" is answerable without an API call. Propagating a
+suppression into Bison (unsubscribe / remove from campaigns) is NOT built;
+client asked for it 2026-09-23.
 
 ## Mimecast is excluded by default (client request, 2026-09-16)
 
