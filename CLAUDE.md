@@ -1581,13 +1581,43 @@ the most common spelling is shown), with search, per-address restore and
 "Restore all" per group. Checked by `scripts/test-suppress-bulk.mts` (16 cases
 against real rows, rolled back).
 
-⚠ **Suppression is still local to this database.** It stops OUR exports and
-pushes; it does not touch Email Bison, where the lead may sit in live
-campaigns. The mirror already records, per instance, `status` (`unsubscribed`
-is one of the values it returns) and `campaigns`/`campaign_ids` — so "where
-does this address exist" is answerable without an API call. Propagating a
-suppression into Bison (unsubscribe / remove from campaigns) is NOT built;
-client asked for it 2026-09-23.
+### Suppression reaches Email Bison (2026-09-23)
+
+Suppression used to be local to this database: it stopped OUR exports and
+pushes but never touched Bison, so **542 of 1,067** suppressed addresses were
+still `in_sequence` on a live install (1,358 lead records across the four).
+
+**Bison's API reference is at `/api/reference`** (spec: `/api/reference.openapi`,
+YAML, 180 operations). Guessed paths all 404 — read the spec, do not guess.
+The relevant ones:
+
+| Endpoint | Note |
+|---|---|
+| `PATCH /api/leads/{id}/unsubscribe` | no body; status → `unsubscribed` |
+| `PATCH /api/leads/{id}/update-status` | `{status}` ∈ verified, unverified, unknown, unsubscribed, risky, inactive |
+| `PATCH /api/leads/bulk-update-status` | `{lead_ids[], status}` |
+| `POST /api/leads/{id}/blacklist`, `POST /api/blacklisted-emails/bulk` (CSV), `DELETE /api/blacklisted-emails/{id}` | blacklist, **not used** — client chose unsubscribe only |
+
+⚠ **The docs are wrong about one thing.** The unsubscribe example response shows
+`lead_campaign_data: []`, which reads as "campaign membership is wiped". It is
+not: verified on three live leads, the campaign rows survive with their ids and
+stats intact (`stopped` / `sequence_finished`). Unsubscribe is therefore far
+less destructive than the docs imply.
+
+**Round trip, verified live 2026-09-23:** `unsubscribed` →
+`update-status {unverified}` → `unverified` (campaigns still there) →
+`unsubscribe` → `unsubscribed`. That matters because **Bison refuses to add an
+unsubscribed lead to a campaign** (the push-worker already reads that back as a
+refusal reason), so clearing the status is what makes a reactivated lead
+sendable to FUTURE campaigns — the client's requirement.
+
+`bison_unsubscribe_queue` (116) holds one job per address **per install**
+(`fn_enqueue_bison_unsubscribe`, reads the mirror so it costs no API calls);
+the suppress route enqueues `unsubscribe`, the restore route `reactivate`, and
+a later opposite action deletes the pending one. `npm run bison-unsubscribe`
+(`scripts/bison-unsubscribe-worker.mjs`, Railway cron `*/15 * * * *`) drains it
+at ~2.5 calls/s, waits out a 429 rather than hammering, marks a 404 `gone`
+rather than failed, and is lease-locked. A stale mirror id is re-resolved live.
 
 ## Mimecast is excluded by default (client request, 2026-09-16)
 

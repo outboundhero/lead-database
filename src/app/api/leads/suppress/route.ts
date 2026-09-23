@@ -134,6 +134,19 @@ export async function POST(request: NextRequest) {
     flagged += Number(rows[0]?.leads_flagged ?? 0);
   }
 
+  // Push the decision into Bison. Suppression used to be local to this
+  // database, so a lead we had promised never to contact could still be
+  // mid-sequence there (2026-09-23: 542 of 1,067 were). Queued, not called
+  // inline — Bison answers one lead per request and 429s under load, and a
+  // suppression can cover tens of thousands of addresses across four installs.
+  let queued = 0;
+  for (let i = 0; i < emails.length; i += CHUNK) {
+    const { rows } = await pool.query(
+      `select fn_enqueue_bison_unsubscribe($1::text[], 'unsubscribe', $2::uuid) as n`,
+      [emails.slice(i, i + CHUNK), auth.user.id]);
+    queued += Number(rows[0]?.n ?? 0);
+  }
+
   // Optional hard delete of the lead rows. The suppression entries stay behind,
   // which is what stops the Bison sync recreating them.
   let deleted = 0;
@@ -146,10 +159,11 @@ export async function POST(request: NextRequest) {
   }
 
   return NextResponse.json({
-    suppressed, leadsFlagged: flagged, leadsDeleted: deleted,
+    suppressed, leadsFlagged: flagged, leadsDeleted: deleted, bisonQueued: queued,
     message:
       `${suppressed.toLocaleString()} address${suppressed === 1 ? "" : "es"} will never be contacted again` +
       (deleted ? `, and ${deleted.toLocaleString()} lead row${deleted === 1 ? "" : "s"} deleted` : "") +
+      (queued ? `. ${queued.toLocaleString()} Bison lead record${queued === 1 ? "" : "s"} queued to be unsubscribed there too` : "") +
       ". They stay blocked even if Bison still holds them.",
   });
 }
@@ -183,19 +197,28 @@ export async function DELETE(request: NextRequest) {
   }
   if (emails.length === 0) return NextResponse.json({ error: "Nothing to restore" }, { status: 400 });
 
-  let unsuppressed = 0, restored = 0;
+  let unsuppressed = 0, restored = 0, queued = 0;
   for (let i = 0; i < emails.length; i += CHUNK) {
-    const { rows } = await pool.query(
-      `select * from fn_unsuppress_emails($1::text[])`, [emails.slice(i, i + CHUNK)]);
+    const chunk = emails.slice(i, i + CHUNK);
+    const { rows } = await pool.query(`select * from fn_unsuppress_emails($1::text[])`, [chunk]);
     unsuppressed += Number(rows[0]?.unsuppressed ?? 0);
     restored += Number(rows[0]?.leads_restored ?? 0);
+    // Clear `unsubscribed` in Bison as well, or the lead can never be sent to a
+    // future campaign: Bison refuses to add an unsubscribed lead to a sequence
+    // (the push-worker already reads that back as a refusal reason). Verified
+    // 2026-09-23 on a live install — update-status flips it back to
+    // 'unverified' and the campaign history is untouched.
+    const { rows: [e] } = await pool.query(
+      `select fn_enqueue_bison_unsubscribe($1::text[], 'reactivate', $2::uuid) as n`, [chunk, auth.user.id]);
+    queued += Number(e?.n ?? 0);
   }
   return NextResponse.json({
-    unsuppressed, leadsRestored: restored,
+    unsuppressed, leadsRestored: restored, bisonQueued: queued,
     message:
       `${unsuppressed.toLocaleString()} address${unsuppressed === 1 ? "" : "es"} restored` +
       (restored ? `, ${restored.toLocaleString()} lead${restored === 1 ? "" : "s"} active again` : "") +
-      (restored < unsuppressed ? ` (${(unsuppressed - restored).toLocaleString()} had no lead row left)` : ""),
+      (restored < unsuppressed ? ` (${(unsuppressed - restored).toLocaleString()} had no lead row left)` : "") +
+      (queued ? `. ${queued.toLocaleString()} Bison record${queued === 1 ? "" : "s"} queued to be made sendable again` : ""),
   });
 }
 
