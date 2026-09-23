@@ -1611,6 +1611,15 @@ unsubscribed lead to a campaign** (the push-worker already reads that back as a
 refusal reason), so clearing the status is what makes a reactivated lead
 sendable to FUTURE campaigns — the client's requirement.
 
+⚠ **Bison refuses to unsubscribe a lead it has never emailed** — 422 "This
+lead has not been sent any emails yet", 343 of the first 1,358. The worker
+falls back to `update-status {unsubscribed}`, which works on a never-emailed
+lead (verified live). Either route ends at `status = unsubscribed`, which is
+what bars the lead from a sequence.
+
+**Catch-up run 2026-09-23: 1,358 records, 1,015 via unsubscribe + 343 via the
+fallback, 0 failed**, sampled live across all four installs.
+
 `bison_unsubscribe_queue` (116) holds one job per address **per install**
 (`fn_enqueue_bison_unsubscribe`, reads the mirror so it costs no API calls);
 the suppress route enqueues `unsubscribe`, the restore route `reactivate`, and

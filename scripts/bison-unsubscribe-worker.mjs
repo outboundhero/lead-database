@@ -11,13 +11,19 @@
 // 2026-09-23: 542 of them). The queue (migration 116) holds one job per address
 // per install; this drains it.
 //
-//   unsubscribe -> PATCH /api/leads/{id}/unsubscribe
-//                  Verified live: 200, status becomes 'unsubscribed', and the
-//                  documented response empties lead_campaign_data.
+//   unsubscribe -> PATCH /api/leads/{id}/unsubscribe, falling back to
+//                  PATCH /api/leads/{id}/update-status {status:'unsubscribed'}
+//                  when Bison answers 422 "This lead has not been sent any
+//                  emails yet" — it refuses to unsubscribe a lead it never
+//                  emailed (343 of the first 1,358). Either way the lead ends
+//                  up 'unsubscribed', which is what stops it being mailed and
+//                  bars it from being added to a sequence.
 //   reactivate  -> PATCH /api/leads/{id}/update-status {status:'unverified'}
-//                  Bison has NO resubscribe endpoint. This makes the lead
-//                  contactable again; it does NOT put it back in the sequences
-//                  it was removed from. Nothing can.
+//                  Bison has NO resubscribe endpoint, but clearing the status
+//                  is what a reactivated lead needs to be sendable to FUTURE
+//                  campaigns. Campaign HISTORY survives an unsubscribe (the
+//                  docs' lead_campaign_data: [] example is wrong — verified on
+//                  live leads), but nothing resumes a stopped sequence.
 //
 // PACING IS THE POINT. Bison answers one lead per request and 429s hard under
 // sustained load — a blanket 429 once killed the mirror sync at 188,761 of
@@ -95,7 +101,22 @@ async function callBison(job) {
   // The lead no longer exists on that install (deleted since the last mirror
   // sync). Terminal, and not a failure: there is nothing left to unsubscribe.
   if (res.status === 404) return { gone: true };
-  if (!res.ok) return { error: `HTTP ${res.status}: ${(await res.text()).slice(0, 200).replace(/\s+/g, " ")}` };
+  if (!res.ok) {
+    const body = (await res.text()).slice(0, 300).replace(/\s+/g, " ");
+    // Bison refuses to "unsubscribe" a lead it has never emailed (422 "This
+    // lead has not been sent any emails yet") — 343 of the first 1,358 in the
+    // 2026-09-23 catch-up. The goal is that the lead cannot be mailed or added
+    // to a sequence, and setting the status directly achieves exactly that
+    // (verified live: status becomes 'unsubscribed' on a never-emailed lead).
+    if (job.action === "unsubscribe" && res.status === 422 && /not been sent any emails/i.test(body)) {
+      const alt = await fetch(`${base}/api/leads/${job.bison_lead_id}/update-status`, {
+        method: "PATCH", headers: init.headers, body: JSON.stringify({ status: "unsubscribed" }),
+      }).catch((e) => ({ ok: false, status: 0, text: async () => e.message }));
+      if (alt.ok) return { ok: true, viaStatus: true };
+      return { error: `HTTP ${res.status} (${body}); status fallback → HTTP ${alt.status}` };
+    }
+    return { error: `HTTP ${res.status}: ${body}` };
+  }
   return { ok: true };
 }
 
@@ -109,7 +130,7 @@ async function finish(job, patch) {
     [job.id, patch.status, patch.error ?? null]);
 }
 
-let done = 0, gone = 0, failed = 0, retried = 0;
+let done = 0, gone = 0, failed = 0, retried = 0, viaStatus = 0;
 try {
   if (!(await acquireLock())) { log("another run holds the lease — exiting"); process.exit(0); }
 
@@ -149,7 +170,7 @@ try {
       out = await callBison(job);
     }
 
-    if (out.ok) { if (!out.dry) await finish(job, { status: "done" }); done++; }
+    if (out.ok) { if (!out.dry) await finish(job, { status: "done" }); done++; if (out.viaStatus) viaStatus++; }
     else if (out.gone) { await finish(job, { status: "gone" }); gone++; }
     else if (out.retryAfterMs) {      // still throttled: leave pending, stop the run
       log("still throttled after waiting — stopping this run, the rest stays queued");
@@ -164,7 +185,8 @@ try {
   }
 
   const { rows: [left] } = await q(`select count(*)::int n from bison_unsubscribe_queue where status = 'pending'`);
-  log(`done ${done}, gone ${gone}, failed ${failed}${retried ? `, 429 waits ${retried}` : ""} — ${left.n} still queued`);
+  log(`done ${done}${viaStatus ? ` (${viaStatus} via status fallback)` : ""}, gone ${gone}, failed ${failed}` +
+      `${retried ? `, 429 waits ${retried}` : ""} — ${left.n} still queued`);
 } catch (e) {
   console.error(ts(), "ERROR", e instanceof Error ? e.message : e);
   process.exitCode = 1;
