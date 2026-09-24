@@ -37,6 +37,7 @@
 import pg from "pg";
 import { randomUUID } from "node:crypto";
 import dotenv from "dotenv";
+import { campaignsForLead } from "./lib/push-side.mjs";
 import { espBucket } from "./lib/esp-bucket.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname });
 
@@ -635,6 +636,31 @@ async function pushCycle() {
   );
   const batchOf = new Map(batchRows.map((b) => [b.id, b]));
 
+  // B2B vs B2C is decided by the ADDRESS DOMAIN — freemail (gmail/yahoo/aol/…)
+  // is B2C, a company domain is B2B. This is the same definition the Leads
+  // filters and fn_lead_filter_conditions' emailSide branch use, and it is the
+  // ONLY correct one (client, 2026-09-24).
+  //
+  // It used to read `lead.email_type === "personal"`, which asks something else
+  // entirely — is this mailbox a person (john@) or a role (info@)? That sent
+  // 1,745,235 company addresses into B2C campaigns and 271,587 freemail
+  // addresses into B2B campaigns before it was caught.
+  const { rows: fmRows } = await pool.query("select domain from freemail_domains");
+  const FREEMAIL = new Set(fmRows.map((r) => String(r.domain).toLowerCase()));
+
+  // Which install is this client's B2B one and which is B2C. Used to resolve a
+  // campaign whose `side` was never stamped, instead of attaching to both.
+  const tags = [...new Set(batchRows.map((b) => b.client_tag).filter(Boolean))];
+  const instanceSide = new Map();   // `${tag}|${instance}` -> 'b2b' | 'b2c'
+  if (tags.length) {
+    const { rows } = await pool.query(
+      "select tag, b2b_instance, b2c_instance from client_tags where tag = any($1::text[])", [tags]);
+    for (const r of rows) {
+      if (r.b2b_instance) instanceSide.set(`${r.tag}|${r.b2b_instance}`, "b2b");
+      if (r.b2c_instance) instanceSide.set(`${r.tag}|${r.b2c_instance}`, "b2c");
+    }
+  }
+
   const fatalBatches = new Set(); // batch ids that hit 401/403/missing-key this cycle
   const toAttach = new Map();     // `${domain}|${campaignId}` -> { auth, campaignId, entries: [{item, leadId}] }
   const finals = [];              // items that reached the attach phase
@@ -727,12 +753,23 @@ async function pushCycle() {
     const allCampaigns = batch.campaigns ?? [];
     const routed = allCampaigns.some((c) => c.bucket);
     const bucket = routed ? espBucket(lead.esp) : null;
-    // WORKSPACE SPLIT (2026-08-26): business addresses send from the client's
-    // B2B install, personal ones from its B2C install. Batches queued before
-    // this carry no `side` at all, and those still attach to every campaign —
-    // which is how 100% of their leads ended up in BOTH workspaces.
-    const sided = allCampaigns.some((c) => c.side);
-    const side = lead.email_type === "personal" ? "b2c" : "b2b";
+    // WORKSPACE SPLIT: a company address sends from the client's B2B install,
+    // a freemail address from its B2C install.
+    // ⚠ NEVER attach to both workspaces — see scripts/lib/push-side.mjs.
+    const sideCall = campaignsForLead({
+      campaigns: allCampaigns, email: lead.email, clientTag: batch.client_tag,
+      freemailDomains: FREEMAIL, instanceSide,
+    });
+    if (sideCall.refuse) {
+      await setItem(item, token, {
+        status: "skipped",
+        error: `refusing to push: ${sideCall.refuse}. ` +
+               "Set b2b_instance/b2c_instance for this client tag, or re-queue from the wizard.",
+        claimed_at: null,
+      });
+      return;
+    }
+    const sideTargets = new Set(sideCall.targets.map((c) => `${c.instance_url ?? ""}|${c.id}`));
     // De-duplicate by instance+id: the same campaign listed twice would be
     // attached twice, and Bison rejects the second attach as "already in
     // another sequence" — turning a clean push into a partial failure. Batches
@@ -744,9 +781,9 @@ async function pushCycle() {
       item.target_campaigns?.length
         ? item.target_campaigns
         : allCampaigns
-            // A campaign with no side sits on neither of this client's
-            // instances; it stays open to any lead rather than being dropped.
-            .filter((c) => !sided || !c.side || c.side === side)
+            // Single-install batches have nothing to split, so an unresolved
+            // side stays open; a two-install batch was refused above.
+            .filter((c) => sideTargets.has(`${c.instance_url ?? ""}|${c.id}`))
             .filter((c) => !routed || (c.bucket ?? "default") === bucket)
             .map((c) => ({ id: String(c.id), instance_url: c.instance_url }))
     ).filter((t) => {
