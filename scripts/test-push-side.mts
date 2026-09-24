@@ -9,7 +9,6 @@
 // one fn_lead_filter_conditions uses when the leads were selected — the two
 // drifting apart is what caused the incident in the first place.
 import { Client } from "pg";
-// @ts-expect-error — plain .mjs helper shared with the worker
 import { sideOfEmail, sideOfCampaign, campaignsForLead } from "./lib/push-side.mjs";
 
 let passed = 0, failed = 0;

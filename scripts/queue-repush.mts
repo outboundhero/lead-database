@@ -82,9 +82,10 @@ for (const r of rows) {
       order by b.created_at desc limit 1`, [r.client_tag]);
   if (!src) { console.log(`  ${r.client_tag}: no campaign template — skipped`); continue; }
   const want = r.side === "b2b" ? src.b2b_instance : src.b2c_instance;
-  const campaigns = (src.campaigns as Array<Record<string, unknown>>)
+  type Camp = { id: string | number; instance_url?: string; side?: string; bucket?: string; name?: string };
+  const campaigns: Camp[] = (src.campaigns as Camp[])
     .filter((c) => (c.side ?? (c.instance_url === src.b2b_instance ? "b2b" : c.instance_url === src.b2c_instance ? "b2c" : null)) === r.side)
-    .map((c) => ({ ...c, side: r.side }));
+    .map((c) => ({ ...c, side: r.side as string }));
   if (!campaigns.length) {
     console.log(`  ${r.client_tag}/${r.side}: no ${r.side} campaign on ${want ?? "(install unknown)"} — skipped, needs a campaign choice`);
     continue;
