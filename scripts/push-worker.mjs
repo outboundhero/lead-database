@@ -160,9 +160,9 @@ if (INSTANCE && SPAN_ONLY) {
   console.error("PUSH_INSTANCE and PUSH_SPAN_ONLY are mutually exclusive");
   process.exit(1);
 }
-if (INSTANCE && !KEYS[INSTANCE] && DEFAULT_DOMAIN !== INSTANCE) {
+if (INSTANCE && !KEY_MAP[INSTANCE] && DEFAULT_DOMAIN !== INSTANCE) {
   // Refuse rather than idle forever on batches we hold no key for.
-  console.error(`PUSH_INSTANCE=${INSTANCE} is not in EMAILBISON_KEYS (${Object.keys(KEYS).join(", ") || "empty"})`);
+  console.error(`PUSH_INSTANCE=${INSTANCE} is not in EMAILBISON_KEYS (${Object.keys(KEY_MAP).join(", ") || "empty"})`);
   process.exit(1);
 }
 // The batches this worker owns, as a SQL fragment. Spliced into several
