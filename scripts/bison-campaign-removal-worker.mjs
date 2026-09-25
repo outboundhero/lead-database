@@ -47,7 +47,13 @@ if (!process.env.DATABASE_URL) { console.error("DATABASE_URL is required"); proc
 const KEYS = process.env.EMAILBISON_KEYS ? JSON.parse(process.env.EMAILBISON_KEYS) : {};
 if (!Object.keys(KEYS).length) { console.error("EMAILBISON_KEYS is required"); process.exit(1); }
 
-setTimeout(() => { console.error("WATCHDOG: 50 min — exiting"); process.exit(0); }, 50 * 60_000).unref();
+// Watchdog: sized for a cron slot by default. The one-off remediation runs for
+// hours, so --watchdog=0 disables it (2026-09-24: the default 50 min silently
+// killed all four workers mid-run with 2.1M rows still queued).
+const WATCHDOG_MIN = num(flag("watchdog"), 50);
+if (WATCHDOG_MIN > 0) {
+  setTimeout(() => { console.error(`WATCHDOG: ${WATCHDOG_MIN} min — exiting`); process.exit(0); }, WATCHDOG_MIN * 60_000).unref();
+}
 
 // One lease PER INSTALL so the four installs can drain in parallel — they are
 // four separate servers (distinct IPs), so their rate limits are independent.

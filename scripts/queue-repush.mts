@@ -29,6 +29,13 @@ const flag = (n: string) => {
 const TAG = typeof flag("tag") === "string" ? (flag("tag") as string) : null;
 const DRY = !!flag("dry");
 const MAX_PER_BATCH = Number(flag("max") ?? 200000);
+// Only queue work whose target install is in this list. The removals hammer two
+// installs for hours; pushing to those at the same time would stack load on the
+// same server and risk the blanket 429 that once killed the mirror sync. The
+// finished installs are idle, so their side can be re-pushed immediately.
+const ONLY = typeof flag("instance") === "string"
+  ? new Set((flag("instance") as string).split(",").map((x) => x.trim()).filter(Boolean))
+  : null;
 
 const db = new Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 await db.connect();
@@ -75,17 +82,31 @@ for (const r of rows) {
   // The campaigns for the side this lead SHOULD be on — taken from the client's
   // own most recent push so the bucket split (Google+Custom / Outlook / SEGs)
   // is exactly the one the operator chose.
+  // The template must actually CONTAIN campaigns for the side being pushed.
+  // Taking "the most recent batch" alone breaks once this script has queued a
+  // one-sided re-push for that client: its own batch becomes the newest and
+  // has no campaigns for the other side (2026-09-25: DO/b2c and JPHO/b2c were
+  // skipped that way).
   const [src] = await q(
     `select b.campaigns, ct.b2b_instance, ct.b2c_instance
        from push_batches b left join client_tags ct on ct.tag = b.client_tag
-      where b.client_tag = $1 and jsonb_array_length(b.campaigns) > 0
-      order by b.created_at desc limit 1`, [r.client_tag]);
+      where b.client_tag = $1
+        and exists (
+          select 1 from jsonb_array_elements(b.campaigns) cc
+           where coalesce(cc->>'side',
+                          case when cc->>'instance_url' = ct.b2b_instance then 'b2b'
+                               when cc->>'instance_url' = ct.b2c_instance then 'b2c' end) = $2)
+      order by b.created_at desc limit 1`, [r.client_tag, r.side]);
   if (!src) { console.log(`  ${r.client_tag}: no campaign template — skipped`); continue; }
   const want = r.side === "b2b" ? src.b2b_instance : src.b2c_instance;
   type Camp = { id: string | number; instance_url?: string; side?: string; bucket?: string; name?: string };
   const campaigns: Camp[] = (src.campaigns as Camp[])
     .filter((c) => (c.side ?? (c.instance_url === src.b2b_instance ? "b2b" : c.instance_url === src.b2c_instance ? "b2c" : null)) === r.side)
     .map((c) => ({ ...c, side: r.side as string }));
+  if (ONLY && !campaigns.some((c) => c.instance_url && ONLY.has(c.instance_url))) {
+    console.log(`  ${r.client_tag}/${r.side}: target install busy — deferred (${ids.length.toLocaleString()} lead(s))`);
+    continue;
+  }
   if (!campaigns.length) {
     console.log(`  ${r.client_tag}/${r.side}: no ${r.side} campaign on ${want ?? "(install unknown)"} — skipped, needs a campaign choice`);
     continue;
