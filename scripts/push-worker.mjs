@@ -135,6 +135,49 @@ const KEY_MAP = (() => {
 const DEFAULT_KEY = (env.EMAILBISON_API_KEY ?? "").trim() || null;
 const DEFAULT_DOMAIN = normalizeDomain(env.EMAILBISON_BASE_URL || "app.outboundhero.co");
 
+// ── ONE WORKER PER BISON INSTALL ────────────────────────────────────────────
+// The four installs are four separate servers on distinct IPs with INDEPENDENT
+// rate limits, so the honest way to use all four is four processes, each
+// driving one of them. A single process cannot: its item pool
+// (PUSH_CONCURRENCY) is one global ceiling, so whichever install its current
+// batch belongs to is the only one doing work — measured 2026-09-25, one
+// install ran at 22.5 items/s against its own 45/s gate while the other three
+// sat idle with 160k items pending.
+//
+//   PUSH_INSTANCE=app.facilityreach.com   own the batches that live ONLY there
+//   PUSH_SPAN_ONLY=1                      own the batches that span two installs
+//   neither                               own everything (original behaviour)
+//
+// A batch whose campaigns span two installs (96 of them historically, 4.1M
+// items — the wizard/export picker lets B2B and B2C be chosen together) is
+// claimed by NO per-install worker, because a lead in it routes to one install
+// or the other per its email domain and a scoped worker would attach it to the
+// wrong one. PUSH_SPAN_ONLY=1 is the service that picks those up, so the four
+// scoped workers plus one span worker cover the queue exactly once.
+const INSTANCE = (env.PUSH_INSTANCE ?? "").trim().toLowerCase() || null;
+const SPAN_ONLY = env.PUSH_SPAN_ONLY === "1";
+if (INSTANCE && SPAN_ONLY) {
+  console.error("PUSH_INSTANCE and PUSH_SPAN_ONLY are mutually exclusive");
+  process.exit(1);
+}
+if (INSTANCE && !KEYS[INSTANCE] && DEFAULT_DOMAIN !== INSTANCE) {
+  // Refuse rather than idle forever on batches we hold no key for.
+  console.error(`PUSH_INSTANCE=${INSTANCE} is not in EMAILBISON_KEYS (${Object.keys(KEYS).join(", ") || "empty"})`);
+  process.exit(1);
+}
+// The batches this worker owns, as a SQL fragment. Spliced into several
+// queries with different parameter numbering, hence an inlined literal rather
+// than a placeholder — INSTANCE is validated against EMAILBISON_KEYS above, so
+// it can only ever be one of our own install domains.
+const batchScope = (alias) =>
+  INSTANCE
+    ? `and not exists (select 1 from jsonb_array_elements(${alias}.campaigns) cc
+                        where coalesce(cc->>'instance_url', '') <> '${INSTANCE}')`
+    : SPAN_ONLY
+      ? `and (select count(distinct cc->>'instance_url')
+                from jsonb_array_elements(${alias}.campaigns) cc) > 1`
+      : "";
+
 // Returns { base, key, domain } for a campaign's instance, or null when no key covers it.
 function authFor(instanceUrl) {
   const domain = instanceUrl ? normalizeDomain(instanceUrl) : DEFAULT_DOMAIN;
@@ -435,8 +478,9 @@ async function gatherCycle() {
     `update push_batches b
         set status = 'gathering', started_at = coalesce(b.started_at, now())
       where b.id = (
-        select id from push_batches where status = 'pending'
-         order by created_at limit 1
+        select g.id from push_batches g
+         where g.status = 'pending' ${batchScope("g")}
+         order by g.created_at limit 1
          for update skip locked
       )
       returning b.*`
@@ -572,18 +616,35 @@ async function pushCycle() {
   // 9 campaigns and carry ~44. Attach is the stage that swings between 14s and
   // 116s a cycle, and this cuts the number of those calls by roughly ten times.
   //
-  // Two batches rather than one so more than one Bison install is still in
-  // play — a single client uses one instance pair, and the rate gate is
-  // per-instance. PUSH_BATCH_FOCUS=0 restores the old spread-everything
-  // behaviour if a client ever needs to jump the queue.
+  // One batch per INSTALL, so every install is busy while each one still works
+  // a single client at a time. PUSH_BATCH_FOCUS caps how many installs are in
+  // play (set it to the number of installs, 4); 0 restores the old
+  // spread-everything behaviour if a client ever needs to jump the queue.
   let focusIds = null;
   if (BATCH_FOCUS > 0) {
+    // ONE BATCH PER INSTALL, oldest first. Taking simply "the N oldest batches"
+    // concentrated attach calls nicely but said nothing about WHICH installs
+    // they sat on, so the focus could be three batches on the same install
+    // while the others idled — measured 2026-09-25 mid-remediation:
+    // app.facilityreach.com had 160,357 items pending and was doing nothing
+    // because the three oldest batches belonged to two other installs.
+    // The rate gate is per-install, so a batch on each install runs at full
+    // speed in parallel; within an install it is still one batch at a time,
+    // which is what keeps an attach POST carrying ~44 leads instead of ~4.
     const { rows } = await pool.query(
-      `select b.id from push_batches b
+      `select distinct on (x.inst) b.id, x.inst
+         from push_batches b
+         left join lateral (
+           select cc->>'instance_url' as inst
+             from jsonb_array_elements(b.campaigns) cc
+            where cc->>'instance_url' is not null
+            limit 1
+         ) x on true
         where b.status = 'processing'
           and exists (select 1 from push_items i
                        where i.batch_id = b.id and i.status = 'pending')
-        order by b.created_at
+          ${batchScope("b")}
+        order by x.inst, b.created_at
         limit $1`,
       [BATCH_FOCUS]
     );
@@ -591,17 +652,35 @@ async function pushCycle() {
     if (focusIds.length === 0) return false; // nothing pending anywhere
   }
 
+  // A QUOTA PER FOCUSED BATCH, not "the first N across all of them".
+  //
+  // This used to be `order by p.batch_id, p.lead_id limit $1`. batch_id is a
+  // random uuid, so that ordering drained whichever focused batch happened to
+  // hold the lowest uuid, in full, before the next one was touched — every item
+  // in a cycle went to ONE install, its per-install rate gate was the only one
+  // in use, and the other three installs idled. Spreading the focus across
+  // installs (above) is useless without this: the focus decides which batches
+  // are eligible, the claim decides who actually gets worked.
+  //
+  // Each cycle now takes CLAIM_BATCH/installs from each, so one pool of
+  // PUSH_CONCURRENCY workers is spread over four independent rate gates.
+  // A batch with less than its quota pending simply contributes what it has;
+  // as batches drain they leave the focus and the quota for the rest rises.
+  const perBatch = focusIds ? Math.max(1, Math.ceil(CLAIM_BATCH / focusIds.length)) : CLAIM_BATCH;
   const { rows: items } = await pool.query(
     focusIds
       ? `update push_items i
             set status = 'pushing', claim_token = $2, claimed_at = now()
           where (i.batch_id, i.lead_id) in (
-            select p.batch_id, p.lead_id
-              from push_items p
-             where p.status = 'pending' and p.batch_id = any($3::uuid[])
-             order by p.batch_id, p.lead_id
-             limit $1
-             for update of p skip locked
+            select c.batch_id, c.lead_id
+              from unnest($3::uuid[]) f(batch_id)
+              cross join lateral (
+                select p.batch_id, p.lead_id
+                  from push_items p
+                 where p.batch_id = f.batch_id and p.status = 'pending'
+                 limit $1
+                 for update of p skip locked
+              ) c
           )
           returning i.*`
       : `update push_items i
@@ -611,12 +690,13 @@ async function pushCycle() {
               from push_items p
               join push_batches b on b.id = p.batch_id
              where p.status = 'pending' and b.status = 'processing'
+               ${batchScope("b")}
              order by p.lead_id
              limit $1
              for update of p skip locked
           )
           returning i.*`,
-    focusIds ? [CLAIM_BATCH, token, focusIds] : [CLAIM_BATCH, token]
+    focusIds ? [perBatch, token, focusIds] : [CLAIM_BATCH, token]
   );
   if (items.length === 0) return false;
   mark("claim", tClaim);
@@ -796,9 +876,19 @@ async function pushCycle() {
       // NEVER fall back to "send it somewhere". A lead with no campaign of its
       // own is parked with the reason spelled out (client req #5: surface the
       // failure instead of silently putting the lead in the wrong place).
-      if (sided || routed) {
+      //
+      // ⚠ This block sits OUTSIDE the try/catch below, so anything that throws
+      // here aborts the WHOLE cycle: the main loop logs "cycle error" and every
+      // one of the ~400 claimed items stays 'pushing' until the 10-minute stale
+      // reclaim, with attach and finalize skipped. It referenced `sided` and
+      // `side` — both deleted along with the old email_type routing (7d7e5d9) —
+      // so from 2026-09-24 every lead with no campaign of its own threw
+      // `ReferenceError: sided is not defined` and killed a full cycle instead
+      // of being parked. Keep this block free of anything that can throw.
+      const sideDropped = sideCall.targets.length === 0 && allCampaigns.length > 0;
+      if (sideDropped || routed) {
         const why = [
-          sided ? `no ${side.toUpperCase()} campaign on this batch` : null,
+          sideDropped ? `no ${String(sideCall.side).toUpperCase()} campaign on this batch` : null,
           routed ? `no campaign for the "${bucket}" bucket` : null,
         ].filter(Boolean).join("; ");
         await setItem(item, token, {
@@ -881,7 +971,25 @@ async function pushCycle() {
           cursor = items.length;
           return;
         }
-        await processItem(items[n]);
+        // ONE ITEM MUST NEVER ABORT THE CYCLE. processItem handles its own
+        // Bison/API failures; this catches what its internal try does NOT cover
+        // — a programming error in the routing block, or a failed status write.
+        // Without it such a throw rejects this Promise.all, skips attach and
+        // finalize for every item in the cycle, and leaves all ~400 of them
+        // 'pushing' until the 10-minute stale reclaim (measured 2026-09-25:
+        // a stale `sided` reference did exactly that). Releasing the one item
+        // puts it straight back to 'pending' instead.
+        try {
+          await processItem(items[n]);
+        } catch (e) {
+          console.error(`item ${items[n].email ?? items[n].lead_id} threw:`,
+            e instanceof Error ? e.message : e);
+          // failOrRetry, NOT releaseItems: releasing leaves attempts untouched,
+          // so an item that throws every time would be re-claimed forever and
+          // (with a per-install worker) starve its whole install. This retries
+          // it MAX_ATTEMPTS times and then parks it as 'failed' with the error.
+          await failOrRetry(items[n], token, e).catch(() => {});
+        }
       }
     })
   );
@@ -997,7 +1105,8 @@ async function pushCycle() {
 console.log(
   `push-worker up — rate ${RATE}/s/instance, concurrency ${CONCURRENCY}, claim ${CLAIM_BATCH}, ` +
   `poll ${POLL_MS}ms, stale ${STALE_MIN}m, refresh ${REFRESH_MS / 1000}s, ` +
-  `focus ${BATCH_FOCUS === 0 ? "all batches" : `${BATCH_FOCUS} oldest`}, ` +
+  `focus ${BATCH_FOCUS === 0 ? "all batches" : `${BATCH_FOCUS} per install`}, ` +
+  `owns ${INSTANCE ?? (SPAN_ONLY ? "batches spanning 2 installs" : "every install")}, ` +
   `keys: ${Object.keys(KEY_MAP).length} mapped${DEFAULT_KEY ? " + default" : ""}${ONCE ? ", once" : ""}`
 );
 let lastSweep = 0;
