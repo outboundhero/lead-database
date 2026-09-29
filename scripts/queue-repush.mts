@@ -28,7 +28,11 @@ const flag = (n: string) => {
 };
 const TAG = typeof flag("tag") === "string" ? (flag("tag") as string) : null;
 const DRY = !!flag("dry");
-const MAX_PER_BATCH = Number(flag("max") ?? 200000);
+// 25k, not 200k: a push batch's gather is ONE query over its selected_ids, and
+// a gather that runs past the worker's 15-minute stale reset can never commit
+// — an 81,793-lead JPU batch sat in 'gathering' for 14 hours that way
+// (2026-09-25). Every 25k batch since has gathered well inside the window.
+const MAX_PER_BATCH = Number(flag("max") ?? 25000);
 // Only queue work whose target install is in this list. The removals hammer two
 // installs for hours; pushing to those at the same time would stack load on the
 // same server and risk the blanket 429 that once killed the mirror sync. The
@@ -39,8 +43,54 @@ const ONLY = typeof flag("instance") === "string"
 
 const db = new Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 await db.connect();
-const q = async (sql: string, p: unknown[] = []) => (await db.query(sql, p)).rows;
-await db.query("set statement_timeout = 0");
+// Every statement in its OWN transaction with SET LOCAL. This used to issue a
+// session-level `set statement_timeout = 0` over DATABASE_URL — the 6543
+// transaction pooler, which hands the backend to the next client without
+// resetting GUCs, so the setting could land on a push-worker's connection
+// (CLAUDE.md: the 2026-09-16 outage was exactly this).
+const q = async (sql: string, p: unknown[] = []) => {
+  await db.query("begin");
+  try {
+    await db.query("set local statement_timeout = 0");
+    const rows = (await db.query(sql, p)).rows;
+    await db.query("commit");
+    return rows;
+  } catch (e) {
+    await db.query("rollback").catch(() => {});
+    throw e;
+  }
+};
+
+// Live campaign status from Bison. Leads are only ever added to a campaign
+// that is Active or Draft (client decision 2026-09-29): an archived, paused or
+// completed campaign will not send, so putting a lead there helps no one.
+const KEYS: Record<string, string> = (() => {
+  const raw = String(process.env.EMAILBISON_KEYS ?? "").trim().replace(/^'|'$/g, "");
+  try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
+})();
+const KEEP_STATUSES = new Set(["active", "draft"]);
+const statusCache = new Map<string, string>();
+async function liveStatus(inst: string, id: string | number): Promise<string> {
+  const k = `${inst}|${id}`;
+  if (statusCache.has(k)) return statusCache.get(k)!;
+  let status = "unknown";
+  if (KEYS[inst]) {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const r = await fetch(`https://${inst}/api/campaigns/${id}`, {
+        headers: { Authorization: `Bearer ${KEYS[inst]}`, Accept: "application/json" },
+      });
+      if (r.status === 429) { await new Promise((res) => setTimeout(res, 30_000)); continue; }
+      if (r.status === 404) { status = "not found"; break; }
+      const j = await r.json().catch(() => null);
+      status = String(j?.data?.status ?? j?.status ?? "unknown").toLowerCase();
+      break;
+    }
+  } else {
+    status = "no api key";
+  }
+  statusCache.set(k, status);
+  return status;
+}
 
 // Leads that ended up ONLY on the wrong side, with the side they should be on.
 const rows = await q(`
@@ -54,15 +104,26 @@ const rows = await q(`
      where b.client_tag is not null and coalesce(b.sent,0) > 0
        ${TAG ? "and b.client_tag = $1" : ""}
   ), att as (
-    select i.batch_id, i.lead_id, i.email, a cid
-      from push_items i, lateral unnest(coalesce(i.attached_ids,'{}'::text[])) a
+    -- Resolve every attachment to its INSTALL through the item's own
+    -- target_campaigns ({id, instance_url}). attached_ids holds bare campaign
+    -- ids, and several clients use the SAME ids on both installs (CCHS has
+    -- 214/215/216 on facilityreach and on outboundclean). Matching by id alone
+    -- counted a lead sitting in the wrong install's 214 as already in the right
+    -- one, so the first run (2026-09-25) re-added nothing at all for CCHS,
+    -- CCGNH, CCGHAL, CVJLEX, CVJLOU or JPLA.
+    select i.batch_id, i.lead_id, i.email, t->>'id' cid, t->>'instance_url' inst
+      from push_items i,
+           lateral jsonb_array_elements(coalesce(i.target_campaigns, '[]'::jsonb)) t
      where i.status = 'sent'
+       and (t->>'id') = any(coalesce(i.attached_ids, '{}'::text[]))
   ), j as (
     select camp.client_tag, att.lead_id, att.email,
            case when split_part(lower(att.email),'@',2) in (select domain from freemail_domains)
                 then 'b2c' else 'b2b' end addr,
            camp.side
-      from att join camp on camp.batch_id = att.batch_id and camp.cid = att.cid
+      from att join camp on camp.batch_id = att.batch_id
+                        and camp.cid = att.cid
+                        and camp.inst = att.inst
      where camp.side is not null
   )
   select client_tag, addr as side, array_agg(distinct lead_id) as lead_ids
@@ -72,6 +133,15 @@ const rows = await q(`
         from j group by 1,2,3,4
     ) p
    where correct = 0
+     -- Already tried by a push made AFTER the routing fix, and deliberately not
+     -- sent: outside the client's targeting, refused by Bison (unsubscribed,
+     -- bounced, in another sequence) or unfetchable. That verdict came from the
+     -- corrected pipeline, so re-queueing would only repeat it.
+     and not exists (
+       select 1 from push_items pi join push_batches pb on pb.id = pi.batch_id
+        where pb.client_tag = p.client_tag and pb.email_side = p.addr
+          and pb.created_at >= '2026-09-24 20:00+00'
+          and pi.lead_id = p.lead_id and pi.status in ('skipped', 'failed'))
    group by 1,2`, TAG ? [TAG] : []);
 
 if (!rows.length) { console.log("nothing to re-push"); await db.end(); process.exit(0); }
@@ -111,6 +181,20 @@ for (const r of rows) {
     console.log(`  ${r.client_tag}/${r.side}: no ${r.side} campaign on ${want ?? "(install unknown)"} — skipped, needs a campaign choice`);
     continue;
   }
+  // Only campaigns that are live-Active or Draft in Bison right now.
+  const withStatus = await Promise.all(campaigns.map(async (c) => ({
+    c, status: c.instance_url ? await liveStatus(c.instance_url, c.id) : "no install",
+  })));
+  const dropped = withStatus.filter((x) => !KEEP_STATUSES.has(x.status));
+  const usable = withStatus.filter((x) => KEEP_STATUSES.has(x.status)).map((x) => x.c);
+  if (dropped.length) {
+    console.log(`  ${r.client_tag}/${r.side}: not using ${dropped.map((x) => `${x.c.id}@${x.c.instance_url} (${x.status})`).join(", ")}`);
+  }
+  if (!usable.length) {
+    console.log(`  ${r.client_tag}/${r.side}: no Active or Draft campaign left — skipped (${ids.length.toLocaleString()} lead(s))`);
+    continue;
+  }
+  campaigns.splice(0, campaigns.length, ...usable);
   for (let i = 0; i < ids.length; i += MAX_PER_BATCH) {
     const slice = ids.slice(i, i + MAX_PER_BATCH);
     console.log(`  ${r.client_tag}/${r.side}: ${slice.length.toLocaleString()} lead(s) → ${campaigns.map((c) => `${c.id}@${c.instance_url}`).join(", ")}${DRY ? "  [dry]" : ""}`);
