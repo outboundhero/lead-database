@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isNurtureCampaign } from "@/lib/bison/campaigns";
+import { isArchivedCampaign } from "@/lib/bison/campaign-meta";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeFilterState } from "@/types/filters";
@@ -114,7 +115,9 @@ function suggestCampaign(
   // NEVER fall back to a Nurture campaign. The old `?? matching[0]` meant that a
   // client whose every tag-prefixed campaign is a Nurture got one suggested
   // anyway — the opposite of the rule that we only ever send to main campaigns.
-  return matching.find((c) => !isNurtureCampaign(c.name)) ?? null;
+  // Nor an archived one: it cannot send, and the newest campaign of a client
+  // that just archived its current set is exactly that archived set.
+  return matching.find((c) => !isNurtureCampaign(c.name) && !isArchivedCampaign(c)) ?? null;
 }
 
 export async function POST(request: NextRequest) {

@@ -821,6 +821,42 @@ pre-filter before the regex conditions (7.6s instead of >180s) inside a
 transaction with `set local statement_timeout`. Failures now surface as a red
 retry pill instead of nothing.
 
+## Campaign pickers show status, date and size (2026-10-06)
+
+Both pickers (export popup, Send-to-Bison wizard) render each campaign's Bison
+`status`, `created_at` and `total_leads` beside its name, sort **newest
+first**, and hide **archived** campaigns by default (popup: toggle; wizard:
+excluded, and never suggested). Helpers in
+[campaign-meta.ts](src/lib/bison/campaign-meta.ts), covered by
+`scripts/test-campaign-meta.mts`. Reason: a client whose B2C install was set
+up in June carries a second campaign set with the **same names** as its March
+B2B set (JPCA: `818` active, 60,916 leads vs `146` draft, 2,918 leads), and
+name-only rows made them indistinguishable. Both routes already passed the
+whole Bison row through; nothing displayed it.
+
+"Sync campaigns" now reports what it did: `/api/bison/campaigns` returns a
+`sync` block (`fetchedAt`, `total`, `perInstance`) and the popup shows it plus
+"N new since last sync" after a manual sync. The wizard's step 3 has its own
+Sync that re-runs `send-preview` and keeps choices that still exist.
+
+⚠ **A two-install batch is refused at queue time** (`push-batch` 400) when the
+client tag is missing or any campaign could not be given a side. The worker
+would refuse every lead later anyway (push-side.mjs), but on 2026-10-05 four
+exports (CVJCIN, SCAS, RICS, TTT — 148,550 leads) were queued for clients whose
+B2B/B2C mapping had not been synced yet, gathered in full, then skipped
+entirely. The error names the client and says to run **Sync groups** first.
+
+⚠ **`sent` overstates what Bison holds.** Bison does not add a lead to a
+campaign while the lead is "In Sequence" in another campaign on that install
+(its `allow_parallel_sending` flag, which the worker never sends), yet it
+returns 2xx for the chunk; the worker then marks the whole chunk attached.
+Measured 2026-10-05 on JPCO's draft B2C mains: 13,666 recorded, 10,423 in
+Bison — every missing lead already sat in JPCO's own Nurture or another
+client's campaign. Leads the push CREATES on the install land 100%. A later
+push for the same client skips any lead with a `sent` item, so these are never
+retried. Not yet fixed; decision pending on whether a lead already in a
+client's Nurture should be forced into main.
+
 ## Net-new forecast on export
 
 After choosing campaigns, the export popup shows how many of the selected leads

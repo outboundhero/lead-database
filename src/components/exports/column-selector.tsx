@@ -11,12 +11,35 @@ import {
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { isNurtureCampaign } from "@/lib/bison/campaigns";
+import {
+  byNewestCampaign, campaignLeadCount, campaignStatus, campaignStatusLabel,
+  formatCampaignDate, isArchivedCampaign,
+} from "@/lib/bison/campaign-meta";
 import { Input } from "@/components/ui/input";
 import { LEAD_FIELDS } from "@/lib/uploads/constants";
 import { toast } from "sonner";
 
-export interface BisonCampaign { id: number | string; name?: string; instance_url?: string; workspace_name?: string }
+export interface BisonCampaign {
+  id: number | string;
+  name?: string;
+  instance_url?: string;
+  workspace_name?: string;
+  // Straight from Bison. Shown beside the name so two campaigns with the same
+  // name (a client's March B2B set and its June B2C set) can be told apart.
+  status?: string;
+  created_at?: string;
+  total_leads?: number;
+}
 export type ExportDestination = "csv" | "bison";
+
+/** What the last read from Bison returned, for the Sync button to report. */
+interface CampaignSync {
+  fetchedAt: string;
+  total: number;
+  perInstance: Record<string, number>;
+  /** Campaigns present now that were not in the previous list (only after a manual Sync). */
+  added: number | null;
+}
 
 // Campaign ids can collide across Bison instances — selection keys must
 // include the instance the campaign lives on.
@@ -135,6 +158,13 @@ export function ColumnSelector({
   const [campaignsPartial, setCampaignsPartial] = useState<string[]>([]);
   // One fetch per dialog open — never auto-retry on error/empty (manual Retry instead)
   const [campaignsAttempted, setCampaignsAttempted] = useState(false);
+  // Result of the last read from Bison, shown under the Sync button.
+  const [campaignSync, setCampaignSync] = useState<CampaignSync | null>(null);
+  // The last list loaded and the scope it was loaded for, so a Sync can say
+  // what is new. A ref, because loadCampaigns is memoised with no dependencies.
+  const lastLoadRef = useRef<{ term: string; list: BisonCampaign[] }>({ term: "", list: [] });
+  // Archived campaigns cannot send, so they are hidden unless asked for.
+  const [showArchived, setShowArchived] = useState(false);
   // Campaign-picker upgrades (client req #7)
   const [tagScope, setTagScope] = useState(""); // client-tag prefix filter ("" = all)
   const [clientTagOptions, setClientTagOptions] = useState<string[]>([]);
@@ -192,7 +222,24 @@ export function ColumnSelector({
         return r.json();
       })
       .then((d) => {
-        setCampaigns(Array.isArray(d.campaigns) ? d.campaigns : []);
+        const next: BisonCampaign[] = Array.isArray(d.campaigns) ? d.campaigns : [];
+        // A manual Sync reports what it found that the previous list lacked —
+        // the reason an operator presses it is a campaign just created in Bison.
+        // Only comparable against a previous load of the SAME scope: a scoped
+        // (one client) list and the full list differ by thousands.
+        const prev = lastLoadRef.current;
+        const before = new Set(prev.list.map(campaignKey));
+        const added = force && prev.term === term && prev.list.length > 0
+          ? next.filter((c) => !before.has(campaignKey(c))).length
+          : null;
+        lastLoadRef.current = { term, list: next };
+        setCampaigns(next);
+        const s = d.sync;
+        setCampaignSync(
+          s && typeof s === "object"
+            ? { fetchedAt: String(s.fetchedAt ?? ""), total: Number(s.total ?? next.length), perInstance: s.perInstance ?? {}, added }
+            : null
+        );
         // Surface per-instance failures/truncation instead of quietly showing
         // an incomplete list.
         setCampaignsPartial(Array.isArray(d.errors) ? d.errors : []);
@@ -226,6 +273,7 @@ export function ColumnSelector({
     setCampaignSearch("");
     setCampaignsError(null);
     setCampaignsAttempted(false);
+    setShowArchived(false);
     setTagScope("");
     setPresetName("");
     scopeTouchedRef.current = false;
@@ -425,6 +473,17 @@ export function ColumnSelector({
                 {campaignsLoading ? "Syncing…" : "Sync campaigns"}
               </button>
             </div>
+            {campaignSync && !campaignsLoading && (
+              <p className="mb-1 text-[10px] text-muted-foreground" title={Object.entries(campaignSync.perInstance).map(([i, n]) => `${i}: ${n}`).join("\n")}>
+                Read from Bison {campaignSync.fetchedAt ? new Date(campaignSync.fetchedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "just now"}
+                {" · "}{campaignSync.total.toLocaleString()} campaign{campaignSync.total === 1 ? "" : "s"} across {Object.keys(campaignSync.perInstance).length} install{Object.keys(campaignSync.perInstance).length === 1 ? "" : "s"}
+                {campaignSync.added != null && (
+                  <span className={campaignSync.added > 0 ? " font-medium text-foreground" : ""}>
+                    {" · "}{campaignSync.added > 0 ? `${campaignSync.added} new since last sync` : "nothing new"}
+                  </span>
+                )}
+              </p>
+            )}
             {campaignsLoading ? (
               <p className="text-xs text-muted-foreground">Loading campaigns…</p>
             ) : campaignsError ? (
@@ -443,7 +502,7 @@ export function ColumnSelector({
               // a default that a checkbox could switch off. Client-tag scope
               // matches the "TAG:" naming convention; search runs on what remains.
               const nurtureHidden = campaigns.filter((c) => isNurtureCampaign(c.name)).length;
-              const filtered = campaigns.filter((c) => {
+              const inScope = campaigns.filter((c) => {
                 const name = (c.name ?? "").toLowerCase();
                 if (isNurtureCampaign(c.name)) return false;
                 if (tagScope && !name.startsWith(tagScope.toLowerCase())) return false;
@@ -454,6 +513,12 @@ export function ColumnSelector({
                   (c.instance_url ?? "").toLowerCase().includes(q)
                 );
               });
+              // Archived campaigns cannot send. Hidden unless asked for, so the
+              // list is the campaigns a push could actually reach.
+              const archivedHidden = showArchived ? 0 : inScope.filter(isArchivedCampaign).length;
+              const filtered = (showArchived ? inScope : inScope.filter((c) => !isArchivedCampaign(c)))
+                .slice()
+                .sort(byNewestCampaign);
               const filteredKeys = filtered.map(campaignKey);
               return (
               <div className="space-y-2">
@@ -496,6 +561,18 @@ export function ColumnSelector({
                     <span className="text-muted-foreground" title="Leads are only ever pushed to main campaigns. Nurture campaigns are populated from replies inside Bison.">
                       {nurtureHidden} nurture campaign{nurtureHidden === 1 ? "" : "s"} not shown
                     </span>
+                  )}
+                  {(archivedHidden > 0 || showArchived) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowArchived((v) => !v)}
+                      className="text-muted-foreground hover:underline"
+                      title="Archived campaigns cannot send, so they are hidden by default."
+                    >
+                      {showArchived
+                        ? "Hide archived"
+                        : `${archivedHidden} archived not shown`}
+                    </button>
                   )}
                 </div>
                 {(presets.length > 0 || selectedCampaignKeys.size > 0) && (
@@ -595,10 +672,14 @@ export function ColumnSelector({
                     <div className="grid grid-cols-1 gap-1">
                       {group.map((c) => {
                         const key = campaignKey(c);
+                        const status = campaignStatus(c);
+                        const live = status === "active" || status === "launching";
+                        const date = formatCampaignDate(c);
+                        const leads = campaignLeadCount(c);
                         return (
                           <label
                             key={key}
-                            className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted/50 cursor-pointer"
+                            className={`flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted/50 cursor-pointer ${live ? "" : "text-muted-foreground"}`}
                           >
                             <input
                               type="checkbox"
@@ -606,7 +687,28 @@ export function ColumnSelector({
                               onChange={() => toggleCampaign(key)}
                               className="rounded"
                             />
-                            {c.name ?? `Campaign ${c.id}`}
+                            <span className="min-w-0 flex-1 truncate">{c.name ?? `Campaign ${c.id}`}</span>
+                            {/* Status, date and size — the three things that tell
+                                two same-named campaigns apart. */}
+                            <span className="flex shrink-0 items-center gap-2 text-[10px] tabular-nums">
+                              {status !== "unknown" && (
+                                <span
+                                  className={`rounded-full px-1.5 py-px font-medium ${
+                                    live
+                                      ? "bg-emerald-500/15 text-emerald-700"
+                                      : status === "draft"
+                                      ? "bg-sky-500/15 text-sky-700"
+                                      : status === "paused"
+                                      ? "bg-amber-500/15 text-amber-700"
+                                      : "bg-muted text-muted-foreground"
+                                  }`}
+                                >
+                                  {campaignStatusLabel(c)}
+                                </span>
+                              )}
+                              {date && <span title="Created in Bison">{date}</span>}
+                              {leads != null && <span title="Leads in this campaign now">{leads.toLocaleString()} leads</span>}
+                            </span>
                           </label>
                         );
                       })}
@@ -750,12 +852,22 @@ export function ColumnSelector({
               const from = rangeFromStr ? parseInt(rangeFromStr, 10) : undefined;
               const to = rangeToStr ? parseInt(rangeToStr, 10) : undefined;
               const limit = from && to ? to - from + 1 : to ? to : null;
-              const chosenCampaigns = destination === "bison"
+              // Archived campaigns cannot send and are hidden from the list, but
+              // a preset saved before a campaign was archived still names it.
+              // Never push to one: drop it here and say so.
+              const picked = destination === "bison"
                 ? campaigns.filter((c) => selectedCampaignKeys.has(campaignKey(c)))
                 : [];
+              const chosenCampaigns = picked.filter((c) => !isArchivedCampaign(c));
+              const archivedPicked = picked.length - chosenCampaigns.length;
               if (destination === "bison" && chosenCampaigns.length === 0) {
-                toast.error("Pick at least one Bison campaign first");
+                toast.error(archivedPicked > 0
+                  ? `The selected campaign${archivedPicked === 1 ? " is" : "s are"} archived in Bison and cannot send — pick a live one`
+                  : "Pick at least one Bison campaign first");
                 return;
+              }
+              if (archivedPicked > 0) {
+                toast.info(`${archivedPicked} archived campaign${archivedPicked === 1 ? "" : "s"} left out of this push (archived campaigns cannot send)`);
               }
               onConfirm(Array.from(selected), limit && limit > 0 ? limit : null, from, to, destination, chosenCampaigns,
                 { clientTag: detectedTag, includeAlreadyPushed });

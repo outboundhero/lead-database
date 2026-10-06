@@ -35,6 +35,9 @@ interface PushBatchCampaign {
   // own side. Absent = campaign is on neither of this client's instances, and
   // is left open to any lead.
   side?: "b2b" | "b2c";
+  // Bison's status as the picker read it; only used to refuse "archived" at
+  // queue time. Not stored on the batch.
+  status?: string;
 }
 
 interface PushBatchPayload {
@@ -126,6 +129,15 @@ export async function POST(request: NextRequest) {
     if (isNurtureCampaign(c.name)) {
       return NextResponse.json(
         { error: `"${String(c.name)}" is a Nurture campaign — leads are only ever pushed to main campaigns.` },
+        { status: 400 }
+      );
+    }
+    // An archived campaign cannot send. The pickers hide them, but a preset
+    // saved before the campaign was archived still names it; the status rides
+    // along from the picker's own Bison read so this can be refused here.
+    if (typeof c.status === "string" && c.status.trim().toLowerCase() === "archived") {
+      return NextResponse.json(
+        { error: `"${String(c.name ?? c.id)}" is archived in Bison and cannot send — pick a live campaign.` },
         { status: 400 }
       );
     }
@@ -237,6 +249,41 @@ export async function POST(request: NextRequest) {
       // No side when the campaign is on neither of this client's instances —
       // the worker then leaves that campaign open to any lead rather than
       // silently dropping it.
+    }
+  }
+
+  // A BATCH ACROSS TWO INSTALLS MUST KNOW WHICH SIDE EACH CAMPAIGN IS.
+  //
+  // The worker refuses to guess (push-side.mjs): a lead in a two-install batch
+  // whose campaigns carry no side would otherwise land in both workspaces, the
+  // 2026-09-24 incident. Refusing at push time is the right safety net, but it
+  // is a bad place to find out: on 2026-10-05 four exports (CVJCIN, SCAS, RICS,
+  // TTT — 148,550 leads) were queued for clients whose B2B/B2C install mapping
+  // had not been synced yet, gathered in full, and then every lead was skipped.
+  // Fail here instead, with what to do about it.
+  const installs = new Set(campaigns.map((c) => c.instance_url));
+  if (installs.size > 1) {
+    if (!clientTag) {
+      return NextResponse.json(
+        {
+          error:
+            "These campaigns are on two Bison installs, so the leads must be split into B2B and B2C — " +
+            "select the client (top bar) before exporting, or pick campaigns from one install only.",
+        },
+        { status: 400 }
+      );
+    }
+    const unsided = campaigns.filter((c) => !c.side);
+    if (unsided.length > 0) {
+      const where = [...new Set(unsided.map((c) => c.instance_url))].join(", ");
+      return NextResponse.json(
+        {
+          error:
+            `${clientTag} has no B2B/B2C mapping for ${where}, so leads could not be routed and every one would be refused. ` +
+            "On the Clients page run “Sync groups” (or fix the client's group in the sheet), then export again.",
+        },
+        { status: 400 }
+      );
     }
   }
 

@@ -68,6 +68,8 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
                 name: c.name,
                 instance_url: c.instance_url,
                 workspace_name: c.workspace_name,
+                // So the route can refuse an archived campaign (it cannot send).
+                status: c.status,
               })),
               selectedIds: isSelected ? selectedIds : undefined,
               filters: isSelected ? undefined : filters,

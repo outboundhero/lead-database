@@ -20,6 +20,8 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { mainCampaignsOnly } from "@/lib/bison/campaigns";
+import { byNewestCampaign, describeCampaign, isArchivedCampaign } from "@/lib/bison/campaign-meta";
+import { RefreshCw } from "lucide-react";
 import type { FilterState } from "@/types/filters";
 import { suggestBucketFromName } from "@/lib/bison/esp-bucket";
 
@@ -48,6 +50,10 @@ interface PreviewCampaign {
   name?: string;
   instance_url?: string;
   workspace_name?: string;
+  // Straight from Bison, shown beside the name (see src/lib/bison/campaign-meta).
+  status?: string;
+  created_at?: string;
+  total_leads?: number;
 }
 
 // (routing helpers use suggestBucketFromName from src/lib/bison/esp-bucket)
@@ -89,8 +95,23 @@ const emptyChoice = (): SideChoice => ({
 
 // Pre-fill from campaign names; routing turns on automatically when at least
 // two buckets have a recognizable campaign ("…Outlook…", "…SEGs…", "…Google…").
-function seedChoice(side: PreviewSide): SideChoice {
-  const sendable = mainCampaignsOnly(side.campaigns);
+// Campaigns a push may go to, newest first: main (never Nurture) and not
+// archived. Newest first matters for the seed below — a client's older
+// "(2)" generation often carries the same bucket words as the current set,
+// and the bucket must pre-fill with the current one.
+function pushableCampaigns(side: PreviewSide): PreviewCampaign[] {
+  return mainCampaignsOnly(side.campaigns)
+    .filter((c) => !isArchivedCampaign(c))
+    .sort(byNewestCampaign);
+}
+
+function seedChoice(side: PreviewSide, tag?: string): SideChoice {
+  // Only THIS client's campaigns may pre-fill a bucket. The install's list
+  // holds every client's campaigns, newest first, so without the tag filter
+  // the newest "…Outlook…" campaign on the install — usually another client's,
+  // created yesterday — would be pre-filled.
+  const prefix = tag ? new RegExp("^" + tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "[\\s:]", "i") : null;
+  const sendable = pushableCampaigns(side).filter((c) => !prefix || prefix.test(String(c.name ?? "").trim()));
   const buckets: Record<BucketKey, string> = { outlook: SKIP, seg: SKIP, default: SKIP };
   for (const c of sendable) {
     const b = suggestBucketFromName(c.name);
@@ -230,10 +251,17 @@ export function SendToBisonWizard({
     );
   }, [tags, tagSearch]);
 
-  function runPreview(tag: ClientTagRow) {
-    setPreviewLoading(true);
+  // resync = re-read the campaign lists from Bison while the operator is on
+  // step 3 (a campaign was just created or launched over there). The split
+  // counts are recomputed too, but choices already made are kept wherever the
+  // chosen campaign still exists; only a choice that vanished is re-seeded.
+  const [resyncing, setResyncing] = useState(false);
+  const [resyncNote, setResyncNote] = useState<string | null>(null);
+  function runPreview(tag: ClientTagRow, opts: { resync?: boolean } = {}) {
+    const resync = opts.resync === true && !!preview;
+    if (resync) { setResyncing(true); setResyncNote(null); }
+    else { setPreviewLoading(true); setPreview(null); }
     setPreviewError(null);
-    setPreview(null);
     fetch("/api/bison/send-preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -248,14 +276,58 @@ export function SendToBisonWizard({
         return r.json();
       })
       .then((d: SendPreview) => {
+        if (resync && preview) {
+          // Keyed by install + id, and de-duplicated: a client whose B2B and
+          // B2C installs are the same domain lists each campaign on both sides.
+          const key = (c: PreviewCampaign) => `${c.instance_url}#${c.id}`;
+          const before = new Set([...preview.b2b.campaigns, ...preview.b2c.campaigns].map(key));
+          const now = new Set([...d.b2b.campaigns, ...d.b2c.campaigns].map(key));
+          const added = [...now].filter((k) => !before.has(k)).length;
+          // A choice survives only if its campaign is still one the operator
+          // could pick now — main and not archived. A campaign archived in
+          // Bison since the preview would otherwise stay chosen while the
+          // dropdown (which hides archived) shows blank.
+          // Only the entries whose campaign vanished are re-seeded; the rest of
+          // the operator's choices stay as they were.
+          const keep = (choice: SideChoice, side: PreviewSide): SideChoice => {
+            const ids = new Set(pushableCampaigns(side).map((c) => String(c.id)));
+            const ok = (id: string) => id === SKIP || ids.has(id);
+            const seeded = seedChoice(side, d.clientTag);
+            return {
+              mode: choice.mode,
+              single: ok(choice.single) ? choice.single : seeded.single,
+              buckets: {
+                outlook: ok(choice.buckets.outlook) ? choice.buckets.outlook : seeded.buckets.outlook,
+                seg: ok(choice.buckets.seg) ? choice.buckets.seg : seeded.buckets.seg,
+                default: ok(choice.buckets.default) ? choice.buckets.default : seeded.buckets.default,
+              },
+            };
+          };
+          setB2bChoice((c) => keep(c, d.b2b));
+          setB2cChoice((c) => keep(c, d.b2c));
+          setResyncNote(
+            `Re-read from Bison at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` +
+            ` · ${now.size} campaigns` +
+            (added > 0 ? ` · ${added} new` : " · nothing new")
+          );
+        } else {
+          // Seed choices — routing auto-enables when the side has recognizable
+          // Outlook/SEG/Google campaigns; otherwise fall back to the suggestion.
+          setB2bChoice(seedChoice(d.b2b, d.clientTag));
+          setB2cChoice(seedChoice(d.b2c, d.clientTag));
+          setResyncNote(null);
+        }
         setPreview(d);
-        // Seed choices — routing auto-enables when the side has recognizable
-        // Outlook/SEG/Google campaigns; otherwise fall back to the suggestion.
-        setB2bChoice(seedChoice(d.b2b));
-        setB2cChoice(seedChoice(d.b2c));
       })
-      .catch((e) => setPreviewError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setPreviewLoading(false));
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        // A failed re-sync must not flip the wizard into the step-2 error
+        // view (whose only exit discards the operator's choices). Report it
+        // on the step-3 line and keep what was already loaded.
+        if (resync) setResyncNote(`Sync failed: ${msg} — showing the previous list`);
+        else setPreviewError(msg);
+      })
+      .finally(() => { setPreviewLoading(false); setResyncing(false); });
   }
 
   function goToPreview() {
@@ -299,6 +371,7 @@ export function SendToBisonWizard({
           name: campaign.name,
           instance_url: sideData.instance,
           workspace_name: campaign.workspace_name,
+          status: campaign.status,
           ...(choice.mode === "route" && bucket ? { bucket } : {}),
         })),
         selectedIds: usingSelection ? selectedIds : undefined,
@@ -480,6 +553,21 @@ export function SendToBisonWizard({
         {/* ── Step 3: pick a campaign per side + amount & history ── */}
         {step === 3 && preview && (
           <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
+            <div className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
+                {resyncNote ?? "Campaign lists are read live from Bison."}
+              </span>
+              <button
+                type="button"
+                onClick={() => selectedTag && runPreview(selectedTag, { resync: true })}
+                disabled={resyncing || !selectedTag}
+                className="inline-flex shrink-0 items-center gap-1 text-[11px] font-medium text-primary hover:underline disabled:opacity-50"
+                title="Re-read the campaign lists from Bison now. Use this after creating or launching a campaign. Your choices are kept."
+              >
+                <RefreshCw className={`size-3 ${resyncing ? "animate-spin" : ""}`} />
+                {resyncing ? "Syncing…" : "Sync campaigns"}
+              </button>
+            </div>
             <CampaignPicker
               label="Business (B2B)"
               side={preview.b2b}
@@ -692,8 +780,11 @@ function CampaignPicker({
   // only ever sends to main campaigns). This was previously a default with a
   // "show nurture campaigns" escape hatch; the escape hatch is gone, and
   // /api/bison/push-batch now rejects them server-side regardless.
-  const sendable = mainCampaignsOnly(side.campaigns);
-  const hidden = side.campaigns.length - sendable.length;
+  // Archived campaigns are excluded too: they cannot send.
+  const sendable = pushableCampaigns(side);
+  const nurtureHidden = side.campaigns.length - mainCampaignsOnly(side.campaigns).length;
+  const archivedHidden = mainCampaignsOnly(side.campaigns).length - sendable.length;
+  const hidden = nurtureHidden;
 
   const campaignSelect = (val: string, set: (id: string) => void, skipLabel: string) => (
     <Select value={val} onValueChange={set}>
@@ -702,12 +793,18 @@ function CampaignPicker({
       </SelectTrigger>
       <SelectContent>
         <SelectItem value={SKIP} className="text-[13px]">{skipLabel}</SelectItem>
-        {sendable.map((c) => (
-          <SelectItem key={String(c.id)} value={String(c.id)} className="text-[13px]">
-            {c.name ?? `Campaign ${c.id}`}
-            {side.suggested && String(side.suggested.id) === String(c.id) ? "  (suggested)" : ""}
-          </SelectItem>
-        ))}
+        {sendable.map((c) => {
+          // Status · created · size beside the name: a draft June campaign and
+          // an active March campaign can share a name exactly.
+          const meta = describeCampaign(c);
+          return (
+            <SelectItem key={String(c.id)} value={String(c.id)} className="text-[13px]">
+              {c.name ?? `Campaign ${c.id}`}
+              {meta ? <span className="text-muted-foreground"> — {meta}</span> : null}
+              {side.suggested && String(side.suggested.id) === String(c.id) ? "  (suggested)" : ""}
+            </SelectItem>
+          );
+        })}
       </SelectContent>
     </Select>
   );
@@ -757,9 +854,11 @@ function CampaignPicker({
       ) : (
         campaignSelect(value.single, (id) => onChange({ ...value, single: id }), "— Don't send this side —")
       )}
-      {hidden > 0 && (
-        <p className="mt-1 text-[10px] text-muted-foreground" title="Nurture campaigns are populated from replies inside Bison, never from a push out of here.">
-          {hidden} nurture campaign{hidden === 1 ? "" : "s"} not shown — leads only go to main campaigns
+      {(hidden > 0 || archivedHidden > 0) && (
+        <p className="mt-1 text-[10px] text-muted-foreground" title="Nurture campaigns are populated from replies inside Bison, never from a push out of here. Archived campaigns cannot send.">
+          {hidden > 0 ? `${hidden} nurture campaign${hidden === 1 ? "" : "s"} not shown — leads only go to main campaigns` : ""}
+          {hidden > 0 && archivedHidden > 0 ? " · " : ""}
+          {archivedHidden > 0 ? `${archivedHidden} archived not shown` : ""}
         </p>
       )}
     </div>

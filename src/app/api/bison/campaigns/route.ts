@@ -234,6 +234,19 @@ function refreshOnce(instances: ReturnType<typeof bisonInstances>): Promise<void
   return inFlight;
 }
 
+// What the picker's "Sync campaigns" button reports back: when this list was
+// read from Bison and how many campaigns each install returned. Without it the
+// button cleared a cache and nothing visible changed, so operators could not
+// tell whether it had done anything (2026-10-06).
+function syncMeta(at: number, data: Array<Record<string, unknown>>) {
+  const perInstance: Record<string, number> = {};
+  for (const c of data) {
+    const inst = String(c.instance_url ?? "");
+    perInstance[inst] = (perInstance[inst] ?? 0) + 1;
+  }
+  return { fetchedAt: new Date(at).toISOString(), total: data.length, perInstance };
+}
+
 export async function GET(request: Request) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -261,21 +274,22 @@ export async function GET(request: Request) {
     const key = search.toLowerCase();
     const hit = searchCache.get(key);
     if (!fresh && hit && Date.now() - hit.at < CACHE_TTL_MS) {
-      return NextResponse.json({ campaigns: hit.data, errors: hit.errors, cached: true, scoped: search });
+      return NextResponse.json({ campaigns: hit.data, errors: hit.errors, cached: true, scoped: search, sync: syncMeta(hit.at, hit.data) });
     }
     const { data, errors } = await searchInstances(instances, search);
+    const at = Date.now();
     if (data.length > 0 || errors.length === 0) {
-      searchCache.set(key, { at: Date.now(), data, errors });
+      searchCache.set(key, { at, data, errors });
       if (searchCache.size > 50) searchCache.delete(searchCache.keys().next().value as string);
     }
-    return NextResponse.json({ campaigns: data, errors, cached: false, scoped: search });
+    return NextResponse.json({ campaigns: data, errors, cached: false, scoped: search, sync: syncMeta(at, data) });
   }
 
   const age = cache ? Date.now() - cache.at : Infinity;
 
   if (!fresh && cache) {
     if (age < CACHE_TTL_MS) {
-      return NextResponse.json({ campaigns: cache.data, errors: cache.errors, cached: true });
+      return NextResponse.json({ campaigns: cache.data, errors: cache.errors, cached: true, sync: syncMeta(cache.at, cache.data) });
     }
     if (age < STALE_OK_MS) {
       // STALE-WHILE-REVALIDATE: hand back what we have immediately and refresh
@@ -284,7 +298,7 @@ export async function GET(request: Request) {
       // every time the cache lapsed. A campaign created moments ago shows up on
       // the next open, or right away via the picker's refresh (?fresh=1).
       void refreshOnce(instances).catch(() => {});
-      return NextResponse.json({ campaigns: cache.data, errors: cache.errors, cached: true, stale: true });
+      return NextResponse.json({ campaigns: cache.data, errors: cache.errors, cached: true, stale: true, sync: syncMeta(cache.at, cache.data) });
     }
   }
 
@@ -296,5 +310,6 @@ export async function GET(request: Request) {
     campaigns: cache?.data ?? [],
     errors: failed && lastErrors.length ? lastErrors : (cache?.errors ?? lastErrors),
     cached: false,
+    sync: cache ? syncMeta(cache.at, cache.data) : null,
   });
 }
