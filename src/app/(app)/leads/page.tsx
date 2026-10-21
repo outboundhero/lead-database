@@ -4,9 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { RowSelectionState } from "@tanstack/react-table";
 import { toast } from "sonner";
-import type { FilterResult } from "@/lib/filters/build-rpc-filters";
 import { useFilters, type TargetingPatch } from "@/lib/hooks/use-filters";
-import type { LocationTargetEntry } from "@/types/filters";
+import type { FilterState, LocationTargetEntry } from "@/types/filters";
 import { useDebounce } from "@/lib/hooks/use-debounce";
 import { FilterBar } from "@/components/filters/filter-bar";
 import { ClientSelector, type ClientRosterEntry } from "@/components/filters/client-selector";
@@ -32,6 +31,14 @@ const SORT_OPTIONS = [
   { label: "Revenue (Low → High)", sortBy: "annual_revenue", sortDir: "asc" as const },
   { label: "Revenue (High → Low)", sortBy: "annual_revenue", sortDir: "desc" as const },
 ];
+
+// What decides WHICH leads match. Page, page size and sort only change which
+// of them are on screen, so they never re-run the count.
+function countKeyOf(f: FilterState): string {
+  const { page: _p, pageSize: _ps, sortBy: _sb, sortDir: _sd, ...rest } = f;
+  void _p; void _ps; void _sb; void _sd;
+  return JSON.stringify(rest);
+}
 
 export default function LeadsPage() {
   const {
@@ -93,6 +100,17 @@ export default function LeadsPage() {
   const [totalCount, setTotalCount] = useState(0);
   const [isApproximate, setIsApproximate] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  // The total is fetched on its own (/api/leads/count), never together with
+  // the rows: a heavy search's rows can be ready in seconds while its count
+  // runs to the 120 s limit, and waiting for both is what timed the table out
+  // (2026-10-19: rows 2.2 s, count 121 s). totalCount answers the current
+  // filters only while countStatus is "done" for the settled count key.
+  const [countStatus, setCountStatus] = useState<"counting" | "done" | "timedOut" | "failed">("counting");
+  const countKey = useMemo(() => countKeyOf(debouncedFilters), [debouncedFilters]);
+  // Like filtersSettled, but for the total: a filter edit inside the debounce
+  // window has not reached the count yet; a page or sort change never will.
+  const countSettled = countKeyOf(filters) === countKey;
+  const countKnown = countSettled && countStatus === "done";
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   // "Select all N filtered" mode — the whole filtered set is targeted, not just
@@ -480,26 +498,29 @@ export default function LeadsPage() {
       });
   }, [leads, filters.clientTag]);
 
+  const rowsAbortRef = useRef<AbortController | null>(null);
   const fetchLeads = useCallback(async () => {
     const myReq = ++reqSeq.current;
     setIsLoading(true);
+    // A newer search supersedes this one — stop waiting on the old response.
+    rowsAbortRef.current?.abort();
     // Big searches can exceed the server's patience — abort at 100s with a
     // clear message instead of spinning forever, and KEEP the previous rows.
     const controller = new AbortController();
+    rowsAbortRef.current = controller;
     const timer = setTimeout(() => controller.abort(), 100_000);
     try {
-      const res = await fetch("/api/leads/filter", {
+      // Rows only (?count=0): the total comes from fetchCount below.
+      const res = await fetch("/api/leads/filter?count=0", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(debouncedFilters),
         signal: controller.signal,
       });
       if (!res.ok) throw new Error(`Filter request failed: ${res.status}`);
-      const result: FilterResult & { isApproximate?: boolean } = await res.json();
+      const result: { data: Lead[] } = await res.json();
       if (myReq !== reqSeq.current) return; // superseded — drop it
       setLeads(result.data);
-      setTotalCount(result.totalCount);
-      setIsApproximate(result.isApproximate ?? false);
     } catch (err) {
       if (myReq !== reqSeq.current) return; // superseded — its abort is expected
       console.error("Filter query error:", err);
@@ -517,6 +538,62 @@ export default function LeadsPage() {
   useEffect(() => {
     fetchLeads();
   }, [fetchLeads]);
+
+  // The total, keyed on countKey: re-runs when the filters change, not when
+  // the page or the sort does. A count the database could not finish inside
+  // its 120 s limit comes back as { timedOut: true } and is shown as such — it
+  // is not an error, the rows on screen are still right.
+  const countSeq = useRef(0);
+  const countAbortRef = useRef<AbortController | null>(null);
+  const fetchCount = useCallback(async () => {
+    const myReq = ++countSeq.current;
+    setCountStatus("counting");
+    countAbortRef.current?.abort();
+    const controller = new AbortController();
+    countAbortRef.current = controller;
+    // Just past the database's own 120 s limit, so its timed-out answer
+    // normally lands first; this only catches a connection that never answers.
+    const timer = setTimeout(() => controller.abort(), 130_000);
+    try {
+      const res = await fetch("/api/leads/count", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // The filters minus page/size/sort — the route fills in the defaults.
+        body: countKey,
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`Count request failed: ${res.status}`);
+      const result: { totalCount: number | null; isApproximate?: boolean; timedOut?: boolean } = await res.json();
+      if (myReq !== countSeq.current) return; // superseded — drop it
+      if (result.timedOut || typeof result.totalCount !== "number") {
+        setCountStatus("timedOut");
+        return;
+      }
+      setTotalCount(result.totalCount);
+      setIsApproximate(result.isApproximate ?? false);
+      setCountStatus("done");
+    } catch (err) {
+      if (myReq !== countSeq.current) return; // superseded — its abort is expected
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setCountStatus("timedOut");
+      } else {
+        console.error("Count query error:", err);
+        setCountStatus("failed");
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }, [countKey]);
+
+  useEffect(() => {
+    fetchCount();
+  }, [fetchCount]);
+
+  // After a delete or a Never contact the total changed too, not just the page.
+  const refreshLeads = useCallback(() => {
+    fetchLeads();
+    fetchCount();
+  }, [fetchLeads, fetchCount]);
 
   // Clear row selection whenever the filters or sort change (but not on pagination changes).
   // Otherwise selected IDs from a prior view leak into "Export Selected".
@@ -581,15 +658,26 @@ export default function LeadsPage() {
           <h1 className="text-[28px] font-semibold tracking-tight">Leads</h1>
           <p
             className="mt-0.5 text-[13px] text-muted-foreground"
-            title={isApproximate ? "Approximate count (planner estimate, ±5%)" : undefined}
+            title={
+              countKnown && isApproximate
+                ? "Approximate count (planner estimate, ±5%)"
+                : countSettled && countStatus === "timedOut"
+                  ? "Counting every match took longer than the 2-minute limit. The rows below are correct, and paging still works."
+                  : undefined
+            }
           >
-            {/* While a query is in flight the PREVIOUS count is meaningless —
+            {/* While a count is in flight the PREVIOUS total is meaningless —
                 showing it made a heavy filter look like it had not applied at
                 all (the header sat on the unfiltered 7,395,814 for minutes).
-                Show that we are counting instead. */}
-            {isLoading || !filtersSettled
+                Show that we are counting instead. A page or sort change keeps
+                the total: it is still the right one. */}
+            {!countSettled || countStatus === "counting"
               ? "Counting…"
-              : `${isApproximate ? "~" : ""}${totalCount.toLocaleString()} contacts`}
+              : countStatus === "timedOut"
+                ? "Count timed out"
+                : countStatus === "failed"
+                  ? "Count unavailable"
+                  : `${isApproximate ? "~" : ""}${totalCount.toLocaleString()} contacts`}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -625,14 +713,25 @@ export default function LeadsPage() {
                     : `All ${(isApproximate ? "~" : "") + totalCount.toLocaleString()} selected`
                   : `${selectedIds.length} selected`}
               </span>
-              {allPageSelected && !selectAllFiltered && totalCount > leads.length && (
+              {/* Select-all is offered only once the total is known: every
+                  action downstream (Never contact, export, delete) shows that
+                  number to confirm what it is about to touch. */}
+              {allPageSelected && !selectAllFiltered && (countKnown ? totalCount > leads.length : leads.length >= filters.pageSize) && (
                 <Button
                   variant="ghost"
                   size="sm"
                   className="text-primary"
                   onClick={selectAllFilteredNow}
+                  disabled={!countKnown}
+                  title={
+                    countKnown
+                      ? undefined
+                      : countSettled && countStatus === "timedOut"
+                        ? "Select all needs the total, which took too long to count — narrow the filters"
+                        : "Available once the total is counted"
+                  }
                 >
-                  Select all {totalCount.toLocaleString()}
+                  {countKnown ? `Select all ${totalCount.toLocaleString()}` : "Select all…"}
                 </Button>
               )}
               <Button
@@ -702,7 +801,8 @@ export default function LeadsPage() {
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-card shadow-ios">
         <LeadTable
           data={leads}
-          totalCount={totalCount}
+          /* null while counting or timed out — paging then works from the rows */
+          totalCount={countKnown ? totalCount : null}
           page={filters.page}
           pageSize={filters.pageSize}
           /* debounce window counts as busy — see filtersSettled */
@@ -739,7 +839,7 @@ export default function LeadsPage() {
              (minus unchecked rows) instead of the ~100 ids this page holds. */
           filters={selectAllFiltered ? actionFilters : null}
           count={selectedCount}
-          onDone={() => { clearSelection(); fetchLeads(); }}
+          onDone={() => { clearSelection(); refreshLeads(); }}
         />
 
         <DeleteLeadsDialog
@@ -752,7 +852,7 @@ export default function LeadsPage() {
           isApproximate={isApproximate}
           onDeleted={() => {
             clearSelection();
-            fetchLeads();
+            refreshLeads();
           }}
         />
         </>
@@ -835,7 +935,7 @@ export default function LeadsPage() {
         onClose={() => setSelectedLead(null)}
         onDeleted={() => {
           setSelectedLead(null);
-          fetchLeads();
+          refreshLeads();
         }}
         onUpdated={(updated) => {
           // Patch the row in place so the table reflects the edit without

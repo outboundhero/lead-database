@@ -71,7 +71,8 @@ const makeCheckboxColumn = (all: SelectAllMode | null): ColumnDef<Lead> => ({
 
 interface LeadTableProps {
   data: Lead[];
-  totalCount: number;
+  /** null while the total is unknown (counting / timed out) — paging works from the rows. */
+  totalCount: number | null;
   page: number;
   pageSize: number;
   isLoading: boolean;
@@ -151,7 +152,7 @@ export function LeadTable({
       onRowSelectionChange(next);
     },
     manualPagination: true,
-    rowCount: totalCount,
+    rowCount: totalCount ?? undefined,
   });
 
   const rows = table.getRowModel().rows;
@@ -321,6 +322,7 @@ export function LeadTable({
         page={page}
         pageSize={pageSize}
         totalCount={totalCount}
+        rowsOnPage={data.length}
         isLoading={isLoading}
         onPageChange={onPageChange}
         onPageSizeChange={onPageSizeChange}

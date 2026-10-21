@@ -18,7 +18,10 @@ import {
 interface LeadTablePaginationProps {
   page: number;
   pageSize: number;
-  totalCount: number;
+  /** null = the total is not known (still counting, or the count timed out). */
+  totalCount: number | null;
+  /** Rows on this page. Without a total, a full page is the only sign of a next one. */
+  rowsOnPage: number;
   /** While true the count belongs to the PREVIOUS query — don't present it as this one's. */
   isLoading?: boolean;
   onPageChange: (page: number) => void;
@@ -29,22 +32,29 @@ export function LeadTablePagination({
   page,
   pageSize,
   totalCount,
+  rowsOnPage,
   isLoading = false,
   onPageChange,
   onPageSizeChange,
 }: LeadTablePaginationProps) {
-  const totalPages = Math.ceil(totalCount / pageSize);
-  const from = totalCount === 0 ? 0 : (page - 1) * pageSize + 1;
-  const to = Math.min(page * pageSize, totalCount);
+  const known = totalCount !== null;
+  const totalPages = known ? Math.ceil(totalCount / pageSize) : 0;
+  const from = (page - 1) * pageSize + 1;
+  const to = known ? Math.min(page * pageSize, totalCount) : (page - 1) * pageSize + rowsOnPage;
+  const hasNext = known ? page < totalPages : rowsOnPage >= pageSize;
 
   return (
     <div className="ios-frost flex items-center justify-between border-t border-border/40 px-4 py-3">
       <div className="text-[13px] text-muted-foreground">
         {isLoading
           ? "Loading…"
-          : totalCount === 0
-            ? "No results"
-            : `${from.toLocaleString()}–${to.toLocaleString()} of ${totalCount.toLocaleString()}`}
+          : known
+            ? totalCount === 0
+              ? "No results"
+              : `${from.toLocaleString()}–${to.toLocaleString()} of ${totalCount.toLocaleString()}`
+            : rowsOnPage === 0
+              ? page > 1 ? "No more results" : "No results"
+              : `${from.toLocaleString()}–${to.toLocaleString()}`}
       </div>
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2">
@@ -83,13 +93,13 @@ export function LeadTablePagination({
             <ChevronLeft className="size-4" strokeWidth={2} />
           </Button>
           <span className="px-2 text-[13px] font-medium tabular-nums">
-            {page} / {totalPages || 1}
+            {known ? `${page} / ${totalPages || 1}` : page}
           </span>
           <Button
             variant="ghost"
             size="icon-sm"
             onClick={() => onPageChange(page + 1)}
-            disabled={page >= totalPages}
+            disabled={!hasNext}
           >
             <ChevronRight className="size-4" strokeWidth={2} />
           </Button>
@@ -97,7 +107,7 @@ export function LeadTablePagination({
             variant="ghost"
             size="icon-sm"
             onClick={() => onPageChange(totalPages)}
-            disabled={page >= totalPages}
+            disabled={!known || page >= totalPages}
           >
             <ChevronsRight className="size-4" strokeWidth={2} />
           </Button>

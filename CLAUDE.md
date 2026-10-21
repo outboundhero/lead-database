@@ -248,7 +248,7 @@ scrollers (`max-h-[40vh] overflow-y-auto` on long lists) still compose fine.
 | Function | Purpose | Timeout |
 |---|---|---|
 | `fn_filter_leads_v2(p_filters, p_sort_by, p_sort_dir, p_limit, p_offset)` | Main filter — extended for `email_type`, `exclude_keywords`, silent `is_bounced` filter (migration 032); honours `skipCount` inside `p_filters` (086) | 120s |
-| `fn_filter_leads_count(p_filters)` | Total run concurrently with the rows query (086) | 15s, then estimate |
+| `fn_filter_leads_count(p_filters)` | The Leads page's total — its own request since 2026-10-21 (`/api/leads/count`) | 120s, then 57014 (the in-function 15s fallback never fires — see "Leads total is its own request") |
 | `fn_lead_column_values(p_filters, p_column, p_search, p_limit, p_scan_cap)` | Per-column filter dropdown values (088); 20-name allowlist, `'__BLANK__'` sentinel | 25s |
 | `fn_export_leads(p_filters, p_cursor, p_limit, p_skip)` | Export — enforces `validation_status IN ('valid','catch_all') AND is_bounced = false` (migration 033) | 300s |
 | `fn_lead_filter_conditions(p_filters)` | Shared WHERE builder — browse/export gate, suppression escapable | n/a |
@@ -385,7 +385,8 @@ Known I/O-heavy patterns to avoid:
 ## Key Files
 
 ```
-src/app/api/leads/filter/route.ts          — Main filter API (fn_filter_leads_v2 RPC)
+src/app/api/leads/filter/route.ts          — Main filter API (fn_filter_leads_v2 RPC); ?count=0 = rows only
+src/app/api/leads/count/route.ts           — Leads total (fn_filter_leads_count), separate from the rows; 57014 → {timedOut:true}
 src/app/api/exports/stream/route.ts        — Streaming CSV export + validation pre-pass
 src/app/api/exports/process/route.ts       — Background export (for selected IDs)
 src/app/api/dashboard/refresh/route.ts     — Dashboard refresh
@@ -1097,8 +1098,13 @@ Detail worth carrying forward from these:
 - **085/086 — the count path is the slow path.** 91 exclude terms × 7 columns =
   637 regex evaluations per row; collapsing 97 conditions into 7 took an exact
   count from **466s → 4.7s**. And the `SET LOCAL statement_timeout` bound did NOT
-  hold: the `OTHERS` handler re-ran the same `COUNT` **unbounded**. Both now
-  degrade to the planner estimate and never retry unbounded. `skipCount` rides
+  hold. ⚠ It still does not, and never can (measured 2026-10-19): a `SET LOCAL
+  statement_timeout` inside a function does not re-arm the timer of the
+  statement already running, and `EXCEPTION WHEN OTHERS` cannot catch
+  `query_canceled`. So the "degrade to the planner estimate" branches in
+  `fn_filter_leads_v2` / `fn_filter_leads_count` are dead code; the function's
+  own `SET statement_timeout TO '120s'` (which PostgREST applies before the
+  call) is the only limit, and hitting it is an error (57014). `skipCount` rides
   **inside `p_filters`**, not as a new parameter — a new parameter would create a
   second overload instead of replacing the function (the documented trap).
 - **087 — `require_location` is a 44× lever.** The `OR l.country_code IS NULL`
@@ -1569,6 +1575,38 @@ pooler**; they now run every statement in its own transaction with `SET
 LOCAL` (`tq()` helper). Grep for a bare `set statement_timeout` before adding
 any new script.
 
+## Leads total is its own request; Ends With includes grouped (2026-10-21)
+
+**Symptom:** a search with ~50 foreign email endings showed "This search is too
+heavy and timed out". Measured through PostgREST exactly as the route called
+it: rows **2.2 s**, count **121.3 s then 57014**. The route awaited both, the
+browser aborts at 100 s, so rows that were ready after 2 s never showed. The
+count's own "15 s, then estimate" fallback cannot work (see 085/086 above).
+
+**Page:** rows come from `/api/leads/filter?count=0`, the total from
+`/api/leads/count` — separate requests, so the table never waits for the
+count. The count is keyed on the filters minus page/pageSize/sortBy/sortDir,
+so paging and sorting no longer re-run it (they used to re-run the full count
+on every click). Header: Counting… / N contacts / Count timed out (57014 →
+`{timedOut:true}`, not an error) / Count unavailable. Without a total,
+pagination pages from the rows (next = a full page came back). "Select all" is
+offered only once the total is known, because every action downstream shows
+that number to confirm what it will touch. `/api/leads/filter` without
+`?count=0` still returns rows + total (old open tabs). ⚠ A superseded request is
+aborted in the browser only — PostgREST keeps the old query running up to its
+limit, so a burst of filter edits can still stack counts in Postgres.
+
+**Migration 118:** `fn_lead_filter_conditions` groups INCLUDED endings by
+length — one `right(<expr>, N) = ANY ('{…}')` per distinct length — instead of
+one test per value. Same rows (0 mismatches on two different 2% samples,
+including quote/backslash/brace/comma/"null"/unicode values). 2% sample: 50
+included endings 8.25 s → 1.12 s. Full table through PostgREST: the 50-ending
+search's count **121.3 s (timeout) → 16.2 s, exact** (10,250); rows 2.0 s.
+⚠ EXCLUDES deliberately stay one condition per value: Postgres runs those
+cheap quals first and the first excluded ending that matches (usually `.com`)
+rejects a lead after one `lower()+right()`. Grouped, a 56-value exclude list
+measured 1.7× **slower** (0.89 → 1.48 s), as did one `NOT (… OR …)`.
+
 ## Selection is "everything matching, minus what you unchecked" (2026-09-22)
 
 The Leads page had two disconnected selection states: `rowSelection` (TanStack,
@@ -1838,6 +1876,9 @@ threshold today; `?fresh=1` for those clients exceeds its 30 s cap.
    cancelling superseded requests — measured 20.7 s → ~11 s for the heaviest
    clients. Do NOT add the proposed 8 s count cap: it would replace exact totals
    with planner estimates (wrong header, pagination, select-all/export/delete counts).
+   **Partly done 2026-10-21:** rows and total are separate requests, the total
+   is not re-run on page/sort, superseded requests are aborted in the browser
+   (not yet in Postgres). The single shared scan is still open.
 2. location-worker stages 2–3: index-driven pass 2/3 and draining the 142k
    junk-state cohort. The proposed `'unrecognized'` status **violates the live
    `leads_location_status_check` constraint** — needs a constraint change and a

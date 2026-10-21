@@ -24,19 +24,34 @@ export async function POST(req: NextRequest) {
     const limit = Math.min(filters.pageSize, 200);
 
     const p_filters = buildRpcFilters(filters);
+    const rowsCall = () => supabaseAdmin.rpc("fn_filter_leads_v2", {
+      p_filters: { ...p_filters, skipCount: true },
+      p_sort_by: filters.sortBy === "created_at" ? "" : (filters.sortBy || ""),
+      p_sort_dir: filters.sortDir || "desc",
+      p_limit: limit,
+      p_offset: offset,
+    });
+
+    // ?count=0 — rows only. The Leads page fetches the total separately from
+    // /api/leads/count, so a slow count can no longer hold the table back: a
+    // 50-ending search had its rows in 2.2 s but waited on a count that ran
+    // 121 s and timed out (2026-10-19). Without the parameter the response is
+    // unchanged (rows + total), for any tab still running the old page.
+    if (req.nextUrl.searchParams.get("count") === "0") {
+      const rowsRes = await rowsCall();
+      if (rowsRes.error) {
+        console.error("Filter RPC error:", rowsRes.error);
+        return NextResponse.json({ error: rowsRes.error.message }, { status: 500 });
+      }
+      return NextResponse.json({ data: rowsRes.data?.data ?? [] });
+    }
 
     // The page of rows and the total are two expensive scans over the same
     // filtered set. Running them IN SERIES inside one RPC meant a heavy client
     // filter paid both (CCGCT: rows 4.8s THEN count 4.5s). Fire them together
     // and the wall clock is the slower of the two, not the sum.
     const [rowsRes, countRes] = await Promise.all([
-      supabaseAdmin.rpc("fn_filter_leads_v2", {
-        p_filters: { ...p_filters, skipCount: true },
-        p_sort_by: filters.sortBy === "created_at" ? "" : (filters.sortBy || ""),
-        p_sort_dir: filters.sortDir || "desc",
-        p_limit: limit,
-        p_offset: offset,
-      }),
+      rowsCall(),
       supabaseAdmin.rpc("fn_filter_leads_count", { p_filters }),
     ]);
 
