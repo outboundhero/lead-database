@@ -36,12 +36,14 @@ const TAG_FROM_FILENAME = flag("tag-from-filename") === "true";
 const TAG = flag("tag")?.trim() || null;
 const tagOf = (name: string): string | null => TAG ?? (TAG_FROM_FILENAME ? (name.match(/^([A-Za-z]{3,10})(?=[\s._-]|\.csv$)/i)?.[1]?.toUpperCase() ?? null) : null);
 
-// Client mapping, confirmed 2026-09-18 (Location → address per the client).
+// Client mapping, confirmed 2026-09-18 (Location → address per the client);
+// LinkedIn / Company LinkedIn added 2026-10-23 (they were skipped until then).
 const CLIENT_MAPPING: Record<string, string> = {
   "First Name": "first_name", "Last Name": "last_name", "Title": "title", "Email Business": "email",
   "Location": "address", "State": "state", "City": "city", "Company Name": "company", "Company Industry": "category",
   "Company Description": "subcategory", "Company SEO Description": "additional_category",
   "Company Website": "domain", "Company Primary Phone": "company_phone",
+  "LinkedIn": "person_linkedin", "Company LinkedIn": "company_linkedin",
 };
 
 const natural = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });

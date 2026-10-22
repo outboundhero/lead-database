@@ -1452,6 +1452,19 @@ only the one-off folder driver `scripts/import-csv-folder.mts
 --tag-from-filename` does, and it refuses any tag not present in
 `client_tags`. Used once for the JPDET / CCGHTX / CCGEN / CCGGC delivery.
 
+**LinkedIn links (2026-10-23).** `person_linkedin` / `company_linkedin` existed on
+`leads` but were missing from `LEAD_FIELDS`, so every upload skipped the
+files' "LinkedIn" / "Company LinkedIn" columns (the Map-to dropdown had no
+option, and the engine only writes `LEAD_FIELDS` keys). Now both are mappable
+(auto-matched from those headers), mapped by the delivery scripts, and export
+columns. Merge fills them only when blank. Only future imports get them (the
+77 batches before 2026-10-23 all carried both columns; no backfill was run).
+Finding emails for the people the list's source had none for is NOT this
+export: those rows are held back, and each upload's "No-email rows" download
+streams them exactly as uploaded — LinkedIn column included (2026-10-23: all
+131,787 no-email rows from the 24 uploads since 10-19 had a linkedin.com/in/
+link).
+
 **The route returns `{batchId}` (202) at once and runs the import in Next
 `after()`** — ~18 ms/row measured, so a 10k-row file is ~3 min and the 88k set
 ~26 min; the page and `UploadProgress` follow `upload_batches`. A chunk that
@@ -1591,7 +1604,13 @@ on every click). Header: Counting… / N contacts / Count timed out (57014 →
 `{timedOut:true}`, not an error) / Count unavailable. Without a total,
 pagination pages from the rows (next = a full page came back). "Select all" is
 offered only once the total is known, because every action downstream shows
-that number to confirm what it will touch. `/api/leads/filter` without
+that number to confirm what it will touch. The Export menu's "Export Filtered
+(N leads)" shows that filtered total (minus rows unchecked out of a
+select-all); since 31e5807 it had shown the TICK count while sending every
+eligible match (2026-10-23 fix). It is an upper bound: the CSV export also
+drops bounced and invalid/unknown leads, and a push also drops leads already
+sent for the client tag and the client's rules. It is disabled while the total
+is unknown; "Retry" next to "Count timed out" / "Count unavailable" re-runs it. `/api/leads/filter` without
 `?count=0` still returns rows + total (old open tabs). ⚠ A superseded request is
 aborted in the browser only — PostgREST keeps the old query running up to its
 limit, so a burst of filter edits can still stack counts in Postgres.

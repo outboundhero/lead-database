@@ -678,6 +678,18 @@ export default function LeadsPage() {
                 : countStatus === "failed"
                   ? "Count unavailable"
                   : `${isApproximate ? "~" : ""}${totalCount.toLocaleString()} contacts`}
+            {/* Without a total, Select all and Export Filtered stay disabled,
+                and the count only re-runs when the filters change — so offer
+                a retry rather than a dead end. */}
+            {countSettled && (countStatus === "timedOut" || countStatus === "failed") && (
+              <button
+                type="button"
+                className="ml-1.5 font-medium text-primary hover:underline"
+                onClick={() => fetchCount()}
+              >
+                Retry
+              </button>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -793,6 +805,17 @@ export default function LeadsPage() {
             filters={actionFilters}
             totalCount={selectedCount}
             selectedIds={selectAllFiltered ? [] : selectedIds}
+            /* What "Export Filtered" is run against: every lead matching the
+               filters (minus rows unchecked out of a select-all) — NOT the
+               ticked rows, whose count it used to show. An upper bound (the
+               export and a push drop undeliverable / already-sent leads).
+               null = not known. */
+            filteredCount={countKnown ? Math.max(0, totalCount - (selectAllFiltered ? excludedIds.size : 0)) : null}
+            filteredCountNote={
+              !countSettled || countStatus === "counting" ? "counting…"
+                : countStatus === "timedOut" ? "count timed out"
+                : "count unavailable"
+            }
           />
         </div>
       </div>

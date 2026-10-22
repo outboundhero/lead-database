@@ -31,11 +31,13 @@ const TAGS = (flag("tags") ?? "").split(",").map((s) => s.trim()).filter(Boolean
 if (!["skip", "merge", "replace"].includes(STRATEGY)) { console.error("--strategy must be skip|merge|replace"); process.exit(1); }
 
 // The client's mapping (confirmed 2026-09-18), keyed by the file's REAL headers.
+// Same list as scripts/import-csv-folder.mts — LinkedIn columns added 2026-10-23.
 const CLIENT_MAPPING: Record<string, string> = {
   "First Name": "first_name", "Last Name": "last_name", "Title": "title", "Email Business": "email",
   "Location": "address", "State": "state", "City": "city", "Company Name": "company", "Company Industry": "category",
   "Company Description": "subcategory", "Company SEO Description": "additional_category",
   "Company Website": "domain", "Company Primary Phone": "company_phone",
+  "LinkedIn": "person_linkedin", "Company LinkedIn": "company_linkedin",
 };
 
 const all = parse(fs.readFileSync(file, "utf8"), { skip_empty_lines: true, relax_quotes: true, relax_column_count: true, bom: true }) as string[][];
@@ -77,12 +79,12 @@ const inspect = async (c: import("pg").PoolClient, passes: import("../src/lib/up
             l.category, left(l.subcategory, 60) as subcategory, length(l.subcategory) as sub_len, left(l.additional_category, 60) as additional_category, l.category_source,
             (select string_agg(t.title, ' / ' order by t.title) from lead_job_titles t where t.lead_id = l.id) as job_titles,
             (select json_agg(json_build_object('city', ll.city_text, 'state', ll.state_text, 'code', ll.state_code)) from lead_locations ll where ll.lead_id = l.id) as extra_locations,
-            l.alt_location_text
+            l.alt_location_text, l.person_linkedin, l.company_linkedin
        from leads l where l.email = any($1::text[]) order by l.email`, [emails]);
   console.log("══ LEADS AS THEY WOULD BE STORED");
   for (const l of leads) {
     console.log(`\n  ${l.email}`);
-    for (const k of ["first_name","last_name","title","job_titles","company","city","state","extra_locations","address","tags","updated_at","domain","company_phone","esp","email_type","category","category_source","subcategory","sub_len","additional_category"]) {
+    for (const k of ["first_name","last_name","title","job_titles","company","city","state","extra_locations","address","tags","updated_at","domain","company_phone","esp","email_type","category","category_source","subcategory","sub_len","additional_category","person_linkedin","company_linkedin"]) {
       const v = l[k]; if (v == null) continue;
       console.log(`     ${k.padEnd(20)} ${typeof v === "object" ? JSON.stringify(v) : String(v)}`);
     }

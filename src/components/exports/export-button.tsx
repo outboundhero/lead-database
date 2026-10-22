@@ -17,17 +17,31 @@ import { useHasPermission } from "@/lib/context/role-context";
 
 interface ExportButtonProps {
   filters: FilterState;
+  /** Selection size — enables the trigger. */
   totalCount: number;
   selectedIds?: string[];
+  /**
+   * The page's filtered total (minus rows unchecked out of a select-all) —
+   * what "Export Filtered" is run against, not the ticked rows (it labelled
+   * the tick count as "Export Filtered (50 leads)" while sending every match).
+   * An upper bound: the CSV export also drops bounced and invalid/unknown
+   * leads, and a push also drops leads already sent for the client tag and the
+   * client's rules. null = the total is not known yet, and the item stays
+   * disabled — an action must state what it will touch.
+   */
+  filteredCount?: number | null;
+  /** Shown in place of the number when filteredCount is null ("counting…"). */
+  filteredCountNote?: string;
 }
 
-export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportButtonProps) {
+export function ExportButton({ filters, totalCount, selectedIds = [], filteredCount = null, filteredCountNote = "count unknown" }: ExportButtonProps) {
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [exportType, setExportType] = useState<"filtered" | "selected">("filtered");
   const [exporting, setExporting] = useState(false);
   const canExport = useHasPermission("manager"); // owner / admin / manager
 
   function openSelector(type: "filtered" | "selected") {
+    if (type === "filtered" && filteredCount == null) return; // total unknown
     setExportType(type);
     setSelectorOpen(true);
   }
@@ -109,7 +123,7 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
           ? `leads ${rangeFrom.toLocaleString()}–${rangeTo.toLocaleString()}`
           : rangeTo
           ? `up to ${rangeTo.toLocaleString()} leads`
-          : `${totalCount.toLocaleString()} filtered leads`;
+          : `${filteredCount != null ? filteredCount.toLocaleString() : "all"} filtered leads`;
         toast.success(
           `Queued push of ${leadsLabel} to ${campaignLabel} — progress on the Exports page`,
           { id: toastId }
@@ -240,11 +254,14 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
               <DropdownMenuSeparator />
             </>
           )}
+          {/* The filtered set, never the tick count. Disabled until its total
+              is known, like "Select all" on the page. onSelect, not onClick:
+              Radix runs onClick even on a disabled item (a scripted click). */}
           <DropdownMenuItem
-            onClick={() => openSelector("filtered")}
-            disabled={totalCount === 0}
+            onSelect={() => openSelector("filtered")}
+            disabled={filteredCount == null || filteredCount === 0}
           >
-            Export Filtered ({totalCount.toLocaleString()} leads)
+            Export Filtered ({filteredCount != null ? `${filteredCount.toLocaleString()} leads` : filteredCountNote})
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -253,7 +270,7 @@ export function ExportButton({ filters, totalCount, selectedIds = [] }: ExportBu
         open={selectorOpen}
         onClose={() => setSelectorOpen(false)}
         onConfirm={handleExport}
-        totalCount={exportType === "selected" ? selectedIds.length : totalCount}
+        totalCount={exportType === "selected" ? selectedIds.length : (filteredCount ?? undefined)}
         exportType={exportType}
         tagIncludes={filters.tags?.include ?? []}
         clientTag={filters.clientTag ?? null}

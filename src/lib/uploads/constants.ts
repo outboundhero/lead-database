@@ -58,6 +58,13 @@ export const LEAD_FIELDS: LeadField[] = [
   { key: "postal_code", label: "ZIP / Postal Code", aliases: ["postal_code", "zip", "zipcode", "zip_code", "postcode"] },
   { key: "company_phone", label: "Company Phone", aliases: ["company_phone", "company phone", "business_phone"] },
   { key: "google_maps_url", label: "Google Maps URL", aliases: ["google_maps_url", "google maps url", "maps_url", "gmaps"] },
+  // The person's profile link, kept on every lead an upload stores (client
+  // request 2026-10-23; the columns existed, uploads skipped them) and offered
+  // as an export column. Rows with NO email never become leads: the upload's
+  // "No-email rows" download returns them as uploaded, LinkedIn included —
+  // that file is the one to run through an email finder.
+  { key: "person_linkedin", label: "Person LinkedIn", aliases: ["person_linkedin", "linkedin", "linkedin_url", "linkedin profile", "person linkedin", "person linkedin url", "personal linkedin"] },
+  { key: "company_linkedin", label: "Company LinkedIn", aliases: ["company_linkedin", "company linkedin", "company linkedin url"] },
   { key: "question", label: "Personalization Question", aliases: ["question", "custom_question", "personalization"] },
   { key: "notes", label: "Notes", aliases: ["notes", "note"] },
   { key: "tags", label: "Tags", aliases: ["tags", "tag", "comma separated tags", "keywords", "keyword"] },

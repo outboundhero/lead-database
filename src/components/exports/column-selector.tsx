@@ -72,6 +72,8 @@ const EXPORT_ONLY_KEYS = new Set([
   "postal_code",
   "company_phone",
   "google_maps_url",
+  "person_linkedin",
+  "company_linkedin",
   "question",
   "notes",
   "tags",
