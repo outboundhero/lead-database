@@ -249,6 +249,7 @@ scrollers (`max-h-[40vh] overflow-y-auto` on long lists) still compose fine.
 |---|---|---|
 | `fn_filter_leads_v2(p_filters, p_sort_by, p_sort_dir, p_limit, p_offset)` | Main filter — extended for `email_type`, `exclude_keywords`, silent `is_bounced` filter (migration 032); honours `skipCount` inside `p_filters` (086) | 120s |
 | `fn_filter_leads_count(p_filters)` | The Leads page's total — its own request since 2026-10-21 (`/api/leads/count`) | 120s, then 57014 (the in-function 15s fallback never fires — see "Leads total is its own request") |
+| `fn_cancel_lead_queries(p_tags)` | Cancels running Leads searches tagged `application_name = 'leads-q:<uuid>'` (`queryTag` in `p_filters`, 119); service_role only | n/a |
 | `fn_lead_column_values(p_filters, p_column, p_search, p_limit, p_scan_cap)` | Per-column filter dropdown values (088); 20-name allowlist, `'__BLANK__'` sentinel | 25s |
 | `fn_export_leads(p_filters, p_cursor, p_limit, p_skip)` | Export — enforces `validation_status IN ('valid','catch_all') AND is_bounced = false` (migration 033) | 300s |
 | `fn_lead_filter_conditions(p_filters)` | Shared WHERE builder — browse/export gate, suppression escapable | n/a |
@@ -387,6 +388,8 @@ Known I/O-heavy patterns to avoid:
 ```
 src/app/api/leads/filter/route.ts          — Main filter API (fn_filter_leads_v2 RPC); ?count=0 = rows only
 src/app/api/leads/count/route.ts           — Leads total (fn_filter_leads_count), separate from the rows; 57014 → {timedOut:true}
+src/app/api/leads/cancel/route.ts          — Stops searches the Leads page gave up on (fn_cancel_lead_queries, 119)
+src/lib/leads/query-cancel.ts              — Query-id registry: refuse/cancel abandoned searches (globalThis, see 119 section)
 src/app/api/exports/stream/route.ts        — Streaming CSV export + validation pre-pass
 src/app/api/exports/process/route.ts       — Background export (for selected IDs)
 src/app/api/dashboard/refresh/route.ts     — Dashboard refresh
@@ -1611,9 +1614,9 @@ eligible match (2026-10-23 fix). It is an upper bound: the CSV export also
 drops bounced and invalid/unknown leads, and a push also drops leads already
 sent for the client tag and the client's rules. It is disabled while the total
 is unknown; "Retry" next to "Count timed out" / "Count unavailable" re-runs it. `/api/leads/filter` without
-`?count=0` still returns rows + total (old open tabs). ⚠ A superseded request is
-aborted in the browser only — PostgREST keeps the old query running up to its
-limit, so a burst of filter edits can still stack counts in Postgres.
+`?count=0` still returns rows + total (old open tabs). A superseded request used
+to be aborted in the browser only, with PostgREST running the old query on to
+its limit; since 119 it is cancelled in the database (next section).
 
 **Migration 118:** `fn_lead_filter_conditions` groups INCLUDED endings by
 length — one `right(<expr>, N) = ANY ('{…}')` per distinct length — instead of
@@ -1625,6 +1628,57 @@ search's count **121.3 s (timeout) → 16.2 s, exact** (10,250); rows 2.0 s.
 cheap quals first and the first excluded ending that matches (usually `.com`)
 rejects a lead after one `lower()+right()`. Grouped, a 56-value exclude list
 measured 1.7× **slower** (0.89 → 1.48 s), as did one `NOT (… OR …)`.
+
+## Leads search speed: host once, capped walk, cancellable searches (119, 2026-10-23)
+
+All three change how a result is found, never which rows: old vs new compared
+on every lead (629 condition payloads, 2.9M distinct hosts, synthetic rows from
+each payload's own endings) and on 100+ real page queries — 0 differences.
+
+**Domain Ends With** computes the host expression (two `regexp_replace`, ~2.4 µs
+a lead) as few times as possible: per side, an ending that ends with another
+listed ending is dropped (`.co.uk` with `.uk`), then with N endings over L
+lengths it is 118's grouped `right(<host>, len) = ANY` when N ≥ 31·(L−1), else
+one `<host> LIKE ANY ('{%…}')` (LIKE costs ~0.078 µs per pattern, so a long
+same-length list would be slower as LIKE — all 213 country endings were 2.6×
+slower in a first draft). An exclude is `NOT (…)` of the same; 118 ran the host
+once per exclude VALUE. Counts, full table, 2 workers: 20 endings / 6 lengths
+43.0 → 14.1 s (no worker: 128 → 40 s), 56 excludes 24.2 → 13.5 s, 213 country
+endings 22.7 → 16.6 s.
+
+**Rows, page 1 only.** With the created_at sort the planner walks
+`idx_leads_created_id` and stops at a page of matches; a rare filter walked all
+9.5M rows (`.ci`: 35–48 s). When page 1's plan is a SERIAL walk of that index,
+the walk is capped at the newest 1.5M leads (a filtered `ORDER BY … LIMIT
+1500000` subquery — an exact prefix of the same order, so a full page found
+there is the page, with the old walk's own work); short of a page it re-runs
+ordered by `created_at + interval '0'` (no index → parallel scan + sort).
+`.ci` 35.8 → ~11 s; a client tag ~570k deep 2.4 → 2.0 s. ⚠ Price: a filter
+whose 50th match is 1.5M–3M deep (email `.pt`, `.to`) pays the cap and the
+scan, ~1.5× slower (6.6 → ~10.6 s). Deliberately NOT capped: pages after the
+first (walk usually finds them soon) and PARALLEL walks (client targeting —
+the capped walk runs in one process; one saved search went 8.6 → 14 s in a
+first draft). The two-window first draft (250k, then 1.5M) was rejected: a
+filter with no match in the newest 250k paid the scan though its matches sat
+at 570k (2.2 → 7.3 s).
+
+**Cancellable searches.** The page sends a random id per rows/count request
+(`x-lead-query-id`); the routes pass it as `p_filters.queryTag` (like
+`skipCount` — a parameter would add an overload); the functions set
+`application_name = 'leads-q:<uuid>'` for their transaction (tag appears
+~10 ms after the call starts, reverts at commit/abort — checked through
+Supavisor); `fn_cancel_lead_queries` cancels exactly those backends
+(pg_stat_clear_snapshot first). `src/lib/leads/query-cancel.ts` keeps a
+registry on `globalThis` (the build inlines the module into each route chunk):
+a search whose id was cancelled earlier, or whose client is gone, is refused
+(409) before the RPC; a running one is cancelled until its RPC settles (it may
+not have reached Postgres yet). The page batches one tick's cancels into one
+POST, sends them from `pagehide` via `sendBeacon` on reload/close, and bumps
+its request sequences before the unmount aborts (no false "timed out" toast).
+⚠ Never set `req.done` in the fetch `finally`: Chrome rejects in-flight
+fetches BEFORE our pagehide runs (Next registers its own listener first), so a
+reload would skip the cancel. Measured: cancel → 57014 in one round trip;
+parallel workers gone within ~10 ms.
 
 ## Selection is "everything matching, minus what you unchecked" (2026-09-22)
 

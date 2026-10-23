@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import type { FilterState } from "@/types/filters";
 import { DEFAULT_FILTER_STATE } from "@/types/filters";
 import { buildRpcFilters } from "@/lib/filters/build-rpc-filters";
+import { beginSearch, readQueryId } from "@/lib/leads/query-cancel";
 
 // POST /api/leads/count  (body: the same filters as /api/leads/filter)
 //
@@ -31,10 +32,24 @@ export async function POST(req: NextRequest) {
 
   try {
     const filters: FilterState = { ...DEFAULT_FILTER_STATE, ...(body as Partial<FilterState>) };
-    const { data, error } = await createAdminClient().rpc("fn_filter_leads_count", {
-      p_filters: buildRpcFilters(filters),
-    });
+    // The page's query id rides along as queryTag so a count it gives up on
+    // (newer filters) can be cancelled in the database (migration 119); one it
+    // gave up on before it got here is not started at all.
+    const queryId = readQueryId(req);
+    const search = beginSearch(req, queryId);
+    if (search.refused) return NextResponse.json({ error: "Count cancelled" }, { status: 409 });
+    let res;
+    try {
+      res = await createAdminClient().rpc("fn_filter_leads_count", {
+        p_filters: { ...buildRpcFilters(filters), ...(queryId ? { queryTag: queryId } : {}) },
+      });
+    } finally {
+      search.done();
+    }
+    const { data, error } = res;
     if (error) {
+      // 57014 is the 120 s limit — or a cancel of a count the page abandoned,
+      // whose answer nobody is waiting for.
       if (error.code === "57014") {
         return NextResponse.json({ totalCount: null, isApproximate: false, timedOut: true });
       }

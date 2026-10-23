@@ -20,6 +20,7 @@ import { useHasPermission } from "@/lib/context/role-context";
 import { countActiveFilters, needsClientTargeting, EXCLUDE_IDS_MAX } from "@/types/filters";
 import { LocationCoverageNotice, type LocationCoverage } from "@/components/clients/location-coverage-notice";
 import type { Lead } from "@/types/database";
+import { QUERY_ID_HEADER } from "@/lib/leads/query-id";
 
 const SORT_OPTIONS = [
   { label: "Name (A → Z)", sortBy: "first_name", sortDir: "asc" as const },
@@ -38,6 +39,50 @@ function countKeyOf(f: FilterState): string {
   const { page: _p, pageSize: _ps, sortBy: _sb, sortDir: _sd, ...rest } = f;
   void _p; void _ps; void _sb; void _sd;
   return JSON.stringify(rest);
+}
+
+// A search the page gives up on (newer filters, its own time limit, leaving
+// the page) is aborted here AND cancelled in the database — PostgREST would
+// otherwise keep running it to its 120 s limit, holding the parallel workers
+// the next search needs. Each request carries a random id for that
+// (migration 119); without crypto.randomUUID it is simply not cancellable.
+type InFlight = { controller: AbortController; id: string | null; done: boolean };
+
+function startSearch(): InFlight {
+  const id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : null;
+  return { controller: new AbortController(), id, done: false };
+}
+
+/** POST the ids to /api/leads/cancel. `unloading`: the document is going away. */
+function sendCancels(ids: string[], unloading = false) {
+  const body = JSON.stringify({ ids });
+  // sendBeacon is built to outlive the page; keepalive fetch is the fallback.
+  if (unloading && typeof navigator !== "undefined" && navigator.sendBeacon?.("/api/leads/cancel", new Blob([body], { type: "application/json" }))) return;
+  fetch("/api/leads/cancel", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true,
+  }).catch(() => {});
+}
+
+// Rows and count are given up together when the filters change — one request.
+let cancelBatch: string[] = [];
+function queueCancel(id: string) {
+  cancelBatch.push(id);
+  if (cancelBatch.length > 1) return;
+  queueMicrotask(() => {
+    const ids = cancelBatch;
+    cancelBatch = [];
+    for (let i = 0; i < ids.length; i += 4) sendCancels(ids.slice(i, i + 4)); // the route takes 4
+  });
+}
+
+function abandonSearch(req: InFlight | null) {
+  if (!req || req.done) return;
+  req.done = true;
+  req.controller.abort();
+  if (req.id) queueCancel(req.id);
 }
 
 export default function LeadsPage() {
@@ -498,25 +543,27 @@ export default function LeadsPage() {
       });
   }, [leads, filters.clientTag]);
 
-  const rowsAbortRef = useRef<AbortController | null>(null);
+  const rowsReqRef = useRef<InFlight | null>(null);
   const fetchLeads = useCallback(async () => {
     const myReq = ++reqSeq.current;
     setIsLoading(true);
-    // A newer search supersedes this one — stop waiting on the old response.
-    rowsAbortRef.current?.abort();
+    // A newer search supersedes this one — stop the old one, here and in the
+    // database.
+    abandonSearch(rowsReqRef.current);
     // Big searches can exceed the server's patience — abort at 100s with a
     // clear message instead of spinning forever, and KEEP the previous rows.
-    const controller = new AbortController();
-    rowsAbortRef.current = controller;
-    const timer = setTimeout(() => controller.abort(), 100_000);
+    const req = startSearch();
+    rowsReqRef.current = req;
+    const timer = setTimeout(() => abandonSearch(req), 100_000);
     try {
       // Rows only (?count=0): the total comes from fetchCount below.
       const res = await fetch("/api/leads/filter?count=0", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(req.id ? { [QUERY_ID_HEADER]: req.id } : {}) },
         body: JSON.stringify(debouncedFilters),
-        signal: controller.signal,
+        signal: req.controller.signal,
       });
+      req.done = true; // the server has answered; nothing left to cancel
       if (!res.ok) throw new Error(`Filter request failed: ${res.status}`);
       const result: { data: Lead[] } = await res.json();
       if (myReq !== reqSeq.current) return; // superseded — drop it
@@ -530,6 +577,9 @@ export default function LeadsPage() {
         toast.error("Search failed — showing the previous results. Try adjusting the filters.");
       }
     } finally {
+      // NOT req.done here: when Chrome reloads or leaves the page it rejects
+      // in-flight fetches BEFORE our pagehide listener runs (Next registers
+      // its own first), and marking them done then would skip their cancel.
       clearTimeout(timer);
       if (myReq === reqSeq.current) setIsLoading(false);
     }
@@ -544,24 +594,27 @@ export default function LeadsPage() {
   // its 120 s limit comes back as { timedOut: true } and is shown as such — it
   // is not an error, the rows on screen are still right.
   const countSeq = useRef(0);
-  const countAbortRef = useRef<AbortController | null>(null);
+  const countReqRef = useRef<InFlight | null>(null);
   const fetchCount = useCallback(async () => {
     const myReq = ++countSeq.current;
     setCountStatus("counting");
-    countAbortRef.current?.abort();
-    const controller = new AbortController();
-    countAbortRef.current = controller;
+    // A count for older filters is stopped in the database too, so it no
+    // longer holds the parallel workers this one needs.
+    abandonSearch(countReqRef.current);
+    const req = startSearch();
+    countReqRef.current = req;
     // Just past the database's own 120 s limit, so its timed-out answer
     // normally lands first; this only catches a connection that never answers.
-    const timer = setTimeout(() => controller.abort(), 130_000);
+    const timer = setTimeout(() => abandonSearch(req), 130_000);
     try {
       const res = await fetch("/api/leads/count", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(req.id ? { [QUERY_ID_HEADER]: req.id } : {}) },
         // The filters minus page/size/sort — the route fills in the defaults.
         body: countKey,
-        signal: controller.signal,
+        signal: req.controller.signal,
       });
+      req.done = true; // the server has answered; nothing left to cancel
       if (!res.ok) throw new Error(`Count request failed: ${res.status}`);
       const result: { totalCount: number | null; isApproximate?: boolean; timedOut?: boolean } = await res.json();
       if (myReq !== countSeq.current) return; // superseded — drop it
@@ -581,13 +634,55 @@ export default function LeadsPage() {
         setCountStatus("failed");
       }
     } finally {
-      clearTimeout(timer);
+      clearTimeout(timer); // not req.done — see fetchLeads
     }
   }, [countKey]);
 
   useEffect(() => {
     fetchCount();
   }, [fetchCount]);
+
+  // Leaving the page: stop whatever search is still running in the database.
+  // The sequences move first, so the aborts read as superseded — no "timed
+  // out" toast on the page being opened.
+  useEffect(() => () => {
+    reqSeq.current++;
+    countSeq.current++;
+    abandonSearch(rowsReqRef.current);
+    abandonSearch(countReqRef.current);
+  }, []);
+
+  // Reload, tab close, a link out: React runs no cleanup then, so cancel from
+  // pagehide (no abort, no toast — the document is going). If the page comes
+  // back from the back/forward cache instead, re-run what was cut off.
+  const resumeRef = useRef({ rows: false, count: false });
+  useEffect(() => {
+    const onHide = () => {
+      const rows = rowsReqRef.current, count = countReqRef.current;
+      resumeRef.current = { rows: !!rows && !rows.done, count: !!count && !count.done };
+      const ids: string[] = [];
+      for (const r of [rows, count]) {
+        if (r && !r.done) {
+          r.done = true;
+          if (r.id) ids.push(r.id);
+        }
+      }
+      if (ids.length) sendCancels(ids, true);
+    };
+    const onShow = (e: PageTransitionEvent) => {
+      if (!e.persisted) return;
+      const { rows, count } = resumeRef.current;
+      resumeRef.current = { rows: false, count: false };
+      if (rows) fetchLeads();
+      if (count) fetchCount();
+    };
+    window.addEventListener("pagehide", onHide);
+    window.addEventListener("pageshow", onShow);
+    return () => {
+      window.removeEventListener("pagehide", onHide);
+      window.removeEventListener("pageshow", onShow);
+    };
+  }, [fetchLeads, fetchCount]);
 
   // After a delete or a Never contact the total changed too, not just the page.
   const refreshLeads = useCallback(() => {
