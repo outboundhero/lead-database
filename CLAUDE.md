@@ -283,6 +283,8 @@ REOON_API_KEY                 # Email validation primary
 FINDEMAIL_API_KEY             # Email validation fallback
 VALIDATION_BATCH_SIZE         # default 100
 VALIDATION_REVALIDATE_DAYS    # default 45
+COSTING_API_KEY               # Bearer key ReplyRouter uses for GET /api/costing (web service only, ≥32 chars; unset/short = every call 500)
+COSTING_ENVIRONMENT           # optional; product.environment in the costing feed (default production)
 EMAILBISON_KEYS               # JSON: instance domain -> token. FOUR Bison installs
                               #   group 1: app.outboundhero.co   + personal.cleaningoutbound.com
                               #   group 2: app.facilityreach.com + personal.outboundclean.com
@@ -389,6 +391,12 @@ Known I/O-heavy patterns to avoid:
 src/app/api/leads/filter/route.ts          — Main filter API (fn_filter_leads_v2 RPC); ?count=0 = rows only
 src/app/api/leads/count/route.ts           — Leads total (fn_filter_leads_count), separate from the rows; 57014 → {timedOut:true}
 src/app/api/leads/cancel/route.ts          — Stops searches the Leads page gave up on (fn_cancel_lead_queries, 119)
+src/app/api/costing/route.ts               — ReplyRouter costing feed (Bearer COSTING_API_KEY; reads cost_line_items, 121)
+src/lib/costing/feed.ts                    — Costing feed: range/key checks, exact read + totals, integrity backstop
+src/lib/costing/db.ts                      — The costing route's own 2-connection pool (fails fast)
+scripts/lib/costing-store.mjs              — Costing writers' validation (spec rules) + upsert; BigInt money
+scripts/costing-import.mjs                 — Invoice headers + lines -> cost_invoices / cost_line_items (dry run by default)
+scripts/lib/fake-pg.mjs                    — Tiny fake Postgres for testing a route's failure paths (used by test-costing-feed)
 src/lib/leads/query-cancel.ts              — Query-id registry: refuse/cancel abandoned searches (globalThis, see 119 section)
 src/app/api/exports/stream/route.ts        — Streaming CSV export + validation pre-pass
 src/app/api/exports/process/route.ts       — Background export (for selected IDs)
@@ -1679,6 +1687,111 @@ its request sequences before the unmount aborts (no false "timed out" toast).
 fetches BEFORE our pagehide runs (Next registers its own listener first), so a
 reload would skip the cancel. Measured: cancel → 57014 in one round trip;
 parallel workers gone within ~10 ms.
+
+## Costing feed for ReplyRouter (121, 2026-10-27)
+
+ReplyRouter's Costing section pulls `GET /api/costing?from=&to=` (spec "Costing
+feed — spec for product endpoints v1.0") with `Authorization: Bearer
+COSTING_API_KEY`, daily, re-pulling the last 35 days. EXACT figures only:
+`invoice` lines, a provider's billing API (`provider_api`), or our own metering
+when it reproduces the charge exactly (`metered`). Never estimates or proration.
+
+- **Read path:** the route is excluded from the session middleware — the key is
+  the only auth. `COSTING_API_KEY` unset or shorter than 32 characters makes
+  every call a 500 "not configured" (fails closed; the value is trimmed, since
+  pasted values often end in a newline); a wrong or missing key is a 401. The
+  route has its own 2-connection pool (`src/lib/costing/db.ts`, 5 s connect
+  timeout — the shared pool can wait 2 min behind exports, and the spec wants an
+  answer in ~10 s) and reads in one READ ONLY REPEATABLE READ transaction with
+  `SET LOCAL statement_timeout = '8s'` under a 9 s deadline counted from the
+  request, so the wait for a connection comes out of it (a silent half-open
+  connection would otherwise hold the request and a pool slot forever: the
+  deadline releases the client with an error, which destroys the socket — a
+  plain `release()` would hand the stuck client back to the pool). The
+  checked-out client gets an `'error'` listener: pg-pool removes its own at
+  checkout, so a server that drops the connection mid-query would otherwise
+  raise an uncaught exception. It reads
+  items with `amount::text` (kept exactly
+  as given — unconstrained numeric keeps the scale), totals summed in SQL and
+  written trimmed with at least 2 decimals ("40.0595", "52.20"). No money ever
+  becomes a JS number. Before answering, the feed re-adds the items in BigInt
+  and checks no money field is a number: a feed that would not add up is a 500,
+  never a wrong answer. `notes` (COVERAGE_NOTES in src/lib/costing/feed.ts)
+  says which sources are missing — update it as each comes online.
+- **Tables:** `cost_line_items` (one row per spec item, keyed by its id;
+  `origin` = the writer that owns it) and `cost_invoices` (vendor, invoice_id,
+  invoice_date, currency, total). The table re-checks what SQL can: scale ≤ 12
+  and |amount| < 1e15 (`abs()` first — `scale(NaN)` is NULL and NaN ≥ 0 is
+  true, so NaN/Infinity would otherwise pass), sign by billing type, model for
+  ai, no blank service/model/description (`cost_text_not_blank`), `final` for
+  invoice lines, a metered amount exactly Σ qty × price ÷ per over its priced
+  usage (`fn_cost_metered_exact`, cross-multiplied so nothing rounds), and the
+  full spec shape of every jsonb field (`fn_cost_usage_ok`,
+  `fn_cost_subscription_ok` with real calendar dates via `fn_cost_is_date`,
+  `fn_cost_attributes_ok`, `fn_cost_allocations_exact`, `cost_invoice_shape`):
+  decimal strings, no JSON number (node-postgres would parse it into a float),
+  no nested `null` (it would be served as null, which the spec does not allow),
+  no unknown keys, allocations summing exactly per dimension, attribute numbers
+  under 1e15 (bigger ones come out of JSON.parse as Infinity, then null). A row
+  written by hand cannot break the feed either. ⚠ Those helpers use CASE, not AND/OR,
+  wherever a later test would error on the wrong type: SQL does not promise
+  left-to-right evaluation. Deferred constraint triggers make every
+  invoice's lines exist only with a header, share its currency and date, and add
+  up EXACTLY to its total — checked at COMMIT, so a header and its lines go in
+  one transaction. A final row's amount/currency/date/status change only under
+  `SET LOCAL costing.allow_final_edit = 'on'`. RLS on with no policies and the
+  anon/authenticated grants revoked; never read these through supabase-js
+  (PostgREST sends numeric as a JSON number). ⚠ CHECKs pass on NULL — write
+  them with IS NOT DISTINCT FROM (the invoice rule failed a test this way).
+- **Write path:** every writer goes through `scripts/lib/costing-store.mjs`
+  (spec validation; BigInt 1e-12 arithmetic; metered = Σ qty × price ÷ per,
+  exactly; allocations sum exactly per dimension; an id owned by another writer
+  is refused). An explicit `null` inside invoice / usage / subscription is a
+  wrong type, not "absent" (a top-level null field is fine: stored as SQL NULL,
+  omitted from the feed), and every string rule checks `typeof` first —
+  `RegExp.test()` coerces, so `123` passed `/^[0-9a-z]+$/` and numeric ids
+  skipped the duplicate check.
+- **Invoice lines:** `node --env-file=.env.local scripts/costing-import.mjs
+  <file.json> [--commit] [--backfill] [--correct]` — `{ invoices:
+  [{vendor,id,date,currency,total,url?}], items: [...] }`. Each invoice line is
+  dated its invoice day, is in its currency, and the invoice's lines (file +
+  already stored) add up exactly to its total. Dry run by default: it writes,
+  runs the database's deferred checks (`SET CONSTRAINTS ALL IMMEDIATE`) and
+  rolls back, so a passing dry run means the commit passes. A line dated more
+  than 33 days ago (UTC) needs `--backfill` AND a one-off ReplyRouter pull of
+  that range: its daily pull re-reads "the last 35 days" at an unknown time, so
+  read inclusively tomorrow's pull starts at today − 33. `--correct` = a
+  deliberate change to a final line. ⚠ The repo is PUBLIC: a file inside it is
+  refused unless git ignores it (and refused if git cannot run) — keep invoice
+  files outside the repo, or in its git-ignored `costing-invoices/` folder.
+  "Inside" is decided by folder identity (device + inode), not path text: macOS
+  reaches one folder by several spellings (letter case,
+  `/System/Volumes/Data/…`), and realpath does not undo all of them.
+- **Tests:** `npx tsx --env-file=.env.local scripts/test-costing-feed.mts` (302
+  checks, ~80 s): builds migration 121 itself as pg_temp copies in one
+  rolled-back transaction; every raw refusal names the constraint that must
+  fire AND checks the validator refuses the same row; RLS and the anon /
+  authenticated revokes are checked; the route's database paths (a connection
+  that is slow, never answers, goes silent mid-query or drops) and the importer
+  CLI (guard, the statements each mode sends, its own invoice checks) run
+  against a local fake Postgres (`scripts/lib/fake-pg.mjs`).
+
+**Where each cost can come from (investigated 2026-10-27):** no vendor gives
+exact money through an API we hold today.
+- OpenAI (targeting sync gpt-4o / gpt-4o-mini; Locations "AI suggestion"):
+  exact only via the Costs API, which needs an org **Admin key** — the
+  `sk-svcacct-` key gets 403 "Missing scopes: api.usage.read". Project
+  `proj_Q7LMqWQeLhiVayKkUYZqbpPM`. ⚠ Costs amounts are JSON floats with up to
+  ~20 decimals vs the spec's 12-decimal cap — ReplyRouter must decide.
+- Railway (Hobby workspace "outboundhero's Projects", renews ~19th): invoices
+  only — the project token cannot read Customer/invoices, and usage × price does
+  not reproduce the bill (float buckets, grouping-dependent memory totals).
+- Supabase (project phualuedpmsdkzgsmjsw, XL): invoices only — the Management
+  API exposes no invoice or charge.
+- Reoon: payment receipts only (the API returns credit counts). Findymail: not
+  used here since 2026-09-11 (shared account). Google Sheets, GitHub: $0.
+- Bison installs, purchased lead lists, Clay: invoices; which product owns those
+  bills is undecided.
 
 ## Selection is "everything matching, minus what you unchecked" (2026-09-22)
 

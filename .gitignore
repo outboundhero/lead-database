@@ -41,3 +41,6 @@ yarn-error.log*
 next-env.d.ts
 data/geo/raw/
 data/geo/places_slim.tsv
+
+# invoice files for scripts/costing-import.mjs — the repo is public
+/costing-invoices/
