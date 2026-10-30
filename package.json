@@ -24,7 +24,9 @@
     "targeting-worker": "node scripts/sync-client-targeting-from-sheet.mjs --serve",
     "validation-worker": "node scripts/validation-worker.mjs",
     "filter-cache-refresh": "node scripts/refresh-filter-cache.mjs",
-    "bison-unsubscribe": "node scripts/bison-unsubscribe-worker.mjs"
+    "bison-unsubscribe": "node scripts/bison-unsubscribe-worker.mjs",
+    "enrich-worker": "node scripts/enrich-worker.mjs",
+    "enrich-seed-table": "node scripts/enrich-seed-table.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

@@ -44,3 +44,7 @@ data/geo/places_slim.tsv
 
 # invoice files for scripts/costing-import.mjs — the repo is public
 /costing-invoices/
+
+# Clay-tab table specs (scripts/enrich-seed-table.mjs) — each holds one client's
+# exclusion lists and AI prompts, so they live in the database, not the public repo
+/enrich-specs/
