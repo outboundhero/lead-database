@@ -5,6 +5,8 @@ import { workerState } from "@/lib/enrich/queries";
 
 // GET /api/enrich/tables — every Clay-tab table, with the worker's heartbeat.
 // AI Ark run tables (kind ai_ark) come last, newest first, with their run.
+// A run's `finishing` is the AI Ark tab's own test (RUN_FIELDS): cancelled,
+// and still holding the export it paid for.
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +21,8 @@ export async function GET() {
                   CASE WHEN r.id IS NULL THEN NULL ELSE json_build_object(
                     'id', r.id, 'status', r.status, 'mode', r.mode, 'strategy', r.strategy,
                     'pulled', r.pulled, 'size', r.size_requested, 'created_at', r.created_at,
-                    'finished_at', r.finished_at, 'stop_reason', r.stop_reason, 'last_error', r.last_error) END AS run
+                    'finished_at', r.finished_at, 'stop_reason', r.stop_reason, 'last_error', r.last_error,
+                    'finishing', coalesce(r.status = 'cancelled' AND r.finished_at IS NULL AND jsonb_typeof(r.progress->'job') = 'object', false)) END AS run
              FROM enrich_tables t
              LEFT JOIN client_tags ct ON ct.tag = t.client_tag
              LEFT JOIN aiark_runs r ON r.table_id = t.id

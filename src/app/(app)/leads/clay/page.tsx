@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   ChevronLeft,
@@ -60,8 +60,10 @@ const RUN_STATUS_LABEL: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
-/** Cancelled, but still reading the export it had already paid for. */
-const finishing = (r: NonNullable<EnrichTableSummary["run"]>) => r.status === "cancelled" && !r.finished_at;
+/** Cancelled, but still reading the export it had already paid for (the server says, as on the AI Ark tab). */
+const finishing = (r: NonNullable<EnrichTableSummary["run"]>) => r.finishing === true;
+
+const GIVE_UP_MS = 30_000; // a grid request that hangs is dropped, so live updates carry on
 
 /** One AI Ark run table, as the run picker shows it. */
 function runLabel(t: EnrichTableSummary) {
@@ -328,6 +330,9 @@ function TableView({
   const [openCell, setOpenCell] = useState<{ row: number; col: string } | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [tick, setTick] = useState(0);
+  // The detail and rows requests on their way, if any (see the live updates below).
+  const detailReq = useRef<AbortController | null>(null);
+  const rowsReq = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -340,6 +345,8 @@ function TableView({
   // Columns, header counts, row totals and the worker's heartbeat.
   useEffect(() => {
     const ctl = new AbortController();
+    detailReq.current = ctl;
+    const giveUp = setTimeout(() => ctl.abort(), GIVE_UP_MS);
     fetch(`/api/enrich/table?id=${table.id}`, { signal: ctl.signal })
       .then((r) => r.json())
       .then((j: TableDetail & { error?: string }) => {
@@ -349,6 +356,10 @@ function TableView({
       })
       .catch((e) => {
         if (e.name !== "AbortError") toast.error(e.message ?? "Could not load the table");
+      })
+      .finally(() => {
+        clearTimeout(giveUp);
+        if (detailReq.current === ctl) detailReq.current = null;
       });
     return () => ctl.abort();
   }, [table.id, onWorker, tick]);
@@ -365,6 +376,8 @@ function TableView({
 
   useEffect(() => {
     const ctl = new AbortController();
+    rowsReq.current = ctl;
+    const giveUp = setTimeout(() => ctl.abort(), GIVE_UP_MS);
     fetch(`/api/enrich/rows?${query}`, { signal: ctl.signal })
       .then((r) => r.json())
       .then((j: RowsPage & { error?: string }) => {
@@ -374,17 +387,23 @@ function TableView({
       })
       .catch((e) => {
         if (e.name !== "AbortError") toast.error(e.message ?? "Could not load rows");
+      })
+      .finally(() => {
+        clearTimeout(giveUp);
+        if (rowsReq.current === ctl) rowsReq.current = null;
       });
     return () => ctl.abort();
   }, [query, tick]);
 
   // Live updates: every 2.5 s while rows are queued or running, else every 10 s.
   // A tick while the page is hidden is skipped, not the timer, so updates resume
-  // when it is shown again.
+  // when it is shown again. A tick also waits while a request is still on its
+  // way: it would cut that request off, and an answer slower than the tick would
+  // never land. A new table, page or filter still replaces a request at once.
   const busy = (detail?.statuses.queued ?? 0) + (detail?.statuses.running ?? 0) > 0;
   useEffect(() => {
     const t = setInterval(() => {
-      if (document.visibilityState === "visible") setTick((n) => n + 1);
+      if (document.visibilityState === "visible" && !detailReq.current && !rowsReq.current) setTick((n) => n + 1);
     }, busy ? 2_500 : 10_000);
     return () => clearInterval(t);
   }, [busy]);

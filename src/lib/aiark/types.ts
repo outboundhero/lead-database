@@ -116,4 +116,6 @@ export interface CountResult {
   perSearch: number[];
   credits: number;
   sample: { name: string; title: string | null; company: string | null; place: string | null }[];
+  /** The rules' version the count searched with (null: the client had no rules). */
+  rulesVersion: string | null;
 }

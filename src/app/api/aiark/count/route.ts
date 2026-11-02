@@ -19,12 +19,16 @@ import {
 } from "@/lib/aiark/server";
 import type { CountResult, PeopleFilters, RunMode } from "@/lib/aiark/types";
 
-// POST /api/aiark/count {tag, mode, filters?} — how many people AI Ark has for
-// a client's rules and people filters: one People Preview page per search,
-// 1 credit each (demo: made-up people, nothing spent). `filters` lets the tab
-// count before saving; without it the saved filters (or the starting point)
-// are used. Counts include people bought before — leaving them out takes
-// AI Ark exclusion lists, which are kept for pulls. Manager and up.
+// POST /api/aiark/count {tag, mode, filters?, rulesVersion?} — how many people
+// AI Ark has for a client's rules and people filters: one People Preview page
+// per search, 1 credit each (demo: made-up people, nothing spent). `filters`
+// lets the tab count before saving; without it the saved filters (or the
+// starting point) are used. Counts include people bought before — leaving
+// them out takes AI Ark exclusion lists, which are kept for pulls.
+// `rulesVersion` is the rules' version the tab loaded: when the rules have
+// changed since, the answer is 409 with `changed` and nothing is spent. The
+// answer carries the version it searched with, so a count made before a rules
+// change is not taken for one made after. Manager and up.
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -34,7 +38,7 @@ const SAMPLE = 10;
 export async function POST(req: NextRequest) {
   const auth = await requireRole("manager");
   if ("error" in auth) return auth.error;
-  let body: { tag?: unknown; mode?: unknown; filters?: unknown };
+  let body: { tag?: unknown; mode?: unknown; filters?: unknown; rulesVersion?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -55,18 +59,26 @@ export async function POST(req: NextRequest) {
   }
 
   let requests: object[];
+  let rulesVersion: string | null;
   try {
     const p = await withTx(
       async (c) => {
         const client = await clientInfo(c, tag);
         const targeting = await targetingOf(c, tag);
         const people = override ?? peopleOrDefaults(await savedPeople(c, tag), client?.client_type ?? null).value;
-        return plan(targeting, people, await geo(c));
+        return { ...plan(targeting, people, await geo(c)), rulesVersion: targeting?.version ?? null };
       },
       { readOnly: true, timeoutMs: 10_000 }
     );
+    if (body.rulesVersion !== undefined && p.rulesVersion !== body.rulesVersion) {
+      return NextResponse.json(
+        { error: `${tag}'s rules (locations and exclusions) changed since this page loaded them, so nothing was counted. Reload to see them.`, changed: true },
+        { status: 409 }
+      );
+    }
     if (p.blockers.length) return NextResponse.json({ error: p.blockers.join(" ") }, { status: 400 });
     requests = p.requests;
+    rulesVersion = p.rulesVersion;
   } catch (err) {
     console.error("aiark/count plan:", err);
     return NextResponse.json({ error: "Could not work out the search" }, { status: 500 });
@@ -106,6 +118,6 @@ export async function POST(req: NextRequest) {
   if (mode === "live") {
     await logAudit({ action: "aiark_count", performedBy: auth.user.id, details: `${tag}: ${total} matches in ${perSearch.length} searches, ${credits} credits` });
   }
-  const out: CountResult = { mode, total, perSearch, credits, sample };
+  const out: CountResult = { mode, total, perSearch, credits, sample, rulesVersion };
   return NextResponse.json(out);
 }

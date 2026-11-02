@@ -16,11 +16,13 @@
 //   A. the filter mapper, the AI Ark client's error mapping (every documented
 //      status), the person normaliser — no database
 //   B. demo runs end to end against the database: single and export pulls,
-//      no person bought twice (within and across runs), a crash mid-slice and
-//      resume, cancel (queued, mid-slice, and with an export out), out of
-//      credits, a refused key, a refunded / expired / still-processing /
-//      lost-answer export, a paid job held through errors, exclusion lists,
-//      adoption, person writes, the spending brake, lost single answers
+//      no person bought twice (within and across runs, and a single run beside
+//      another run's export), a crash mid-slice and resume, cancel (queued,
+//      mid-slice, and with an export out), out of credits, a refused key, a
+//      refunded / expired / still-processing / lost-answer export, a paid job
+//      held through errors, exclusion lists, adoption, person writes (and
+//      writes whose answer is lost), the spending brake, lost single answers,
+//      a run that gets past an error
 //   C. every outcome the worker works out, against an oracle built from the
 //      database's own functions (fn_regex_escape, fn_whole_term_regex,
 //      fn_commercial_cleaning_condition, geo_admin1), then each client rule
@@ -32,7 +34,7 @@ import ts from "typescript";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { AiArkError, createAiArk, personInputs } from "./lib/aiark/client.mjs";
+import { AiArkError, clip, createAiArk, personInputs } from "./lib/aiark/client.mjs";
 import { createDemoTransport, DEMO_TOKEN } from "./lib/aiark/demo.mjs";
 import { buildRequests, cleanPeopleFilters, CLEANING_DEFAULTS, EMPTY_PEOPLE_FILTERS, loadGeo } from "./lib/aiark/filters.mjs";
 import { RUN_COLUMNS } from "./lib/aiark/columns.mjs";
@@ -300,6 +302,14 @@ async function partA(geo) {
     const q = new URL(transport.calls[0].url).searchParams;
     check("submissions: page, size, sort and the refunded filter", subs.length === 1 && q.get("page") === "2" && q.get("size") === "100" && q.get("sort") === "created,desc" && q.get("fullyRefunded") === "true", transport.calls[0].url);
   }
+  for (const [label, answer] of [
+    ["a 404", { status: 404, json: { timestamp: "x", status: 404, error: "data not found", path: "" } }],
+    ["a cut-off body", { status: 200, text: '{"content":[{"trackId":"t"' }],
+    ["a body with no list", { status: 200, json: {} }],
+  ]) {
+    check(`submissions: ${label} → a failed read, never "no exports" (that could post one again)`, (await fails(() => mk([answer]).c.exportSubmissions({})))?.kind === "server");
+  }
+  check("submissions: a real empty list still passes", (await mk([{ status: 200, json: { content: [] } }]).c.exportSubmissions({})).length === 0);
   {
     const { c: cl } = mk([new TypeError(`Headers.append: "first ${SECRET}" is an invalid header value.`)]);
     const e = await fails(() => cl.credits());
@@ -337,6 +347,11 @@ async function partA(geo) {
   })());
   check("staff → size text", personInputs({ id: "x", company: { summary: { staff: { total: 113, range: { start: 11, end: 50 } } } } }).company_size === "113 (11–50)");
   void withEmail;
+  {
+    const cutEmoji = personInputs({ id: "x", company: { summary: { description: `${"x".repeat(4_999)}\u{1F600} and more` } } }).company_description;
+    check("a description cut at 5,000 never splits an emoji in two", cutEmoji.length === 4_999 && cutEmoji.isWellFormed(), String(cutEmoji.length));
+    check("a lone half of an emoji, as AI Ark may send it, becomes U+FFFD", clip("Owner \uD83D", 100) === "Owner \u{FFFD}" && clip("\uDE00x", 100) === "\u{FFFD}x");
+  }
 
   {
     const tx = createDemoTransport({ jobMs: 0, faults: { refundJobOnce: true } });
@@ -432,6 +447,11 @@ const backdateJob = (id, field, ago) =>
       WHERE id = $1`,
     [id, field, ago]
   );
+/** A submission whose answer was lost, moved back in time: when it was sent and when the answer was lost. */
+const lostAgo = async (id, ago) => {
+  await backdateJob(id, "submitting_at", ago);
+  await backdateJob(id, "lost_at", ago);
+};
 /** People in the registry with no run, so a list has to cover them. */
 const holdPeople = (n) => pool.query(`INSERT INTO aiark_people (person_id, demo) SELECT 'aiark-test-' || gen_random_uuid(), true FROM generate_series(1, $1)`, [n]);
 const dropHeldPeople = () => pool.query(`DELETE FROM aiark_people WHERE person_id LIKE 'aiark-test-%'`);
@@ -453,6 +473,17 @@ const flaky = (match, times) => ({
       throw new Error("Connection terminated unexpectedly");
     }
     return pool.query(sql, params);
+  },
+});
+/** A statement that commits, and whose answer is then lost on the way back. */
+const answerLost = (match, times = 1) => ({
+  query: async (sql, params) => {
+    const res = await pool.query(sql, params);
+    if (times > 0 && match(sql, params)) {
+      times--;
+      throw new Error("Connection terminated unexpectedly");
+    }
+    return res;
   },
 });
 async function tableStats(tableId, runId) {
@@ -674,6 +705,7 @@ async function partB() {
   await writes();
   await brake();
   await lostAnswers();
+  await recovered();
 
   const left = await one(`SELECT count(*)::int AS n FROM aiark_runs WHERE id = ANY($1::uuid[]) AND finished_at IS NULL`, [created.runs]);
   check("every run here has ended", left.n === 0, `${left.n} still open`);
@@ -773,10 +805,38 @@ async function cancelExports() {
     const run = await newRun({ strategy: "export", size: 100, requests: [search()] });
     await step(cf);
     await cancelRoute(run.id);
-    await backdateJob(run.id, "submitting_at", "3 minutes");
+    await lostAgo(run.id, "3 minutes");
     await driveFinished(run.id, cf);
     const c = await runRow(run.id);
     check("a cancelled run whose export never reached AI Ark ends without posting again", posts === 1 && c.status === "cancelled" && c.progress.job === null, `${posts} posts, ${JSON.stringify(c.progress.job)}`);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0, faults: { expireJobOnce: true } });
+    const cf = demoClient(tx);
+    const run = await newRun({ strategy: "export", size: 100, requests: [search()] });
+    await step(cf);
+    await cancelRoute(run.id);
+    await driveFinished(run.id, cf);
+    const c = await runRow(run.id);
+    const track = c.progress.job?.track_id;
+    check("a cancelled run whose paid job then can't be read ends as failed, not as a plain cancel", c.status === "error" && Boolean(track) && c.last_error.includes(track) && Number(c.credits_used) === tx.state.charged, `${c.status} ${c.last_error}`);
+  }
+  {
+    // What the Clay tab and the AI Ark tab are told about a cancelled run, read with their own SQL.
+    const tablesSql = /`(SELECT t\.id, t\.client_tag[\s\S]*?)`/.exec(source("src/app/api/enrich/tables/route.ts"))[1];
+    const fields = /RUN_FIELDS = `([\s\S]*?)`/.exec(source("src/lib/aiark/server.ts"))[1];
+    const run = await newRun({ strategy: "export", size: 30, requests: [search()] });
+    const shown = async () => ({
+      clay: (await one(`SELECT x.run FROM (${tablesSql}) x WHERE x.id = $1`, [run.table_id])).run.finishing,
+      aiArk: (await one(`SELECT ${fields} FROM aiark_runs r LEFT JOIN user_profiles up ON up.id = r.created_by WHERE r.id = $1`, [run.id])).finishing,
+    });
+    await pool.query(`UPDATE aiark_runs SET status = 'cancelled', progress = progress || '{"job": {"track_id": "held"}}' WHERE id = $1`, [run.id]);
+    const holding = await shown();
+    // The job is read and cleared, and the finish that sets finished_at never ran (a crash, a lost connection).
+    await pool.query(`UPDATE aiark_runs SET progress = progress || '{"job": null}' WHERE id = $1`, [run.id]);
+    const read = await shown();
+    check("the Clay tab shows a cancelled run as finishing only while it holds its paid job, as the AI Ark tab does", holding.clay === true && holding.aiArk === true && read.clay === false && !read.aiArk, `${JSON.stringify(holding)} ${JSON.stringify(read)}`);
+    await settle(run.id);
   }
 }
 
@@ -825,6 +885,23 @@ async function expiredExports() {
   check("  … and never reads more than 5 pages", far.st === "error" && far.asked === "0,1,2,3,4" && far.posts === 1, JSON.stringify(far));
   const unrefunded = await lookup((page, track) => [{ trackId: track, fullyRefunded: false, created: new Date().toISOString() }]);
   check("  … and goes by the row's own flag, so an unrefunded job is never bought again", unrefunded.st === "error" && unrefunded.posts === 1, JSON.stringify(unrefunded));
+  {
+    const tx = createDemoTransport({ jobMs: 0, faults: { expireJobOnce: true } });
+    let posts = 0;
+    let lookups = 0;
+    const cf = demoClient(overlay(tx, (req) => {
+      if (isPost(req)) posts++;
+      if (req.url.includes("/submissions") && ++lookups === 1) return ans(404, { timestamp: "x", status: 404, error: "data not found", path: "" });
+    }));
+    const run = await newRun({ strategy: "export", size: 50, requests: [search(SEVERAL_PLACES)] });
+    await step(cf);
+    await due(run.id);
+    await step(cf);
+    const a = await runRow(run.id);
+    check("  … a lookup that can't be read holds the job: it neither ends the run nor buys again", a.status === "running" && Boolean(a.progress.job?.track_id) && a.attempts === 1 && posts === 1, `${a.status} ${a.attempts} posts ${posts} ${a.last_error}`);
+    const st = await drive(run.id, cf);
+    check("  … and the next lookup decides", st === "error" && posts === 1 && lookups === 2, `${st} posts ${posts} lookups ${lookups}`);
+  }
 }
 
 /** B7. Loops that could pay or run for ever, and the writes around a job's price. */
@@ -875,7 +952,7 @@ async function exportLoops() {
     const looking = await runRow(run.id);
     check("waiting to see whether a failed export reached AI Ark keeps the count of tries and the error", looking.attempts === 1 && /500/.test(looking.last_error ?? "") && posts === 1 && Boolean(looking.progress.job), `${looking.attempts} ${looking.last_error} posts ${posts}`);
     for (let i = 0; i < 20 && !TERMINAL.has((await runRow(run.id)).status); i++) {
-      await backdateJob(run.id, "submitting_at", "3 minutes");
+      await lostAgo(run.id, "3 minutes");
       await step(cf);
     }
     const rr = await runRow(run.id);
@@ -942,6 +1019,58 @@ async function exportLoops() {
   }
   {
     const tx = createDemoTransport({ jobMs: 0 });
+    const cf = demoClient(tx);
+    const run = await newRun({ strategy: "export", size: 60, requests: [search()] });
+    await step(cf);
+    await due(run.id);
+    await step(cf, { pool: answerLost((sql) => sql.includes("credits_used = credits_used + $3, progress = $4")) });
+    const a = await runRow(run.id);
+    check("the job's price is saved but the answer is lost: what was saved stays, not the copy before it", a.progress.job?.charged === true && Number(a.credits_used) === tx.state.charged && a.attempts === 1, `${JSON.stringify(a.progress.job)} ${a.credits_used} vs ${tx.state.charged}`);
+    const st = await drive(run.id, cf);
+    check("  … and the job is priced once", st === "done" && Number((await runRow(run.id)).credits_used) === tx.state.charged, st);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0, faults: { refundAtReadOnce: true } });
+    let posts = 0;
+    const cf = demoClient(overlay(tx, (req) => { if (isPost(req)) posts++; }));
+    const run = await newRun({ strategy: "export", size: 60, requests: [search()] });
+    await step(cf);
+    await due(run.id);
+    await step(cf, { pool: answerLost((sql) => sql.includes("credits_used = credits_used - $3")) });
+    const a = await runRow(run.id);
+    check("a refund is saved but the answer is lost: the refunded job is not kept to be refunded again", a.progress.job === null && a.progress.resubmits === 1 && Number(a.credits_used) === 0, `${JSON.stringify(a.progress.job)} ${a.credits_used}`);
+    const st = await drive(run.id, cf);
+    const b = await runRow(run.id);
+    check("  … its price comes off once", st === "done" && posts === 2 && Number(b.credits_used) === tx.state.charged, `${st} posts ${posts} ${b.credits_used} vs ${tx.state.charged}`);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    let reads = 0;
+    const cf = demoClient(tx);
+    const run = await newRun({ strategy: "export", size: 60, requests: [search()] });
+    await step(cf);
+    await due(run.id);
+    // The price is saved and its answer lost, and the read back fails too.
+    const unreadable = {
+      query: async (sql, params) => {
+        if (sql.startsWith("SELECT progress, pulled")) {
+          reads++;
+          throw new Error("Connection terminated unexpectedly");
+        }
+        const res = await pool.query(sql, params);
+        if (sql.includes("credits_used = credits_used + $3, progress = $4")) throw new Error("Connection terminated unexpectedly");
+        return res;
+      },
+    };
+    await step(cf, { pool: unreadable });
+    const a = await runRow(run.id);
+    check("  … and when the run can't even be read back, it is left to its lease, nothing written over it", reads === 1 && a.claim_token !== null && a.progress.job?.charged === true && Number(a.credits_used) === tx.state.charged, `${reads} ${a.claim_token} ${JSON.stringify(a.progress.job)}`);
+    await pool.query(`UPDATE aiark_runs SET claimed_at = now() - interval '11 minutes', next_run_at = now() WHERE id = $1`, [run.id]);
+    const st = await drive(run.id, cf);
+    check("  … then read once the lease runs out, priced once", st === "done" && Number((await runRow(run.id)).credits_used) === tx.state.charged, st);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
     let posts = 0;
     let open = false;
     const cf = demoClient(overlay(tx, (req) => {
@@ -962,6 +1091,62 @@ async function exportLoops() {
     const st = await drive(b.id, cf);
     const [idsA, idsB] = [await personIds(a.table_id), await personIds(b.table_id)];
     check("  … then goes out leaving out the people the first job brought in", st === "done" && posts === 2 && idsB.size === 30 && [...idsB].filter((x) => idsA.has(x)).length === 0, `${st} posts ${posts} ${idsB.size}`);
+  }
+  // A single run for another client with the same search, while an export job is unread.
+  const nobodyTwice = async (exp, single, tx) => {
+    const [idsE, idsS] = [await personIds(exp.table_id), await personIds(single.table_id)];
+    const again = await one(`SELECT count(*)::int AS n FROM enrich_cells WHERE table_id = $1 AND column_key = 'pulled_before'`, [exp.table_id]);
+    const [e, s] = [await runRow(exp.id), await runRow(single.id)];
+    return {
+      ok: idsS.size > 0 && [...idsS].filter((x) => idsE.has(x)).length === 0 && again.n === 0 && Number(e.credits_used) + Number(s.credits_used) === tx.state.charged,
+      detail: `${idsS.size} single, ${[...idsS].filter((x) => idsE.has(x)).length} in both, ${again.n} bought before, ${Number(e.credits_used) + Number(s.credits_used)} vs ${tx.state.charged}`,
+    };
+  };
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    let open = false;
+    let previews = 0;
+    const cf = demoClient(overlay(tx, (req) => {
+      if (req.url.endsWith("/people/preview")) previews++;
+      if (!open && req.url.includes("/statistics")) return PENDING;
+    }));
+    const body = search();
+    const a = await newRun({ strategy: "export", size: 30, requests: [body] });
+    await step(cf); // the export goes out
+    const b = await newRun({ size: 30, requests: [body] });
+    await step(cf);
+    const w = await runRow(b.id);
+    check("a single run waits while another run's export job is unread: no lists, no Preview, no attempt counted", previews === 0 && w.status === "running" && !w.progress.lists && w.attempts === 0 && new Date(w.next_run_at) - Date.now() > 20_000, `${previews} previews, ${JSON.stringify(w.progress)}`);
+    open = true;
+    await due(a.id);
+    await drive(a.id, cf);
+    await due(b.id);
+    const st = await drive(b.id, cf);
+    const out = await nobodyTwice(a, b, tx);
+    check("  … then buys none of the people the job brought in: nobody is paid for twice", st === "done" && out.ok, `${st} ${out.detail}`);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    let open = false;
+    const cf = demoClient(overlay(tx, (req) => (!open && req.url.includes("/statistics") ? PENDING : undefined)));
+    const body = search(SEVERAL_PLACES);
+    const b = await newRun({ size: 150, requests: [body] });
+    await step(cf); // the single run's first page
+    const a = await newRun({ strategy: "export", size: 100, requests: [body] });
+    await pool.query(`UPDATE aiark_runs SET next_run_at = now() + interval '1 minute' WHERE id = $1`, [b.id]);
+    await step(cf); // the export goes out between two of the single run's slices
+    await due(b.id);
+    const before = await runRow(b.id);
+    await step(cf);
+    const w = await runRow(b.id);
+    check("  … and a single run already going waits once another run's export goes out", Boolean((await runRow(a.id)).progress.job?.track_id) && before.pulled > 0 && w.pulled === before.pulled && w.attempts === 0 && new Date(w.next_run_at) - Date.now() > 20_000, `${before.pulled} → ${w.pulled}`);
+    open = true;
+    await due(a.id);
+    await drive(a.id, cf);
+    await due(b.id);
+    const st = await drive(b.id, cf);
+    const out = await nobodyTwice(a, b, tx);
+    check("  … then carries on past the job's people: nobody is paid for twice", st === "done" && out.ok, `${st} ${out.detail}`);
   }
   {
     const tx = createDemoTransport({ jobMs: 0 });
@@ -1009,7 +1194,7 @@ async function heldJobs() {
     down = false;
     const st = await drive(run.id, cf);
     const b = await runRow(run.id);
-    check("  … and when AI Ark is back, it is read", st === "done" && b.pulled === 30 && Number(b.credits_used) === tx.state.charged, `${st} ${b.pulled}`);
+    check("  … and when AI Ark is back, it is read, with no error left on the finished run", st === "done" && b.pulled === 30 && Number(b.credits_used) === tx.state.charged && b.last_error === null, `${st} ${b.pulled} ${b.last_error}`);
   }
   {
     const tx = createDemoTransport({ jobMs: 0 });
@@ -1313,7 +1498,7 @@ async function adoption() {
     const run = await newRun({ strategy: "export", size: 40, requests: [search()] });
     await step(cf);
     await due(run.id);
-    await backdateJob(run.id, "submitting_at", "3 minutes");
+    await lostAgo(run.id, "3 minutes");
     const at = Date.parse((await runRow(run.id)).progress.job.submitting_at);
     const iso = (ms) => new Date(at + ms).toISOString();
     subs = [
@@ -1413,6 +1598,51 @@ async function adoption() {
     await due(run.id);
     await drive(run.id, cf);
   }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    let posts = 0;
+    let open = false;
+    const cf = demoClient(overlay(tx, async (req) => {
+      if (isPost(req) && ++posts === 1) {
+        await tx(req); // AI Ark takes it; the answer never arrives
+        throw new TypeError("fetch failed");
+      }
+      if (!open && req.url.includes("/statistics")) return PENDING;
+    }));
+    const run = await newRun({ strategy: "export", size: 40, requests: [search()] });
+    await step(cf);
+    // The POST first waited out five minutes of 429s, so AI Ark took it five minutes after it was sent.
+    await backdateJob(run.id, "submitting_at", "5 minutes");
+    await step(cf);
+    const a = await runRow(run.id);
+    check("a POST that waited out 429s before AI Ark took it, then lost its answer: its job is still found and adopted", posts === 1 && a.progress.job?.adopted === true && Boolean(a.progress.job.track_id), `${posts} posts ${JSON.stringify(a.progress.job)}`);
+    open = true;
+    await due(run.id);
+    const st = await drive(run.id, cf);
+    check("  … and read, with nothing posted again", st === "done" && posts === 1 && Number((await runRow(run.id)).credits_used) === tx.state.charged, `${st} posts ${posts}`);
+  }
+  for (const [label, bad] of [
+    ["404", ans(404, { timestamp: "x", status: 404, error: "data not found", path: "" })],
+    ["an answer with no list", ans(200, {})],
+  ]) {
+    const tx = createDemoTransport({ jobMs: 0 });
+    let posts = 0;
+    const cf = demoClient(overlay(tx, async (req) => {
+      if (isPost(req)) {
+        posts++;
+        await tx(req); // AI Ark takes it; the answer never arrives
+        throw new TypeError("fetch failed");
+      }
+      if (req.url.includes("/submissions")) return bad;
+    }));
+    const run = await newRun({ strategy: "export", size: 40, requests: [search()] });
+    await step(cf);
+    await lostAgo(run.id, "3 minutes");
+    await step(cf);
+    const a = await runRow(run.id);
+    check(`the list of exports answers ${label} once the window has passed: the job is held and nothing is posted again`, posts === 1 && a.status === "running" && Boolean(a.progress.job) && !a.progress.job.track_id && /could not be read/.test(a.last_error ?? ""), `${posts} posts ${a.status} ${a.last_error}`);
+    await settle(run.id);
+  }
 }
 
 /** B12. A paid answer is in memory only until it is written. */
@@ -1421,6 +1651,97 @@ async function writes() {
   const worker = source("scripts/enrich-worker.mjs");
   check("the worker tells a slice when it is shutting down", /advanceOneRun\(\{[^}]*shouldStop: \(\) => shuttingDown/.test(worker));
   check("a slice in flight keeps a draining worker from exiting under it", /aiark\.idle = false;\s*try \{\s*worked = await advanceOneRun/.test(worker));
+  check("a stopping worker closes its database pool only after the AI Ark slice in flight is done, with no deadline", /await runs;[\s\S]*await pool\.end\(\)/.test(worker) && !/Promise\.race\(\[runs/.test(worker));
+  {
+    const tx = createDemoTransport({});
+    let singles = 0;
+    let balance = 0;
+    const cf = demoClient(overlay(tx, (req) => {
+      if (req.url.includes("/export/single")) singles++;
+      if (req.url.endsWith("/payments/credits")) balance++;
+    }));
+    const run = await newRun({ size: 20, requests: [search()] });
+    await step(cf, { shouldStop: () => singles >= 20 });
+    const r = await runRow(run.id);
+    check("a run that ends while its worker is stopping doesn't wait for the closing balance", r.status === "done" && r.credits_after === null && balance === 1, `${r.status} ${r.credits_after} ${balance} balance reads`);
+  }
+  {
+    const tx = createDemoTransport({});
+    const run = await newRun({ size: 20, requests: [search()] });
+    await step(demoClient(tx), { pool: answerLost((sql) => sql.includes("INSERT INTO aiark_people")) });
+    const r = await runRow(run.id);
+    const s = await tableStats(run.table_id, run.id);
+    check("a person's write is saved but its answer lost: the retry counts them once, and the run stops at its size", r.pulled === 20 && s.rows === 20 && Number(r.credits_used) === tx.state.charged, `${r.pulled} ${JSON.stringify(s)} ${r.credits_used} vs ${tx.state.charged}`);
+    await due(run.id);
+    await drive(run.id, demoClient(tx));
+  }
+  for (const strategy of ["single", "export"]) {
+    const tx = createDemoTransport({ jobMs: 0 });
+    let poisoned = null;
+    const poison = (p) => ({
+      ...p,
+      profile: { ...p.profile, title: "Owner \uD83D" },
+      company: { ...p.company, summary: { ...p.company.summary, description: `${"x".repeat(4_999)}\u{1F600} and more` } },
+    });
+    const cf = demoClient(overlay(tx, async (req) => {
+      if (poisoned || !(req.url.includes("/export/single") || req.url.includes("/inquiries"))) return;
+      const res = await tx(req);
+      const j = JSON.parse(res.text);
+      if (j.status === 200 && j.data) j.data = poison(j.data);
+      else if (j.content?.length) j.content[0] = poison(j.content[0]);
+      else return res;
+      poisoned = (j.data ?? j.content[0]).id;
+      return { ...res, text: JSON.stringify(j) };
+    }));
+    const run = await newRun({ strategy, size: 30, requests: [search()] });
+    for (let i = 0; i < 20 && !TERMINAL.has((await runRow(run.id)).status); i++) {
+      await due(run.id);
+      await step(cf);
+    }
+    const r = await runRow(run.id);
+    const cells = await one(
+      `SELECT max(length(c.value #>> '{}')) FILTER (WHERE c.column_key = 'company_description') AS description,
+              max(c.value #>> '{}') FILTER (WHERE c.column_key = 'title') AS title
+         FROM enrich_cells c JOIN enrich_rows w ON w.id = c.row_id WHERE w.table_id = $1 AND w.row_key = $2`,
+      [run.table_id, `aiark:${poisoned}`]
+    );
+    check(`${strategy}: text Postgres can't take as AI Ark sent it (an emoji cut in two, half of one) is written all the same, holding nothing up`, r.status === "done" && r.pulled === 30 && r.attempts === 0 && cells?.description === 4_999 && cells.title === "Owner \u{FFFD}", `${r.status} ${r.pulled} ${r.attempts} ${JSON.stringify(cells)} ${r.last_error}`);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    let refused = null;
+    const cf = demoClient(overlay(tx, async (req) => {
+      if (refused || !req.url.includes("/inquiries")) return;
+      const res = await tx(req);
+      const j = JSON.parse(res.text);
+      if (!j.content?.length) return res;
+      j.content[0] = { ...j.content[0], profile: { ...j.content[0].profile, title: "Gérante" } };
+      refused = j.content[0].id;
+      return { ...res, text: JSON.stringify(j) };
+    }));
+    // Postgres refuses that title (SQLSTATE class 22) every time it is sent.
+    const refusing = {
+      query: async (sql, params) => {
+        if (sql.includes("INSERT INTO aiark_people") && String(params[6]).includes("Gérante")) {
+          throw Object.assign(new Error("invalid input syntax for type json"), { code: "22P02" });
+        }
+        return pool.query(sql, params);
+      },
+    };
+    const run = await newRun({ strategy: "export", size: 30, requests: [search()] });
+    await step(cf);
+    await due(run.id);
+    await step(cf, { pool: refusing });
+    const r = await runRow(run.id);
+    const got = await one(
+      `SELECT count(*)::int AS registered,
+              (SELECT count(*)::int FROM enrich_cells c JOIN enrich_rows w ON w.id = c.row_id
+                WHERE w.table_id = $3 AND w.row_key = 'aiark:' || $1 AND c.column_key = 'title') AS titles
+         FROM aiark_people WHERE person_id = $1 AND run_id = $2 AND row_id IS NOT NULL`,
+      [refused, run.id, run.table_id]
+    );
+    check("a value Postgres refuses every time (SQLSTATE class 22): the person goes in without it, and the paid job is not held", r.status === "done" && r.pulled === 30 && r.attempts === 0 && got.registered === 1 && got.titles === 0, `${r.status} ${r.pulled} ${r.attempts} ${JSON.stringify(got)}`);
+  }
   {
     const tx = createDemoTransport({});
     let n = 0;
@@ -1544,7 +1865,16 @@ async function brake() {
     const run = await newRun({ size: 10, requests: [search()] });
     await credits(run.id, 27);
     const st = await drive(run.id, demoClient(tx));
-    check("  … one credit under it, a slice still runs", st !== "stopped" || (await runRow(run.id)).pulled > 0, st);
+    const r = await runRow(run.id);
+    check("  … one credit under it, a slice still runs: its Preview page, and nothing past the limit", st === "stopped" && tx.state.charged === 1 && Number(r.credits_used) === 28, `${st} ${tx.state.charged} ${r.credits_used}`);
+  }
+  {
+    const tx = createDemoTransport({});
+    const run = await newRun({ size: 100, requests: [search(SEVERAL_PLACES)] });
+    await credits(run.id, 130); // 125 + 5 + 10 = 140
+    const st = await drive(run.id, demoClient(tx));
+    const r = await runRow(run.id);
+    check("a single run's brake holds inside a page: it stops before a call that could pass the limit", st === "stopped" && Number(r.credits_used) === 140 && tx.state.charged === 10 && r.pulled < 100 && /spending brake/.test(r.stop_reason ?? ""), `${st} ${r.credits_used} charged ${tx.state.charged} pulled ${r.pulled}`);
   }
   {
     const tx = createDemoTransport({ jobMs: 0 });
@@ -1625,6 +1955,21 @@ async function lostAnswers() {
     await due(run.id);
     await drive(run.id, cf);
   }
+}
+
+/** B15. An error a run got past is not shown on it once it has finished. */
+async function recovered() {
+  section("B15. A run that gets past an error");
+  const tx = createDemoTransport({});
+  let failing = 3;
+  const cf = demoClient(overlay(tx, (req) => (req.url.endsWith("/people/preview") && failing-- > 0 ? ans(500, { status: 500, error: "unexpected error" }) : undefined)));
+  const run = await newRun({ size: 20, requests: [search()] });
+  await step(cf);
+  const a = await runRow(run.id);
+  await due(run.id);
+  await step(cf); // the next slice finishes the run
+  const b = await runRow(run.id);
+  check("an error, then a slice that finishes the run: it ends done, with no error left on it", /500/.test(a.last_error ?? "") && b.status === "done" && b.pulled === 20 && b.last_error === null, `${a.last_error} → ${b.status} ${b.last_error}`);
 }
 
 // ── C. Outcomes against the database's own rules ────────────────────────────
@@ -2041,6 +2386,16 @@ async function failedChecks() {
   const rules = await workRow(columns, tag, { ...person, city: "Springfield", state: "Missouri", company: "Harbor Bistro" }, { db: failing(/client_targeting/) });
   check("the rules can't be read → both checks and Outcome are errors", rules.cell("in_area").status === "error" && rules.cell("rule_match").status === "error" && rules.cell("outcome").status === "error");
   check("the Outcome cell names both", /Inside the client's area/.test(rules.cell("outcome").note) && /Client exclusions/.test(rules.cell("outcome").note), rules.cell("outcome").note);
+  const noEmail = Object.fromEntries(Object.entries(person).filter(([k]) => k !== "email" && k !== "email_status"));
+  for (const [label, inputs, want] of [
+    ["no email", noEmail, "No email"],
+    ["an email AI Ark was still checking", { ...noEmail, email_status: "PENDING" }, "Email still being checked"],
+    ["bought in an earlier run", { ...person, pulled_before: "Bought 2026-01-01" }, "Bought in an earlier run"],
+  ]) {
+    resetClientChecks();
+    const row = await workRow(columns, tag, inputs, { db: failing(/client_targeting/) });
+    check(`the rules can't be read, and the Outcome doesn't need them (${label}): "${want}"`, row.cell("in_area").status === "error" && row.cell("outcome").value === want, JSON.stringify(row.cell("outcome")));
+  }
 
   resetClientChecks();
   const none = await workRow(columns, `${RULE_PREFIX}NO_SUCH_CLIENT`, person);
@@ -2054,12 +2409,19 @@ async function failedChecks() {
     { key: "next", name: "Next step", kind: "formula", formula: `{{safe}} ? "go" : "stop"`, position: 4, phase: 1 },
     { key: "free", name: "Unrelated", kind: "formula", formula: `{{email}} ? "yes" : "no"`, position: 5, phase: 1 },
     { key: "fall", name: "Fallback", kind: "waterfall", waterfall: ["{{dupe}}", `"fallback"`], position: 6, phase: 1 },
+    {
+      key: "guarded", name: "Guarded", kind: "formula", position: 7, phase: 1,
+      formula: `(() => { try { return {{dupe}} ? "in" : "out"; } catch { return "caught"; } })()`,
+    },
+    { key: "branch", name: "Branch", kind: "formula", formula: `{{email}} ? "has email" : {{dupe}}`, position: 8, phase: 1 },
   ]);
   const chained = await workRow(chain, tag, { email: person.email }, { db: failing(/bison_leads/) });
   check("a formula over a failed check is an error, not a confident true", chained.cell("safe").status === "error" && /Dupe check/.test(chained.cell("safe").note));
   check("so is a formula over that formula", chained.cell("next").status === "error" && /Safe to run/.test(chained.cell("next").note));
   check("a formula that doesn't read it is untouched", chained.cell("free").value === "yes");
   check("a waterfall works as it did", chained.cell("fall").value === "fallback");
+  check("a formula that would catch its own error still can't hide the failed read", chained.cell("guarded").status === "error" && /Dupe check/.test(chained.cell("guarded").note), JSON.stringify(chained.cell("guarded")));
+  check("a formula whose branch never reaches the failed check keeps its answer", chained.cell("branch").value === "has email", JSON.stringify(chained.cell("branch")));
 }
 
 async function companyText() {
@@ -2173,9 +2535,13 @@ async function cleanup() {
   }
 }
 
-const busy = await one(`SELECT count(*)::int AS n FROM aiark_runs WHERE status IN ('queued', 'running')`);
+// A run still reading a paid export makes every other run of its mode wait, so it counts too.
+const busy = await one(
+  `SELECT count(*)::int AS n FROM aiark_runs
+    WHERE status IN ('queued', 'running') OR (status = 'cancelled' AND finished_at IS NULL AND jsonb_typeof(progress->'job') = 'object')`
+);
 if (busy.n) {
-  console.error(`Refusing to run: ${busy.n} AI Ark run(s) are queued or running in this database. Let them finish or cancel them first.`);
+  console.error(`Refusing to run: ${busy.n} AI Ark run(s) are queued, running or still reading a paid export in this database. Let them finish or cancel them first.`);
   await pool.end();
   process.exit(1);
 }

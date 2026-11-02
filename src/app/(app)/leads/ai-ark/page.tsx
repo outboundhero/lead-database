@@ -131,9 +131,18 @@ function AiArkTab() {
   useEffect(() => {
     formRef.current = form;
   }, [form]);
+  // Edits not saved yet are kept per client while the page is open: a client
+  // switch the page can't ask about (browser Back or Forward, the sidebar)
+  // leaves them here, and they come back, unsaved, with that client.
+  const drafts = useRef(new Map<string, PeopleFilters>());
+  // The client whose filters are on screen, and its filters as loaded or last saved.
+  const shown = useRef<{ tag: string | null; base: PeopleFilters | null }>({ tag: null, base: null });
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
+    const was = shown.current;
+    const edits = formRef.current;
+    if (was.tag && was.tag !== tag && edits && was.base && canonical(edits) !== canonical(was.base)) drafts.current.set(was.tag, edits);
     setLoadError(null);
     try {
       const res = await fetch(`/api/aiark/setup${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`);
@@ -141,9 +150,12 @@ function AiArkTab() {
       if (seq !== loadSeq.current) return;
       if (!res.ok) throw new Error(j.error ?? "Could not load the AI Ark tab");
       const s = j as AiArkSetup;
+      const draft = tag ? drafts.current.get(tag) : undefined;
+      if (tag) drafts.current.delete(tag);
+      shown.current = { tag, base: s.people.value };
       setSetup(s);
       setRuns(s.runs);
-      setForm(s.people.value);
+      setForm(draft ?? s.people.value);
       setSaved(s.people.saved ? s.people.value : null);
       setVersions({ people: s.people.version, rules: s.targeting?.version ?? null });
       setPlan(s.plan);
@@ -157,7 +169,10 @@ function AiArkTab() {
     }
   }, [tag]);
 
-  /** Balance, runs and worker only — never the filters being edited. */
+  /**
+   * Balance and worker only. The runs list is the poll's: an answer read before
+   * a run was started would take that run off the list again.
+   */
   const refreshQuietly = useCallback(async () => {
     try {
       const res = await fetch(`/api/aiark/setup${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`);
@@ -165,7 +180,6 @@ function AiArkTab() {
       const s = (await res.json()) as AiArkSetup;
       if (tag !== tagRef.current) return;
       setSetup((prev) => (prev ? { ...prev, credits: s.credits, worker: s.worker, modes: s.modes } : prev));
-      setRuns(s.runs);
     } catch {
       /* the next poll tries again */
     }
@@ -215,24 +229,30 @@ function AiArkTab() {
 
   // Runs and the worker's state: every 2.5 s while one is going, else every
   // 20 s, and at once when the page is shown again. A hidden page skips a tick
-  // but keeps the timer, so polling never stops for good.
+  // but keeps the timer, so polling never stops for good. A tick also skips
+  // while the last request is still on its way, so an answer slower than the
+  // tick still lands; one that hangs is given up after 30 s.
   const anyActive = runs.some(isActive);
   const loaded = setup !== null;
   useEffect(() => {
     if (!loaded) return;
     let ctl: AbortController | null = null;
     const tick = async () => {
-      if (document.visibilityState !== "visible") return;
-      ctl?.abort();
-      ctl = new AbortController();
+      if (ctl || document.visibilityState !== "visible") return;
+      const mine = new AbortController();
+      ctl = mine;
+      const giveUp = setTimeout(() => mine.abort(), 30_000);
       try {
-        const res = await fetch(`/api/aiark/runs${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`, { signal: ctl.signal });
+        const res = await fetch(`/api/aiark/runs${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`, { signal: mine.signal });
         const j = await res.json();
-        if (!res.ok || tag !== tagRef.current) return;
+        if (!res.ok || mine.signal.aborted || tag !== tagRef.current) return;
         setRuns(j.runs);
         setSetup((s) => (s ? { ...s, worker: j.worker } : s));
       } catch {
         /* aborted, or the next tick tries again */
+      } finally {
+        clearTimeout(giveUp);
+        if (ctl === mine) ctl = null;
       }
     };
     const timer = setInterval(tick, anyActive ? 2_500 : 20_000);
@@ -254,16 +274,31 @@ function AiArkTab() {
     wasActive.current = anyActive;
   }, [anyActive, refreshQuietly]);
 
+  // Filters changed on screen since they were loaded or saved: the browser asks
+  // before the tab is closed or reloaded.
+  const edited = !!form && !!setup && canonical(form) !== canonical(setup.people.value);
+  useEffect(() => {
+    if (!edited) return;
+    const ask = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", ask);
+    return () => window.removeEventListener("beforeunload", ask);
+  }, [edited]);
+
   if (!canView) return <AccessDenied />;
 
   const dirty = !!form && (!saved || canonical(form) !== canonical(saved));
   const set = <K extends keyof PeopleFilters>(k: K, v: PeopleFilters[K]) => setForm((f) => (f ? { ...f, [k]: v } : f));
-  // A count only counts for the client, source and filters it was made for.
-  const countNow = count && tag && form && count.key === countKeyOf(tag, mode, form) ? count : null;
+  // A count only counts for the client, source, filters and rules it was made for.
+  const countNow =
+    count && tag && form && count.key === countKeyOf(tag, mode, form) && count.rulesVersion === versions.rules ? count : null;
 
   const save = async () => {
     if (!tag || !form) return;
     const sent = form;
+    const sentKey = countKeyOf(tag, mode, sent);
     setSaving(true);
     try {
       const res = await fetch("/api/aiark/people-filters", {
@@ -276,8 +311,14 @@ function AiArkTab() {
       if (!res.ok) throw new Error(j.error ?? "Could not save");
       setSaved(j.value);
       setVersions((v) => ({ ...v, people: j.version }));
+      shown.current = { tag, base: j.value };
       // Edits made while the save was on its way stay on screen, as unsaved.
-      if (formRef.current === sent) setForm(j.value);
+      if (formRef.current === sent) {
+        setForm(j.value);
+        // The server cleans filters the same way for a count as for a save, so a
+        // count of what was sent is a count of what was saved: it still counts.
+        setCount((c) => (c && c.key === sentKey ? { ...c, key: countKeyOf(tag, mode, j.value) } : c));
+      }
       setSetup((s) => (s ? { ...s, people: { saved: true, updatedAt: j.updatedAt, version: j.version, defaultsFrom: null, value: j.value } } : s));
       toast.success(`People filters saved for ${tag}`);
     } catch (e) {
@@ -295,7 +336,7 @@ function AiArkTab() {
       const res = await fetch("/api/aiark/count", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tag, mode, filters: form }),
+        body: JSON.stringify({ tag, mode, filters: form, rulesVersion: versions.rules }),
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error ?? "The count failed");
@@ -324,7 +365,15 @@ function AiArkTab() {
         }),
       });
       const j = await res.json();
-      if (!res.ok) throw new Error(j.error ?? "Could not start the pull");
+      if (!res.ok) {
+        // The rules or the saved filters changed since this page loaded them:
+        // it shows them as they are now, and they need a count of their own.
+        if (j.changed && tag === tagRef.current) {
+          load();
+          throw new Error(`${j.error ?? "Something changed since this page loaded."} The page now shows them as they are: count again, then start.`);
+        }
+        throw new Error(j.error ?? "Could not start the pull");
+      }
       if (tag !== tagRef.current) return;
       setRuns((rs) => [j.run, ...rs]);
       toast.success(setup?.worker?.online ? "Pull queued — the worker picks it up in a few seconds" : "Pull queued — start the enrichment worker to run it");
@@ -355,8 +404,9 @@ function AiArkTab() {
     }
   };
 
-  // Reload and a client switch replace the filters on screen: ask first if they aren't saved.
-  const keepEdits = () => !dirty || window.confirm("The people filters have changes that aren't saved. Leave without saving them?");
+  // Reload replaces the filters on screen: ask first if they were changed. A
+  // client switch keeps them (drafts above), so it doesn't ask.
+  const keepEdits = () => !edited || window.confirm("The people filters have changes that aren't saved. Leave without saving them?");
 
   const modes = setup?.modes;
   const est = estimate(strategy, size, plan?.searches ?? 1);
@@ -391,9 +441,7 @@ function AiArkTab() {
         <div className="ml-2">
           <ClientSelector
             clientTag={tag}
-            onChange={(t) => {
-              if (keepEdits()) router.replace(t ? `/leads/ai-ark?client=${encodeURIComponent(t)}` : "/leads/ai-ark");
-            }}
+            onChange={(t) => router.replace(t ? `/leads/ai-ark?client=${encodeURIComponent(t)}` : "/leads/ai-ark")}
           />
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -665,7 +713,7 @@ function AiArkTab() {
                     <p className="text-[12px] leading-relaxed text-muted-foreground">
                       {strategy === "single"
                         ? "Pages through the matches (1 credit per 100), then gets each new person's email — 1 credit only when one is found. People without an email cost nothing, but keep a masked last name."
-                        : "AI Ark exports everyone in one job: 0.5 credits a person plus 0.5 for each email found. Full names and company websites even without an email."}
+                        : "AI Ark exports them in one job per group of up to 300 places, and another for a group that still has people: 0.5 credits a person plus 0.5 for each email found. Full names and company websites even without an email."}
                       {strategy === "export" && !exportReady && <span className="block text-[var(--warning)]">{modes?.exportLive.why}</span>}
                     </p>
                   </div>
@@ -747,7 +795,7 @@ function ModePill({ setup }: { setup: AiArkSetup }) {
   if (setup.modes.live.ready) {
     return (
       <span
-        title={live?.error ?? "AI Ark credits left (read just now)"}
+        title={live?.error ?? "AI Ark credits left (read when the page loaded or the last run ended)"}
         className="flex items-center gap-1.5 rounded-full bg-card px-3 py-1.5 text-[12px] font-medium shadow-ios"
       >
         <span className={cn("size-2 rounded-full", live?.error ? "bg-destructive" : "bg-[var(--success)]")} />

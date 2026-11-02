@@ -2098,17 +2098,24 @@ Two manager-only tabs, applied to production 2026-10-31. Neither writes `leads`.
   company size from `client_people_filters`), count (People Preview, 1 credit a
   search), then pull. Each pull is an `aiark_runs` row and its own Clay-tab table
   (kind `ai_ark`), where every person gets an Outcome ("Ready to add", "No email",
-  "Outside the client's area" …). `aiark_people` records everyone bought so no
-  run pays twice (AI Ark exclusion lists cover the newest 100,000).
+  "Outside the client's area" …). `aiark_people` keeps single runs from buying
+  anyone twice and keeps the newest 100,000 out of export jobs (AI Ark exclusion
+  lists); past that an export can pay again for someone, written as "Bought
+  before". While an export job is unread, no other run of its mode buys. A person
+  whose Export Single answer never arrived stays unregistered, though AI Ark may
+  have charged for them.
 - **The worker** `scripts/enrich-worker.mjs` (`npm run enrich-worker`) fills the
   Clay cells and works AI Ark runs. ⚠ It has **no Railway service yet**: until one
   exists, nothing on either tab runs in production. Give it the no-op build command
   (`echo 'worker service: no next build'`, see "Every worker service MUST override
-  the build command") and `DATABASE_URL`.
+  the build command") and `DATABASE_URL`, and a draining time above 90 s
+  (`RAILWAY_DEPLOYMENT_DRAINING_SECONDS`, e.g. 120): on SIGTERM it waits for the
+  AI Ark call in flight to be written, and an Export Single may take 90 s.
 - **Env:** `AIARK_API_KEY` on **both** the web service (count, balance) and the
-  worker (pulls); `AIARK_WEBHOOK_URL` only for the export strategy (this app's
-  `/api/aiark/webhook` on its public HTTPS host); `AIARK_RPS` (worker, 4) and
-  `AIARK_RPS_WEB` (1) keep one key at AI Ark's 5 a second. ⚠ **Never set
+  worker (pulls); `AIARK_WEBHOOK_URL` (export runs only) also on **both** — the
+  web service offers Export only when it is set, and the worker posts the jobs
+  (this app's `/api/aiark/webhook` on its public HTTPS host); `AIARK_RPS` (worker,
+  4) and `AIARK_RPS_WEB` (1) keep one key at AI Ark's 5 a second. ⚠ **Never set
   `AIARK_DEMO` in production**: it turns on made-up demo runs that write into the
   real tables.
 - **Before the first live pull:** AI Ark's written consent to load its data

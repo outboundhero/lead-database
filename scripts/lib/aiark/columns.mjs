@@ -55,7 +55,7 @@ const COLUMNS = [
   {
     key: "in_area", name: "Inside the client's area", kind: "action", action: "client_area", data_type: "boolean",
     inputs: { city: "{{city}}", state: "{{state}}", country: "{{country}}" }, provider: "Client rules",
-    description: "Re-checks the person's city and state against the client's locations. AI Ark matches place names loosely (a bare city name matches in any state), so this catches people from a same-named city elsewhere.",
+    description: "Re-checks the person's own city and state the way the location resolver and the send gate would place them. Places go to AI Ark as 'City, State', a form its docs don't define, so this catches anyone returned from somewhere else.",
   },
   {
     key: "rule_match", name: "Client exclusions", kind: "action", action: "client_exclusions",

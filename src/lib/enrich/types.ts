@@ -45,6 +45,8 @@ export interface EnrichTableSummary {
     size: number;
     created_at: string;
     finished_at: string | null;
+    /** Cancelled, but still reading the export it had already paid for. */
+    finishing: boolean;
     stop_reason: string | null;
     last_error: string | null;
   } | null;

@@ -25,6 +25,18 @@ const REFUND_CODES = new Set([4031013, 4031014]); // body status of a job AI Ark
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const text = (v) => (v == null ? "" : String(v).trim());
 
+/**
+ * At most `max` UTF-16 units of text, cut between characters, with any lone
+ * half of a surrogate pair (as AI Ark may send it) made U+FFFD: Postgres
+ * refuses such a half inside jsonb, and would refuse it on every try.
+ */
+export function clip(s, max) {
+  const t = String(s).toWellFormed();
+  if (t.length <= max) return t;
+  const c = t.charCodeAt(max - 1);
+  return t.slice(0, c >= 0xd800 && c <= 0xdbff ? max - 1 : max);
+}
+
 export class AiArkError extends Error {
   /**
    * kind: key | credits | rate | bad_request | pending_cap | list_limit |
@@ -52,7 +64,7 @@ export async function fetchTransport({ method, url, headers, body, timeoutMs }) 
 
 function errorText(json, raw) {
   const m = json?.message ?? (typeof json?.error === "string" ? json.error : json?.error?.error);
-  return text(m) || text(raw).slice(0, 200) || "no details";
+  return clip(text(m), 1_000) || clip(text(raw), 200) || "no details";
 }
 
 /**
@@ -252,11 +264,16 @@ export function createAiArk({ token, transport = fetchTransport, rps = 4, timeou
       return { content: json.content, totalPages, totalElements: Number(json.totalElements ?? 0) || 0, last: json.last === true || page + 1 >= totalPages };
     },
 
-    /** One page of the key's export submissions, newest first, refunded ones only if asked. Free. */
+    /**
+     * One page of the key's export submissions, newest first, refunded ones
+     * only if asked. Free. "None" here can lead to posting an export again, so
+     * a 404 or an answer with no list is a failed read, never an empty page.
+     */
     async exportSubmissions({ page = 0, size = 25, fullyRefunded = null } = {}) {
       const query = { page: String(page), size: String(size), sort: "created,desc", ...(fullyRefunded === null ? {} : { fullyRefunded: String(fullyRefunded) }) };
-      const { json } = await call("GET", "/v1/people/export/submissions", { query });
-      return Array.isArray(json?.content) ? json.content : [];
+      const r = await call("GET", "/v1/people/export/submissions", { query });
+      if (r.empty || !Array.isArray(r.json?.content)) throw new AiArkError("server", "AI Ark's list of exports could not be read");
+      return r.json.content;
     },
   };
 }
@@ -313,7 +330,7 @@ export function personInputs(p) {
     email_provider: best ? text(best.mx?.provider) : "",
     linkedin: text(p?.link?.linkedin),
     company_linkedin: text(co.link?.linkedin),
-    company_description: text(cs.description).slice(0, 5_000),
+    company_description: clip(text(cs.description), 5_000),
     aiark_id: text(p?.id),
   };
   return Object.fromEntries(Object.entries(out).filter(([, v]) => v));

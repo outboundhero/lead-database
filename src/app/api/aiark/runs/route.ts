@@ -24,10 +24,11 @@ import type { PeopleFilters, RunMode, RunStrategy } from "@/lib/aiark/types";
 // POST /api/aiark/runs {tag, mode, strategy, size, matchCount, peopleVersion,
 //      rulesVersion} — queues a pull. It uses the client's SAVED people filters
 //      and its current rules, never filters from the request. The page sends
-//      the versions of both it loaded, and a 409 answers any change since, so
-//      a run is what the tab showed. A count must come first (matchCount). One
-//      active run per client. The enrichment worker does the pulling. Manager
-//      and up — a live run spends AI Ark credits.
+//      the versions of both it loaded, and a 409 with `changed` answers any
+//      change since (the page then reloads them), so a run is what the tab
+//      showed. A count must come first (matchCount). One active run per
+//      client. The enrichment worker does the pulling. Manager and up — a live
+//      run spends AI Ark credits.
 
 export const dynamic = "force-dynamic";
 
@@ -115,7 +116,8 @@ export async function POST(req: NextRequest) {
           const what = saved.version !== peopleVersion ? "people filters" : "rules (locations and exclusions)";
           return {
             status: 409,
-            error: `${tag}'s ${what} changed since this page loaded them. Reload to see what a pull would use; nothing was started.`,
+            error: `${tag}'s ${what} changed since this page loaded them, so nothing was started.`,
+            changed: true,
           };
         }
         // cleanPeopleFilters reads only the filter fields, so the row goes in as it is.
@@ -145,7 +147,7 @@ export async function POST(req: NextRequest) {
       },
       { timeoutMs: 20_000 }
     );
-    if ("error" in out) return NextResponse.json({ error: out.error }, { status: out.status });
+    if ("error" in out) return NextResponse.json({ error: out.error, changed: "changed" in out }, { status: out.status });
     await logAudit({
       action: "aiark_run",
       performedBy: auth.user.id,

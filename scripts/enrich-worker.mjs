@@ -346,7 +346,11 @@ async function main() {
   const deadline = Date.now() + 25_000;
   while (inFlight > 0 && Date.now() < deadline) await sleep(250);
   if (inFlight > 0) log(`${inFlight} row(s) still in flight at exit — the stale sweep will re-queue them`);
-  await Promise.race([runs, sleep(Math.max(0, deadline - Date.now()))]);
+  // The AI Ark slice in flight is waited for, with no deadline: a paid call
+  // already sent must have its person written before the pool closes. Told to
+  // stop, a slice makes no new paid call, so this is the one in flight at most
+  // (an Export Single gets 90 s); the service's drain time must cover it.
+  await runs;
   await heartbeat({ stopping: true }).catch(() => {});
   log(`stopped: ${stats.processed} rows processed, ${stats.calls} provider calls, ${stats.failed} failures`);
   await pool.end();

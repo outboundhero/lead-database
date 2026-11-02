@@ -18,7 +18,10 @@
 // of 10,000 a request, 50 lists a day, 24 hours each). Past those limits a
 // single run pays for Preview pages of people it then skips, and an export run
 // stops rather than post without its lists. Anyone a job still brings back is
-// paid for again and written as "Bought before".
+// paid for again and written as "Bought before". An export job's people reach
+// aiark_people only when the job is read, so while one is out no other run of
+// its mode buys anyone: neither another job's lists nor a single run's check
+// could leave them out yet.
 //
 // Crash and cancel: a slice holds the run with a claim token and a 10-minute
 // lease. Cursor writes are fenced on the token; a person already paid for is
@@ -34,7 +37,7 @@
 
 import { randomUUID } from "node:crypto";
 import {
-  AiArkError, createAiArk, EXPORT_MAX, LIST_MAX, LISTS_PER_DAY, LISTS_PER_REQUEST, PAGE_MAX, SEARCH_CAP, personInputs,
+  AiArkError, clip, createAiArk, EXPORT_MAX, LIST_MAX, LISTS_PER_DAY, LISTS_PER_REQUEST, PAGE_MAX, SEARCH_CAP, personInputs,
 } from "./client.mjs";
 import { createDemoTransport, DEMO_TOKEN } from "./demo.mjs";
 import { PERSON_SEARCH_KEYS, RUN_COLUMNS, RUN_INPUT_KEYS } from "./columns.mjs";
@@ -55,6 +58,7 @@ const REFUND_LOOKUP_PAGES = 5;
 const LOST_ANSWERS_MAX = 5; // Export Single answers lost in a row before the run backs off
 const WRITE_RETRIES = 3;
 const WRITE_RETRY_MS = 500;
+const PLAIN = /^[\x20-\x7e]*$/; // the cells kept when Postgres refuses a person's values
 export const DEMO_WEBHOOK = "https://demo.invalid/api/aiark/webhook"; // .invalid never resolves; the demo sends nothing
 
 const num = (v, d) => {
@@ -221,6 +225,8 @@ export async function runDue(pool) {
 
 class LostClaim extends Error {}
 class Cancelled extends Error {}
+/** A write failed and the run could not be read back: what its row holds is unknown, so nothing is written over it. */
+class Unread extends Error {}
 
 /**
  * Saves the cursor mid-slice (fenced). This is where a cancel stops a slice
@@ -248,18 +254,25 @@ async function release(ctx, { inMs = 0, attempts = 0, lastError = null } = {}) {
   );
 }
 
+/**
+ * Ends the run. A cancelled run stays cancelled, unless the paid job it was
+ * still reading ends in an error: people paid for were not read, so it shows
+ * as failed. A run that ends done or stopped drops an error it got past.
+ */
 async function finish(ctx, { status, stopReason = null, lastError = null }) {
   let creditsAfter = null;
   try {
-    creditsAfter = await ctx.client.credits();
+    // A worker that is stopping doesn't wait for it.
+    if (!ctx.shouldStop()) creditsAfter = await ctx.client.credits();
   } catch {
     /* the balance is a nicety; never fail a finish over it */
   }
   const { rows } = await ctx.pool.query(
     `UPDATE aiark_runs
-        SET status = CASE WHEN status = 'running' THEN $3 ELSE status END,
+        SET status = CASE WHEN status = 'running' OR (status = 'cancelled' AND $3 = 'error') THEN $3 ELSE status END,
             stop_reason = coalesce($4, stop_reason),
-            last_error = coalesce($5, last_error), progress = $6, credits_after = coalesce($7, credits_after),
+            last_error = CASE WHEN $3 IN ('done', 'stopped') THEN $5 ELSE coalesce($5, last_error) END,
+            progress = $6, credits_after = coalesce($7, credits_after),
             finished_at = coalesce(finished_at, now()), claim_token = NULL, claimed_at = NULL
       WHERE id = $1 AND claim_token = $2
       RETURNING status, pulled, source_id`,
@@ -303,28 +316,59 @@ async function addCredits(ctx, n) {
   if (!n) return;
   const { rows } = await ctx.pool.query(
     `UPDATE aiark_runs SET credits_used = credits_used + $2, claimed_at = CASE WHEN claim_token = $3 THEN now() ELSE claimed_at END
-      WHERE id = $1 RETURNING status, claim_token = $3 AS held`,
+      WHERE id = $1 RETURNING status, claim_token = $3 AS held, credits_used::float8 AS used`,
     [ctx.run.id, n, ctx.run.claim_token]
   );
   if (!rows[0]?.held) throw new LostClaim();
+  ctx.spent = rows[0].used;
   if (rows[0].status === "cancelled") throw new Cancelled();
+}
+
+/**
+ * A run write whose answer was lost may still have committed (a dropped
+ * connection, the pool's own timeout). Before the error goes on, the run's row
+ * is read back, so what is released next is what the database holds, not the
+ * copy in memory, and a job's price or refund is never applied twice. A row
+ * that can't be read back is left alone until its lease runs out.
+ */
+async function writeRun(ctx, sql, params) {
+  try {
+    return (await ctx.pool.query(sql, params)).rows[0];
+  } catch (e) {
+    let row;
+    try {
+      ({ rows: [row] } = await ctx.pool.query(
+        `SELECT progress, pulled, credits_used::float8 AS used FROM aiark_runs WHERE id = $1 AND claim_token = $2`,
+        [ctx.run.id, ctx.run.claim_token]
+      ));
+    } catch {
+      throw new Unread(String(e?.message ?? e));
+    }
+    if (!row) throw new LostClaim();
+    ctx.progress = row.progress ?? {};
+    ctx.pulled = row.pulled;
+    ctx.spent = row.used;
+    throw e;
+  }
 }
 
 /**
  * One person into the run's table, the registry and the run's counters — one
  * statement, so a crash never leaves a paid person half-recorded. Everything
  * is written even if the claim was lost, since the person is paid for by then,
- * and ON CONFLICT keeps a repeat harmless; the slice stops right after.
+ * and ON CONFLICT keeps a repeat harmless; the slice stops right after. A
+ * retry adds the person's credits only if their row goes in this time: a row
+ * already there means the try before committed and only its answer was lost.
  */
-async function writePersonOnce(ctx, { inputs, credits, pulledBefore = null }) {
+async function writePersonOnce(ctx, { inputs, credits, pulledBefore = null, plain = false }, retry = false) {
   const cells = {};
   for (const k of RUN_INPUT_KEYS) {
     const v = k === "pulled_before" ? pulledBefore : inputs[k];
-    if (v) cells[k] = String(v).replace(/\u0000/g, "").slice(0, 5_000);
+    if (v && (!plain || k === "aiark_id" || PLAIN.test(String(v)))) cells[k] = clip(String(v).replace(/\u0000/g, ""), 5_000);
   }
   const personId = cells.aiark_id;
   if (!personId) return { inserted: 0 };
-  const search = PERSON_SEARCH_KEYS.map((k) => cells[k]).filter(Boolean).join(" ").toLowerCase().slice(0, 2_000);
+  const search = clip(PERSON_SEARCH_KEYS.map((k) => cells[k]).filter(Boolean).join(" ").toLowerCase(), 2_000);
   const usable = cells.email_status === "VALID" && Boolean(cells.email);
   const { rows: [r] } = await ctx.pool.query(
     `WITH ok AS (
@@ -349,33 +393,41 @@ async function writePersonOnce(ctx, { inputs, credits, pulledBefore = null }) {
           SET pulled = pulled + (SELECT count(*) FROM r)::int,
               with_email = with_email + CASE WHEN $12::boolean AND EXISTS (SELECT 1 FROM r) THEN 1 ELSE 0 END,
               skipped_held = skipped_held + CASE WHEN $13::boolean AND EXISTS (SELECT 1 FROM r) THEN 1 ELSE 0 END,
-              credits_used = credits_used + $14,
+              credits_used = credits_used + CASE WHEN NOT $15::boolean OR EXISTS (SELECT 1 FROM r) THEN $14::numeric ELSE 0 END,
               claimed_at = CASE WHEN claim_token = $2 THEN now() ELSE claimed_at END
         WHERE id = $1
-       RETURNING 1
+       RETURNING pulled, credits_used
      )
      SELECT (SELECT count(*) FROM ok)::int AS held, (SELECT status FROM ok) AS status,
             (SELECT count(*) FROM r)::int AS inserted, (SELECT count(*) FROM p)::int AS registered,
-            (SELECT count(*) FROM u)::int AS counted`,
+            (SELECT pulled FROM u) AS pulled, (SELECT credits_used::float8 FROM u) AS used`,
     [
       ctx.run.id, ctx.run.claim_token, ctx.run.table_id, ctx.run.source_id, `aiark:${personId}`, search, JSON.stringify(cells),
-      personId, ctx.run.mode === "demo", cells.email ?? "", cells.email_status ?? "", usable, Boolean(pulledBefore), credits,
+      personId, ctx.run.mode === "demo", cells.email ?? "", cells.email_status ?? "", usable, Boolean(pulledBefore), credits, retry,
     ]
   );
   if (!r.held) throw new LostClaim();
-  ctx.pulled += r.inserted;
+  ctx.pulled = r.pulled;
+  ctx.spent = r.used;
   // An export job is paid for as a whole, so its reading carries on to the end.
   if (r.status === "cancelled" && ctx.run.strategy === "single") throw new Cancelled();
   return r;
 }
 
-/** A paid answer lives only in memory until it is written, so a failed write is tried again. */
+/**
+ * A paid answer lives only in memory until it is written, so a failed write is
+ * tried again. A value Postgres refuses (SQLSTATE class 22) is refused every
+ * time, so that person goes in with only the cells that are plain text rather
+ * than hold up a paid job over one row.
+ */
 async function writePerson(ctx, person) {
   for (let tries = 0; ; tries++) {
     try {
-      return await writePersonOnce(ctx, person);
+      return await writePersonOnce(ctx, person, tries > 0);
     } catch (e) {
-      if (e instanceof LostClaim || e instanceof Cancelled || tries >= WRITE_RETRIES) throw e;
+      if (e instanceof LostClaim || e instanceof Cancelled) throw e;
+      if (/^22/.test(String(e?.code ?? "")) && !person.plain) return writePerson(ctx, { ...person, plain: true });
+      if (tries >= WRITE_RETRIES) throw e;
       await sleep(WRITE_RETRY_MS * (tries + 1));
     }
   }
@@ -507,11 +559,33 @@ async function buildLists(ctx) {
 const endReason = (p) =>
   p.capped?.length ? "Reached AI Ark's limit of 10,000 matches per search" : "No more matches";
 
+/**
+ * Whether another run of this mode holds an export job, and this run's spend.
+ * That job's people reach the registry only when it is read, so until then
+ * neither a new job's lists nor a single run's registry check can leave them
+ * out, and whatever two runs share would be paid for twice.
+ */
+async function otherJob(ctx) {
+  const { rows: [r] } = await ctx.pool.query(
+    `SELECT r.credits_used::float8 AS used,
+            EXISTS (SELECT 1 FROM aiark_runs q
+                     WHERE q.id <> r.id AND q.mode = r.mode AND ${HAS_WORK} AND jsonb_typeof(q.progress->'job') = 'object') AS busy
+       FROM aiark_runs r WHERE r.id = $1`,
+    [ctx.run.id]
+  );
+  return r;
+}
+
 async function sliceSingle(ctx) {
   const { run } = ctx;
+  if ((ctx.progress.chunk ?? 0) >= run.requests.length) return { done: endReason(ctx.progress) };
+  // Waits, with no attempt counted, while another run's export job is unread.
+  // The worker works one slice at a time, so a job posted between two of this
+  // run's slices is seen here before the next page is bought.
+  if ((await otherJob(ctx)).busy) return { wait: OTHER_JOB_WAIT_MS, hold: true };
+  if (listsStale(ctx.progress)) await buildLists(ctx);
   const p = ctx.progress;
   const chunk = p.chunk ?? 0;
-  if (chunk >= run.requests.length) return { done: endReason(p) };
   const page = p.page ?? 0;
   if ((page + 1) * PAGE_MAX > SEARCH_CAP) {
     // AI Ark pages through 10,000 matches per search at most. Going deeper would
@@ -521,6 +595,10 @@ async function sliceSingle(ctx) {
     await savePosition(ctx);
     return { more: true };
   }
+  // The spending brake holds inside a page too: no call is made that could take
+  // the run past it (a Preview page or a found email costs 1 credit).
+  const ceiling = spendCeiling(run);
+  if (ctx.spent + 1 > ceiling) return { stop: brakeReason(run, ctx.spent) };
 
   const res = await ctx.client.preview(run.requests[chunk], { page, size: PAGE_MAX, lists: p.lists });
   await addCredits(ctx, 1);
@@ -536,6 +614,7 @@ async function sliceSingle(ctx) {
   let skipped = 0;
   let lostInARow = 0;
   let stopping = false;
+  let braked = false;
   for (const item of res.content) {
     if (ctx.pulled >= run.size_requested) break;
     if (!item?.id || mine.has(item.id)) continue;
@@ -545,6 +624,10 @@ async function sliceSingle(ctx) {
     }
     if (ctx.shouldStop()) {
       stopping = true;
+      break;
+    }
+    if (ctx.spent + 1 > ceiling) {
+      braked = true;
       break;
     }
     let got;
@@ -568,6 +651,10 @@ async function sliceSingle(ctx) {
   if (skipped) {
     await ctx.pool.query(`UPDATE aiark_runs SET skipped_held = skipped_held + $2 WHERE id = $1`, [run.id, skipped]);
   }
+  if (braked) {
+    ctx.progress = { ...ctx.progress, matches };
+    return { stop: brakeReason(run, ctx.spent) };
+  }
   if (stopping) {
     // The page repeats on resume; the registry skips everyone it already bought.
     ctx.progress = { ...ctx.progress, matches };
@@ -585,13 +672,24 @@ async function sliceSingle(ctx) {
 // ── export: async jobs, read by polling ─────────────────────────────────────
 
 /**
- * The submissions that could be this job's: made around the same moment, the
- * same size, not refunded, and not any run's already.
+ * When AI Ark may have taken a submission whose answer never arrived: from
+ * when it was sent until its answer was lost (the POST may first have waited
+ * out several 429s), with two minutes either side for the clocks. A crash
+ * mid-POST leaves no lost_at, so then the window is around the send alone.
+ */
+const adoptFrom = (job) => Date.parse(job.submitting_at) - ADOPT_WINDOW_MS;
+const adoptUntil = (job) => Date.parse(job.lost_at ?? job.submitting_at) + ADOPT_WINDOW_MS;
+
+/**
+ * The submissions that could be this job's: made within its window, the same
+ * size, not refunded, and not any run's already.
  */
 async function adoptionCandidates(ctx, job) {
-  const at = Date.parse(job.submitting_at);
   const subs = await ctx.client.exportSubmissions({ size: 100 });
-  const near = subs.filter((s) => s.trackId && !s.fullyRefunded && Number(s.requestSize) === job.size && Math.abs(Date.parse(s.created) - at) <= ADOPT_WINDOW_MS);
+  const near = subs.filter((s) => {
+    const at = Date.parse(s.created);
+    return s.trackId && !s.fullyRefunded && Number(s.requestSize) === job.size && at >= adoptFrom(job) && at <= adoptUntil(job);
+  });
   if (!near.length) return [];
   const { rows } = await ctx.pool.query(
     `SELECT t.id FROM unnest($1::text[]) AS t(id)
@@ -631,7 +729,8 @@ async function resubmit(ctx, e) {
   const { job } = ctx.progress;
   const resubmits = (ctx.progress.resubmits ?? 0) + 1;
   const next = { ...ctx.progress, job: null, resubmits, last_refund: e.message };
-  const { rows: [w] } = await ctx.pool.query(
+  const w = await writeRun(
+    ctx,
     `UPDATE aiark_runs SET credits_used = credits_used - $3, progress = $4, claimed_at = now()
       WHERE id = $1 AND claim_token = $2 RETURNING status`,
     [run.id, run.claim_token, job.charged ? job.price ?? 0 : 0, next]
@@ -659,7 +758,7 @@ async function sliceExport(ctx) {
     }
     if (found.length) {
       job = { ...job, track_id: found[0], submitted_at: job.submitting_at, adopted: true };
-    } else if (Date.now() - Date.parse(job.submitting_at) < ADOPT_WINDOW_MS) {
+    } else if (Date.now() < adoptUntil(job)) {
       return { wait: EXPORT_POLL_MS, hold: true };
     } else {
       job = null; // never reached AI Ark: submit again
@@ -677,13 +776,7 @@ async function sliceExport(ctx) {
     // One unread export job per mode: two jobs out at once can't leave out each
     // other's people, so whatever they share is paid for twice. This comes
     // before the lists, which must include the people the other job brings in.
-    const { rows: [{ used, busy }] } = await ctx.pool.query(
-      `SELECT r.credits_used::float8 AS used,
-              EXISTS (SELECT 1 FROM aiark_runs q
-                       WHERE q.id <> r.id AND q.mode = r.mode AND ${HAS_WORK} AND jsonb_typeof(q.progress->'job') = 'object') AS busy
-         FROM aiark_runs r WHERE r.id = $1`,
-      [run.id]
-    );
+    const { used, busy } = await otherJob(ctx);
     if (busy) return { wait: OTHER_JOB_WAIT_MS, hold: true };
     const size = Math.min(remaining, EXPORT_MAX);
     if (used + size > spendCeiling(run)) return { stop: brakeReason(run, used) };
@@ -699,9 +792,13 @@ async function sliceExport(ctx) {
     try {
       started = await ctx.client.exportStart(run.requests[chunk], { size: job.size, lists: p.lists, webhook: hook.url });
     } catch (e) {
-      // Refused outright (400/402/401): nothing was bought. Lost answer: the
-      // next slice looks for the submission before sending anything again.
-      if (e instanceof AiArkError && (e.kind === "network" || e.kind === "server")) return { wait: EXPORT_POLL_MS, error: e };
+      // Refused outright (400/402/401): nothing was bought. Lost answer: AI Ark
+      // may have taken it at any moment until now (lost_at, saved by the
+      // release), and the next slice looks for it before sending anything again.
+      if (e instanceof AiArkError && (e.kind === "network" || e.kind === "server")) {
+        ctx.progress = { ...p, job: { ...job, lost_at: new Date().toISOString() } };
+        return { wait: EXPORT_POLL_MS, error: e };
+      }
       ctx.progress = { ...p, job: null };
       await savePosition(ctx);
       throw e;
@@ -738,7 +835,8 @@ async function sliceExport(ctx) {
     const price = job.charged ? job.price : 0.5 * st.total + 0.5 * st.found;
     const priced = { ...job, state: "DONE", total: st.total, found: st.found, done_at: new Date().toISOString(), page: job.page ?? 0, charged: true, price };
     const next = { ...p, job: priced };
-    const { rows: [w] } = await ctx.pool.query(
+    const w = await writeRun(
+      ctx,
       `UPDATE aiark_runs SET credits_used = credits_used + $3, progress = $4, claimed_at = now()
         WHERE id = $1 AND claim_token = $2 RETURNING status`,
       [run.id, run.claim_token, job.charged ? 0 : price, next]
@@ -818,13 +916,15 @@ async function sliceExport(ctx) {
  *
  * `clientFor(mode)` replaces aiArkFor (tests use it to inject faults).
  * `shouldStop()` is checked between people: when it turns true the slice lets
- * go of the run at once, so a restart need not wait out the lease.
+ * go of the run at once (a run that ends then skips its closing balance), so
+ * a restart need not wait out the lease.
  */
 export async function advanceOneRun({ pool, env = process.env, log = () => {}, clientFor = null, maxPagesPerSlice = 1, shouldStop = () => false }) {
   const run = await claimRun(pool);
   if (!run) return null;
   const got = clientFor ? await clientFor(run.mode) : await aiArkFor(run.mode, { env, db: pool });
-  const ctx = { pool, env, log, run, client: got.client, progress: run.progress ?? {}, pulled: run.pulled, shouldStop };
+  // spent: the run's credits_used as the slice's own writes return it, for the spending brake.
+  const ctx = { pool, env, log, run, client: got.client, progress: run.progress ?? {}, pulled: run.pulled, spent: Number(run.credits_used), shouldStop };
 
   if (!got.client) {
     if (ctx.progress.job) {
@@ -860,7 +960,6 @@ export async function advanceOneRun({ pool, env = process.env, log = () => {}, c
         return run.id;
       }
     }
-    if (run.strategy === "single" && listsStale(ctx.progress)) await buildLists(ctx);
 
     let out = { more: true };
     for (let i = 0; i < maxPagesPerSlice && out.more && !shouldStop(); i++) {
@@ -885,6 +984,8 @@ export async function advanceOneRun({ pool, env = process.env, log = () => {}, c
   } catch (e) {
     if (e instanceof LostClaim) {
       log(`AI Ark run ${run.id.slice(0, 8)}: claim lost mid-slice (reclaimed elsewhere) — stopped`);
+    } else if (e instanceof Unread) {
+      log(`AI Ark run ${run.id.slice(0, 8)}: ${e.message}, and the run could not be read back — left as it is until its lease runs out`);
     } else if (e instanceof Cancelled) {
       await finish(ctx, { status: "cancelled" });
     } else if (ctx.progress.job) {

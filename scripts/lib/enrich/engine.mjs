@@ -105,18 +105,31 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {} }
 
     if (col.kind === "formula") {
       // A failed cell reads as empty, and an empty check reads as "nothing
-      // found", so a formula over one would give a confident wrong answer.
-      const read = failed.size ? refs(col.formula) : null;
-      const broken = read ? columns.filter((c) => failed.has(c.key) && read.has(c.key)) : [];
-      if (broken.length) {
-        put(col, { status: "error", note: `Not worked out: ${broken.map((c) => c.name ?? c.key).join(", ")} failed` });
-        continue;
-      }
+      // found", so a formula that reads one would give a confident wrong
+      // answer. What counts is what the evaluation actually reads: a branch
+      // that returns before reaching a failed check keeps its answer.
+      const read = new Set();
+      const scope = failed.size
+        ? new Proxy(values, {
+            get: (t, k) => {
+              if (failed.has(k)) read.add(k);
+              return t[k];
+            },
+          })
+        : values;
+      let v;
+      let err = null;
       try {
-        const v = evaluate(ctx, col.formula, values);
-        put(col, { status: isEmpty(v) ? "empty" : "done", value: v, note: typeof v === "boolean" ? listMatches(col.formula, values) : null });
+        v = evaluate(ctx, col.formula, scope);
       } catch (e) {
-        put(col, { status: "error", note: `Formula error: ${msg(e)}` });
+        err = e;
+      }
+      if (read.size) {
+        put(col, { status: "error", note: `Not worked out: ${columns.filter((c) => read.has(c.key)).map((c) => c.name ?? c.key).join(", ")} failed` });
+      } else if (err) {
+        put(col, { status: "error", note: `Formula error: ${msg(err)}` });
+      } else {
+        put(col, { status: isEmpty(v) ? "empty" : "done", value: v, note: typeof v === "boolean" ? listMatches(col.formula, values) : null });
       }
       continue;
     }
