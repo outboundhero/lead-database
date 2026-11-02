@@ -50,7 +50,7 @@ export function displayOf(v) {
 }
 
 /**
- * @param row     { id, created_at, run_force }
+ * @param row     { id, created_at, run_force, next_run_at }
  * @param table   { client_tag, keyCounts }
  * @param columns the table's columns in dependency order (formula.order)
  * @param cells   Map column key -> stored cell { status, value, display, note, input_hash }
@@ -63,6 +63,7 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {} }
   const created = row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at;
   const values = { created_at: created };
   const summary = { errors: 0, needsKey: 0, retryable: null, calls: 0 };
+  const failed = new Set(); // the columns that ended this pass in error
 
   const put = (col, next) => {
     const cell = {
@@ -75,7 +76,10 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {} }
     };
     // Downstream formulas see a value only when the cell has one.
     values[col.key] = cell.status === "done" && !isEmpty(cell.value) ? cell.value : undefined;
-    if (cell.status === "error") summary.errors++;
+    if (cell.status === "error") {
+      summary.errors++;
+      failed.add(col.key);
+    }
     if (cell.status === "needs_key") summary.needsKey++;
     const prev = cells.get(col.key);
     const changed =
@@ -100,6 +104,14 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {} }
     if (col.kind === "input" || col.phase > 1) continue;
 
     if (col.kind === "formula") {
+      // A failed cell reads as empty, and an empty check reads as "nothing
+      // found", so a formula over one would give a confident wrong answer.
+      const read = failed.size ? refs(col.formula) : null;
+      const broken = read ? columns.filter((c) => failed.has(c.key) && read.has(c.key)) : [];
+      if (broken.length) {
+        put(col, { status: "error", note: `Not worked out: ${broken.map((c) => c.name ?? c.key).join(", ")} failed` });
+        continue;
+      }
       try {
         const v = evaluate(ctx, col.formula, values);
         put(col, { status: isEmpty(v) ? "empty" : "done", value: v, note: typeof v === "boolean" ? listMatches(col.formula, values) : null });

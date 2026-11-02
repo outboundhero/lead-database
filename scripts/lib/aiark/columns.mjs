@@ -25,7 +25,7 @@ const COLUMNS = [
   { key: "email", name: "Email (AI Ark)", kind: "input", description: "The address AI Ark found when the person was exported. Empty when it found none." },
   {
     key: "email_status", name: "Email check", kind: "input",
-    description: "AI Ark's own check of the address at export time: VALID or INVALID (with the reason when it gave one).",
+    description: "AI Ark's own check of the address at export time: VALID or INVALID (with the reason when it gave one). PENDING: AI Ark was still checking when the run stopped waiting. Nothing updates a PENDING row later.",
   },
   {
     key: "email_domain_type", name: "Mailbox type", kind: "input",
@@ -35,22 +35,22 @@ const COLUMNS = [
   { key: "linkedin", name: "LinkedIn", kind: "input", data_type: "url" },
   { key: "company_linkedin", name: "Company LinkedIn", kind: "input", data_type: "url", hidden: true },
   { key: "company_description", name: "Company description", kind: "input", hidden: true },
-  { key: "aiark_id", name: "AI Ark id", kind: "input", description: "AI Ark's id for the person. A person is bought once: later runs exclude every id already bought." },
+  { key: "aiark_id", name: "AI Ark id", kind: "input", description: "AI Ark's id for the person. Later runs ask AI Ark to leave out the newest 100,000 ids held, as far as the day's exclusion lists allow." },
   {
     key: "pulled_before", name: "Bought before", kind: "input",
-    description: "Filled when an earlier run had already bought this person (it can happen past AI Ark's list limits). The person is not bought or added twice.",
+    description: "Filled in an export run when an earlier run had already bought this person (it can happen past AI Ark's list limits). The job paid for them again; they are not added to the database twice. A single run skips such people, so they never get a row.",
   },
 
   // ── Steps ─────────────────────────────────────────────────────────────────
   {
     key: "email_verdict", name: "Email verdict", kind: "formula",
-    formula: `!{{email}} ? "Not found" : {{email_status}} !== "VALID" ? "Invalid" : {{email_domain_type}} === "CATCH_ALL" ? "Catch-all" : "Valid"`,
-    description: "Only addresses AI Ark marked VALID are used. A catch-all domain's address is kept as catch-all, the way the lead database already treats them.",
+    formula: `!{{email}} ? ({{email_status}} === "PENDING" ? "Pending" : "Not found") : {{email_status}} !== "VALID" ? "Invalid" : {{email_domain_type}} === "CATCH_ALL" ? "Catch-all" : "Valid"`,
+    description: "Only addresses AI Ark marked VALID are used. A catch-all domain's address is kept as catch-all, the way the lead database already treats them. Pending: AI Ark had not finished checking when the run stopped waiting, so the person may well have an email.",
   },
   {
     key: "in_database", name: "Lead database", kind: "action", action: "lead_lookup", data_type: "json",
     inputs: { email: "{{email}}" }, run_if: USABLE, provider: "Lead database",
-    description: "Looks the address up in the lead database and on the never-contact list (which survives a lead being deleted). Bounced means a real, hard bounce.",
+    description: "Looks the address up in the lead database, in its copy of Email Bison and on the never-contact list (which survives a lead being deleted). An address only in the Email Bison copy counts as already in the database. Bounced means the lead is marked bounced: a hard bounce, or one not classified or not yet checked.",
   },
   {
     key: "in_area", name: "Inside the client's area", kind: "action", action: "client_area", data_type: "boolean",
@@ -66,18 +66,20 @@ const COLUMNS = [
   {
     key: "outcome", name: "Outcome", kind: "formula",
     formula:
-      `!${USABLE} ? "No email"` +
+      `{{email_verdict}} === "Pending" ? "Email still being checked"` +
+      ` : !${USABLE} ? "No email"` +
       ` : {{pulled_before}} ? "Bought in an earlier run"` +
       ` : {{in_database}}?.never_contact ? "On the never-contact list"` +
       ` : {{in_database}}?.bounced ? "Bounced"` +
-      ` : {{in_database}}?.lead_id ? "Already in the database"` +
+      ` : {{in_database}}?.lead_id || {{in_database}}?.in_bison ? "Already in the database"` +
       ` : {{in_area}} === false ? "Outside the client's area"` +
       ` : {{rule_match}} ? "Excluded by the client's rules"` +
       ` : "Ready to add"`,
-    description: "Ready to add: a valid email, not already in the database or on the never-contact list, inside the client's area and clear of its exclusions. Those people join the lead database in Phase 4.",
+    description: "Ready to add: a valid email, not already in the database or on the never-contact list, inside the client's area and clear of its exclusions. Those people join the lead database in Phase 4. Email still being checked: AI Ark had not finished when the run stopped waiting; nothing updates these rows later, and later runs leave the person out.",
   },
 
-  // ── Later phases: shown so the whole flow can be seen, not run yet ───────
+  // ── Later phases: two of the steps still to come, shown and not run yet.
+  // The others planned for these people have no column.
   {
     key: "find_email", name: "Find email", kind: "action", action: "later", phase: 3, provider: "Email finders",
     run_if: `!${USABLE}`,

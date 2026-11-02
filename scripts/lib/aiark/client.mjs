@@ -19,6 +19,8 @@ export const LIST_MAX = 10_000; // ids per exclusion list
 export const LISTS_PER_REQUEST = 10;
 export const LISTS_PER_DAY = 50;
 export const EXPORT_MAX = 10_000; // people per Export People with Email job
+const SINGLE_TIMEOUT_MS = 90_000; // Export Single checks an email in real time
+const REFUND_CODES = new Set([4031013, 4031014]); // body status of a job AI Ark auto-refunded
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const text = (v) => (v == null ? "" : String(v).trim());
@@ -62,7 +64,7 @@ export function createAiArk({ token, transport = fetchTransport, rps = 4, timeou
   if (!token) throw new Error("AI Ark key is missing");
   const gap = 1000 / Math.max(0.5, Math.min(5, rps));
   let nextSlot = 0;
-  const stats = { calls: 0, rateLimited: 0 };
+  const stats = { calls: 0, rateLimited: 0, gapMs: gap };
 
   async function throttle() {
     const now = Date.now();
@@ -72,19 +74,19 @@ export function createAiArk({ token, transport = fetchTransport, rps = 4, timeou
   }
 
   /**
-   * One call. `retry`: "safe" retries 429s, 5xx and network errors (reads and
-   * calls whose repeat costs at most one credit); "rate-only" retries just
+   * One call. `retry`: "safe" retries 429s, 5xx and network errors (reads, and
+   * Preview, whose repeat costs at most one credit); "rate-only" retries just
    * 429s — the request was refused before AI Ark processed it — so a call
-   * that could buy thousands of people is never sent twice by accident.
+   * that buys people is never sent twice by accident.
    */
-  async function call(method, path, { body, query, retry = "safe", trackId = false } = {}) {
+  async function call(method, path, { body, query, retry = "safe", trackId = false, timeoutMs: limitMs = timeoutMs } = {}) {
     const qs = query ? `?${new URLSearchParams(query)}` : "";
     const req = {
       method,
       url: `${AIARK_BASE_URL}${path}${qs}`,
       headers: { "X-TOKEN": token, "Content-Type": "application/json", Accept: "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
-      timeoutMs,
+      timeoutMs: limitMs,
     };
     let rateTries = 0;
     let otherTries = 0;
@@ -96,7 +98,8 @@ export function createAiArk({ token, transport = fetchTransport, rps = 4, timeou
         res = await transport(req);
       } catch (e) {
         const timeout = e?.name === "TimeoutError" || e?.name === "AbortError";
-        const why = timeout ? `no answer within ${timeoutMs / 1000}s` : text(e?.cause?.code || e?.message) || "request failed";
+        // Never e.message: building a request with a bad key quotes the key in it.
+        const why = timeout ? `no answer within ${limitMs / 1000}s` : text(e?.cause?.code) || "request failed";
         if (retry === "safe" && ++otherTries < 3) {
           await wait(2_000 * otherTries);
           continue;
@@ -131,9 +134,9 @@ export function createAiArk({ token, transport = fetchTransport, rps = 4, timeou
       if (s === 401) throw new AiArkError("key", "AI Ark refused the key (401)", { status: s });
       if (s === 402) throw new AiArkError("credits", "The AI Ark account is out of credits (402)", { status: s });
       if (s === 403) {
-        // An export job auto-refunded by AI Ark (body status 4031013 / 4031014);
-        // anywhere else a 403 is a key problem.
-        if (trackId) throw new AiArkError("refunded", `AI Ark refunded the export: ${why}`, { status: s, code });
+        // An export job auto-refunded by AI Ark (body status 4031013 / 4031014).
+        // Any other 403 is a key problem, on a job's track id too: the job stays ours.
+        if (trackId && REFUND_CODES.has(code)) throw new AiArkError("refunded", `AI Ark refunded the export: ${why}`, { status: s, code });
         throw new AiArkError("key", `AI Ark refused the key (403): ${why}`, { status: s });
       }
       if (s === 404 && trackId) throw new AiArkError("expired", `AI Ark no longer has this export: ${why}`, { status: s });
@@ -164,16 +167,18 @@ export function createAiArk({ token, transport = fetchTransport, rps = 4, timeou
     /**
      * People Preview: one page of matches without emails, last names masked.
      * 1 credit per page, whatever its size. No matches comes back as 404 or as
-     * an empty page — both read as an empty page here.
+     * an empty page — both read as an empty page here. Any other answer with no
+     * list of people is a failed read, not an empty page.
      */
     async preview(filters, { page = 0, size = PAGE_MAX, lists = null } = {}) {
       const body = { ...filters, ...(lists?.length ? { lists: { people_id: { exclude: lists } } } : {}), page, size };
       const r = await call("POST", "/v1/people/preview", { body });
-      const json = r.empty ? {} : r.json ?? {};
+      if (r.empty) return { content: [], totalElements: 0, totalPages: 0 };
+      if (!Array.isArray(r.json?.content)) throw new AiArkError("server", "AI Ark's Preview answer had no list of people");
       return {
-        content: Array.isArray(json.content) ? json.content : [],
-        totalElements: Number(json.totalElements ?? 0) || 0,
-        totalPages: Number(json.totalPages ?? 0) || 0,
+        content: r.json.content,
+        totalElements: Number(r.json.totalElements ?? 0) || 0,
+        totalPages: Number(r.json.totalPages ?? 0) || 0,
       };
     },
 
@@ -189,9 +194,11 @@ export function createAiArk({ token, transport = fetchTransport, rps = 4, timeou
      * Export Single Person with Email (v2): the full profile and an email for
      * one person. 1 credit only when a valid email is found, nothing otherwise.
      * Answers 200 in every expected case; the envelope's own status says which.
+     * Not retried on a lost answer: AI Ark may have charged for it, and nothing
+     * says a repeat is free.
      */
     async exportSingle(id) {
-      const { json, headers } = await call("POST", "/v2/people/export/single", { body: { id } });
+      const { json, headers } = await call("POST", "/v2/people/export/single", { body: { id }, retry: "rate-only", timeoutMs: SINGLE_TIMEOUT_MS });
       if (json?.status === 200 && json.data && typeof json.data === "object") {
         const charged = Math.abs(parseFloat(headers?.get?.("x-credit") ?? ""));
         return { found: true, person: json.data, credits: Number.isFinite(charged) ? charged : 1 };
@@ -208,11 +215,14 @@ export function createAiArk({ token, transport = fetchTransport, rps = 4, timeou
      * Export People with Email: an async job of up to 10,000 people
      * (0.5 credits a person + 0.5 per email found). AI Ark requires a public
      * HTTPS webhook. Never retried on a lost answer — that could buy the same
-     * people twice; the run engine checks the submissions list instead.
+     * people twice; the run engine checks the submissions list instead. A 404
+     * comes back as { empty: true }: the docs list it here without saying what
+     * it means, and on AI Ark's other calls it means no matches.
      */
     async exportStart(filters, { size, lists = null, webhook }) {
       const body = { ...filters, ...(lists?.length ? { lists: { people_id: { exclude: lists } } } : {}), page: 0, size, webhook };
-      const { json } = await call("POST", "/v1/people/export", { body, retry: "rate-only" });
+      const { json, empty } = await call("POST", "/v1/people/export", { body, retry: "rate-only" });
+      if (empty) return { empty: true };
       const trackId = text(json?.trackId);
       if (!trackId) throw new AiArkError("server", "AI Ark accepted the export but returned no trackId");
       return { trackId, state: text(json?.state) || "PENDING" };
@@ -228,20 +238,24 @@ export function createAiArk({ token, transport = fetchTransport, rps = 4, timeou
       };
     },
 
-    /** One page of a finished export's people, emails included. Free; 409 until DONE. */
+    /**
+     * One page of a finished export's people, emails included. Free; 409 until
+     * DONE. An answer with no list of people is a failed read, not an empty page.
+     */
     async exportResults(trackId, { page = 0, size = PAGE_MAX } = {}) {
       const { json } = await call("GET", `/v1/people/export/${encodeURIComponent(trackId)}/inquiries`, {
         query: { page: String(page), size: String(size) },
         trackId: true,
       });
-      const content = Array.isArray(json?.content) ? json.content : [];
-      const totalPages = Number(json?.totalPages ?? 0) || 0;
-      return { content, totalPages, totalElements: Number(json?.totalElements ?? 0) || 0, last: json?.last === true || page + 1 >= totalPages };
+      if (!Array.isArray(json?.content)) throw new AiArkError("server", "AI Ark's export results had no list of people");
+      const totalPages = Number(json.totalPages ?? 0) || 0;
+      return { content: json.content, totalPages, totalElements: Number(json.totalElements ?? 0) || 0, last: json.last === true || page + 1 >= totalPages };
     },
 
-    /** The key's recent export submissions, newest first. Free. */
-    async exportSubmissions({ size = 25 } = {}) {
-      const { json } = await call("GET", "/v1/people/export/submissions", { query: { page: "0", size: String(size), sort: "created,desc" } });
+    /** One page of the key's export submissions, newest first, refunded ones only if asked. Free. */
+    async exportSubmissions({ page = 0, size = 25, fullyRefunded = null } = {}) {
+      const query = { page: String(page), size: String(size), sort: "created,desc", ...(fullyRefunded === null ? {} : { fullyRefunded: String(fullyRefunded) }) };
+      const { json } = await call("GET", "/v1/people/export/submissions", { query });
       return Array.isArray(json?.content) ? json.content : [];
     },
   };

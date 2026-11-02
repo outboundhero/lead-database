@@ -86,6 +86,8 @@ export interface AiArkRun {
   finished_at: string | null;
   updated_at: string;
   searches: number;
+  /** Cancelled, but still reading the export AI Ark was already paid for. */
+  finishing: boolean;
   lists_note: string | null;
   excluded: number | null;
   job_state: string | null;
@@ -97,8 +99,10 @@ export interface AiArkRun {
 export interface AiArkSetup {
   modes: AiArkModes;
   client: { tag: string; name: string | null; client_type: string | null; status: string | null } | null;
-  targeting: { updatedAt: string; places: number; excludeTerms: number; commercialCleaning: boolean } | null;
-  people: { saved: boolean; updatedAt: string | null; defaultsFrom: "cleaning" | null; value: PeopleFilters };
+  /** version: the rules' updated_at as text, sent back with a pull. */
+  targeting: { updatedAt: string; version: string; places: number; excludeTerms: number; commercialCleaning: boolean } | null;
+  /** version: the saved filters' updated_at as text (null when nothing is saved), sent back with a save or a pull. */
+  people: { saved: boolean; updatedAt: string | null; version: string | null; defaultsFrom: "cleaning" | null; value: PeopleFilters };
   plan: AiArkPlan;
   runs: AiArkRun[];
   credits: Partial<Record<RunMode, { credits: number | null; error: string | null }>>;

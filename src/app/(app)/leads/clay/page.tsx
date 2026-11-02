@@ -60,12 +60,16 @@ const RUN_STATUS_LABEL: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
+/** Cancelled, but still reading the export it had already paid for. */
+const finishing = (r: NonNullable<EnrichTableSummary["run"]>) => r.status === "cancelled" && !r.finished_at;
+
 /** One AI Ark run table, as the run picker shows it. */
 function runLabel(t: EnrichTableSummary) {
   const r = t.run;
   if (!r) return t.name;
   const when = new Date(r.created_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-  return `${when} · ${fmt(r.pulled)} of ${fmt(r.size)} · ${RUN_STATUS_LABEL[r.status] ?? r.status}${r.mode === "demo" ? " · demo" : ""}`;
+  const status = finishing(r) ? "Finishing" : RUN_STATUS_LABEL[r.status] ?? r.status;
+  return `${when} · ${fmt(r.pulled)} of ${fmt(r.size)} · ${status}${r.mode === "demo" ? " · demo" : ""}`;
 }
 
 const STATUS_PILLS: { value: RowStatus | ""; label: string }[] = [
@@ -106,16 +110,24 @@ function ClayTab() {
   const router = useRouter();
   const tableId = useSearchParams().get("t");
   const [tables, setTables] = useState<EnrichTableSummary[] | null>(null);
+  const [tablesError, setTablesError] = useState(false);
   const [worker, setWorker] = useState<WorkerState | null>(null);
 
+  // A failed refresh keeps the tables already on screen; only a first load that
+  // fails says so, rather than reading as "No Clay tables yet".
   const loadTables = useCallback(() => {
     fetch("/api/enrich/tables")
-      .then((r) => r.json())
+      .then(async (r) => {
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error ?? "Could not load the Clay tables");
+        return j;
+      })
       .then((j) => {
         setTables(j.tables ?? []);
         setWorker(j.worker ?? null);
+        setTablesError(false);
       })
-      .catch(() => setTables([]));
+      .catch(() => setTablesError(true));
   }, []);
 
   useEffect(() => {
@@ -131,7 +143,7 @@ function ClayTab() {
   const table = tables?.find((t) => t.id === tableId) ?? null;
 
   // While the open AI Ark run is still pulling, keep its progress in the run picker current.
-  const pulling = table?.run && (table.run.status === "queued" || table.run.status === "running");
+  const pulling = table?.run && (table.run.status === "queued" || table.run.status === "running" || finishing(table.run));
   useEffect(() => {
     if (!pulling) return;
     const t = setInterval(() => {
@@ -204,6 +216,15 @@ function ClayTab() {
         </div>
       </div>
 
+      {tablesError && (
+        <div className="rounded-2xl bg-destructive/10 p-4 text-[13px] text-destructive">
+          Could not load the Clay tables{tables ? " just now; what is on screen may be out of date" : ""}.{" "}
+          <button type="button" className="font-semibold underline" onClick={loadTables}>
+            Try again
+          </button>
+        </div>
+      )}
+
       {tables && tables.length === 0 && (
         <div className="rounded-2xl bg-card p-10 text-center shadow-ios">
           <p className="text-[15px] font-semibold">No Clay tables yet</p>
@@ -227,7 +248,7 @@ function ClayTab() {
                   type="button"
                   disabled={!t}
                   onClick={() => t && !active && router.replace(`/leads/clay?t=${t.id}`)}
-                  title={t ? undefined : runs ? "No AI Ark runs yet: start one on the AI Ark tab" : "Built in Phase 2"}
+                  title={t ? undefined : runs ? "No AI Ark runs yet: start one on the AI Ark tab" : "This client's table hasn't been set up yet"}
                   className={cn(
                     "-mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-[13.5px] font-medium transition-colors",
                     active ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
@@ -240,7 +261,7 @@ function ClayTab() {
                   ) : t ? (
                     <span className="rounded-full bg-muted px-1.5 text-[11px] tabular-nums text-muted-foreground">{fmt(t.row_count)}</span>
                   ) : (
-                    <span className="rounded-full bg-muted px-1.5 text-[10px] text-muted-foreground">Phase 2</span>
+                    <span className="rounded-full bg-muted px-1.5 text-[10px] text-muted-foreground">not set up</span>
                   )}
                 </button>
               );
@@ -265,6 +286,13 @@ function ClayTab() {
               </div>
             )}
           </div>
+          {table.run && (table.run.stop_reason || table.run.last_error || finishing(table.run)) && (
+            <p className={cn("text-[12.5px]", table.run.status === "error" ? "text-destructive" : "text-muted-foreground")}>
+              {finishing(table.run)
+                ? "Cancelled: nothing new is bought. The export AI Ark was already paid for is still being read in."
+                : [table.run.stop_reason, table.run.last_error].filter(Boolean).join(" · ")}
+            </p>
+          )}
           {/* keyed: switching tables starts every filter, page and selection afresh */}
           <TableView key={table.id} table={table} onWorker={setWorker} onRowsChanged={loadTables} />
         </>
@@ -351,13 +379,15 @@ function TableView({
   }, [query, tick]);
 
   // Live updates: every 2.5 s while rows are queued or running, else every 10 s.
+  // A tick while the page is hidden is skipped, not the timer, so updates resume
+  // when it is shown again.
   const busy = (detail?.statuses.queued ?? 0) + (detail?.statuses.running ?? 0) > 0;
   useEffect(() => {
-    const t = setTimeout(() => {
+    const t = setInterval(() => {
       if (document.visibilityState === "visible") setTick((n) => n + 1);
     }, busy ? 2_500 : 10_000);
-    return () => clearTimeout(t);
-  }, [busy, tick]);
+    return () => clearInterval(t);
+  }, [busy]);
 
   const refresh = useCallback(() => setTick((n) => n + 1), []);
 

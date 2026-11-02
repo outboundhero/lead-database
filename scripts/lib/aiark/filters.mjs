@@ -1,11 +1,14 @@
 // What AI Ark is asked for a client: the client's rules (client_targeting —
 // locations and exclusion terms, synced from the sheets) plus its people
 // filters (client_people_filters — titles, seniority, departments, company
-// size), turned into People Search filter bodies exactly as AI Ark documents
-// them (docs.ai-ark.com, checked 2026-10-30).
+// size), turned into People Search filter bodies in the shapes AI Ark documents
+// (docs.ai-ark.com, checked 2026-10-30). The one thing it does not document is
+// a city with its state, so places go out as "City, State" on trust and every
+// person is re-checked after the pull.
 //
-// Nothing is dropped silently: every list that has to be cut says so in the
-// report, and anything that blocks a count or a pull is a blocker.
+// Nothing is dropped silently: a value that can't be used is refused when the
+// filters are saved, every list that has to be cut says so in the report, and
+// anything that blocks a count or a pull is a blocker.
 //
 // Plain JavaScript: the AI Ark tab's routes and the worker share it.
 
@@ -33,9 +36,10 @@ export const INDUSTRY_SUGGESTIONS = [
 ];
 
 /**
- * A starting point for cleaning clients: the three role tracks used in Clay
- * (CEO / owner, operations, facility / office manager) and the titles its
- * agents were told to skip. Shown, not saved, until someone saves it.
+ * A starting point for cleaning clients, drawn from the three role tracks used
+ * in Clay (CEO / owner, operations, facility / office manager) and the titles
+ * its agents were told to skip. Part of each list, not all of it. Shown, not
+ * saved, until someone saves it.
  */
 export const CLEANING_DEFAULTS = {
   titles: [
@@ -62,13 +66,20 @@ export const EMPTY_PEOPLE_FILTERS = {
 
 const clean = (v) => (v == null ? "" : String(v).replace(/\s+/g, " ").trim());
 
-function list(v, { lower = false, max = 120 } = {}) {
+const VALUE_MAX = 120;
+
+/** Trimmed, de-duplicated values. One over VALUE_MAX goes into `tooLong`, for the caller to report. */
+function list(v, { lower = false, tooLong = [] } = {}) {
   const out = [];
   const seen = new Set();
   for (const raw of Array.isArray(v) ? v : []) {
     let s = clean(raw);
     if (lower) s = s.toLowerCase();
-    if (!s || s.length > max) continue;
+    if (!s) continue;
+    if (s.length > VALUE_MAX) {
+      tooLong.push(s);
+      continue;
+    }
     const k = s.toLowerCase();
     if (seen.has(k)) continue;
     seen.add(k);
@@ -84,17 +95,19 @@ function list(v, { lower = false, max = 120 } = {}) {
 export function cleanPeopleFilters(input) {
   const errors = [];
   const f = input && typeof input === "object" ? input : {};
-  const titles = list(f.titles);
-  const exclude_titles = list(f.exclude_titles);
+  const tooLong = [];
+  const titles = list(f.titles, { tooLong });
+  const exclude_titles = list(f.exclude_titles, { tooLong });
   const title_mode = TITLE_MODES.includes(String(f.title_mode ?? "").toUpperCase()) ? String(f.title_mode).toUpperCase() : "SMART";
-  const seniority = list(f.seniority, { lower: true });
+  const seniority = list(f.seniority, { lower: true, tooLong });
   const badSeniority = seniority.filter((s) => !SENIORITY.includes(s));
   if (badSeniority.length) errors.push(`Unknown seniority: ${badSeniority.join(", ")} (AI Ark has ${SENIORITY.join(", ")})`);
-  const departments = list(f.departments, { lower: true });
+  const departments = list(f.departments, { lower: true, tooLong });
   const badDept = departments.filter((d) => !/^[a-z][a-z0-9_]*$/.test(d));
   if (badDept.length) errors.push(`Departments are AI Ark catalog values written like facility_administration: ${badDept.join(", ")}`);
-  const industries = list(f.industries, { lower: true });
-  const exclude_industries = list(f.exclude_industries, { lower: true });
+  const industries = list(f.industries, { lower: true, tooLong });
+  const exclude_industries = list(f.exclude_industries, { lower: true, tooLong });
+  if (tooLong.length) errors.push(`Over ${VALUE_MAX} characters: ${tooLong.map((s) => `"${s.slice(0, 40)}…"`).join(", ")}`);
 
   const employee_bands = [];
   for (const b of Array.isArray(f.employee_bands) ? f.employee_bands : []) {
@@ -182,13 +195,15 @@ export function buildRequests({ targeting, people, geo }) {
     notes.push(`AI Ark matches excluded words as whole words; the lead database matches them anywhere in the text ("bar" also drops "Barbershop"). That stricter check runs after the pull.`);
   }
 
-  const titles = list(p.titles).slice(0, ARRAY_MAX);
-  const excludeTitles = list(p.exclude_titles).slice(0, ARRAY_MAX);
-  const seniority = list(p.seniority, { lower: true }).filter((s) => SENIORITY.includes(s));
-  const departments = list(p.departments, { lower: true }).slice(0, ARRAY_MAX);
+  const tooLong = [];
+  const titles = list(p.titles, { tooLong }).slice(0, ARRAY_MAX);
+  const excludeTitles = list(p.exclude_titles, { tooLong }).slice(0, ARRAY_MAX);
+  const seniority = list(p.seniority, { lower: true, tooLong }).filter((s) => SENIORITY.includes(s));
+  const departments = list(p.departments, { lower: true, tooLong }).slice(0, ARRAY_MAX);
   const bands = (Array.isArray(p.employee_bands) ? p.employee_bands : []).slice(0, MAX_BANDS);
-  const industries = list(p.industries, { lower: true }).slice(0, ARRAY_MAX);
-  const excludeIndustries = list(p.exclude_industries, { lower: true }).slice(0, ARRAY_MAX);
+  const industries = list(p.industries, { lower: true, tooLong }).slice(0, ARRAY_MAX);
+  const excludeIndustries = list(p.exclude_industries, { lower: true, tooLong }).slice(0, ARRAY_MAX);
+  if (tooLong.length) notes.push(`${tooLong.length} filter ${tooLong.length === 1 ? "value is" : "values are"} over ${VALUE_MAX} characters and left out.`);
   const mode = TITLE_MODES.includes(p.title_mode) ? p.title_mode : "SMART";
 
   if (!titles.length && !seniority.length && !departments.length) {

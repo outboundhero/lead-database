@@ -123,7 +123,7 @@ async function claim(n) {
          ORDER BY q.next_run_at, q.id
          LIMIT $2
            FOR UPDATE OF q SKIP LOCKED)
-      RETURNING r.id, r.table_id, r.run_force, r.attempts, r.created_at, r.claim_token`,
+      RETURNING r.id, r.table_id, r.run_force, r.attempts, r.created_at, r.claim_token, r.next_run_at`,
     [randomUUID(), n]
   );
   return rows;
@@ -296,8 +296,9 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
 async function aiarkLoop() {
   while (!shuttingDown) {
     let worked = null;
+    aiark.idle = false;
     try {
-      worked = await advanceOneRun({ pool, env, log });
+      worked = await advanceOneRun({ pool, env, log, shouldStop: () => shuttingDown });
       if (worked) aiark.slices++;
     } catch (e) {
       log(`AI Ark loop error: ${e.message}`);

@@ -1,9 +1,11 @@
 // A stand-in for AI Ark that never leaves the machine, offered only when
 // AIARK_DEMO=1. It answers the same endpoints, with the same shapes and the
-// same errors, as the documented API (./client.mjs), so a demo run exercises
-// every path a live run takes: Preview pages that cost a credit, exclusion
-// lists, single exports that charge only when an email is found, async export
-// jobs, 402 when the credits run out.
+// same errors, as the documented API (./client.mjs). A demo run shows the
+// ordinary paths: Preview pages that cost a credit, exclusion lists, single
+// exports that charge only when an email is found, async export jobs, 402 when
+// the credits run out. It runs with latency only, so refunds, expired jobs,
+// PROCESSING emails, 429s and 5xx answers come up only when a caller asks for
+// them through the options below, which scripts/test-aiark.mjs does.
 //
 // The people are made up (./demo-people.mjs): every web address is under the
 // reserved ".example" domain. The same filters always give the same people,
@@ -114,7 +116,13 @@ function excludedByFilters(p, ask) {
  *   jobMs       how long an export job takes to finish
  *   processingMs  after a job finishes, ~5% of its people still show their
  *                 email as PROCESSING for this long (tests the re-read path)
- *   faults      { rateEvery, serverEvery, refundJobOnce, expireJobOnce } for tests
+ *   faults      for tests:
+ *                 rateEvery, serverEvery   every Nth call answers 429 / 500
+ *                 refundJobOnce            the first look at a job finds it refunded
+ *                 refundAtReadOnce         the first results read finds it refunded (after DONE)
+ *                 expireJobOnce            the first results read answers 404, not refunded
+ *                 expireRefundedOnce       the same 404, for a job AI Ark did refund
+ *                 ignoreLists              exclusion lists leave nobody out
  */
 export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4_000, processingMs = 0, faults = {} } = {}) {
   const lists = new Map(); // list id -> Set of person ids
@@ -122,6 +130,7 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
   const people = new Map(); // person id -> person, for single exports
   const cache = new Map(); // filter seed -> people[]
   const state = { balance, calls: 0, charged: 0, listsMade: 0, refundedOnce: false, expiredOnce: false };
+  const REFUNDED = "this request was automatically refunded because the results were not delivered within the time limit. you can submit it again.";
 
   const answer = (status, json, headers = {}) => ({
     status,
@@ -134,6 +143,13 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
     state.balance = Math.round((state.balance - n) * 100) / 100;
     state.charged = Math.round((state.charged + n) * 100) / 100;
     return true;
+  };
+  const refund = (job) => {
+    const back = job.people.length * 0.5 + job.found * 0.5;
+    job.refunded = true;
+    job.done = true;
+    state.balance += back;
+    state.charged = Math.round((state.charged - back) * 100) / 100;
   };
 
   function populationOf(filters) {
@@ -160,7 +176,7 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
 
   function matching(body) {
     const excluded = new Set();
-    for (const id of contentOf(body.lists?.people_id?.exclude)) for (const p of lists.get(id) ?? []) excluded.add(p);
+    if (!faults.ignoreLists) for (const id of contentOf(body.lists?.people_id?.exclude)) for (const p of lists.get(id) ?? []) excluded.add(p);
     return populationOf(body).filter((p) => !excluded.has(p.id));
   }
 
@@ -243,35 +259,38 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
     }
 
     if (method === "GET" && path === "/v1/people/export/submissions") {
-      const content = [...jobs.values()]
-        .sort((a, b) => b.created - a.created)
-        .map((j) => ({
-          trackId: j.trackId,
-          service: "PEOPLE_EXPORT",
-          requestSize: j.size,
-          state: Date.now() >= j.doneAt ? "SETTLED" : "PENDING",
-          fullyRefunded: false,
-          refundReason: null,
-          created: new Date(j.created).toISOString(),
-        }));
-      return answer(200, { content, totalElements: content.length });
+      const refundedOnly = u.searchParams.get("fullyRefunded");
+      const all = [...jobs.values()]
+        .filter((j) => refundedOnly === null || Boolean(j.refunded) === (refundedOnly === "true"))
+        .sort((a, b) => b.created - a.created);
+      const page = Math.max(0, Number(u.searchParams.get("page") ?? 0) || 0);
+      const size = Math.min(100, Math.max(1, Number(u.searchParams.get("size") ?? 25) || 25));
+      const content = all.slice(page * size, page * size + size).map((j) => ({
+        trackId: j.trackId,
+        service: "PEOPLE_EXPORT",
+        requestSize: j.size,
+        state: Date.now() >= j.doneAt ? "SETTLED" : "PENDING",
+        fullyRefunded: Boolean(j.refunded),
+        refundReason: j.refunded ? "STUCK_HARD_REFUND" : null,
+        created: new Date(j.created).toISOString(),
+      }));
+      return answer(200, { content, totalElements: all.length });
     }
 
     const m = /^\/v1\/people\/export\/([^/]+)\/(statistics|inquiries)$/.exec(path);
     if (m && method === "GET") {
       const job = jobs.get(decodeURIComponent(m[1]));
-      if (!job) return appError(404, "track id expired or not found");
-      if (faults.refundJobOnce && !state.refundedOnce) {
+      if (!job || job.expired) return appError(404, "track id expired or not found");
+      if (job.refunded) return answer(403, { timestamp: new Date().toISOString(), status: 4031013, error: REFUNDED, path: "" });
+      if ((faults.refundJobOnce || (faults.refundAtReadOnce && m[2] === "inquiries")) && !state.refundedOnce) {
         state.refundedOnce = true;
-        jobs.delete(job.trackId);
-        const refund = job.people.length * 0.5 + job.found * 0.5;
-        state.balance += refund;
-        state.charged = Math.round((state.charged - refund) * 100) / 100;
-        return appError(403, "this request was automatically refunded because the results were not delivered within the time limit. you can submit it again.");
+        refund(job);
+        return answer(403, { timestamp: new Date().toISOString(), status: 4031013, error: REFUNDED, path: "" });
       }
-      if (faults.expireJobOnce && !state.expiredOnce && m[2] === "inquiries") {
+      if ((faults.expireJobOnce || faults.expireRefundedOnce) && !state.expiredOnce && m[2] === "inquiries") {
         state.expiredOnce = true;
-        jobs.delete(job.trackId);
+        if (faults.expireRefundedOnce) refund(job);
+        job.expired = true;
         return appError(404, "track id expired or not found");
       }
       const done = Date.now() >= job.doneAt;

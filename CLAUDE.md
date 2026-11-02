@@ -2082,6 +2082,44 @@ threshold today; `?fresh=1` for those clients exceeds its 30 s cap.
    spending on a move; free mitigations first (verify the session JWT locally
    instead of `auth.getUser()` per request, dedupe the double client-tags fetch).
 
+## Clay tab and AI Ark tab (migrations 122, 123)
+
+Two manager-only tabs, applied to production 2026-10-31. Neither writes `leads`.
+
+- **Clay tab** (`/leads/clay`): a client's Clay tables rebuilt as generic
+  `enrich_tables` / `enrich_columns` / `enrich_rows` / `enrich_cells`. Column
+  definitions (Clay's formulas, waterfalls, run conditions, verbatim) are loaded
+  with `node scripts/enrich-seed-table.mjs <spec.json>`; specs hold a client's
+  exclusion lists and prompts, so they live in the git-ignored `enrich-specs/`,
+  never in this public repo. Rows arrive from the GMaps Scraper
+  (`POST /api/enrich/intake`, Bearer `ENRICH_INTAKE_KEY`) or a CSV.
+- **AI Ark tab** (`/leads/ai-ark`): pick a client, see what AI Ark will be asked
+  (locations and exclusion terms from `client_targeting`, job titles / seniority /
+  company size from `client_people_filters`), count (People Preview, 1 credit a
+  search), then pull. Each pull is an `aiark_runs` row and its own Clay-tab table
+  (kind `ai_ark`), where every person gets an Outcome ("Ready to add", "No email",
+  "Outside the client's area" …). `aiark_people` records everyone bought so no
+  run pays twice (AI Ark exclusion lists cover the newest 100,000).
+- **The worker** `scripts/enrich-worker.mjs` (`npm run enrich-worker`) fills the
+  Clay cells and works AI Ark runs. ⚠ It has **no Railway service yet**: until one
+  exists, nothing on either tab runs in production. Give it the no-op build command
+  (`echo 'worker service: no next build'`, see "Every worker service MUST override
+  the build command") and `DATABASE_URL`.
+- **Env:** `AIARK_API_KEY` on **both** the web service (count, balance) and the
+  worker (pulls); `AIARK_WEBHOOK_URL` only for the export strategy (this app's
+  `/api/aiark/webhook` on its public HTTPS host); `AIARK_RPS` (worker, 4) and
+  `AIARK_RPS_WEB` (1) keep one key at AI Ark's 5 a second. ⚠ **Never set
+  `AIARK_DEMO` in production**: it turns on made-up demo runs that write into the
+  real tables.
+- **Before the first live pull:** AI Ark's written consent to load its data
+  (terms §6.2); one 1-credit count to learn how AI Ark reads "City, State" (sent as
+  "Armonk, New York", a format its docs don't define); a small supervised pull of
+  each strategy to confirm the response shapes, which so far were only tested
+  against the demo stand-in.
+- **Tests:** stop the worker, then
+  `AIARK_TEST_TAG=<cleaning client tag> node --env-file=.env.local scripts/test-aiark.mjs`
+  (local database only; it refuses any other).
+
 ## Known issues / TODO
 
 - [ ] Reoon bulk endpoint batch size — confirm exact cap from docs before tuning `VALIDATION_BATCH_SIZE`

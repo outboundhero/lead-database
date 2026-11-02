@@ -54,6 +54,7 @@ const OUTCOMES: { key: string; cls: string }[] = [
   { key: "No email", cls: "bg-muted text-muted-foreground" },
   { key: "Outside the client's area", cls: "bg-[var(--warning)]/15 text-[var(--warning)]" },
   { key: "Excluded by the client's rules", cls: "bg-[var(--warning)]/15 text-[var(--warning)]" },
+  { key: "Email still being checked", cls: "bg-muted text-muted-foreground" },
   { key: "Bounced", cls: "bg-destructive/12 text-destructive" },
   { key: "On the never-contact list", cls: "bg-destructive/12 text-destructive" },
 ];
@@ -61,9 +62,19 @@ const OUTCOMES: { key: string; cls: string }[] = [
 const EMAIL_RATE = 0.6; // assumed share of people with a valid email, for estimates
 const fmt = (n: number | null | undefined) => (n ?? 0).toLocaleString("en-US");
 const cr = (n: number | null | undefined) => (n ?? 0).toLocaleString("en-US", { maximumFractionDigits: 1 });
-const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-const isActive = (r: AiArkRun) => r.status === "queued" || r.status === "running";
 const bandKey = (b: EmployeeBand) => `${b.start ?? ""}-${b.end ?? ""}`;
+/** Running, or cancelled but still reading the export it paid for. */
+const isActive = (r: AiArkRun) => r.status === "queued" || r.status === "running" || r.finishing;
+
+/** Filters as AI Ark reads them: the order of chips doesn't matter. */
+function canonical(f: PeopleFilters) {
+  const sorted = (a: string[]) => [...a].sort();
+  return JSON.stringify([
+    f.title_mode, sorted(f.titles), sorted(f.exclude_titles), sorted(f.seniority), sorted(f.departments),
+    sorted(f.employee_bands.map(bandKey)), sorted(f.industries), sorted(f.exclude_industries),
+  ]);
+}
+const countKeyOf = (tag: string, mode: RunMode, f: PeopleFilters) => `${tag}|${mode}|${canonical(f)}`;
 
 /** The same arithmetic as estimateCredits in scripts/lib/aiark/filters.mjs. */
 function estimate(strategy: RunStrategy, size: number, searches: number) {
@@ -72,6 +83,11 @@ function estimate(strategy: RunStrategy, size: number, searches: number) {
   const pages = Math.ceil(n / 100) + Math.max(0, searches - 1);
   return { low: pages, expected: pages + Math.round(n * EMAIL_RATE), high: pages + n };
 }
+
+/** Where a run stops itself: spendCeiling in scripts/lib/aiark/runs.mjs. */
+const spendCeiling = (size: number, searches: number) => Math.ceil(size * 1.25) + 5 * Math.max(1, searches) + 10;
+
+type HeldCount = CountResult & { key: string };
 
 export default function AiArkPage() {
   return (
@@ -93,7 +109,7 @@ function AiArkTab() {
   const [planErrors, setPlanErrors] = useState<string[]>([]);
   const [planning, setPlanning] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [count, setCount] = useState<CountResult | null>(null);
+  const [count, setCount] = useState<HeldCount | null>(null);
   const [counting, setCounting] = useState(false);
   const [runs, setRuns] = useState<AiArkRun[]>([]);
   const [mode, setMode] = useState<RunMode>("demo");
@@ -101,25 +117,42 @@ function AiArkTab() {
   const [size, setSize] = useState(500);
   const [starting, setStarting] = useState(false);
   const [showBody, setShowBody] = useState(false);
+  // The versions of the saved filters and the rules this page loaded: sent back
+  // with a save or a pull, so neither can act on something changed since.
+  const [versions, setVersions] = useState<{ people: string | null; rules: string | null }>({ people: null, rules: null });
   const planFor = useRef<string>("");
+  // A response is used only if it still belongs to the client and filters on screen.
+  const loadSeq = useRef(0);
+  const tagRef = useRef(tag);
+  const formRef = useRef(form);
+  useEffect(() => {
+    tagRef.current = tag;
+  }, [tag]);
+  useEffect(() => {
+    formRef.current = form;
+  }, [form]);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoadError(null);
     try {
       const res = await fetch(`/api/aiark/setup${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`);
       const j = await res.json();
+      if (seq !== loadSeq.current) return;
       if (!res.ok) throw new Error(j.error ?? "Could not load the AI Ark tab");
       const s = j as AiArkSetup;
       setSetup(s);
       setRuns(s.runs);
       setForm(s.people.value);
       setSaved(s.people.saved ? s.people.value : null);
+      setVersions({ people: s.people.version, rules: s.targeting?.version ?? null });
       setPlan(s.plan);
       setPlanErrors([]);
       planFor.current = JSON.stringify(s.people.value);
       // Keep the chosen source while it works; otherwise whichever is ready (demo first when both are).
       setMode((m) => (s.modes[m].ready ? m : s.modes.demo.ready ? "demo" : "live"));
     } catch (e) {
+      if (seq !== loadSeq.current) return;
       setLoadError(e instanceof Error ? e.message : "Could not load the AI Ark tab");
     }
   }, [tag]);
@@ -130,6 +163,7 @@ function AiArkTab() {
       const res = await fetch(`/api/aiark/setup${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`);
       if (!res.ok) return;
       const s = (await res.json()) as AiArkSetup;
+      if (tag !== tagRef.current) return;
       setSetup((prev) => (prev ? { ...prev, credits: s.credits, worker: s.worker, modes: s.modes } : prev));
       setRuns(s.runs);
     } catch {
@@ -148,7 +182,10 @@ function AiArkTab() {
   useEffect(() => {
     if (!tag || !form) return;
     const key = JSON.stringify(form);
-    if (key === planFor.current) return;
+    if (key === planFor.current) {
+      setPlanning(false); // an edit undone before its plan came back
+      return;
+    }
     setPlanning(true);
     const ctl = new AbortController();
     const t = setTimeout(async () => {
@@ -164,11 +201,10 @@ function AiArkTab() {
         planFor.current = key;
         setPlan(j.plan);
         setPlanErrors(j.errors ?? []);
-        setCount(null);
       } catch (e) {
         if ((e as Error).name !== "AbortError") toast.error((e as Error).message);
       } finally {
-        setPlanning(false);
+        if (!ctl.signal.aborted) setPlanning(false);
       }
     }, 400);
     return () => {
@@ -177,45 +213,72 @@ function AiArkTab() {
     };
   }, [tag, form]);
 
-  // Runs: every 2.5 s while one is going, else every 20 s. When one ends, the balance is re-read.
+  // Runs and the worker's state: every 2.5 s while one is going, else every
+  // 20 s, and at once when the page is shown again. A hidden page skips a tick
+  // but keeps the timer, so polling never stops for good.
   const anyActive = runs.some(isActive);
+  const loaded = setup !== null;
+  useEffect(() => {
+    if (!loaded) return;
+    let ctl: AbortController | null = null;
+    const tick = async () => {
+      if (document.visibilityState !== "visible") return;
+      ctl?.abort();
+      ctl = new AbortController();
+      try {
+        const res = await fetch(`/api/aiark/runs${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`, { signal: ctl.signal });
+        const j = await res.json();
+        if (!res.ok || tag !== tagRef.current) return;
+        setRuns(j.runs);
+        setSetup((s) => (s ? { ...s, worker: j.worker } : s));
+      } catch {
+        /* aborted, or the next tick tries again */
+      }
+    };
+    const timer = setInterval(tick, anyActive ? 2_500 : 20_000);
+    const onShow = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    document.addEventListener("visibilitychange", onShow);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onShow);
+      ctl?.abort();
+    };
+  }, [loaded, tag, anyActive]);
+
+  // When a run ends, the balance is read again.
   const wasActive = useRef(false);
   useEffect(() => {
-    if (!setup) return;
     if (wasActive.current && !anyActive) refreshQuietly();
     wasActive.current = anyActive;
-    const t = setTimeout(async () => {
-      if (document.visibilityState !== "visible") return;
-      try {
-        const res = await fetch(`/api/aiark/runs${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`);
-        const j = await res.json();
-        if (res.ok) setRuns(j.runs);
-      } catch {
-        /* the next tick tries again */
-      }
-    }, anyActive ? 2_500 : 20_000);
-    return () => clearTimeout(t);
-  }, [setup, runs, anyActive, tag, refreshQuietly]);
+  }, [anyActive, refreshQuietly]);
 
   if (!canView) return <AccessDenied />;
 
-  const dirty = !!form && (!saved || !same(form, saved));
+  const dirty = !!form && (!saved || canonical(form) !== canonical(saved));
   const set = <K extends keyof PeopleFilters>(k: K, v: PeopleFilters[K]) => setForm((f) => (f ? { ...f, [k]: v } : f));
+  // A count only counts for the client, source and filters it was made for.
+  const countNow = count && tag && form && count.key === countKeyOf(tag, mode, form) ? count : null;
 
   const save = async () => {
     if (!tag || !form) return;
+    const sent = form;
     setSaving(true);
     try {
       const res = await fetch("/api/aiark/people-filters", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tag, filters: form }),
+        body: JSON.stringify({ tag, filters: form, version: versions.people }),
       });
       const j = await res.json();
+      if (tag !== tagRef.current) return; // another client is on screen now
       if (!res.ok) throw new Error(j.error ?? "Could not save");
-      setForm(j.value);
       setSaved(j.value);
-      setSetup((s) => (s ? { ...s, people: { saved: true, updatedAt: j.updatedAt, defaultsFrom: null, value: j.value } } : s));
+      setVersions((v) => ({ ...v, people: j.version }));
+      // Edits made while the save was on its way stay on screen, as unsaved.
+      if (formRef.current === sent) setForm(j.value);
+      setSetup((s) => (s ? { ...s, people: { saved: true, updatedAt: j.updatedAt, version: j.version, defaultsFrom: null, value: j.value } } : s));
       toast.success(`People filters saved for ${tag}`);
     } catch (e) {
       toast.error((e as Error).message);
@@ -226,6 +289,7 @@ function AiArkTab() {
 
   const runCount = async () => {
     if (!tag || !form) return;
+    const key = countKeyOf(tag, mode, form);
     setCounting(true);
     try {
       const res = await fetch("/api/aiark/count", {
@@ -235,7 +299,7 @@ function AiArkTab() {
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error ?? "The count failed");
-      setCount(j);
+      setCount({ ...j, key }); // shown only while the same client, source and filters are on screen
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -244,19 +308,24 @@ function AiArkTab() {
   };
 
   const start = async () => {
-    if (!tag) return;
+    if (!tag || !countNow) return;
     const est = estimate(strategy, size, plan?.searches ?? 1);
-    const what = mode === "demo" ? "a DEMO pull (made-up people, nothing bought)" : `a LIVE pull — about ${cr(est.expected)} AI Ark credits, at most ${cr(est.high)}`;
+    const what = mode === "demo"
+      ? "a DEMO pull (made-up people, nothing bought)"
+      : `a LIVE pull — about ${cr(est.expected)} AI Ark credits; the run stops itself before passing ${cr(spendCeiling(size, plan?.searches ?? 1))}`;
     if (!window.confirm(`Start ${what} of ${fmt(size)} people for ${tag}?`)) return;
     setStarting(true);
     try {
       const res = await fetch("/api/aiark/runs", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tag, mode, strategy, size, matchCount: count?.mode === mode ? count.total : null }),
+        body: JSON.stringify({
+          tag, mode, strategy, size, matchCount: countNow.total, peopleVersion: versions.people, rulesVersion: versions.rules,
+        }),
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error ?? "Could not start the pull");
+      if (tag !== tagRef.current) return;
       setRuns((rs) => [j.run, ...rs]);
       toast.success(setup?.worker?.online ? "Pull queued — the worker picks it up in a few seconds" : "Pull queued — start the enrichment worker to run it");
     } catch (e) {
@@ -267,21 +336,31 @@ function AiArkTab() {
   };
 
   const cancel = async (run: AiArkRun) => {
-    const extra = run.strategy === "export" ? " An export job AI Ark has already accepted still finishes and is charged." : "";
-    if (!window.confirm(`Cancel this pull? Everyone pulled so far stays in its table.${extra}`)) return;
-    const res = await fetch("/api/aiark/runs/cancel", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: run.id }),
-    });
-    const j = await res.json();
-    if (!res.ok) return toast.error(j.error ?? "Could not cancel");
-    toast.success(j.note ?? "Pull cancelled");
-    setRuns((rs) => rs.map((r) => (r.id === run.id ? { ...r, status: "cancelled" } : r)));
+    const extra = run.strategy === "export"
+      ? " If AI Ark has already taken this run's export, that job is still charged, and its people are still read in so nobody paid for is lost."
+      : "";
+    if (!window.confirm(`Cancel this pull? Nothing new is bought, and everyone pulled so far stays in its table.${extra}`)) return;
+    try {
+      const res = await fetch("/api/aiark/runs/cancel", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: run.id }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error ?? "Could not cancel the pull");
+      toast.success(j.note ?? "Pull cancelled");
+      setRuns((rs) => rs.map((r) => (r.id === run.id ? { ...r, status: "cancelled", finishing: Boolean(j.note) } : r)));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not cancel the pull");
+    }
   };
+
+  // Reload and a client switch replace the filters on screen: ask first if they aren't saved.
+  const keepEdits = () => !dirty || window.confirm("The people filters have changes that aren't saved. Leave without saving them?");
 
   const modes = setup?.modes;
   const est = estimate(strategy, size, plan?.searches ?? 1);
+  const ceiling = spendCeiling(size, plan?.searches ?? 1);
   const blockers = [...(plan?.blockers ?? []), ...planErrors];
   const exportReady = mode === "demo" || !!modes?.exportLive.ready;
   const activeHere = runs.find((r) => isActive(r) && r.client_tag === tag);
@@ -292,8 +371,9 @@ function AiArkTab() {
     plan?.pullBlockers.length ? plan.pullBlockers[0] :
     dirty ? "Save the people filters first — a pull always uses the saved filters" :
     strategy === "export" && !exportReady ? modes?.exportLive.why ?? "Export needs a webhook address" :
-    activeHere ? "This client already has a pull going" :
+    activeHere ? (activeHere.finishing ? "This client's cancelled pull is still reading what it paid for" : "This client already has a pull going") :
     !Number.isInteger(size) || size < 1 || size > 10_000 ? "Pull between 1 and 10,000 people" :
+    !countNow ? "Count the matches first — a pull starts after a count of these filters" :
     null;
 
   return (
@@ -309,7 +389,12 @@ function AiArkTab() {
           </div>
         </div>
         <div className="ml-2">
-          <ClientSelector clientTag={tag} onChange={(t) => router.replace(t ? `/leads/ai-ark?client=${encodeURIComponent(t)}` : "/leads/ai-ark")} />
+          <ClientSelector
+            clientTag={tag}
+            onChange={(t) => {
+              if (keepEdits()) router.replace(t ? `/leads/ai-ark?client=${encodeURIComponent(t)}` : "/leads/ai-ark");
+            }}
+          />
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {setup && <ModePill setup={setup} />}
@@ -321,7 +406,7 @@ function AiArkTab() {
               <AlertTriangle className="size-3.5" /> Worker not running
             </span>
           )}
-          <Button size="sm" variant="outline" onClick={load} aria-label="Reload">
+          <Button size="sm" variant="outline" onClick={() => keepEdits() && load()} aria-label="Reload">
             <RefreshCw />
           </Button>
         </div>
@@ -611,10 +696,14 @@ function AiArkTab() {
                     <>About <b>{cr(est.expected)}</b> demo credits (made up — nothing is bought).</>
                   ) : (
                     <>
-                      About <b>{cr(est.expected)}</b> AI Ark credits — at least {cr(est.low)}, at most {cr(est.high)} if everyone has an email.
+                      About <b>{cr(est.expected)}</b> AI Ark credits ({cr(est.high)} if everyone has an email). The run stops itself before passing{" "}
+                      {cr(ceiling)}.
                     </>
                   )}{" "}
-                  <span className="text-muted-foreground">Assumes 6 in 10 people have an email. Nobody already bought is bought again.</span>
+                  <span className="text-muted-foreground">
+                    Assumes 6 in 10 people have an email. People bought before are left out up to AI Ark&apos;s list limits; past those, an export job
+                    can buy some of them again.
+                  </span>
                   {setup.credits[mode]?.credits != null && (
                     <span className="block text-muted-foreground">{cr(setup.credits[mode]!.credits)} credits left{mode === "demo" ? " on the demo account" : ""}.</span>
                   )}
@@ -631,7 +720,7 @@ function AiArkTab() {
                   </Button>
                 </div>
                 {pullWhyNot && tag && <p className="-mt-2 text-[12px] text-muted-foreground">{pullWhyNot}.</p>}
-                {count && <CountView count={count} />}
+                {countNow && <CountView count={countNow} />}
               </div>
             </Card>
 
@@ -687,7 +776,7 @@ function CountView({ count }: { count: CountResult }) {
           · {count.credits} credit{count.credits === 1 ? "" : "s"} used{count.perSearch.length > 1 ? ` · ${count.perSearch.map(fmt).join(" + ")}` : ""}
         </span>
       </p>
-      <p className="mt-0.5 text-[11.5px] text-muted-foreground">Includes people bought before; a pull leaves them out.</p>
+      <p className="mt-0.5 text-[11.5px] text-muted-foreground">Includes people bought before; a pull leaves them out, up to AI Ark&apos;s list limits.</p>
       {count.sample.length > 0 && (
         <table className="mt-2 w-full text-[12px]">
           <thead className="text-left text-muted-foreground">
@@ -716,7 +805,7 @@ function CountView({ count }: { count: CountResult }) {
 }
 
 function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
-  const st = STATUS[run.status];
+  const st = run.finishing ? { label: "Finishing", cls: STATUS.running.cls } : STATUS[run.status];
   const pct = run.size_requested ? Math.min(100, Math.round((run.pulled / run.size_requested) * 100)) : 0;
   const when = new Date(run.created_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const waiting = run.strategy === "export" && run.status === "running" && run.job_state && run.job_state !== "DONE";
@@ -724,7 +813,7 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
     <div className="py-3 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center gap-2">
         <span className={cn("rounded-full px-2 py-0.5 text-[11.5px] font-semibold", st.cls)}>
-          {run.status === "running" && <Loader2 className="mr-1 inline size-3 animate-spin" />}
+          {(run.status === "running" || run.finishing) && <Loader2 className="mr-1 inline size-3 animate-spin" />}
           {st.label}
         </span>
         <span className="text-[13px] font-medium">
@@ -741,7 +830,7 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
               <Table2 className="size-3.5" /> Open table
             </Link>
           )}
-          {isActive(run) && (
+          {(run.status === "queued" || run.status === "running") && (
             <Button size="xs" variant="outline" className="text-destructive" onClick={onCancel}>
               <Square className="size-3" /> Cancel
             </Button>
@@ -753,10 +842,18 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
       </div>
       <p className="mt-1.5 text-[12px] tabular-nums text-muted-foreground">
         {fmt(run.pulled)} of {fmt(run.size_requested)} pulled · {fmt(run.with_email)} with an email
-        {run.skipped_held ? ` · ${fmt(run.skipped_held)} bought before, skipped` : ""} · {cr(run.credits_used)} credits
+        {run.skipped_held
+          ? ` · ${fmt(run.skipped_held)} bought before, ${run.strategy === "export" ? "bought again by the export" : "skipped"}`
+          : ""}{" "}
+        · {cr(run.credits_used)} credits
         {run.match_count != null ? ` · ${fmt(run.match_count)} matched at the count` : ""}
         {waiting ? " · AI Ark is preparing the export" : ""}
       </p>
+      {run.finishing && (
+        <p className="mt-1 text-[12px] text-muted-foreground">
+          Cancelled: nothing new is bought. The export AI Ark was already paid for is still being read in, so nobody paid for is lost.
+        </p>
+      )}
       {run.outcomes && (
         <div className="mt-1.5 flex flex-wrap gap-1">
           {OUTCOMES.filter((o) => run.outcomes![o.key]).map((o) => (

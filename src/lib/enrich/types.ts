@@ -44,6 +44,9 @@ export interface EnrichTableSummary {
     pulled: number;
     size: number;
     created_at: string;
+    finished_at: string | null;
+    stop_reason: string | null;
+    last_error: string | null;
   } | null;
 }
 

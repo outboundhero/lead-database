@@ -54,6 +54,7 @@ async function setupFor(c: PoolClient, tag: string | null, override: PeopleFilte
     targeting: targeting
       ? {
           updatedAt: targeting.updated_at,
+          version: targeting.version,
           places: Array.isArray(targeting.include_locations) ? targeting.include_locations.length : 0,
           excludeTerms: Array.isArray(targeting.exclude_terms) ? targeting.exclude_terms.length : 0,
           commercialCleaning: Boolean(targeting.commercial_cleaning),

@@ -50,8 +50,10 @@ CREATE TABLE IF NOT EXISTS client_people_filters (
 -- ── Runs ────────────────────────────────────────────────────────────────────
 -- One row per pull. The worker (scripts/enrich-worker.mjs) claims queued and
 -- running runs with SKIP LOCKED, works a slice, records its cursor in
--- `progress` and lets go — so a cancel is seen between slices, and a crash
--- resumes from the cursor without buying anyone twice (aiark_people).
+-- `progress` and lets go. A cancel stops new paid calls; a cancelled run stays
+-- claimable while it holds an export job, and finished_at is set once that job
+-- is read. A crash resumes from the cursor, and aiark_people keeps a repeated
+-- page from buying anyone again.
 
 CREATE TABLE IF NOT EXISTS aiark_runs (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -70,12 +72,12 @@ CREATE TABLE IF NOT EXISTS aiark_runs (
   table_id        uuid REFERENCES enrich_tables(id) ON DELETE SET NULL,
   source_id       uuid REFERENCES enrich_sources(id) ON DELETE SET NULL,
   filters         jsonb NOT NULL,    -- what the tab showed: targeting version, people filters, mapping notes
-  requests        jsonb NOT NULL,    -- the AI Ark filter bodies exactly as sent, one per location chunk
+  requests        jsonb NOT NULL,    -- the AI Ark filter bodies, one per location chunk; each call adds page, size, exclusion lists and (export) the webhook
   match_count     bigint,            -- People Preview's totalElements from the count before the run, if any
   progress        jsonb NOT NULL DEFAULT '{}'::jsonb,  -- the worker's cursor (chunk, page, export job, lists)
   pulled          integer NOT NULL DEFAULT 0,  -- people written to the run's table
   with_email      integer NOT NULL DEFAULT 0,  -- of those, with an email AI Ark marked valid
-  skipped_held    integer NOT NULL DEFAULT 0,  -- bought in an earlier run: skipped, not bought again
+  skipped_held    integer NOT NULL DEFAULT 0,  -- held from an earlier run: a single run skips them; in an export the job paid for them again and they are rows
   credits_used    numeric NOT NULL DEFAULT 0,
   credits_before  numeric,
   credits_after   numeric,
@@ -95,10 +97,12 @@ CREATE TABLE IF NOT EXISTS aiark_runs (
 CREATE INDEX IF NOT EXISTS aiark_runs_client_idx ON aiark_runs (client_tag, created_at DESC);
 CREATE INDEX IF NOT EXISTS aiark_runs_queue_idx ON aiark_runs (next_run_at) WHERE status IN ('queued', 'running');
 
--- ── Everyone ever bought from AI Ark ────────────────────────────────────────
--- Keyed on AI Ark's person id, so no run pays for the same person twice: the
--- next run excludes them in its request (AI Ark Lists) and skips any that come
--- back anyway. Kept when a run's table is deleted — the person was still paid for.
+-- ── Everyone AI Ark has been asked about ────────────────────────────────────
+-- Keyed on AI Ark's person id: everyone bought, plus people a single run checked
+-- and found without an email, which costs nothing. The next run asks AI Ark to
+-- leave out the newest 100,000 (AI Ark Lists, as far as the day's lists allow).
+-- A single run skips any that come back; an export job pays for them again and
+-- marks them "Bought before". Kept when a run's table is deleted.
 
 CREATE TABLE IF NOT EXISTS aiark_people (
   person_id    text PRIMARY KEY,
@@ -127,8 +131,8 @@ ALTER TABLE aiark_people          ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON client_people_filters, aiark_runs, aiark_people FROM anon, authenticated;
 
 COMMENT ON TABLE client_people_filters IS 'AI Ark tab: a client''s people filters — titles, seniority, departments, company size (123).';
-COMMENT ON TABLE aiark_runs IS 'AI Ark tab: one row per pull, with the filters exactly as sent and the worker''s cursor (123).';
-COMMENT ON TABLE aiark_people IS 'AI Ark tab: every AI Ark person id ever bought, so none is bought twice (123).';
+COMMENT ON TABLE aiark_runs IS 'AI Ark tab: one row per pull, with its filter bodies and the worker''s cursor (123).';
+COMMENT ON TABLE aiark_people IS 'AI Ark tab: every AI Ark person id bought, or checked and found without an email, so later runs can leave them out (123).';
 
 DO $$
 DECLARE missing text;

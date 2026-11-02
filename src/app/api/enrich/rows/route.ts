@@ -128,6 +128,9 @@ export async function POST(req: NextRequest) {
   try {
     const result = await withTx(
       async (c) => {
+        // An AI Ark run's table holds only people AI Ark returned: a CSV row there could reach "Ready to add" unbought.
+        const { rows: [t] } = await c.query<{ kind: string }>(`SELECT kind FROM enrich_tables WHERE id = $1`, [body.table]);
+        if (t?.kind === "ai_ark") return "ai_ark" as const;
         const { rows: cols } = await c.query<{ key: string }>(
           `SELECT key FROM enrich_columns WHERE table_id = $1 AND kind = 'input'`,
           [body.table]
@@ -143,6 +146,9 @@ export async function POST(req: NextRequest) {
       { timeoutMs: 45_000 }
     );
     if (!result) return NextResponse.json({ error: "No such table" }, { status: 404 });
+    if (result === "ai_ark") {
+      return NextResponse.json({ error: "An AI Ark run's table takes only the people its run pulls, not CSV rows" }, { status: 409 });
+    }
     return NextResponse.json(result);
   } catch (err) {
     console.error("enrich/rows POST:", err);
