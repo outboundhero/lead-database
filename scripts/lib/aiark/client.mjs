@@ -314,6 +314,8 @@ export function personInputs(p) {
     : state === "PROCESSING" ? "PENDING" : "";
   const out = {
     full_name: text(prof.full_name) || [text(prof.first_name), text(prof.last_name)].filter(Boolean).join(" "),
+    first_name: text(prof.first_name),
+    last_name: text(prof.last_name),
     title: text(prof.title),
     seniority: text(dep.seniority),
     department: (Array.isArray(dep.departments) ? dep.departments : []).slice(0, 3).join(", "),

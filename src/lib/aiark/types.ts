@@ -110,6 +110,19 @@ export interface AiArkSetup {
   suggestions: { departments: string[]; industries: string[]; seniority: string[] };
 }
 
+/** GET /api/aiark/add: where a run's people stand with "Add to the database". */
+export interface AddState {
+  run: { id: string; mode: RunMode; finished: boolean };
+  /** Ready to add and not added yet, including anyone an earlier add could not store. */
+  ready: number;
+  added: number;
+  /** Skipped: already a lead, in the Email Bison copy or on the never-contact list. */
+  skipped: number;
+  adding: number;
+  /** The import could not store them; the next add tries again. */
+  failed: number;
+}
+
 export interface CountResult {
   mode: RunMode;
   total: number;

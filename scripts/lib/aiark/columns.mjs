@@ -12,6 +12,8 @@ const USABLE = `({{email_verdict}} === "Valid" || {{email_verdict}} === "Catch-a
 const COLUMNS = [
   // ── What AI Ark returned ──────────────────────────────────────────────────
   { key: "full_name", name: "Name", kind: "input", description: "The person's name on their AI Ark profile." },
+  { key: "first_name", name: "First name", kind: "input", hidden: true },
+  { key: "last_name", name: "Last name", kind: "input", hidden: true },
   { key: "title", name: "Job title", kind: "input", description: "Current job title." },
   { key: "seniority", name: "Seniority", kind: "input" },
   { key: "department", name: "Department", kind: "input" },
@@ -75,7 +77,7 @@ const COLUMNS = [
       ` : {{in_area}} === false ? "Outside the client's area"` +
       ` : {{rule_match}} ? "Excluded by the client's rules"` +
       ` : "Ready to add"`,
-    description: "Ready to add: a valid email, not already in the database or on the never-contact list, inside the client's area and clear of its exclusions. Those people join the lead database in Phase 4. Email still being checked: AI Ark had not finished when the run stopped waiting; nothing updates these rows later, and later runs leave the person out.",
+    description: "Ready to add: a valid email, not already in the database or on the never-contact list, inside the client's area and clear of its exclusions. Those people join the lead database when someone presses Add to the database above this table. Email still being checked: AI Ark had not finished when the run stopped waiting; nothing updates these rows later, and later runs leave the person out.",
   },
 
   // ── Later phases: two of the steps still to come, shown and not run yet.
@@ -85,10 +87,11 @@ const COLUMNS = [
     run_if: `!${USABLE}`,
     description: "People AI Ark returns without a valid email go through the email-finding steps (Findymail, Prospeo, Anymail Finder) and the checks after them. Built in Phase 3.",
   },
+  // Phase 4 keeps the engine off it: only "Add to the database" (scripts/lib/aiark/add.mjs) writes these cells.
   {
     key: "add_to_database", name: "Add to the database", kind: "action", action: "later", phase: 4, provider: "Lead database",
     run_if: `{{outcome}} === "Ready to add"`,
-    description: "People marked Ready to add join the lead database with source AI Ark, and then go out from the Leads tab like any other lead. Built in Phase 4.",
+    description: "Filled when someone presses Add to the database above this table, once the pull has finished. Added: a new lead with source AI Ark, tagged with the client, which goes out from the Leads tab like any other lead. Already in the database / On the never-contact list: skipped, as the database had moved on since the outcome was worked out. Not added: the import could not store the person; the next add tries again.",
   },
 ];
 

@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   ChevronLeft,
   ChevronRight,
+  Database,
   KeyRound,
   Loader2,
   Play,
@@ -37,6 +38,7 @@ import { ClayGrid, FILTER_LABELS, type GridFilter } from "@/components/clay/clay
 import { CellPanel } from "@/components/clay/cell-panel";
 import { ImportDialog } from "@/components/clay/import-dialog";
 import type { EnrichColumn, EnrichTableSummary, RowsPage, RowStatus, TableDetail, WorkerState } from "@/lib/enrich/types";
+import type { AddState } from "@/lib/aiark/types";
 
 // The Clay tab: a client's Clay tables, rebuilt inside the lead database.
 // Columns are the client's own Clay columns (formulas and run conditions
@@ -303,6 +305,103 @@ function ClayTab() {
   );
 }
 
+/**
+ * "Add to the database" for a live AI Ark run's table: the people marked Ready
+ * to add become leads (POST /api/aiark/add), and this bar follows the add. Each
+ * person's result lands in the table's "Add to the database" column.
+ */
+function AddToDatabase({ table, onAdded }: { table: EnrichTableSummary; onAdded: () => void }) {
+  const run = table.run!;
+  const [state, setState] = useState<AddState | null>(null);
+  const [starting, setStarting] = useState(false);
+
+  const load = useCallback(() => {
+    fetch(`/api/aiark/add?run=${run.id}`)
+      .then(async (r) => {
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error);
+        setState(j);
+      })
+      .catch(() => {});
+  }, [run.id]);
+
+  // Outcomes land while the run pulls: read again whenever it moves on.
+  useEffect(() => {
+    load();
+  }, [load, run.status, run.pulled]);
+
+  // While an add is under way, follow it; when it ends, the grid shows each person's result.
+  const adding = (state?.adding ?? 0) > 0;
+  const wasAdding = useRef(false);
+  useEffect(() => {
+    if (!adding) {
+      if (wasAdding.current) onAdded();
+      wasAdding.current = false;
+      return;
+    }
+    wasAdding.current = true;
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, 3_000);
+    return () => clearInterval(t);
+  }, [adding, load, onAdded]);
+
+  if (run.mode === "demo" || !state) return null;
+
+  const add = async () => {
+    const who = `${fmt(state.ready)} ${state.ready === 1 ? "person" : "people"}`;
+    if (!window.confirm(`Add ${who} marked "Ready to add" to the lead database, tagged ${table.client_tag}? Anyone who has reached the database since is skipped.`)) return;
+    setStarting(true);
+    try {
+      const res = await fetch("/api/aiark/add", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ run: run.id }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error ?? "Could not start adding");
+      const skipped = j.skipped ? `${fmt(j.skipped)} skipped: they reached the database since their outcome was worked out.` : undefined;
+      toast.success(j.adding ? `Adding ${fmt(j.adding)} to the lead database. The Uploads page shows the batch.` : "Nobody new to add", { description: skipped });
+      onAdded();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not start adding");
+    } finally {
+      setStarting(false);
+      load();
+    }
+  };
+
+  const done = [
+    state.added ? `${fmt(state.added)} added` : "",
+    state.skipped ? `${fmt(state.skipped)} skipped` : "",
+    state.failed ? `${fmt(state.failed)} not stored` : "",
+  ].filter(Boolean);
+  const why = !state.run.finished
+    ? "Add its people once the pull has finished"
+    : adding
+      ? "Adding now"
+      : state.ready === 0
+        ? "Nobody here is ready to add"
+        : undefined;
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-2xl bg-card px-4 py-2.5 shadow-ios">
+      <Database className="size-4 text-primary" />
+      <p className="text-[13px]">
+        <span className="font-semibold">{fmt(state.ready)} ready to add</span>
+        {done.length > 0 && <span className="text-muted-foreground"> · {done.join(" · ")}</span>}
+        {adding && (
+          <span className="ml-2 inline-flex items-center gap-1 text-muted-foreground">
+            <Loader2 className="size-3 animate-spin" /> adding {fmt(state.adding)}…
+          </span>
+        )}
+      </p>
+      <Button size="sm" className="ml-auto" disabled={Boolean(why) || starting} title={why} onClick={add}>
+        <Database /> Add to the database
+      </Button>
+    </div>
+  );
+}
+
 function TableView({
   table,
   onWorker,
@@ -460,6 +559,7 @@ function TableView({
 
   return (
     <>
+      {isRun && table.run && <AddToDatabase table={table} onAdded={refresh} />}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative w-64">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />

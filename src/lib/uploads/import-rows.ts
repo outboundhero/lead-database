@@ -51,6 +51,12 @@ export interface ImportConfig {
    * AND replace; nothing under skip.
    */
   addTags?: string[];
+  /**
+   * leads columns this import may write beyond the Uploads page's fields
+   * (LEAD_FIELDS), mapped like any other. For imports built in code (an AI Ark
+   * pull's people, scripts/lib/aiark/add.mjs); the Uploads page never sends it.
+   */
+  extraFields?: string[];
   chunkSize?: number;
   onProgress?: (c: ImportCounters) => Promise<void> | void;
   /**
@@ -420,7 +426,8 @@ async function processChunk(
   const idByEmail = new Map<string, string>([...existing.values()].map((r) => [r.email, r.id]));
 
   // Column list: every mapped/derived key that is a real leads column.
-  const cols = [...new Set(chunk.flatMap((p) => Object.keys(p.lead)))].filter((k) => LEAD_KEYS.has(k) && types.has(k)).sort();
+  const extra = new Set(cfg.extraFields ?? []);
+  const cols = [...new Set(chunk.flatMap((p) => Object.keys(p.lead)))].filter((k) => (LEAD_KEYS.has(k) || extra.has(k)) && types.has(k)).sort();
   const colList = cols.map(q).join(", ");
 
   // 2. New leads.

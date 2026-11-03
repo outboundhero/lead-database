@@ -2084,7 +2084,8 @@ threshold today; `?fresh=1` for those clients exceeds its 30 s cap.
 
 ## Clay tab and AI Ark tab (migrations 122, 123)
 
-Two manager-only tabs, applied to production 2026-10-31. Neither writes `leads`.
+Two manager-only tabs, applied to production 2026-10-31. Only "Add to the database"
+(below) writes `leads`.
 
 - **Clay tab** (`/leads/clay`): a client's Clay tables rebuilt as generic
   `enrich_tables` / `enrich_columns` / `enrich_rows` / `enrich_cells`. Column
@@ -2104,6 +2105,25 @@ Two manager-only tabs, applied to production 2026-10-31. Neither writes `leads`.
   before". While an export job is unread, no other run of its mode buys. A person
   whose Export Single answer never arrived stays unregistered, though AI Ark may
   have charged for them.
+- **Add to the database** (a bar above a finished live run's table on the Clay
+  tab; `POST /api/aiark/add`, logic in `scripts/lib/aiark/add.mjs`): the people
+  whose Outcome is "Ready to add" become leads, once each. Anyone who has since
+  become a lead, reached the Email Bison copy or the never-contact list is
+  skipped at once; the rest go through the Uploads page's engine
+  (`importRows`, strategy `skip`, never merged) as one `upload_batches` row, so
+  each add is on the Uploads page. Each lead gets the client's tag, `source` =
+  `AI Ark`, `validation_status` from AI Ark's check (valid / catch_all), AI Ark's
+  first and last name, and the industry in `general_industry` and the company
+  description in `specific_industry`: both are among the columns
+  `fn_client_eligibility_conditions` checks for exclusion terms (the Outcome
+  checked the same two texts), and neither is sent to Email Bison. Those and
+  `country` / `seniority` / `company_size` are outside the Uploads page's fields,
+  so the import takes them as `ImportConfig.extraFields`. Category stays empty.
+  Each person's result is the run table's `add_to_database` cell: running
+  (being added), done (Added, or skipped with its reason), error (not stored;
+  the next add retries). The engine never works that column (phase 4). A
+  batch still `processing` after 3 hours is dead and its people can be added
+  again. Demo runs are refused.
 - **The worker** `scripts/enrich-worker.mjs` (`npm run enrich-worker`) fills the
   Clay cells and works AI Ark runs. ⚠ It has **no Railway service yet**: until one
   exists, nothing on either tab runs in production. Give it the no-op build command
@@ -2118,11 +2138,14 @@ Two manager-only tabs, applied to production 2026-10-31. Neither writes `leads`.
   4) and `AIARK_RPS_WEB` (1) keep one key at AI Ark's 5 a second. ⚠ **Never set
   `AIARK_DEMO` in production**: it turns on made-up demo runs that write into the
   real tables.
-- **Before the first live pull:** AI Ark's written consent to load its data
-  (terms §6.2); one 1-credit count to learn how AI Ark reads "City, State" (sent as
-  "Armonk, New York", a format its docs don't define); a small supervised pull of
-  each strategy to confirm the response shapes, which so far were only tested
-  against the demo stand-in.
+- **Before the first live pull:** a small supervised pull of each strategy to
+  confirm the Export Single and export-job response shapes, which so far were
+  only tested against the demo stand-in. Storing AI Ark's data in the lead
+  database was approved by the owner on 2026-11-03 (terms §6.2). A 1-credit
+  Preview on 2026-11-02 showed AI Ark respects the state in "City, State"
+  ("Springfield, Illinois": all 100 on the first page in Illinois). But 34 of
+  those 100 had the state "Illinois Metropolitan Area", which the area check
+  doesn't place (Outside) and a single run still buys first.
 - **Tests:** stop the worker, then
   `AIARK_TEST_TAG=<cleaning client tag> node --env-file=.env.local scripts/test-aiark.mjs`
   (local database only; it refuses any other).

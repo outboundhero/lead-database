@@ -12,6 +12,7 @@ import type { AiArkModes, AiArkPlan, AiArkRun, PeopleFilters, PlanReport, RunMod
 
 export { cleanPeopleFilters, DEPARTMENT_SUGGESTIONS, INDUSTRY_SUGGESTIONS, SENIORITY } from "../../../scripts/lib/aiark/filters.mjs";
 export { createRun } from "../../../scripts/lib/aiark/runs.mjs";
+export { addState, beginAdd, EXTRA_FIELDS, finishAdd, IMPORT_COLUMNS, STALE_HOURS } from "../../../scripts/lib/aiark/add.mjs";
 export { AiArkError, personInputs } from "../../../scripts/lib/aiark/client.mjs";
 
 // Server side of the AI Ark tab. The filter mapper, the AI Ark client and the

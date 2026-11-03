@@ -28,6 +28,8 @@
 //      fn_commercial_cleaning_condition, geo_admin1), then each client rule
 //      against the real thing: made-up clients and people go through the import's
 //      own code, the location resolver script and fn_client_eligibility_conditions
+//   D. "Add to the database": the import rows, then who an add takes, skips and
+//      settles (the import itself is the Uploads page's engine, stood in for here)
 
 import pg from "pg";
 import ts from "typescript";
@@ -38,6 +40,7 @@ import { AiArkError, clip, createAiArk, personInputs } from "./lib/aiark/client.
 import { createDemoTransport, DEMO_TOKEN } from "./lib/aiark/demo.mjs";
 import { buildRequests, cleanPeopleFilters, CLEANING_DEFAULTS, EMPTY_PEOPLE_FILTERS, loadGeo } from "./lib/aiark/filters.mjs";
 import { RUN_COLUMNS } from "./lib/aiark/columns.mjs";
+import { addState, beginAdd, EXTRA_FIELDS, finishAdd, headcount, IMPORT_COLUMNS, importRow, names } from "./lib/aiark/add.mjs";
 import { cityKey, findState } from "./lib/aiark/geo.mjs";
 import { advanceOneRun, aiArkFor, createRun, runDue, webhookFor } from "./lib/aiark/runs.mjs";
 import { CLIENT_ACTIONS, resetClientChecks, wholeTermSource } from "./lib/enrich/client-checks.mjs";
@@ -69,7 +72,7 @@ function check(name, ok, detail = "") {
 const section = (s) => console.log(`\n${s}`);
 const source = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 
-const created = { runs: [], tables: [], emails: [] };
+const created = { runs: [], tables: [], emails: [], batches: [] };
 // What the rule checks in section C add, all removed by dropRuleData.
 const TEST_DOMAIN = "aiark-test.example";
 const RULE_PREFIX = "ABCTEST_";
@@ -2516,6 +2519,109 @@ async function emailBisonCopy() {
   check("an index serves the lookup", idx.n > 0);
 }
 
+// ── D. Add to the database ──────────────────────────────────────────────────
+
+async function addToDatabase() {
+  section("D1. The import rows");
+  const row = importRow({
+    email: `pat@${TEST_DOMAIN}`, first_name: "Mary Ann", last_name: "Smith", full_name: "Mary Ann Smith", title: "Office Manager",
+    company: "Acme Cleaning", domain: "acme.example", city: "Dayton", state: "Ohio", country: "United States",
+    linkedin: "https://linkedin.example/in/pat", company_industry: "Facilities Services", company_description: "We clean offices",
+    company_size: "1,234 (1,001–5,000)", email_verdict: "Catch-all",
+  });
+  const at = (k) => IMPORT_COLUMNS.findIndex(([, f]) => f === k);
+  check("one value per import column", row.length === IMPORT_COLUMNS.length);
+  check("AI Ark's own first and last name", row[at("first_name")] === "Mary Ann" && row[at("last_name")] === "Smith", JSON.stringify(row));
+  check("without them, the full name splits at its first space", JSON.stringify(names({ full_name: " Mary  Ann Smith " })) === '["Mary","Ann Smith"]');
+  check("employees only when AI Ark gave a headcount", headcount("1,234 (1,001–5,000)") === "1234" && headcount("1,001–5,000") === "" && headcount("5,001+") === "" && headcount(undefined) === "");
+  check("a catch-all address goes in as catch_all, a valid one as valid", row[at("validation_status")] === "catch_all" && importRow({ email: "a@b.example", email_verdict: "Valid" })[at("validation_status")] === "valid");
+  check("industry and description go to general_industry and specific_industry, with source AI Ark",
+    row[at("general_industry")] === "Facilities Services" && row[at("specific_industry")] === "We clean offices" && row[at("source")] === "AI Ark" && row[at("person_linkedin")].endsWith("/in/pat"));
+  check("every extra field is an import column", EXTRA_FIELDS.every((k) => at(k) >= 0));
+  const { d: gate } = await one(`SELECT pg_get_functiondef('fn_client_eligibility_conditions'::regproc) AS d`);
+  check("the send gate looks for exclusion terms in both", /l\.general_industry/.test(gate) && /l\.specific_industry/.test(gate));
+  check("and a push sends neither to Email Bison", !/general_industry|specific_industry/.test(source("scripts/push-worker.mjs") + source("src/lib/bison/push-leads.ts")));
+
+  section("D2. Who an add takes, skips and settles");
+  const run = await newRun({ size: 5 });
+  await pool.query(`UPDATE aiark_runs SET status = 'done', finished_at = now() WHERE id = $1`, [run.id]);
+  const { source_id } = await one(`SELECT source_id FROM aiark_runs WHERE id = $1`, [run.id]);
+  const email = (n) => `add${n}@${TEST_DOMAIN}`;
+  const ids = {};
+  for (const [n, outcome = "Ready to add"] of [[1], [2], [3], [4], [5, "No email"], [6], [7]]) {
+    const { id } = await one(`INSERT INTO enrich_rows (table_id, source_id, row_key, run_status) VALUES ($1, $2, $3, 'done') RETURNING id`, [run.table_id, source_id, `aiark:add-${n}`]);
+    ids[n] = Number(id);
+    const cells = { email: email(n), full_name: `Pat Example${n}`, title: "Office Manager", company: "aiark test lead", email_verdict: "Valid", outcome };
+    await pool.query(
+      `INSERT INTO enrich_cells (row_id, column_key, table_id, status, value, display)
+       SELECT $1, k, $2, 'done', to_jsonb(v), left(v, 300) FROM jsonb_each_text($3::jsonb) AS t(k, v)`,
+      [id, run.table_id, JSON.stringify(cells)]
+    );
+  }
+  // Since their outcomes were worked out: 2 became a lead, 3 went on the never-contact list, 4 reached the Email Bison copy.
+  await pool.query(`INSERT INTO leads (email, company) VALUES ($1, 'aiark test lead')`, [email(2)]);
+  await pool.query(`INSERT INTO suppressed_emails (email, reason) VALUES ($1, 'aiark test')`, [email(3)]);
+  await pool.query(`INSERT INTO bison_leads (instance_url, bison_id, email) VALUES ($1, 21, $2)`, [TEST_DOMAIN, email(4).toUpperCase()]);
+
+  const state = async () => JSON.stringify(await addState(pool, run.table_id));
+  const counts = (ready, added, skipped, adding, failed) => JSON.stringify({ ready, added, skipped, adding, failed });
+  const begin = async () => {
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      const out = await beginAdd(c, { tableId: run.table_id, userId: null, filename: "aiark test add" });
+      await c.query("COMMIT");
+      if (out.batchId) created.batches.push(out.batchId);
+      return out;
+    } catch (e) {
+      await c.query("ROLLBACK");
+      throw e;
+    } finally {
+      c.release();
+    }
+  };
+  const cell = (n) => one(`SELECT status, value, display FROM enrich_cells WHERE row_id = $1 AND column_key = 'add_to_database'`, [ids[n]]);
+
+  check("before: the six Ready to add, nobody else", (await state()) === counts(6, 0, 0, 0, 0), await state());
+  const first = await begin();
+  check("an add takes three and skips three at once", !first.busy && first.people.length === 3 && first.rows.length === 3 && first.skipped === 3, JSON.stringify(first.people));
+  const [c2, c3, c4] = await Promise.all([2, 3, 4].map(cell));
+  check("a lead since: Already in the database, with its lead", c2.status === "done" && c2.display === "Already in the database" && c2.value.reason === "lead" && Boolean(c2.value.lead_id), JSON.stringify(c2));
+  check("never contact since: On the never-contact list", c3.status === "done" && c3.display === "On the never-contact list" && c3.value.reason === "never_contact", JSON.stringify(c3));
+  check("in the Email Bison copy since, whatever its case: Already in the database", c4.status === "done" && c4.value.reason === "bison", JSON.stringify(c4));
+  check("a person who isn't Ready to add is left alone", !(await cell(5)));
+  const marks = await Promise.all([1, 6, 7].map(cell));
+  check("the rest read as being added by the batch", marks.every((m) => m.status === "running" && m.value.batch_id === first.batchId), JSON.stringify(marks));
+  const batch = await one(`SELECT status, duplicate_strategy, total_rows, batch_type, source_label FROM upload_batches WHERE id = $1`, [first.batchId]);
+  check("the batch is an upload that skips duplicates", batch.status === "processing" && batch.duplicate_strategy === "skip" && batch.total_rows === 3 && batch.batch_type === "leads" && batch.source_label === "AI Ark", JSON.stringify(batch));
+  check("a second add while one is under way is refused", (await begin()).busy === true);
+  check("while adding: three adding, nobody ready", (await state()) === counts(0, 0, 3, 3, 0), await state());
+
+  // What the import leaves behind, stood in for: 1 becomes a lead, someone else adds 7 first, 6 can't be stored.
+  await pool.query(`INSERT INTO leads (email, company, source) VALUES ($1, 'aiark test lead', 'AI Ark')`, [email(1)]);
+  await pool.query(`INSERT INTO leads (email, company, source) VALUES ($1, 'aiark test lead', 'upload')`, [email(7)]);
+  await finishAdd(pool, { tableId: run.table_id, batchId: first.batchId, batchAt: first.batchAt, people: first.people });
+  const [a1, a6, a7] = await Promise.all([1, 6, 7].map(cell));
+  check("a new lead reads Added, with its lead", a1.status === "done" && a1.display === "Added" && a1.value.added === true && Boolean(a1.value.lead_id), JSON.stringify(a1));
+  check("a lead someone else added first reads Already in the database", a7.status === "done" && a7.value.added === false && a7.display === "Already in the database", JSON.stringify(a7));
+  check("a person the import could not store is an error", a6.status === "error" && a6.display === "Not added", JSON.stringify(a6));
+  check("after: one added, four skipped, one not stored and ready again", (await state()) === counts(1, 1, 4, 0, 1), await state());
+
+  const second = await begin();
+  check("the next add takes only the person not stored", Boolean(second.batchId) && second.people.length === 1 && second.people[0].row_id === ids[6] && second.skipped === 0, JSON.stringify(second.people));
+  await finishAdd(pool, { tableId: run.table_id, batchId: first.batchId, batchAt: first.batchAt, people: first.people });
+  check("an older batch's finish leaves a newer add's cell alone", (await cell(6)).value.batch_id === second.batchId && (await cell(6)).status === "running");
+  await pool.query(`UPDATE upload_batches SET created_at = now() - interval '4 hours' WHERE id = $1`, [second.batchId]);
+  check("an add whose batch died with the server is ready again", (await state()) === counts(1, 1, 4, 0, 0), await state());
+  const third = await begin();
+  check("and the next add takes it", !third.busy && third.people.length === 1 && third.people[0].row_id === ids[6]);
+  await pool.query(`INSERT INTO leads (email, company, source) VALUES ($1, 'aiark test lead', 'AI Ark')`, [email(6)]);
+  await finishAdd(pool, { tableId: run.table_id, batchId: third.batchId, batchAt: third.batchAt, people: third.people });
+  check("then everyone is settled", (await state()) === counts(0, 2, 4, 0, 0), await state());
+  const again = await begin();
+  check("and another add finds nobody to add", !again.busy && !again.batchId && again.people.length === 0 && again.skipped === 0);
+}
+
 // ── Run ─────────────────────────────────────────────────────────────────────
 
 async function cleanup() {
@@ -2533,6 +2639,7 @@ async function cleanup() {
     await pool.query(`DELETE FROM enrich_tables WHERE id = ANY($1::uuid[])`, [created.tables]);
     await pool.query(`DELETE FROM enrich_counters WHERE table_id = ANY($1::uuid[])`, [created.tables]).catch(() => {});
   }
+  if (created.batches.length) await pool.query(`DELETE FROM upload_batches WHERE id = ANY($1::uuid[])`, [created.batches]);
 }
 
 // A run still reading a paid export makes every other run of its mode wait, so it counts too.
@@ -2557,6 +2664,7 @@ try {
   await companyText();
   await ruleChanges();
   await emailBisonCopy();
+  await addToDatabase();
 } catch (e) {
   failed++;
   console.error("\nUNEXPECTED:", e);
@@ -2569,8 +2677,9 @@ try {
             (SELECT count(*)::int FROM leads WHERE email LIKE $2) AS rule_leads,
             (SELECT count(*)::int FROM bison_leads WHERE instance_url = $3) AS bison,
             (SELECT count(*)::int FROM client_targeting WHERE client_tag LIKE $4) AS rules,
-            (SELECT count(*)::int FROM commercial_cleaning_excluded_titles WHERE term = $5) AS titles`,
-    [created.tables, `%@${TEST_DOMAIN}`, TEST_DOMAIN, `${RULE_PREFIX}%`, TEST_TITLE]
+            (SELECT count(*)::int FROM commercial_cleaning_excluded_titles WHERE term = $5) AS titles,
+            (SELECT count(*)::int FROM upload_batches WHERE id = ANY($6::uuid[])) AS batches`,
+    [created.tables, `%@${TEST_DOMAIN}`, TEST_DOMAIN, `${RULE_PREFIX}%`, TEST_TITLE, created.batches]
   );
   console.log(`\ncleaned up: ${Object.values(leftover).every((n) => n === 0) ? "yes" : `NO ${JSON.stringify(leftover)}`}`);
   console.log(`${passed} passed, ${failed} failed (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
