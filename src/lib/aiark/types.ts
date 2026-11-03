@@ -37,7 +37,11 @@ export interface AiArkModes {
 export interface PlanReport {
   locations: { total: number; sent: number; requests: number; examples: string[]; dropped: { entry: unknown; why: string }[] };
   excludeLocations?: { total: number; sent: number };
-  excludeTerms?: { total: number; sent: number };
+  /** standard: how many of them are the cleaning clients' standard keywords. */
+  excludeTerms?: { total: number; sent: number; standard?: number };
+  /** Keywords left out at the people level too (cleaning clients). */
+  peopleKeywords?: number;
+  excludeCompanyTypes?: string[];
   titles?: number;
   titleMode?: string;
   excludeTitles?: number;

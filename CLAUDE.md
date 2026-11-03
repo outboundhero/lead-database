@@ -2105,6 +2105,20 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   before". While an export job is unread, no other run of its mode buys. A person
   whose Export Single answer never arrived stays unregistered, though AI Ark may
   have charged for them.
+- **Standard filters for cleaning clients** (`scripts/lib/aiark/cleaning-filters.mjs`;
+  AI Ark searches only, never the send gate, `client_targeting`, the Outcome checks
+  or Clay tables): the owner's final lists, overlaps included (2026-11-03). A client
+  whose `client_tags.client_type` is `Cleaning` searches on 287 current-job titles
+  with 265 left out (WORD; an exclusion always wins), 8–6,800 employees, 13 industries
+  left out (STRICT, exact catalog values), company types `GOVERNMENT_AGENCY` and
+  `SELF_EMPLOYED` left out, and 76 keywords left out for companies (all five
+  sources) and people (HEADLINE, SUMMARY). Its onboarding-sheet exclusion terms
+  (`client_targeting.exclude_terms`, synced every 6 hours) are added to those
+  keywords at both levels. Standard terms go first, so AI Ark's limit of 300 only
+  cuts sheet terms, which the Outcome re-checks after the pull. Titles, size and
+  industries are defaults: a pull with nothing saved uses them, and a client's
+  saved filters replace them. Keywords and company types always apply. AI Ark's size
+  filter takes ranges only, so the brief's "plus unknown size" can't be sent.
 - **Add to the database** (a bar above a finished live run's table on the Clay
   tab; `POST /api/aiark/add`, logic in `scripts/lib/aiark/add.mjs`): the people
   whose Outcome is "Ready to add" become leads, once each. Anyone who has since
@@ -2138,9 +2152,11 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   4) and `AIARK_RPS_WEB` (1) keep one key at AI Ark's 5 a second. ⚠ **Never set
   `AIARK_DEMO` in production**: it turns on made-up demo runs that write into the
   real tables.
-- **Before the first live pull:** a small supervised pull of each strategy to
-  confirm the Export Single and export-job response shapes, which so far were
-  only tested against the demo stand-in. Storing AI Ark's data in the lead
+- **Before the first live pull:** one count for a cleaning client, to see AI Ark
+  accept the standard filters (their full request has not been sent live yet), then
+  a small supervised pull of each strategy to confirm the Export Single and
+  export-job response shapes, which so far were only tested against the demo
+  stand-in. Storing AI Ark's data in the lead
   database was approved by the owner on 2026-11-03 (terms §6.2). A 1-credit
   Preview on 2026-11-02 showed AI Ark respects the state in "City, State"
   ("Springfield, Illinois": all 100 on the first page in Illinois). But 34 of

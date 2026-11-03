@@ -26,6 +26,8 @@ interface TagInputProps {
    * break client targeting.
    */
   splitOn?: RegExp | null;
+  /** Extra classes for the chip list, for example to let a very long one scroll. */
+  listClassName?: string;
 }
 
 // iOS-style tag input. Enter or a separator adds a chip; Backspace on an empty
@@ -36,6 +38,7 @@ export function TagInput({
   placeholder,
   maxTags = 500,
   splitOn = LIST_SEPARATORS,
+  listClassName,
 }: TagInputProps) {
   const [draft, setDraft] = React.useState("");
 
@@ -101,7 +104,7 @@ export function TagInput({
   return (
     <div className="space-y-2">
       {values.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
+        <div className={`flex flex-wrap gap-1.5 ${listClassName ?? ""}`}>
           {values.map((tag, i) => (
             <Badge key={`${tag}-${i}`} variant="tinted" className="gap-1 pr-1">
               <span className="normal-case">{tag}</span>

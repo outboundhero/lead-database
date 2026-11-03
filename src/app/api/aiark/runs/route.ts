@@ -4,12 +4,12 @@ import { withTx } from "@/lib/enrich/db";
 import { workerState } from "@/lib/enrich/queries";
 import { logAudit } from "@/lib/api/log-audit";
 import {
-  cleanPeopleFilters,
   cleanTag,
   clientInfo,
   createRun,
   geo,
   modes,
+  peopleOrDefaults,
   plan,
   RUN_FIELDS,
   runsFor,
@@ -23,12 +23,12 @@ import type { PeopleFilters, RunMode, RunStrategy } from "@/lib/aiark/types";
 //      worker's heartbeat (the tab polls this while a run is going).
 // POST /api/aiark/runs {tag, mode, strategy, size, matchCount, peopleVersion,
 //      rulesVersion} — queues a pull. It uses the client's SAVED people filters
-//      and its current rules, never filters from the request. The page sends
-//      the versions of both it loaded, and a 409 with `changed` answers any
-//      change since (the page then reloads them), so a run is what the tab
-//      showed. A count must come first (matchCount). One active run per
-//      client. The enrichment worker does the pulling. Manager and up — a live
-//      run spends AI Ark credits.
+//      (with none saved, a cleaning client's standard filters) and its current
+//      rules, never filters from the request. The page sends the versions of both
+//      it loaded, and a 409 with `changed` answers any change since (the page then
+//      reloads them), so a run is what the tab showed. A count must come first
+//      (matchCount). One active run per client. The enrichment worker does the
+//      pulling. Manager and up — a live run spends AI Ark credits.
 
 export const dynamic = "force-dynamic";
 
@@ -111,19 +111,18 @@ export async function POST(req: NextRequest) {
         if (!client) return { status: 404, error: `${tag} is not a client` };
         const targeting = await targetingOf(c, tag);
         const saved = await savedPeople(c, tag);
-        if (!saved) return { status: 400, error: "Save the people filters first: a pull always uses the saved filters." };
-        if (saved.version !== peopleVersion || (targeting?.version ?? null) !== rulesVersion) {
-          const what = saved.version !== peopleVersion ? "people filters" : "rules (locations and exclusions)";
+        const peopleChanged = (saved?.version ?? null) !== peopleVersion;
+        if (peopleChanged || (targeting?.version ?? null) !== rulesVersion) {
+          const what = peopleChanged ? "people filters" : "rules (locations and exclusions)";
           return {
             status: 409,
             error: `${tag}'s ${what} changed since this page loaded them, so nothing was started.`,
             changed: true,
           };
         }
-        // cleanPeopleFilters reads only the filter fields, so the row goes in as it is.
-        const peopleUpdatedAt = saved.updated_at;
-        const people = cleanPeopleFilters(saved).value as PeopleFilters;
-        const p = plan(targeting, people, await geo(c));
+        const peopleUpdatedAt = saved?.updated_at ?? null;
+        const people: PeopleFilters = peopleOrDefaults(saved, client.client_type ?? null).value;
+        const p = plan(targeting, people, await geo(c), client.client_type ?? null);
         const blocked = [...p.blockers, ...p.pullBlockers];
         if (blocked.length) return { status: 400, error: blocked.join(" ") };
         const run = await createRun(c, {

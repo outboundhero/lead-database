@@ -30,6 +30,8 @@
 //      own code, the location resolver script and fn_client_eligibility_conditions
 //   D. "Add to the database": the import rows, then who an add takes, skips and
 //      settles (the import itself is the Uploads page's engine, stood in for here)
+//   E. the standard filters for cleaning clients in the request AI Ark gets, with
+//      a client's sheet terms added, and that they stay out of the database's rules
 
 import pg from "pg";
 import ts from "typescript";
@@ -39,6 +41,7 @@ import { fileURLToPath } from "node:url";
 import { AiArkError, clip, createAiArk, personInputs } from "./lib/aiark/client.mjs";
 import { createDemoTransport, DEMO_TOKEN } from "./lib/aiark/demo.mjs";
 import { buildRequests, cleanPeopleFilters, CLEANING_DEFAULTS, EMPTY_PEOPLE_FILTERS, loadGeo } from "./lib/aiark/filters.mjs";
+import { CLEANING_EXCLUDE_KEYWORDS } from "./lib/aiark/cleaning-filters.mjs";
 import { RUN_COLUMNS } from "./lib/aiark/columns.mjs";
 import { addState, beginAdd, EXTRA_FIELDS, finishAdd, headcount, IMPORT_COLUMNS, importRow, names } from "./lib/aiark/add.mjs";
 import { cityKey, findState } from "./lib/aiark/geo.mjs";
@@ -77,6 +80,21 @@ const created = { runs: [], tables: [], emails: [], batches: [] };
 const TEST_DOMAIN = "aiark-test.example";
 const RULE_PREFIX = "ABCTEST_";
 const TEST_TITLE = "aiark test title";
+// The filters the runs here use: short, so the demo's made-up people are predictable.
+const TEST_PEOPLE = {
+  ...EMPTY_PEOPLE_FILTERS,
+  titles: [
+    "Owner", "Founder", "CEO", "Chief Executive Officer", "Company Owner", "Franchise Owner",
+    "Chief Operating Officer", "Vice President of Operations", "Vice President of Facilities", "Facilities Director",
+    "Head of Facilities", "Head of Facilities and Operations", "Facilities Manager", "Facility Manager",
+    "Office Manager", "Workplace Manager", "Office Administrator", "Office Coordinator", "Operations Manager",
+  ],
+  title_mode: "WORD",
+  exclude_titles: [
+    "attorney", "legal", "lawyer", "human resources", "intern", "freelance", "recruiter", "talent",
+    "sales", "business development", "accountant", "account manager", "account executive",
+  ],
+};
 
 // ── A. No database ──────────────────────────────────────────────────────────
 
@@ -104,8 +122,8 @@ async function partA(geo) {
   const kw = r.requests[0]?.account?.keyword?.any?.exclude;
   check("exclusion terms as WORD company keywords on NAME/INDUSTRY/DESCRIPTION",
     JSON.stringify(kw?.content) === '["bar","cafe"]' && kw.sources.map((s) => `${s.source}:${s.mode}`).join() === "NAME:WORD,INDUSTRY:WORD,DESCRIPTION:WORD");
-  const title = r.requests[0]?.contact?.experience?.latest?.title?.any;
-  check("titles on the latest role, WORD include + WORD exclude", title?.include?.mode === "WORD" && title.include.content.length === CLEANING_DEFAULTS.titles.length && title.exclude.mode === "WORD");
+  const title = r.requests[0]?.contact?.experience?.current?.title?.any;
+  check("titles on any current role, WORD include + WORD exclude", title?.include?.mode === "WORD" && title.include.content.length === CLEANING_DEFAULTS.titles.length && title.exclude.mode === "WORD");
   check("no pull blockers with titles", r.pullBlockers.length === 0 && r.blockers.length === 0);
 
   const many = { include_locations: Array.from({ length: 310 }, (_, i) => ({ city: `Town${i}`, state: "NY", country: "US" })), exclude_terms: Array.from({ length: 320 }, (_, i) => `term${i}`) };
@@ -393,7 +411,7 @@ const search = (places = ["Dayton, Ohio"]) => ({
 });
 const SEVERAL_PLACES = ["Dayton, Ohio", "Akron, Ohio", "Toledo, Ohio", "Canton, Ohio", "Parma, Ohio"];
 
-async function newRun({ strategy = "single", size, people = CLEANING_DEFAULTS, mode = "demo", requests = null }) {
+async function newRun({ strategy = "single", size, people = TEST_PEOPLE, mode = "demo", requests = null }) {
   // Every run here starts with the day's list budget unused; spendLists uses it up.
   await pool.query(`UPDATE aiark_runs SET progress = progress - 'lists_log' WHERE id = ANY($1::uuid[])`, [created.runs]);
   const geo = await loadGeo(pool);
@@ -2622,6 +2640,51 @@ async function addToDatabase() {
   check("and another add finds nobody to add", !again.busy && !again.batchId && again.people.length === 0 && again.skipped === 0);
 }
 
+// ── E. The standard filters for cleaning clients ────────────────────────────
+
+function cleaningFilters(geo) {
+  section("E. The standard filters for cleaning clients");
+  const rules = { include_locations: [{ city: "Armonk", state: "NY", country: "US" }], exclude_terms: ["Bar", "JANITORIAL", "cafe"], commercial_cleaning: true };
+  const std = buildRequests({ targeting: rules, people: CLEANING_DEFAULTS, geo, cleaning: true });
+  const { contact, account } = std.requests[0];
+  const lower = (list) => list.map((s) => s.toLowerCase());
+  const sourcesOf = (x) => x.sources.map((s) => `${s.source}:${s.mode}`).join();
+
+  check("the supplied lists, whole", CLEANING_DEFAULTS.titles.length === 287 && CLEANING_DEFAULTS.exclude_titles.length === 265 && CLEANING_EXCLUDE_KEYWORDS.length === 76 && CLEANING_DEFAULTS.exclude_industries.length === 13);
+  const saving = cleanPeopleFilters(CLEANING_DEFAULTS);
+  check("a client can save them as its own copy, nothing refused or cut", saving.errors.length === 0 && saving.value.titles.length === 287 && saving.value.exclude_titles.length === 265 && saving.value.employee_bands.length === 1, saving.errors.join("; "));
+  const title = contact.experience.current?.title?.any;
+  check("titles on any current role, as words, none cut", !contact.experience.latest && title.include.mode === "WORD" && title.include.content.length === 287 && title.exclude.mode === "WORD" && title.exclude.content.length === 265);
+  check("8–6,800 employees, and the plan says unknown sizes can't be asked for", JSON.stringify(account.employeeSize) === '{"type":"RANGE","range":[{"start":8,"end":6800}]}' && std.notes.some((n) => n.includes("doesn't know")));
+  const inds = account.industries.any;
+  check("13 industries left out as exact catalog values, none included", !inds.include && inds.exclude.mode === "STRICT" && inds.exclude.content.length === 13 && inds.exclude.content.every((v) => v === v.toLowerCase()));
+  check("government agencies and the self-employed left out", JSON.stringify(account.type) === '{"any":{"exclude":["GOVERNMENT_AGENCY","SELF_EMPLOYED"]}}');
+  const co = account.keyword.any.exclude;
+  const ppl = contact.keyword.any.exclude;
+  check("company keywords: the standard list, then the client's sheet terms, no repeats",
+    co.content.length === 78 && JSON.stringify(lower(co.content.slice(0, 76))) === JSON.stringify(lower(CLEANING_EXCLUDE_KEYWORDS)) && JSON.stringify(co.content.slice(76)) === '["Bar","cafe"]', JSON.stringify(co.content.slice(70)));
+  check("looked for in every company field, as words", sourcesOf(co) === "NAME:WORD,KEYWORD:WORD,SEO:WORD,DESCRIPTION:WORD,INDUSTRY:WORD", sourcesOf(co));
+  check("the same list on people, in headline and summary", JSON.stringify(ppl.content) === JSON.stringify(co.content) && sourcesOf(ppl) === "HEADLINE:WORD,SUMMARY:WORD", sourcesOf(ppl));
+  check("the plan reports all of it", std.report.excludeTerms.standard === 76 && std.report.excludeTerms.total === 78 && std.report.peopleKeywords === 78 && std.report.excludeCompanyTypes.length === 2);
+
+  const crowded = { ...rules, exclude_terms: Array.from({ length: 320 }, (_, i) => `term${i}`) };
+  const cut = buildRequests({ targeting: crowded, people: CLEANING_DEFAULTS, geo, cleaning: true });
+  const cutCo = cut.requests[0].account.keyword.any.exclude.content;
+  check("over AI Ark's 300: every standard keyword is sent, only sheet terms are cut, and it says so",
+    cutCo.length === 300 && JSON.stringify(lower(cutCo.slice(0, 76))) === JSON.stringify(lower(CLEANING_EXCLUDE_KEYWORDS)) && cut.notes.some((n) => n.includes("first 300 of 396")));
+
+  const own = buildRequests({ targeting: rules, people: { ...EMPTY_PEOPLE_FILTERS, titles: ["Owner"] }, geo, cleaning: true });
+  check("a client's saved filters replace titles and size; keywords and company types still apply",
+    own.requests[0].contact.experience.current.title.any.include.content.length === 1 && !own.requests[0].account.employeeSize && own.requests[0].account.keyword.any.exclude.content.length === 78 && Boolean(own.requests[0].contact.keyword) && Boolean(own.requests[0].account.type));
+
+  const other = buildRequests({ targeting: rules, people: { ...EMPTY_PEOPLE_FILTERS, titles: ["Owner"] }, geo });
+  const otherCo = other.requests[0].account.keyword.any.exclude;
+  check("any other client gets none of it: only its own terms, on its company", otherCo.content.length === 3 && sourcesOf(otherCo) === "NAME:WORD,INDUSTRY:WORD,DESCRIPTION:WORD" && !other.requests[0].contact.keyword && !other.requests[0].account.type && other.report.excludeTerms.standard === 0 && other.report.peopleKeywords === 0);
+
+  const elsewhere = ["scripts/lib/enrich/client-checks.mjs", "scripts/lib/enrich/engine.mjs", "scripts/lib/aiark/add.mjs", "scripts/push-worker.mjs", "scripts/sync-client-targeting-from-sheet.mjs"];
+  check("the lists are for AI Ark's search only: the database's rules, the Outcome, adding leads and pushes never read them", elsewhere.every((f) => !/cleaning-filters|CLEANING_(TITLES|EXCLUDE|DEFAULTS|EMPLOYEE)/.test(source(f))));
+}
+
 // ── Run ─────────────────────────────────────────────────────────────────────
 
 async function cleanup() {
@@ -2665,6 +2728,7 @@ try {
   await ruleChanges();
   await emailBisonCopy();
   await addToDatabase();
+  cleaningFilters(geo);
 } catch (e) {
   failed++;
   console.error("\nUNEXPECTED:", e);

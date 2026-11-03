@@ -47,7 +47,7 @@ async function setupFor(c: PoolClient, tag: string | null, override: PeopleFilte
   const client = await clientInfo(c, tag);
   const targeting = await targetingOf(c, tag);
   const people = peopleOrDefaults(await savedPeople(c, tag), client?.client_type ?? null);
-  const p = planView(targeting, override ?? people.value, g);
+  const p = planView(targeting, override ?? people.value, g, client?.client_type ?? null);
   return {
     ...base,
     client,

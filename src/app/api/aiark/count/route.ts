@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
         const client = await clientInfo(c, tag);
         const targeting = await targetingOf(c, tag);
         const people = override ?? peopleOrDefaults(await savedPeople(c, tag), client?.client_type ?? null).value;
-        return { ...plan(targeting, people, await geo(c)), rulesVersion: targeting?.version ?? null };
+        return { ...plan(targeting, people, await geo(c), client?.client_type ?? null), rulesVersion: targeting?.version ?? null };
       },
       { readOnly: true, timeoutMs: 10_000 }
     );

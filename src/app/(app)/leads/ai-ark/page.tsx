@@ -63,6 +63,7 @@ const EMAIL_RATE = 0.6; // assumed share of people with a valid email, for estim
 const fmt = (n: number | null | undefined) => (n ?? 0).toLocaleString("en-US");
 const cr = (n: number | null | undefined) => (n ?? 0).toLocaleString("en-US", { maximumFractionDigits: 1 });
 const bandKey = (b: EmployeeBand) => `${b.start ?? ""}-${b.end ?? ""}`;
+const LONG_LIST = "max-h-44 overflow-y-auto"; // the standard title lists run to hundreds of chips
 /** Running, or cancelled but still reading the export it paid for. */
 const isActive = (r: AiArkRun) => r.status === "queued" || r.status === "running" || r.finishing;
 
@@ -289,8 +290,10 @@ function AiArkTab() {
 
   if (!canView) return <AccessDenied />;
 
-  const dirty = !!form && (!saved || canonical(form) !== canonical(saved));
-  const set = <K extends keyof PeopleFilters>(k: K, v: PeopleFilters[K]) => setForm((f) => (f ? { ...f, [k]: v } : f));
+  // What a pull uses now: the saved filters, or a cleaning client's standard ones with none saved.
+  const inUse = saved ?? (setup?.people.defaultsFrom === "cleaning" ? setup.people.value : null);
+  const dirty = !!form && (!inUse || canonical(form) !== canonical(inUse));
+  const set =<K extends keyof PeopleFilters>(k: K, v: PeopleFilters[K]) => setForm((f) => (f ? { ...f, [k]: v } : f));
   // A count only counts for the client, source, filters and rules it was made for.
   const countNow =
     count && tag && form && count.key === countKeyOf(tag, mode, form) && count.rulesVersion === versions.rules ? count : null;
@@ -519,7 +522,7 @@ function AiArkTab() {
                   <Row label="Exclusions">
                     {fmt(setup.targeting.excludeTerms)} terms
                     {plan.report.excludeTerms && plan.report.excludeTerms.sent < plan.report.excludeTerms.total && (
-                      <span className="text-[var(--warning)]"> ({fmt(plan.report.excludeTerms.sent)} sent to AI Ark, all re-checked after)</span>
+                      <span className="text-[var(--warning)]"> ({fmt(plan.report.excludeTerms.sent - (plan.report.excludeTerms.standard ?? 0))} sent to AI Ark, all re-checked after)</span>
                     )}
                   </Row>
                   {setup.targeting.commercialCleaning && (
@@ -538,8 +541,8 @@ function AiArkTab() {
               sub="Saved per client — the client sheets don't have these"
               right={
                 <div className="flex items-center gap-2">
-                  {dirty && saved && (
-                    <Button size="xs" variant="ghost" onClick={() => setForm(saved)}>
+                  {dirty && inUse && (
+                    <Button size="xs" variant="ghost" onClick={() => setForm(inUse)}>
                       Undo changes
                     </Button>
                   )}
@@ -552,13 +555,13 @@ function AiArkTab() {
               {!setup.people.saved && (
                 <p className="mb-3 rounded-xl bg-[var(--warning)]/12 px-3 py-2 text-[12.5px] leading-relaxed">
                   {setup.people.defaultsFrom === "cleaning"
-                    ? "A starting point for cleaning clients: owner, operations and facility / office manager roles, and the titles to skip. Not saved yet — change anything, then Save."
+                    ? "The standard AI Ark filters for cleaning clients, in use for this client as they are. Change anything, then Save, to keep this client's own copy. The standard keywords and company types always apply."
                     : "Nothing saved for this client yet. Add job titles, seniority or departments, then Save."}
                 </p>
               )}
               <div className="space-y-4">
-                <Field label="Job titles" hint="Their current main role. Smart also finds related titles (“CEO” finds “Chief Executive Officer”); Word needs the words; Strict needs the exact title.">
-                  <TagInput values={form.titles} onChange={(v) => set("titles", v)} placeholder="Office Manager, Facilities Director…" maxTags={300} />
+                <Field label={`Job titles (${fmt(form.titles.length)})`} hint="Any of their current roles. Smart also finds related titles (“CEO” finds “Chief Executive Officer”); Word needs the words; Strict needs the exact title.">
+                  <TagInput values={form.titles} onChange={(v) => set("titles", v)} placeholder="Office Manager, Facilities Director…" maxTags={300} listClassName={LONG_LIST} />
                   <IosSegmentedControl
                     size="sm"
                     className="mt-2"
@@ -571,8 +574,8 @@ function AiArkTab() {
                     ]}
                   />
                 </Field>
-                <Field label="Leave out titles" hint="Matched as words: “sales” leaves out “Sales Manager”.">
-                  <TagInput values={form.exclude_titles} onChange={(v) => set("exclude_titles", v)} placeholder="sales, recruiter…" maxTags={300} />
+                <Field label={`Leave out titles (${fmt(form.exclude_titles.length)})`} hint="Matched as words: “sales” leaves out “Sales Manager”. A title left out always wins over a title above.">
+                  <TagInput values={form.exclude_titles} onChange={(v) => set("exclude_titles", v)} placeholder="sales, recruiter…" maxTags={300} listClassName={LONG_LIST} />
                 </Field>
                 <Field label="Seniority">
                   <Chips
@@ -587,7 +590,13 @@ function AiArkTab() {
                 </Field>
                 <Field label="Company size (employees)">
                   <Chips
-                    options={BANDS.map((b) => ({ value: bandKey(b), label: b.label }))}
+                    options={[
+                      ...BANDS.map((b) => ({ value: bandKey(b), label: b.label })),
+                      // A band that isn't one of the chips (the standard 8–6,800) still shows, and can be switched off.
+                      ...form.employee_bands
+                        .filter((b) => !BANDS.some((x) => bandKey(x) === bandKey(b)))
+                        .map((b) => ({ value: bandKey(b), label: `${fmt(b.start)}${b.end ? `–${fmt(b.end)}` : "+"}` })),
+                    ]}
                     values={form.employee_bands.map(bandKey)}
                     onChange={(keys) =>
                       set(
@@ -605,7 +614,7 @@ function AiArkTab() {
                   <TagInput values={form.industries} onChange={(v) => set("industries", v)} placeholder="facilities services…" maxTags={300} splitOn={null} />
                   <Suggest values={form.industries} options={setup.suggestions.industries} onAdd={(v) => set("industries", [...form.industries, v])} />
                 </Field>
-                <Field label="Leave out industries">
+                <Field label="Leave out industries" hint="Exact AI Ark industry names: “real estate” doesn't also leave out “commercial real estate”.">
                   <TagInput values={form.exclude_industries} onChange={(v) => set("exclude_industries", v)} placeholder="restaurants…" maxTags={300} splitOn={null} />
                 </Field>
                 {planErrors.length > 0 && (
@@ -644,8 +653,14 @@ function AiArkTab() {
                   <Row label="Company size">{plan.report.bands?.length ? plan.report.bands.map((b) => `${fmt(b.start)}${b.end ? `–${fmt(b.end)}` : "+"}`).join(", ") : "any"}</Row>
                   <Row label="Companies">
                     leaving out {fmt(plan.report.excludeTerms?.sent)} exclusion term{plan.report.excludeTerms?.sent === 1 ? "" : "s"}
+                    {plan.report.excludeTerms?.standard ? ` (${fmt(plan.report.excludeTerms.standard)} standard, the rest this client's)` : ""}
                     {plan.report.industries ? `, in ${fmt(plan.report.industries)} industries` : ""}
+                    {plan.report.excludeIndustries ? `, not in ${fmt(plan.report.excludeIndustries)} industries` : ""}
+                    {plan.report.excludeCompanyTypes?.length ? `, no ${plan.report.excludeCompanyTypes.map((t) => t.replace(/_/g, " ").toLowerCase()).join(" or ")} companies` : ""}
                   </Row>
+                  {plan.report.peopleKeywords ? (
+                    <Row label="People">leaving out the same {fmt(plan.report.peopleKeywords)} terms in their headline or summary</Row>
+                  ) : null}
                 </div>
               )}
               {(plan.notes.length > 0 || (plan.pullBlockers.length > 0 && !blockers.length)) && (

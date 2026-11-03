@@ -4,7 +4,8 @@
 // size), turned into People Search filter bodies in the shapes AI Ark documents
 // (docs.ai-ark.com, checked 2026-10-30). The one thing it does not document is
 // a city with its state, so places go out as "City, State" on trust and every
-// person is re-checked after the pull.
+// person is re-checked after the pull. A cleaning client's search starts from
+// the standard filters in cleaning-filters.mjs, and its rules add to them.
 //
 // Nothing is dropped silently: a value that can't be used is refused when the
 // filters are saved, every list that has to be cut says so in the report, and
@@ -13,6 +14,14 @@
 // Plain JavaScript: the AI Ark tab's routes and the worker share it.
 
 import { ARRAY_MAX } from "./client.mjs";
+import {
+  CLEANING_EMPLOYEE_BANDS,
+  CLEANING_EXCLUDE_COMPANY_TYPES,
+  CLEANING_EXCLUDE_INDUSTRIES,
+  CLEANING_EXCLUDE_KEYWORDS,
+  CLEANING_EXCLUDE_TITLES,
+  CLEANING_TITLES,
+} from "./cleaning-filters.mjs";
 import { placeString } from "./geo.mjs";
 
 export { loadGeo } from "./geo.mjs";
@@ -21,6 +30,15 @@ export const SENIORITY = ["founder", "owner", "partner", "c_suite", "vp", "direc
 export const TITLE_MODES = ["SMART", "WORD", "STRICT"];
 const MAX_REQUESTS = 50; // aiark_runs.requests holds at most 50 bodies (15,000 places)
 const MAX_BANDS = 20;
+
+// Where excluded keywords are looked for. A client's terms: the fields the lead
+// database checks them against. A cleaning client's: every company field, and
+// the two that say what a person does now (a work history often names the
+// janitorial vendors a facility manager has run).
+const RULE_SOURCES = ["NAME", "INDUSTRY", "DESCRIPTION"];
+const CLEANING_COMPANY_SOURCES = ["NAME", "KEYWORD", "SEO", "DESCRIPTION", "INDUSTRY"];
+const CLEANING_PEOPLE_SOURCES = ["HEADLINE", "SUMMARY"];
+const asWords = (sources) => sources.map((source) => ({ mode: "WORD", source }));
 
 /** Department-and-function values seen in AI Ark's catalog that suit facility buyers (checked 2026-10-30). */
 export const DEPARTMENT_SUGGESTIONS = [
@@ -36,28 +54,18 @@ export const INDUSTRY_SUGGESTIONS = [
 ];
 
 /**
- * A starting point for cleaning clients, drawn from the three role tracks used
- * in Clay (CEO / owner, operations, facility / office manager) and the titles
- * its agents were told to skip. Part of each list, not all of it. Shown, not
- * saved, until someone saves it.
+ * A cleaning client's people filters until someone saves its own: what the tab
+ * shows and what a count or a pull uses (cleaning-filters.mjs).
  */
 export const CLEANING_DEFAULTS = {
-  titles: [
-    "Owner", "Founder", "CEO", "Chief Executive Officer", "Company Owner", "Franchise Owner",
-    "Chief Operating Officer", "Vice President of Operations", "Vice President of Facilities", "Facilities Director",
-    "Head of Facilities", "Head of Facilities and Operations", "Facilities Manager", "Facility Manager",
-    "Office Manager", "Workplace Manager", "Office Administrator", "Office Coordinator", "Operations Manager",
-  ],
+  titles: CLEANING_TITLES,
   title_mode: "WORD",
-  exclude_titles: [
-    "attorney", "legal", "lawyer", "human resources", "intern", "freelance", "recruiter", "talent",
-    "sales", "business development", "accountant", "account manager", "account executive",
-  ],
+  exclude_titles: CLEANING_EXCLUDE_TITLES,
   seniority: [],
   departments: [],
-  employee_bands: [],
+  employee_bands: CLEANING_EMPLOYEE_BANDS,
   industries: [],
-  exclude_industries: [],
+  exclude_industries: CLEANING_EXCLUDE_INDUSTRIES,
 };
 
 export const EMPTY_PEOPLE_FILTERS = {
@@ -143,7 +151,7 @@ function chunks(arr, n) {
  *
  * @returns {{ requests: object[], report: object, notes: string[], blockers: string[], pullBlockers: string[] }}
  */
-export function buildRequests({ targeting, people, geo }) {
+export function buildRequests({ targeting, people, geo, cleaning = false }) {
   const notes = [];
   const blockers = [];
   const pullBlockers = [];
@@ -186,12 +194,16 @@ export function buildRequests({ targeting, people, geo }) {
   }
   if (placesOut.length > ARRAY_MAX) notes.push(`Only the first ${ARRAY_MAX} of ${placesOut.length} excluded places are sent; all are re-checked after the pull.`);
 
-  const terms = Array.isArray(targeting.exclude_terms) ? targeting.exclude_terms.map(clean).filter(Boolean) : [];
+  const clientTerms = Array.isArray(targeting.exclude_terms) ? targeting.exclude_terms.map(clean).filter(Boolean) : [];
+  // The standard list comes first: a list over AI Ark's limit then only cuts
+  // terms that are re-checked after the pull.
+  const standardTerms = cleaning ? CLEANING_EXCLUDE_KEYWORDS : [];
+  const terms = [...new Map([...standardTerms, ...clientTerms].map((t) => [t.toLowerCase(), t])).values()];
   const termsSent = terms.slice(0, ARRAY_MAX);
   if (terms.length > ARRAY_MAX) {
-    notes.push(`AI Ark takes ${ARRAY_MAX} exclusion terms per search: the first ${ARRAY_MAX} of ${terms.length} are sent, and all ${terms.length} are re-checked after the pull.`);
+    notes.push(`AI Ark takes ${ARRAY_MAX} exclusion terms per search: the first ${ARRAY_MAX} of ${terms.length} are sent, and all of the client's own are re-checked after the pull.`);
   }
-  if (termsSent.length) {
+  if (clientTerms.length) {
     notes.push(`AI Ark matches excluded words as whole words; the lead database matches them anywhere in the text ("bar" also drops "Barbershop"). That stricter check runs after the pull.`);
   }
 
@@ -201,6 +213,7 @@ export function buildRequests({ targeting, people, geo }) {
   const seniority = list(p.seniority, { lower: true, tooLong }).filter((s) => SENIORITY.includes(s));
   const departments = list(p.departments, { lower: true, tooLong }).slice(0, ARRAY_MAX);
   const bands = (Array.isArray(p.employee_bands) ? p.employee_bands : []).slice(0, MAX_BANDS);
+  if (bands.length) notes.push("AI Ark's company size filter takes ranges only, with no way to ask for companies whose size it doesn't know, so they are probably left out.");
   const industries = list(p.industries, { lower: true, tooLong }).slice(0, ARRAY_MAX);
   const excludeIndustries = list(p.exclude_industries, { lower: true, tooLong }).slice(0, ARRAY_MAX);
   if (tooLong.length) notes.push(`${tooLong.length} filter ${tooLong.length === 1 ? "value is" : "values are"} over ${VALUE_MAX} characters and left out.`);
@@ -212,8 +225,9 @@ export function buildRequests({ targeting, people, geo }) {
 
   const contactBase = {};
   if (titles.length || excludeTitles.length) {
+    // current: all the person's active roles (latest is only the primary one).
     contactBase.experience = {
-      latest: {
+      current: {
         title: {
           any: {
             ...(titles.length ? { include: { mode, content: titles } } : {}),
@@ -225,14 +239,19 @@ export function buildRequests({ targeting, people, geo }) {
   }
   if (seniority.length) contactBase.seniority = { any: { include: seniority } };
   if (departments.length) contactBase.departmentAndFunction = { any: { include: departments } };
+  if (cleaning && termsSent.length) {
+    contactBase.keyword = { any: { exclude: { sources: asWords(CLEANING_PEOPLE_SOURCES), content: termsSent } } };
+  }
 
   const account = {};
   if (bands.length) account.employeeSize = { type: "RANGE", range: bands.map((b) => ({ ...b })) };
   if (industries.length || excludeIndustries.length) {
+    // Excluded industries are exact catalog values: "real estate" must not also
+    // leave out "commercial real estate", which nobody asked to lose.
     account.industries = {
       any: {
         ...(industries.length ? { include: { mode: "WORD", content: industries } } : {}),
-        ...(excludeIndustries.length ? { exclude: { mode: "WORD", content: excludeIndustries } } : {}),
+        ...(excludeIndustries.length ? { exclude: { mode: "STRICT", content: excludeIndustries } } : {}),
       },
     };
   }
@@ -240,12 +259,13 @@ export function buildRequests({ targeting, people, geo }) {
     account.keyword = {
       any: {
         exclude: {
-          sources: [{ mode: "WORD", source: "NAME" }, { mode: "WORD", source: "INDUSTRY" }, { mode: "WORD", source: "DESCRIPTION" }],
+          sources: asWords(cleaning ? CLEANING_COMPANY_SOURCES : RULE_SOURCES),
           content: termsSent,
         },
       },
     };
   }
+  if (cleaning) account.type = { any: { exclude: [...CLEANING_EXCLUDE_COMPANY_TYPES] } };
 
   const requests = blockers.length
     ? []
@@ -259,7 +279,9 @@ export function buildRequests({ targeting, people, geo }) {
     report: {
       locations: { total: uniq.length, sent: uniq.length, requests: groups.length, examples: uniq.slice(0, 6), dropped },
       excludeLocations: { total: placesOut.length, sent: excludePlaces.length },
-      excludeTerms: { total: terms.length, sent: termsSent.length },
+      excludeTerms: { total: terms.length, sent: termsSent.length, standard: standardTerms.length },
+      peopleKeywords: cleaning ? termsSent.length : 0,
+      excludeCompanyTypes: cleaning ? [...CLEANING_EXCLUDE_COMPANY_TYPES] : [],
       titles: titles.length,
       titleMode: mode,
       excludeTitles: excludeTitles.length,

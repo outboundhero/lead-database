@@ -83,7 +83,7 @@ export async function savedPeople(c: PoolClient, tag: string, { lock = false } =
   return rows[0] ?? null;
 }
 
-/** The saved filters, or the starting point the tab shows until someone saves. */
+/** The saved filters, or what applies until someone saves: the standard filters for a cleaning client, nothing otherwise. */
 export function peopleOrDefaults(saved: Record<string, unknown> | null, clientType: string | null) {
   if (saved) {
     const { updated_at, version, ...value } = saved;
@@ -105,8 +105,8 @@ export function peopleOrDefaults(saved: Record<string, unknown> | null, clientTy
   };
 }
 
-export function plan(targeting: Record<string, unknown> | null, people: PeopleFilters, g: Geo): AiArkPlan & { requests: object[] } {
-  const built = buildRequests({ targeting, people, geo: g });
+export function plan(targeting: Record<string, unknown> | null, people: PeopleFilters, g: Geo, clientType: string | null = null): AiArkPlan & { requests: object[] } {
+  const built = buildRequests({ targeting, people, geo: g, cleaning: clientType === "Cleaning" });
   return {
     requests: built.requests,
     searches: built.requests.length,
@@ -119,8 +119,8 @@ export function plan(targeting: Record<string, unknown> | null, people: PeopleFi
 }
 
 /** The plan as the page shows it: everything but the request bodies beyond the first. */
-export function planView(targeting: Record<string, unknown> | null, people: PeopleFilters, g: Geo): AiArkPlan {
-  const p = plan(targeting, people, g);
+export function planView(targeting: Record<string, unknown> | null, people: PeopleFilters, g: Geo, clientType: string | null = null): AiArkPlan {
+  const p = plan(targeting, people, g, clientType);
   return { searches: p.searches, report: p.report, notes: p.notes, blockers: p.blockers, pullBlockers: p.pullBlockers, example: p.example };
 }
 
