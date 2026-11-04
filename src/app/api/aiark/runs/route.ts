@@ -107,6 +107,10 @@ export async function POST(req: NextRequest) {
             : `${tag} already has a run going. Cancel it or let it finish first.`;
           return { status: 409, error };
         }
+        // A pull queued now would start spending the moment a worker appears.
+        if (mode === "live" && !(await workerState(c))?.online) {
+          return { status: 409, error: "Pulls aren't switched on yet: the service that runs them is off, so nothing was started." };
+        }
         const client = await clientInfo(c, tag);
         if (!client) return { status: 404, error: `${tag} is not a client` };
         const targeting = await targetingOf(c, tag);

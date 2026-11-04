@@ -2111,17 +2111,43 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   whose `client_tags.client_type` is `Cleaning` searches on 287 current-job titles
   with 265 left out (WORD; an exclusion always wins), 8–6,800 employees, 13 industries
   left out (STRICT, exact catalog values), company types `GOVERNMENT_AGENCY` and
-  `SELF_EMPLOYED` left out, and 76 keywords left out for companies (all five
-  sources) and people (HEADLINE, SUMMARY). Its onboarding-sheet exclusion terms
-  (`client_targeting.exclude_terms`, synced every 6 hours) are added to those
-  keywords at both levels. Standard terms go first, so AI Ark's limit of 300 only
-  cuts sheet terms, which the Outcome re-checks after the pull. Titles, size and
+  `SELF_EMPLOYED` left out, and 76 keywords left out for companies (NAME, INDUSTRY,
+  DESCRIPTION) and people (HEADLINE, SUMMARY). Its onboarding-sheet exclusion terms
+  (`client_targeting.exclude_terms`, synced every 6 hours) are added to the company
+  keywords as the limit below allows, broadest first; the rest are re-checked by
+  the Outcome after the pull, when the person is already paid for. Titles, size and
   industries are defaults: a pull with nothing saved uses them, and a client's
   saved filters replace them. Keywords and company types always apply. AI Ark's size
   filter takes ranges only, so the brief's "plus unknown size" can't be sent.
+- ⚠ **AI Ark refuses a request as too large at a limit its docs don't state**
+  (`request size must less or equal to {0,number} bytes`, 400, nothing charged).
+  Bytes alone don't decide it: live 2026-11-05 it took 9,905 bytes and refused 8,502.
+  Sources and places seem to weigh more; 116 company keywords on all 5 sources were
+  refused with fewer titles and places than the same list on 3 sources. An empty
+  search still costs its credit. So `buildRequests` keeps every list within what it
+  held in a request AI Ark accepted (`TITLES_BYTES` and friends), and splits titles
+  and places across searches: median client 2 searches, largest 20, each one credit
+  on a count. WORD phrases a shorter listed phrase already covers are dropped from
+  the request (`condensePhrases`: 287 titles go out as 153, 265 as 180), which
+  changes nobody's match. Those are the only sizes tested live; a refusal is free.
+- **Where a pull's people go** (`scripts/lib/aiark/add.mjs`): with an email, the
+  database; with none, the pipeline. People with a usable email, inside the client's
+  area, clear of its exclusions and new to the database are "Ready to add". When a
+  pull has finished and its rows are all worked, the worker asks the web app to add
+  them (`AIARK_AUTO_ADD_URL`, `AIARK_AUTO_ADD_KEY`, `POST /api/aiark/add/auto`). ⚠
+  **Not switched on:** with those unset, and until a worker exists, nothing is added
+  automatically and live Start is refused (`Pulls aren't switched on yet`). A cancelled
+  pull, and anyone an add could not store, take the button. People with no email stay
+  in the pull's table; the email-finding steps (`find_email`, phase 3) are not built.
+  When they are, they hand an address to `emailFound()`, which works the person again
+  so they go to the database like anyone else. Those steps need a real name and
+  company, which only the export strategy returns (a Preview has a masked last name
+  and no LinkedIn or domain, and Export Single returns nothing without an email), so
+  Export job is the tab's default.
 - **Add to the database** (a bar above a finished live run's table on the Clay
-  tab; `POST /api/aiark/add`, logic in `scripts/lib/aiark/add.mjs`): the people
-  whose Outcome is "Ready to add" become leads, once each. Anyone who has since
+  tab; `POST /api/aiark/add`, `src/lib/aiark/add-run.ts`, logic in
+  `scripts/lib/aiark/add.mjs`): the people whose Outcome is "Ready to add" become
+  leads, once each. Anyone who has since
   become a lead, reached the Email Bison copy or the never-contact list is
   skipped at once; the rest go through the Uploads page's engine
   (`importRows`, strategy `skip`, never merged) as one `upload_batches` row, so
@@ -2148,20 +2174,25 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
 - **Env:** `AIARK_API_KEY` on **both** the web service (count, balance) and the
   worker (pulls); `AIARK_WEBHOOK_URL` (export runs only) also on **both** — the
   web service offers Export only when it is set, and the worker posts the jobs
-  (this app's `/api/aiark/webhook` on its public HTTPS host); `AIARK_RPS` (worker,
+  (this app's `/api/aiark/webhook` on its public HTTPS host); `AIARK_AUTO_ADD_URL` (worker) and `AIARK_AUTO_ADD_KEY` (worker and web, 32+
+  characters) turn on adding finished pulls; `AIARK_RPS` (worker,
   4) and `AIARK_RPS_WEB` (1) keep one key at AI Ark's 5 a second. ⚠ **Never set
   `AIARK_DEMO` in production**: it turns on made-up demo runs that write into the
   real tables.
-- **Before the first live pull:** one count for a cleaning client, to see AI Ark
-  accept the standard filters (their full request has not been sent live yet), then
-  a small supervised pull of each strategy to confirm the Export Single and
-  export-job response shapes, which so far were only tested against the demo
-  stand-in. Storing AI Ark's data in the lead
-  database was approved by the owner on 2026-11-03 (terms §6.2). A 1-credit
-  Preview on 2026-11-02 showed AI Ark respects the state in "City, State"
-  ("Springfield, Illinois": all 100 on the first page in Illinois). But 34 of
-  those 100 had the state "Illinois Metropolitan Area", which the area check
-  doesn't place (Outside) and a single run still buys first.
+- **Live test 2026-11-05 (5 credits, one client):** the standard filters are accepted within
+  the limits above (3,377 matches for 110 titles × 40 places). Export job: PENDING →
+  DONE in 41 s, statistics, inquiries and the email block all as the client expects,
+  full names, LinkedIn and company domain back. Both people had emails, so a no-email
+  person from an export is still unseen. Both were already in the database. Short
+  exclusions are whole-word: of 100 titles, "it" sat inside 6 and "cto" inside 9, as a
+  word in none. ⚠ `experience.current` means all active roles, so 15 of the 100 had a
+  main title on no list (a side role matched). ⚠ The Outcome's "anywhere in the text"
+  check on company descriptions caught 13 of the 100 on "pub" and "bar", probably
+  inside longer words like "public". Not fixed: the send gate checks
+  `specific_industry`, where the add stores the description, the same way.
+- **Before the first live pull:** a small supervised pull of each strategy; Export
+  Single's answer has never been read live. Storing AI Ark's data in the lead database
+  was approved by the owner on 2026-11-03 (terms §6.2).
 - **Tests:** stop the worker, then
   `AIARK_TEST_TAG=<cleaning client tag> node --env-file=.env.local scripts/test-aiark.mjs`
   (local database only; it refuses any other).

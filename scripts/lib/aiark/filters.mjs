@@ -28,15 +28,25 @@ export { loadGeo } from "./geo.mjs";
 
 export const SENIORITY = ["founder", "owner", "partner", "c_suite", "vp", "director", "head", "manager", "senior", "mid_level", "entry", "intern"];
 export const TITLE_MODES = ["SMART", "WORD", "STRICT"];
-const MAX_REQUESTS = 50; // aiark_runs.requests holds at most 50 bodies (15,000 places)
+const MAX_REQUESTS = 50; // aiark_runs.requests holds at most 50 bodies
 const MAX_BANDS = 20;
 
-// Where excluded keywords are looked for. A client's terms: the fields the lead
-// database checks them against. A cleaning client's: every company field, and
-// the two that say what a person does now (a work history often names the
-// janitorial vendors a facility manager has run).
-const RULE_SOURCES = ["NAME", "INDUSTRY", "DESCRIPTION"];
-const CLEANING_COMPANY_SOURCES = ["NAME", "KEYWORD", "SEO", "DESCRIPTION", "INDUSTRY"];
+// AI Ark refuses a request as too large at a limit its docs don't state, and the
+// bytes sent don't decide it: live on 2026-11-05 it took 9,905 bytes and refused
+// 8,502. Places and repeated keyword sources seem to weigh more. So no list goes
+// past what it held in a request AI Ark accepted (110 titles, 180 titles left out,
+// 40 places, 64 people keywords, 116 company keywords on 3 sources), less a margin
+// for the exclusion list ids an export adds. Sizes are the JSON list in bytes.
+const TITLES_BYTES = 2_000;
+const EXCLUDE_TITLES_BYTES = 2_540;
+const PLACES_BYTES = 950;
+const COMPANY_TERMS_BYTES = 1_900;
+
+// Where excluded keywords are looked for. For companies: the fields the lead
+// database checks a client's terms against (AI Ark refused the same request with
+// all five of its sources). For people: the two that say what a person does now
+// (a work history often names the janitorial vendors a facility manager has run).
+const COMPANY_SOURCES = ["NAME", "INDUSTRY", "DESCRIPTION"];
 const CLEANING_PEOPLE_SOURCES = ["HEADLINE", "SUMMARY"];
 const asWords = (sources) => sources.map((source) => ({ mode: "WORD", source }));
 
@@ -139,15 +149,55 @@ export function cleanPeopleFilters(input) {
   };
 }
 
-function chunks(arr, n) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
-  return out;
+const bytes = (v) => new TextEncoder().encode(JSON.stringify(v)).length;
+const wordsOf = (s) => String(s).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+
+/** Does `outer` hold the words of `inner`, in order and side by side? */
+function holds(inner, outer) {
+  for (let i = 0; i + inner.length <= outer.length; i++) {
+    if (inner.every((w, j) => outer[i + j] === w)) return true;
+  }
+  return false;
 }
 
 /**
- * The AI Ark filter bodies for a client: one per 300 places (AI Ark's limit
- * per list), each with the same people and company filters.
+ * The phrases worth sending, in their order. A WORD match finds a phrase with
+ * extra words around it, so a phrase holding a shorter listed one adds nothing
+ * ("facility manager" beside "facility"), and leaving it out changes nobody's match.
+ */
+export function condensePhrases(phrases) {
+  const items = phrases.map((s, i) => ({ s, i, w: wordsOf(s) })).filter((x) => x.w.length);
+  const kept = [];
+  for (const x of [...items].sort((a, b) => a.w.length - b.w.length || a.i - b.i)) {
+    if (!kept.some((k) => holds(k.w, x.w))) kept.push(x);
+  }
+  return kept.sort((a, b) => a.i - b.i).map((x) => x.s);
+}
+
+/** Values split into lists of at most `capacity` bytes and AI Ark's 300 values. */
+function pack(values, capacity) {
+  const groups = [];
+  let group = [];
+  let used = 2;
+  for (const v of values) {
+    const n = bytes(v) + 1;
+    if (group.length && (used + n > capacity || group.length >= ARRAY_MAX)) {
+      groups.push(group);
+      group = [];
+      used = 2;
+    }
+    group.push(v);
+    used += n;
+  }
+  groups.push(group);
+  return groups;
+}
+
+/**
+ * The AI Ark filter bodies for a client: one per group of titles × group of
+ * places, each within what AI Ark is known to take. The exclusions go in every
+ * search. A cleaning client's standard filters always go; its own exclusion
+ * terms go as room allows, broadest first, at company level only.
  *
  * @returns {{ requests: object[], report: object, notes: string[], blockers: string[], pullBlockers: string[] }}
  */
@@ -179,13 +229,6 @@ export function buildRequests({ targeting, people, geo, cleaning = false }) {
   const excludePlaces = [...new Set(placesOut)].slice(0, ARRAY_MAX);
 
   if (!uniq.length) blockers.push("The client's rules have no locations, so AI Ark would search everywhere. Add locations first.");
-  const groups = chunks(uniq, ARRAY_MAX);
-  if (groups.length > MAX_REQUESTS) {
-    blockers.push(`${uniq.length.toLocaleString("en-US")} places is more than one run can send (${(MAX_REQUESTS * ARRAY_MAX).toLocaleString("en-US")}).`);
-  }
-  if (groups.length > 1) {
-    notes.push(`The ${uniq.length.toLocaleString("en-US")} places go out as ${groups.length} searches of up to ${ARRAY_MAX} (AI Ark's limit per list); counts are added up.`);
-  }
   if (uniq.some((s) => s.includes(","))) {
     notes.push(`Places are sent as "City, State". AI Ark's docs don't say how it reads a city with its state, so every person is re-checked against the client's area after the pull.`);
   }
@@ -195,14 +238,22 @@ export function buildRequests({ targeting, people, geo, cleaning = false }) {
   if (placesOut.length > ARRAY_MAX) notes.push(`Only the first ${ARRAY_MAX} of ${placesOut.length} excluded places are sent; all are re-checked after the pull.`);
 
   const clientTerms = Array.isArray(targeting.exclude_terms) ? targeting.exclude_terms.map(clean).filter(Boolean) : [];
-  // The standard list comes first: a list over AI Ark's limit then only cuts
-  // terms that are re-checked after the pull.
   const standardTerms = cleaning ? CLEANING_EXCLUDE_KEYWORDS : [];
   const terms = [...new Map([...standardTerms, ...clientTerms].map((t) => [t.toLowerCase(), t])).values()];
-  const termsSent = terms.slice(0, ARRAY_MAX);
-  if (terms.length > ARRAY_MAX) {
-    notes.push(`AI Ark takes ${ARRAY_MAX} exclusion terms per search: the first ${ARRAY_MAX} of ${terms.length} are sent, and all of the client's own are re-checked after the pull.`);
+  // What stands for a standard keyword (itself, or a sheet term that covers it)
+  // goes first and stays, so only terms re-checked after the pull can be cut.
+  const standardWords = standardTerms.map(wordsOf);
+  const merged = condensePhrases(terms);
+  const staysTerms = merged.filter((t) => standardWords.some((w) => holds(wordsOf(t), w)));
+  const ownTerms = merged
+    .filter((t) => !standardWords.some((w) => holds(wordsOf(t), w)))
+    .sort((a, b) => wordsOf(a).length - wordsOf(b).length || a.length - b.length);
+  const companyTerms = [...staysTerms];
+  for (const t of ownTerms) {
+    if (companyTerms.length >= ARRAY_MAX || bytes([...companyTerms, t]) > COMPANY_TERMS_BYTES) break;
+    companyTerms.push(t);
   }
+  const peopleTerms = condensePhrases(standardTerms);
   if (clientTerms.length) {
     notes.push(`AI Ark matches excluded words as whole words; the lead database matches them anywhere in the text ("bar" also drops "Barbershop"). That stricter check runs after the pull.`);
   }
@@ -223,64 +274,89 @@ export function buildRequests({ targeting, people, geo, cleaning = false }) {
     pullBlockers.push("Choose job titles, seniority or departments first — without them AI Ark returns everyone at the matching companies.");
   }
 
+  const titlesSent = mode === "WORD" ? condensePhrases(titles) : titles;
+  const excludeTitlesSent = condensePhrases(excludeTitles);
+
   const contactBase = {};
-  if (titles.length || excludeTitles.length) {
-    // current: all the person's active roles (latest is only the primary one).
-    contactBase.experience = {
-      current: {
-        title: {
-          any: {
-            ...(titles.length ? { include: { mode, content: titles } } : {}),
-            ...(excludeTitles.length ? { exclude: { mode: "WORD", content: excludeTitles } } : {}),
-          },
-        },
-      },
-    };
-  }
   if (seniority.length) contactBase.seniority = { any: { include: seniority } };
   if (departments.length) contactBase.departmentAndFunction = { any: { include: departments } };
-  if (cleaning && termsSent.length) {
-    contactBase.keyword = { any: { exclude: { sources: asWords(CLEANING_PEOPLE_SOURCES), content: termsSent } } };
+  if (peopleTerms.length) {
+    contactBase.keyword = { any: { exclude: { sources: asWords(CLEANING_PEOPLE_SOURCES), content: peopleTerms } } };
   }
-
-  const account = {};
-  if (bands.length) account.employeeSize = { type: "RANGE", range: bands.map((b) => ({ ...b })) };
+  const accountBase = {};
+  if (bands.length) accountBase.employeeSize = { type: "RANGE", range: bands.map((b) => ({ ...b })) };
   if (industries.length || excludeIndustries.length) {
     // Excluded industries are exact catalog values: "real estate" must not also
     // leave out "commercial real estate", which nobody asked to lose.
-    account.industries = {
+    accountBase.industries = {
       any: {
         ...(industries.length ? { include: { mode: "WORD", content: industries } } : {}),
         ...(excludeIndustries.length ? { exclude: { mode: "STRICT", content: excludeIndustries } } : {}),
       },
     };
   }
-  if (termsSent.length) {
-    account.keyword = {
-      any: {
-        exclude: {
-          sources: asWords(cleaning ? CLEANING_COMPANY_SOURCES : RULE_SOURCES),
-          content: termsSent,
-        },
-      },
-    };
-  }
-  if (cleaning) account.type = { any: { exclude: [...CLEANING_EXCLUDE_COMPANY_TYPES] } };
+  if (cleaning) accountBase.type = { any: { exclude: [...CLEANING_EXCLUDE_COMPANY_TYPES] } };
 
-  const requests = blockers.length
-    ? []
-    : groups.map((g) => ({
-        contact: { ...contactBase, location: { any: { include: g, ...(excludePlaces.length ? { exclude: excludePlaces } : {}) } } },
-        ...(Object.keys(account).length ? { account } : {}),
-      }));
+  if (companyTerms.length) {
+    accountBase.keyword = { any: { exclude: { sources: asWords(COMPANY_SOURCES), content: companyTerms } } };
+  }
+
+  const body = (titleGroup, placeGroup) => {
+    return {
+      contact: {
+        // current: all the person's active roles (latest is only the primary one).
+        ...(titleGroup.length || excludeTitlesSent.length
+          ? {
+              experience: {
+                current: {
+                  title: {
+                    any: {
+                      ...(titleGroup.length ? { include: { mode, content: titleGroup } } : {}),
+                      ...(excludeTitlesSent.length ? { exclude: { mode: "WORD", content: excludeTitlesSent } } : {}),
+                    },
+                  },
+                },
+              },
+            }
+          : {}),
+        ...contactBase,
+        location: { any: { include: placeGroup, ...(excludePlaces.length ? { exclude: excludePlaces } : {}) } },
+      },
+      ...(Object.keys(accountBase).length ? { account: accountBase } : {}),
+    };
+  };
+
+  const titleGroups = pack(titlesSent, TITLES_BYTES);
+  const placeGroups = pack(uniq, PLACES_BYTES);
+  const searches = titleGroups.length * placeGroups.length;
+  if (bytes(excludeTitlesSent) > EXCLUDE_TITLES_BYTES) {
+    blockers.push(`The titles to leave out are too long for an AI Ark search. Shorten the list by about ${(bytes(excludeTitlesSent) - EXCLUDE_TITLES_BYTES).toLocaleString("en-US")} characters.`);
+  }
+  if (searches > MAX_REQUESTS) {
+    blockers.push(`These job titles and ${uniq.length.toLocaleString("en-US")} places would take ${searches} searches, more than one run can send (${MAX_REQUESTS}). Shorten the job titles or the locations.`);
+  }
+
+  const requests = blockers.length ? [] : titleGroups.flatMap((t) => placeGroups.map((g) => body(t, g)));
+  const sentWords = companyTerms.map(wordsOf);
+  const termsCovered = terms.filter((t) => sentWords.some((w) => holds(w, wordsOf(t)))).length;
+
+  if (titles.length > titlesSent.length || excludeTitles.length > excludeTitlesSent.length || terms.length > merged.length) {
+    notes.push(`Shorter phrases stand in for longer ones ("facility" also finds "facility manager"), which keeps the request small and changes nobody's match.`);
+  }
+  if (requests.length > 1) {
+    notes.push(`AI Ark limits how much one request can hold, so this goes out as ${requests.length} searches (${titleGroups.length} ${titleGroups.length === 1 ? "group" : "groups"} of job titles × ${placeGroups.length} ${placeGroups.length === 1 ? "group" : "groups"} of places), and a count costs 1 credit for each. Counts are added up, so someone matching titles in two groups is counted twice; a pull leaves out people it has already bought.`);
+  }
+  if (termsCovered < terms.length) {
+    notes.push(`AI Ark's limits leave room for ${termsCovered} of this client's ${terms.length} exclusion terms in the search. The others are checked after the pull, when the person is already paid for.`);
+  }
 
   return {
     requests,
     report: {
-      locations: { total: uniq.length, sent: uniq.length, requests: groups.length, examples: uniq.slice(0, 6), dropped },
+      locations: { total: uniq.length, sent: uniq.length, requests: requests.length, examples: uniq.slice(0, 6), dropped },
       excludeLocations: { total: placesOut.length, sent: excludePlaces.length },
-      excludeTerms: { total: terms.length, sent: termsSent.length, standard: standardTerms.length },
-      peopleKeywords: cleaning ? termsSent.length : 0,
+      excludeTerms: { total: terms.length, sent: termsCovered, standard: standardTerms.length },
+      peopleKeywords: standardTerms.length,
       excludeCompanyTypes: cleaning ? [...CLEANING_EXCLUDE_COMPANY_TYPES] : [],
       titles: titles.length,
       titleMode: mode,

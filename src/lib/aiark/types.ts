@@ -39,7 +39,7 @@ export interface PlanReport {
   excludeLocations?: { total: number; sent: number };
   /** standard: how many of them are the cleaning clients' standard keywords. */
   excludeTerms?: { total: number; sent: number; standard?: number };
-  /** Keywords left out at the people level too (cleaning clients). */
+  /** Standard keywords left out at the people level too (cleaning clients). */
   peopleKeywords?: number;
   excludeCompanyTypes?: string[];
   titles?: number;
@@ -98,6 +98,8 @@ export interface AiArkRun {
   created_by_name: string | null;
   /** People per outcome so far; only on a client's newest runs. */
   outcomes?: Record<string, number>;
+  /** People from this run who became leads. */
+  added?: number;
 }
 
 export interface AiArkSetup {
@@ -125,6 +127,8 @@ export interface AddState {
   adding: number;
   /** The import could not store them; the next add tries again. */
   failed: number;
+  /** No email: waiting for the email-finding steps. */
+  pipeline: number;
 }
 
 export interface CountResult {

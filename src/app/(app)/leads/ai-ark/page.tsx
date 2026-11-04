@@ -17,9 +17,10 @@ import type { AiArkPlan, AiArkRun, AiArkSetup, CountResult, EmployeeBand, People
 
 // The AI Ark tab: pick a client, check what AI Ark would be asked (the
 // client's locations and exclusions from its rules, plus people filters saved
-// here), count, and pull. Each pull becomes a table on the Clay tab, where the
-// enrichment worker works out every person's outcome. Nothing on this page
-// adds anyone to the lead database.
+// here), count, and pull. The enrichment worker works out every person's outcome
+// in the pull's table on the Clay tab. When the pull has finished, people with an
+// email go to the lead database; people with none wait in that table for the
+// email-finding steps, and go on to the database if one finds an address.
 
 const BANDS: { label: string; start: number; end?: number }[] = [
   { label: "1–10", start: 1, end: 10 },
@@ -114,7 +115,7 @@ function AiArkTab() {
   const [counting, setCounting] = useState(false);
   const [runs, setRuns] = useState<AiArkRun[]>([]);
   const [mode, setMode] = useState<RunMode>("demo");
-  const [strategy, setStrategy] = useState<RunStrategy>("single");
+  const [strategy, setStrategy] = useState<RunStrategy>("export");
   const [size, setSize] = useState(500);
   const [starting, setStarting] = useState(false);
   const [showBody, setShowBody] = useState(false);
@@ -420,6 +421,7 @@ function AiArkTab() {
   const pullWhyNot =
     !tag ? "Pick a client" :
     !modes?.[mode].ready ? modes?.[mode].why ?? "Not available" :
+    mode === "live" && !setup?.worker?.online ? "Pulls aren't switched on yet: the service that runs them is off. Counting works." :
     blockers.length ? "Fix what is listed under “What AI Ark will be asked”" :
     plan?.pullBlockers.length ? plan.pullBlockers[0] :
     dirty ? "Save the people filters first — a pull always uses the saved filters" :
@@ -659,7 +661,7 @@ function AiArkTab() {
                     {plan.report.excludeCompanyTypes?.length ? `, no ${plan.report.excludeCompanyTypes.map((t) => t.replace(/_/g, " ").toLowerCase()).join(" or ")} companies` : ""}
                   </Row>
                   {plan.report.peopleKeywords ? (
-                    <Row label="People">leaving out the same {fmt(plan.report.peopleKeywords)} terms in their headline or summary</Row>
+                    <Row label="People">leaving out {fmt(plan.report.peopleKeywords)} standard terms in their headline or summary</Row>
                   ) : null}
                 </div>
               )}
@@ -692,7 +694,7 @@ function AiArkTab() {
 
             <Card
               title="Pull people"
-              sub="Each pull becomes a table on the Clay tab, where every person's outcome is worked out"
+              sub="People with an email go to the database. People without one go to the enrichment pipeline on the Clay tab, and on to the database once it finds an email."
             >
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">
@@ -727,8 +729,8 @@ function AiArkTab() {
                     />
                     <p className="text-[12px] leading-relaxed text-muted-foreground">
                       {strategy === "single"
-                        ? "Pages through the matches (1 credit per 100), then gets each new person's email — 1 credit only when one is found. People without an email cost nothing, but keep a masked last name."
-                        : "AI Ark exports them in one job per group of up to 300 places, and another for a group that still has people: 0.5 credits a person plus 0.5 for each email found. Full names and company websites even without an email."}
+                        ? "Pages through the matches (1 credit per 100), then gets each new person's email — 1 credit only when one is found. People without an email cost nothing, but keep a hidden last name and no LinkedIn or website, so the pipeline can't find their email."
+                        : "AI Ark exports them in one job per group of up to 300 places, and another for a group that still has people: 0.5 credits a person plus 0.5 for each email found. AI Ark's docs say full names and company websites come even without an email, which the pipeline needs to find one."}
                       {strategy === "export" && !exportReady && <span className="block text-[var(--warning)]">{modes?.exportLive.why}</span>}
                     </p>
                   </div>
@@ -754,6 +756,9 @@ function AiArkTab() {
                     </button>
                   ))}
                 </div>
+                <p className="-mt-2 text-[12px] leading-relaxed text-muted-foreground">
+                  How many people this pull buys, with or without an email. New leads will be fewer: some have no email, and some are already in the database or outside the client&apos;s rules.
+                </p>
                 <div className="rounded-xl bg-muted/60 px-3 py-2 text-[12.5px] leading-relaxed">
                   {mode === "demo" ? (
                     <>About <b>{cr(est.expected)}</b> demo credits (made up — nothing is bought).</>
@@ -919,11 +924,18 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
       )}
       {run.outcomes && (
         <div className="mt-1.5 flex flex-wrap gap-1">
-          {OUTCOMES.filter((o) => run.outcomes![o.key]).map((o) => (
-            <span key={o.key} className={cn("rounded-full px-2 py-0.5 text-[11.5px] font-medium tabular-nums", o.cls)}>
-              {fmt(run.outcomes![o.key])} {o.key}
+          {run.added ? (
+            <span className="rounded-full bg-[var(--success)]/15 px-2 py-0.5 text-[11.5px] font-medium tabular-nums text-[var(--success)]">
+              {fmt(run.added)} added to the database
             </span>
-          ))}
+          ) : null}
+          {OUTCOMES.map((o) => ({ ...o, n: (run.outcomes![o.key] ?? 0) - (o.key === "Ready to add" ? run.added ?? 0 : 0) }))
+            .filter((o) => o.n > 0)
+            .map((o) => (
+              <span key={o.key} className={cn("rounded-full px-2 py-0.5 text-[11.5px] font-medium tabular-nums", o.cls)}>
+                {fmt(o.n)} {o.key === "No email" ? "no email, in the pipeline" : o.key}
+              </span>
+            ))}
         </div>
       )}
       {(run.stop_reason || run.last_error || run.lists_note) && (

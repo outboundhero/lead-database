@@ -324,7 +324,8 @@ export function personInputs(p) {
     company_industry: text(cs.industry),
     company_size: sizeText(cs.staff),
     city: text(loc.city),
-    state: text(loc.state),
+    // LinkedIn's metro areas come through as "Illinois Metropolitan Area". The state is what counts.
+    state: text(loc.state).replace(/\s+metropolitan area$/i, ""),
     country: text(loc.country),
     email: best ? text(best.address).toLowerCase() : "",
     email_status: status,

@@ -183,6 +183,17 @@ export async function runsFor(c: PoolClient, tag: string | null, limit = 20): Pr
       const run = rows.find((r) => r.table_id === x.table_id);
       if (run) (run.outcomes ??= {})[x.outcome] = x.n;
     }
+    const { rows: added } = await c.query<{ table_id: string; n: number }>(
+      `SELECT table_id, count(*)::int AS n
+         FROM enrich_cells
+        WHERE table_id = ANY($1::uuid[]) AND column_key = 'add_to_database' AND status = 'done' AND value->>'added' = 'true'
+        GROUP BY 1`,
+      [tables]
+    );
+    for (const x of added) {
+      const run = rows.find((r) => r.table_id === x.table_id);
+      if (run) run.added = x.n;
+    }
   }
   return rows;
 }

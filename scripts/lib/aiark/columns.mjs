@@ -1,7 +1,8 @@
 // The columns of an AI Ark run's Clay-tab table. Every run gets the same set:
 // what AI Ark returned for the person (inputs), then the steps that work out
 // the person's outcome — the checks the lead database applies to anyone it
-// sends to, run here before anyone is added.
+// sends to, run here before anyone is added. Who has an email goes on to the
+// database; who has none waits here for the email-finding steps (add.mjs).
 //
 // Shared by the run route (which creates the table) and the worker (which
 // fills it). Plain JavaScript so both Node and Next.js can import it.
@@ -77,7 +78,7 @@ const COLUMNS = [
       ` : {{in_area}} === false ? "Outside the client's area"` +
       ` : {{rule_match}} ? "Excluded by the client's rules"` +
       ` : "Ready to add"`,
-    description: "Ready to add: a valid email, not already in the database or on the never-contact list, inside the client's area and clear of its exclusions. Those people join the lead database when someone presses Add to the database above this table. Email still being checked: AI Ark had not finished when the run stopped waiting; nothing updates these rows later, and later runs leave the person out.",
+    description: "Ready to add: a valid email, not already in the database or on the never-contact list, inside the client's area and clear of its exclusions. Those people go to the lead database when the pull has finished. No email: waits here for the email-finding steps, and goes to the database if one finds an address. Email still being checked: AI Ark had not finished when the run stopped waiting; nothing updates these rows later, and later runs leave the person out.",
   },
 
   // ── Later phases: two of the steps still to come, shown and not run yet.
@@ -85,13 +86,13 @@ const COLUMNS = [
   {
     key: "find_email", name: "Find email", kind: "action", action: "later", phase: 3, provider: "Email finders",
     run_if: `!${USABLE}`,
-    description: "People AI Ark returns without a valid email go through the email-finding steps (Findymail, Prospeo, Anymail Finder) and the checks after them. Built in Phase 3.",
+    description: "People AI Ark returns without a valid email wait here for the email-finding steps (Findymail, Prospeo, Anymail Finder), which aren't switched on yet. An address found goes through the same checks, then to the database. Built in Phase 3.",
   },
-  // Phase 4 keeps the engine off it: only "Add to the database" (scripts/lib/aiark/add.mjs) writes these cells.
+  // Phase 4 keeps the engine off it: only adding to the database (scripts/lib/aiark/add.mjs) writes these cells.
   {
     key: "add_to_database", name: "Add to the database", kind: "action", action: "later", phase: 4, provider: "Lead database",
     run_if: `{{outcome}} === "Ready to add"`,
-    description: "Filled when someone presses Add to the database above this table, once the pull has finished. Added: a new lead with source AI Ark, tagged with the client, which goes out from the Leads tab like any other lead. Already in the database / On the never-contact list: skipped, as the database had moved on since the outcome was worked out. Not added: the import could not store the person; the next add tries again.",
+    description: "Filled once the pull has finished. Added: a new lead with source AI Ark, tagged with the client, which goes out from the Leads tab like any other lead. Already in the database / On the never-contact list: skipped, as the database had moved on since the outcome was worked out. Not added: the import could not store the person; the next add tries again.",
   },
 ];
 

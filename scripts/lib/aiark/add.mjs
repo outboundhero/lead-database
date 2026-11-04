@@ -1,8 +1,15 @@
-// "Add to the database" for an AI Ark run's table: the people whose Outcome is
-// "Ready to add" become leads, once each. The web route (src/app/api/aiark/add)
+// Where a pull's people go. With an email: the database. Their Outcome is "Ready
+// to add" and they become leads, once each. The web app (src/lib/aiark/add-run.ts)
 // starts an add here, runs the import through the Uploads page's engine
 // (src/lib/uploads/import-rows.ts, duplicates skipped, never merged) and then
-// settles each person here. Plain JavaScript so the test script can reach it.
+// settles each person here. With no email: the pipeline. They wait in the pull's
+// table for the email-finding steps, and emailFound() brings them back: a person
+// given an address is worked again, and goes to the database like anyone else.
+//
+// The worker starts an add when a pull has finished (pullsToAdd, requestAdd), if
+// AIARK_AUTO_ADD_URL and AIARK_AUTO_ADD_KEY are set on it and the key on the web
+// service. Until then, and for a cancelled pull, it takes the button on the Clay
+// tab. Plain JavaScript so the worker and the test script can reach it.
 //
 // Each person's add_to_database cell says what happened to them:
 //   running  {batch_id}                         being added by that upload batch
@@ -17,6 +24,9 @@
 export const ADD_COLUMN = "add_to_database";
 export const SOURCE = "AI Ark";
 const READY = "Ready to add";
+const NO_EMAIL = "No email";
+const AUTO_ADD_KEY_MIN = 32; // the web route refuses a shorter one
+const AUTO_ADD_WAIT_MS = 30_000;
 /** An add whose upload batch is still 'processing' after this long died with the server; its people can be added again. */
 export const STALE_HOURS = 3;
 
@@ -108,9 +118,10 @@ const LIVE_BATCH = `b.status = 'processing' AND b.created_at > now() - make_inte
 /**
  * Where a run table's people stand. `ready` is who an add would take now: Ready
  * to add and not settled, which includes anyone an earlier add could not store.
+ * `pipeline` is who has no email, waiting for the email-finding steps.
  * @param {{ query: Function }} db
  * @param {string} tableId
- * @returns {Promise<{ ready: number, added: number, skipped: number, adding: number, failed: number }>}
+ * @returns {Promise<{ ready: number, added: number, skipped: number, adding: number, failed: number, pipeline: number }>}
  */
 export async function addState(db, tableId) {
   const { rows: [r] } = await db.query(
@@ -118,8 +129,9 @@ export async function addState(db, tableId) {
             count(*) FILTER (WHERE x.status = 'done' AND x.added)::int AS added,
             count(*) FILTER (WHERE x.status = 'done' AND NOT x.added)::int AS skipped,
             count(*) FILTER (WHERE x.adding)::int AS adding,
-            count(*) FILTER (WHERE x.status = 'error')::int AS failed
-       FROM (SELECT (o.value #>> '{}') = $2 AS ready, a.status,
+            count(*) FILTER (WHERE x.status = 'error')::int AS failed,
+            count(*) FILTER (WHERE x.no_email)::int AS pipeline
+       FROM (SELECT (o.value #>> '{}') = $2 AS ready, (o.value #>> '{}') = $4 AS no_email, a.status,
                     coalesce((a.value->>'added')::boolean, false) AS added,
                     coalesce(a.status = 'running' AND ${LIVE_BATCH}, false) AS adding
                FROM enrich_rows r
@@ -127,9 +139,103 @@ export async function addState(db, tableId) {
                LEFT JOIN enrich_cells a ON a.row_id = r.id AND a.column_key = $3
                LEFT JOIN upload_batches b ON a.status = 'running' AND b.id::text = a.value->>'batch_id'
               WHERE r.table_id = $1) x`,
-    [tableId, READY, ADD_COLUMN]
+    [tableId, READY, ADD_COLUMN, NO_EMAIL]
   );
   return r;
+}
+
+/**
+ * Finished live pulls with someone to send to the database: a person Ready to
+ * add who has not been tried, or whose add died with the server. Someone an add
+ * could not store is left to the button, so one bad person can't repeat forever.
+ * A pull is taken only once its rows are all worked, so it makes one upload. A
+ * cancelled pull is left to the button too: someone stopped it on purpose.
+ * @param {{ query: Function }} db
+ * @returns {Promise<{ id: string, client_tag: string }[]>}
+ */
+export async function pullsToAdd(db, limit = 5) {
+  const { rows } = await db.query(
+    `SELECT r.id, r.client_tag
+       FROM aiark_runs r
+      WHERE r.mode = 'live' AND r.finished_at IS NOT NULL AND r.status <> 'cancelled'
+        AND NOT EXISTS (SELECT 1 FROM enrich_rows q WHERE q.table_id = r.table_id AND q.run_status IN ('queued', 'running'))
+        AND EXISTS (
+          SELECT 1 FROM enrich_cells o
+            LEFT JOIN enrich_cells a ON a.row_id = o.row_id AND a.column_key = $2
+            LEFT JOIN upload_batches b ON a.status = 'running' AND b.id::text = a.value->>'batch_id'
+           WHERE o.table_id = r.table_id AND o.column_key = 'outcome' AND o.status = 'done' AND o.value #>> '{}' = $1
+             AND (a.row_id IS NULL OR (a.status = 'running' AND NOT coalesce(${LIVE_BATCH}, false))))
+      ORDER BY r.finished_at
+      LIMIT $3`,
+    [READY, ADD_COLUMN, limit]
+  );
+  return rows;
+}
+
+/** The address and key that let the worker start adds, or null: then pulls wait for the button. */
+export function autoAddConfig(env = process.env) {
+  const url = String(env.AIARK_AUTO_ADD_URL ?? "").trim();
+  const key = String(env.AIARK_AUTO_ADD_KEY ?? "").trim();
+  return url && key.length >= AUTO_ADD_KEY_MIN ? { url, key } : null;
+}
+
+/**
+ * Asks the web app to add one pull's people. The import engine is TypeScript the
+ * worker can't load, and uploads run there too. Never throws: the worker asks
+ * again on its next round.
+ * @returns {Promise<{ ok: boolean, status: number | null, why: string | null }>}
+ */
+export async function requestAdd(config, runId, fetchImpl = fetch) {
+  try {
+    const res = await fetchImpl(config.url, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${config.key}` },
+      body: JSON.stringify({ run: runId }),
+      signal: AbortSignal.timeout(AUTO_ADD_WAIT_MS),
+    });
+    const json = await res.json().catch(() => null);
+    return { ok: res.ok, status: res.status, why: res.ok ? null : String(json?.error ?? "no reason given").slice(0, 300) };
+  } catch (e) {
+    return { ok: false, status: null, why: String(e?.name === "TimeoutError" ? "no answer in time" : e?.cause?.code ?? e?.message ?? e).slice(0, 300) };
+  }
+}
+
+/**
+ * The way back from the pipeline. An email-finding step hands over the address
+ * it found for someone with no email; the person's email cells take it and the
+ * row is worked again, like a person AI Ark found the address for: the same
+ * checks and Outcome, and Ready to add goes to the database. Only someone whose
+ * Outcome is still "No email", and whose row isn't being worked, is changed.
+ * @param {{ query: Function }} db
+ * @param {{ rowId: number, email: string, status?: string, domainType?: string }} found
+ * @returns {Promise<boolean>} whether the person was changed
+ */
+export async function emailFound(db, { rowId, email, status = "VALID", domainType = "SMTP" }) {
+  const address = String(email ?? "").trim().toLowerCase();
+  if (!address) return false;
+  const cells = { email: address, email_status: status, email_domain_type: domainType };
+  const { rows: [r] } = await db.query(
+    `WITH target AS (
+       SELECT q.id, q.table_id FROM enrich_rows q
+         JOIN enrich_cells o ON o.row_id = q.id AND o.column_key = 'outcome' AND o.status = 'done' AND o.value #>> '{}' = $3
+        WHERE q.id = $1 AND q.run_status <> 'running'
+          FOR UPDATE OF q
+     ), c AS (
+       INSERT INTO enrich_cells AS e (row_id, column_key, table_id, status, value, display, updated_at)
+       SELECT t.id, kv.key, t.table_id, 'done', to_jsonb(kv.value), left(kv.value, 300), now()
+         FROM target t CROSS JOIN LATERAL jsonb_each_text($2::jsonb) AS kv
+       ON CONFLICT (row_id, column_key) DO UPDATE
+         SET status = 'done', value = EXCLUDED.value, display = EXCLUDED.display, note = NULL, updated_at = now()
+     ), p AS (
+       UPDATE aiark_people SET email = $4, email_status = $5 WHERE row_id = (SELECT id FROM target)
+     )
+     UPDATE enrich_rows q
+        SET run_status = 'queued', next_run_at = now(), attempts = 0, claim_token = NULL, claimed_at = NULL, last_error = NULL, updated_at = now()
+       FROM target t WHERE q.id = t.id
+     RETURNING q.id`,
+    [rowId, JSON.stringify(cells), NO_EMAIL, address, status]
+  );
+  return Boolean(r);
 }
 
 /**

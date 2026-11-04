@@ -308,7 +308,9 @@ function ClayTab() {
 /**
  * "Add to the database" for a live AI Ark run's table: the people marked Ready
  * to add become leads (POST /api/aiark/add), and this bar follows the add. Each
- * person's result lands in the table's "Add to the database" column.
+ * person's result lands in the table's "Add to the database" column. With
+ * automatic adding on, the worker does this when a pull finishes; the button
+ * stays for a cancelled pull and for anyone an add could not store.
  */
 function AddToDatabase({ table, onAdded }: { table: EnrichTableSummary; onAdded: () => void }) {
   const run = table.run!;
@@ -375,6 +377,7 @@ function AddToDatabase({ table, onAdded }: { table: EnrichTableSummary; onAdded:
     state.added ? `${fmt(state.added)} added` : "",
     state.skipped ? `${fmt(state.skipped)} skipped` : "",
     state.failed ? `${fmt(state.failed)} not stored` : "",
+    state.pipeline ? `${fmt(state.pipeline)} no email, waiting in the pipeline` : "",
   ].filter(Boolean);
   const why = !state.run.finished
     ? "Add its people once the pull has finished"

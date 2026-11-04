@@ -26,7 +26,9 @@
 // without one, the columns that need it show "Needs key" and the row waits.
 // AIARK_API_KEY — live AI Ark runs; AIARK_DEMO=1 — demo runs with made-up
 // people (AIARK_DEMO_CREDITS, 25000); AIARK_WEBHOOK_URL — needed only for the
-// export strategy; AIARK_RPS (4).
+// export strategy; AIARK_RPS (4). AIARK_AUTO_ADD_URL and AIARK_AUTO_ADD_KEY — a
+// finished pull's people with an email go to the database with no button (this
+// app's /api/aiark/add/auto; the same key on the web service).
 // ENRICH_CONCURRENCY (6), ENRICH_POLL_MS (2000), ENRICH_STALE_MIN (15),
 // ENRICH_WORKER_ID ("enrich-worker"), ENRICH_ONCE=1 (drain the queue, then exit).
 
@@ -37,6 +39,7 @@ import dotenv from "dotenv";
 import { order } from "./lib/enrich/formula.mjs";
 import { runRow } from "./lib/enrich/engine.mjs";
 import { advanceOneRun, runDue } from "./lib/aiark/runs.mjs";
+import { autoAddConfig, pullsToAdd, requestAdd } from "./lib/aiark/add.mjs";
 import { PERSON_SEARCH_KEYS } from "./lib/aiark/columns.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname, quiet: true });
 
@@ -275,6 +278,7 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
       key: Boolean(env.AIARK_API_KEY),
       demo: env.AIARK_DEMO === "1",
       webhook: Boolean(env.AIARK_WEBHOOK_URL),
+      auto_add: Boolean(autoAdd),
       active_run: aiark.active,
       slices: aiark.slices,
     },
@@ -309,6 +313,27 @@ async function aiarkLoop() {
   }
 }
 
+// ── Finished pulls: people with an email go to the database ─────────────────
+
+const AUTO_ADD_EVERY_MS = 30_000;
+const autoAdd = autoAddConfig(env);
+let autoAddBusy = false;
+
+async function addFinishedPulls() {
+  if (!autoAdd || autoAddBusy) return;
+  autoAddBusy = true;
+  try {
+    for (const run of await pullsToAdd(pool)) {
+      const r = await requestAdd(autoAdd, run.id);
+      log(`AI Ark run ${run.id.slice(0, 8)} (${run.client_tag}): add ${r.ok ? "started" : `not started, ${r.status ?? "no answer"}: ${r.why}`}`);
+    }
+  } catch (e) {
+    log(`adding finished pulls: ${e.message}`);
+  } finally {
+    autoAddBusy = false;
+  }
+}
+
 // ── Main loop ───────────────────────────────────────────────────────────────
 
 async function main() {
@@ -319,8 +344,13 @@ async function main() {
   const runs = aiarkLoop();
   let lastSweep = 0;
   let lastBeat = Date.now();
+  let lastAdd = 0;
   while (!shuttingDown) {
     try {
+      if (Date.now() - lastAdd > AUTO_ADD_EVERY_MS) {
+        lastAdd = Date.now();
+        addFinishedPulls();
+      }
       if (Date.now() - lastSweep > 60_000) {
         await reclaimStale();
         lastSweep = Date.now();

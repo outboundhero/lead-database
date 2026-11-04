@@ -7,7 +7,8 @@
 // Titles, employees and industries are the default people filters of any client
 // whose type is Cleaning, until someone saves that client's own. The keywords and
 // company types always apply to a cleaning client (buildRequests, filters.mjs),
-// with the exclusion terms from its onboarding sheet added to the keywords.
+// with the exclusion terms from its onboarding sheet added to the company keywords
+// as AI Ark's request limit allows.
 
 /** Job role, current job: include. "environment, health and safety manager" is one title. */
 export const CLEANING_TITLES = [

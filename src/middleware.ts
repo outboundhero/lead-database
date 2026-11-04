@@ -18,7 +18,8 @@ export const config = {
      * - api/costing (ReplyRouter's costing pull — Bearer COSTING_API_KEY only)
      * - api/enrich/intake (GMaps Scraper places for the Clay tab — Bearer ENRICH_INTAKE_KEY only)
      * - api/aiark/webhook (AI Ark's export callback — answers 200 and reads nothing)
+     * - api/aiark/add/auto (the enrichment worker — Bearer AIARK_AUTO_ADD_KEY only)
      */
-    "/((?!_next/static|_next/image|favicon.ico|api/uploads/process|api/enrich_email|api/leads/first5|api/leads/search|api/leads/update|api/costing|api/enrich/intake|api/aiark/webhook|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/uploads/process|api/enrich_email|api/leads/first5|api/leads/search|api/leads/update|api/costing|api/enrich/intake|api/aiark/webhook|api/aiark/add/auto|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };

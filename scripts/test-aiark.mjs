@@ -28,10 +28,12 @@
 //      fn_commercial_cleaning_condition, geo_admin1), then each client rule
 //      against the real thing: made-up clients and people go through the import's
 //      own code, the location resolver script and fn_client_eligibility_conditions
-//   D. "Add to the database": the import rows, then who an add takes, skips and
-//      settles (the import itself is the Uploads page's engine, stood in for here)
+//   D. "Add to the database": the import rows, who an add takes, skips and settles
+//      (the import itself is the Uploads page's engine, stood in for here), which
+//      finished pulls the worker sends on, and the way back from the pipeline
 //   E. the standard filters for cleaning clients in the request AI Ark gets, with
-//      a client's sheet terms added, and that they stay out of the database's rules
+//      a client's sheet terms added, within what AI Ark is known to accept, and
+//      that they stay out of the database's rules
 
 import pg from "pg";
 import ts from "typescript";
@@ -40,10 +42,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { AiArkError, clip, createAiArk, personInputs } from "./lib/aiark/client.mjs";
 import { createDemoTransport, DEMO_TOKEN } from "./lib/aiark/demo.mjs";
-import { buildRequests, cleanPeopleFilters, CLEANING_DEFAULTS, EMPTY_PEOPLE_FILTERS, loadGeo } from "./lib/aiark/filters.mjs";
+import { buildRequests, cleanPeopleFilters, CLEANING_DEFAULTS, condensePhrases, EMPTY_PEOPLE_FILTERS, loadGeo } from "./lib/aiark/filters.mjs";
 import { CLEANING_EXCLUDE_KEYWORDS } from "./lib/aiark/cleaning-filters.mjs";
 import { RUN_COLUMNS } from "./lib/aiark/columns.mjs";
-import { addState, beginAdd, EXTRA_FIELDS, finishAdd, headcount, IMPORT_COLUMNS, importRow, names } from "./lib/aiark/add.mjs";
+import { addState, autoAddConfig, beginAdd, emailFound, EXTRA_FIELDS, finishAdd, headcount, IMPORT_COLUMNS, importRow, names, pullsToAdd, requestAdd } from "./lib/aiark/add.mjs";
 import { cityKey, findState } from "./lib/aiark/geo.mjs";
 import { advanceOneRun, aiArkFor, createRun, runDue, webhookFor } from "./lib/aiark/runs.mjs";
 import { CLIENT_ACTIONS, resetClientChecks, wholeTermSource } from "./lib/enrich/client-checks.mjs";
@@ -112,7 +114,7 @@ async function partA(geo) {
     exclude_terms: ["bar", "cafe"],
     commercial_cleaning: true,
   };
-  const r = buildRequests({ targeting: t, people: CLEANING_DEFAULTS, geo });
+  const r = buildRequests({ targeting: t, people: TEST_PEOPLE, geo });
   const loc = r.requests[0]?.contact?.location?.any;
   check("one request for 3 usable places", r.requests.length === 1 && loc?.include?.length === 3, JSON.stringify(loc));
   check("city+state, state and country strings", JSON.stringify(loc?.include) === JSON.stringify(["Armonk, New York", "Connecticut", "United States"]), JSON.stringify(loc?.include));
@@ -123,13 +125,14 @@ async function partA(geo) {
   check("exclusion terms as WORD company keywords on NAME/INDUSTRY/DESCRIPTION",
     JSON.stringify(kw?.content) === '["bar","cafe"]' && kw.sources.map((s) => `${s.source}:${s.mode}`).join() === "NAME:WORD,INDUSTRY:WORD,DESCRIPTION:WORD");
   const title = r.requests[0]?.contact?.experience?.current?.title?.any;
-  check("titles on any current role, WORD include + WORD exclude", title?.include?.mode === "WORD" && title.include.content.length === CLEANING_DEFAULTS.titles.length && title.exclude.mode === "WORD");
+  check("titles on any current role, WORD include + WORD exclude", title?.include?.mode === "WORD" && JSON.stringify(title.include.content) === JSON.stringify(condensePhrases(TEST_PEOPLE.titles)) && title.exclude.mode === "WORD");
   check("no pull blockers with titles", r.pullBlockers.length === 0 && r.blockers.length === 0);
 
   const many = { include_locations: Array.from({ length: 310 }, (_, i) => ({ city: `Town${i}`, state: "NY", country: "US" })), exclude_terms: Array.from({ length: 320 }, (_, i) => `term${i}`) };
-  const r2 = buildRequests({ targeting: many, people: CLEANING_DEFAULTS, geo });
-  check("310 places → 2 searches (300 + 10)", r2.requests.length === 2 && r2.requests[0].contact.location.any.include.length === 300 && r2.requests[1].contact.location.any.include.length === 10);
-  check("320 exclusion terms → 300 sent, said so", r2.report.excludeTerms.sent === 300 && r2.report.excludeTerms.total === 320 && r2.notes.some((n) => n.includes("first 300 of 320")));
+  const r2 = buildRequests({ targeting: many, people: TEST_PEOPLE, geo });
+  const placesIn = r2.requests.map((q) => q.contact.location.any.include);
+  check("310 places split across searches, each within the size AI Ark took, none lost or repeated", r2.requests.length > 1 && placesIn.every((g) => Buffer.byteLength(JSON.stringify(g)) <= 950) && new Set(placesIn.flat()).size === 310 && placesIn.flat().length === 310);
+  check("320 exclusion terms → as many as fit, said so", r2.report.excludeTerms.total === 320 && r2.report.excludeTerms.sent < 320 && r2.report.excludeTerms.sent > 150 && Buffer.byteLength(JSON.stringify(r2.requests[0].account.keyword.any.exclude.content)) <= 1900 && r2.notes.some((n) => n.includes("are checked after the pull")));
   check("no targeting → blocker", buildRequests({ targeting: null, people: CLEANING_DEFAULTS, geo }).blockers.length === 1);
   check("no locations → blocker, no requests", (() => { const x = buildRequests({ targeting: { include_locations: [] }, people: CLEANING_DEFAULTS, geo }); return x.blockers.length === 1 && x.requests.length === 0; })());
   check("no titles/seniority/departments → pull blocker", buildRequests({ targeting: t, people: EMPTY_PEOPLE_FILTERS, geo }).pullBlockers.length === 1);
@@ -361,6 +364,7 @@ async function partA(geo) {
   const fin = personInputs(fullFound.person);
   check("single export: full name, VALID email, .example domain, LinkedIn on linkedin.example",
     !/\*\*\*/.test(fin.full_name) && fin.email_status === "VALID" && fin.email.endsWith(".example") && fin.domain.endsWith(".example") && fin.linkedin.startsWith("https://linkedin.example/"), JSON.stringify(fin));
+  check("a metro area reads as its state", personInputs({ id: "x", location: { city: "Springfield", state: "Illinois Metropolitan Area", country: "United States" } }).state === "Illinois" && personInputs({ id: "x", location: { state: "Illinois" } }).state === "Illinois");
   check("processing email → PENDING", personInputs({ id: "x", email: { state: "PROCESSING", output: [] } }).email_status === "PENDING");
   check("not found email → no email cells", (() => {
     const x = personInputs({ id: "x", email: { state: "DONE", output: [{ found: false, status: "INVALID", subStatus: "MAILBOX_NOT_FOUND", domainType: "UNKNOWN" }] } });
@@ -2582,7 +2586,7 @@ async function addToDatabase() {
   await pool.query(`INSERT INTO bison_leads (instance_url, bison_id, email) VALUES ($1, 21, $2)`, [TEST_DOMAIN, email(4).toUpperCase()]);
 
   const state = async () => JSON.stringify(await addState(pool, run.table_id));
-  const counts = (ready, added, skipped, adding, failed) => JSON.stringify({ ready, added, skipped, adding, failed });
+  const counts = (ready, added, skipped, adding, failed) => JSON.stringify({ ready, added, skipped, adding, failed, pipeline: 1 });
   const begin = async () => {
     const c = await pool.connect();
     try {
@@ -2638,6 +2642,94 @@ async function addToDatabase() {
   check("then everyone is settled", (await state()) === counts(0, 2, 4, 0, 0), await state());
   const again = await begin();
   check("and another add finds nobody to add", !again.busy && !again.batchId && again.people.length === 0 && again.skipped === 0);
+  check("a demo pull is never sent on by itself", !(await pullsToAdd(pool, 500)).some((x) => x.id === run.id));
+
+  section("D3. Finished pulls go to the database by themselves, once switched on");
+  const LONG_KEY = "k".repeat(32);
+  check("off without both settings", autoAddConfig({}) === null && autoAddConfig({ AIARK_AUTO_ADD_URL: "https://x.example/a" }) === null && autoAddConfig({ AIARK_AUTO_ADD_KEY: LONG_KEY }) === null);
+  check("off with a short key", autoAddConfig({ AIARK_AUTO_ADD_URL: "https://x.example/a", AIARK_AUTO_ADD_KEY: "short" }) === null);
+  const config = autoAddConfig({ AIARK_AUTO_ADD_URL: " https://x.example/a ", AIARK_AUTO_ADD_KEY: ` ${LONG_KEY}\n` });
+  check("on with both, trimmed", config?.url === "https://x.example/a" && config.key === LONG_KEY);
+  let sent = null;
+  const answered = await requestAdd(config, "run-1", async (url, init) => {
+    sent = { url, method: init.method, auth: init.headers.authorization, body: init.body };
+    return { ok: true, status: 202, json: async () => ({ adding: 3 }) };
+  });
+  check("asks the web app with the key and the run", answered.ok && sent.url === config.url && sent.method === "POST" && sent.auth === `Bearer ${LONG_KEY}` && sent.body === '{"run":"run-1"}', JSON.stringify(sent));
+  const busyAnswer = await requestAdd(config, "run-1", async () => ({ ok: false, status: 409, json: async () => ({ error: "being added" }) }));
+  check("a refusal comes back with its reason", !busyAnswer.ok && busyAnswer.status === 409 && busyAnswer.why === "being added");
+  const lostAnswer = await requestAdd(config, "run-1", async () => { throw new Error("down"); });
+  check("no answer doesn't throw, and the key isn't in the reason", !lostAnswer.ok && lostAnswer.status === null && !lostAnswer.why.includes(LONG_KEY));
+
+  const pull = await newRun({ size: 5 });
+  await pool.query(`UPDATE aiark_runs SET mode = 'live', status = 'done', finished_at = now() WHERE id = $1`, [pull.id]);
+  const { source_id: pullSource } = await one(`SELECT source_id FROM aiark_runs WHERE id = $1`, [pull.id]);
+  const person = async (n, outcome) => {
+    const { id } = await one(`INSERT INTO enrich_rows (table_id, source_id, row_key, run_status) VALUES ($1, $2, $3, 'done') RETURNING id`, [pull.table_id, pullSource, `aiark:pull-${n}`]);
+    await pool.query(
+      `INSERT INTO enrich_cells (row_id, column_key, table_id, status, value, display)
+       SELECT $1, k, $2, 'done', to_jsonb(v), left(v, 300) FROM jsonb_each_text($3::jsonb) AS t(k, v)`,
+      [id, pull.table_id, JSON.stringify({ outcome, ...(outcome === "No email" ? {} : { email: `pull${n}@${TEST_DOMAIN}` }), full_name: "Pat Example", email_status: outcome === "No email" ? "" : "VALID" })]
+    );
+    return Number(id);
+  };
+  const due = async () => (await pullsToAdd(pool, 500)).some((x) => x.id === pull.id);
+  const hasEmail = await person(1, "Ready to add");
+  const noEmail = await person(2, "No email");
+  check("a finished live pull with someone Ready to add goes", await due());
+  check("the pull's no-email person waits in the pipeline", (await addState(pool, pull.table_id)).pipeline === 1, JSON.stringify(await addState(pool, pull.table_id)));
+  await pool.query(`UPDATE enrich_rows SET run_status = 'queued' WHERE id = $1`, [noEmail]);
+  check("not while a row is still being worked: one pull, one upload", !(await due()));
+  await pool.query(`UPDATE enrich_rows SET run_status = 'done' WHERE id = $1`, [noEmail]);
+  await pool.query(`UPDATE aiark_runs SET status = 'cancelled' WHERE id = $1`, [pull.id]);
+  check("a cancelled pull waits for the button", !(await due()));
+  await pool.query(`UPDATE aiark_runs SET status = 'running', finished_at = NULL WHERE id = $1`, [pull.id]);
+  check("an unfinished pull waits", !(await due()));
+  await pool.query(`UPDATE aiark_runs SET status = 'stopped', finished_at = now() WHERE id = $1`, [pull.id]);
+  check("a pull the brake stopped goes: its people are paid for", await due());
+
+  const c = await pool.connect();
+  let auto;
+  try {
+    await c.query("BEGIN");
+    auto = await beginAdd(c, { tableId: pull.table_id, userId: null, filename: "aiark test auto add" });
+    await c.query("COMMIT");
+  } finally {
+    c.release();
+  }
+  created.batches.push(auto.batchId);
+  check("an add takes the person with an email, not the one without", auto.people.length === 1 && auto.people[0].row_id === hasEmail, JSON.stringify(auto.people));
+  check("nothing more to send while it runs", !(await due()));
+  await pool.query(`UPDATE upload_batches SET created_at = now() - interval '4 hours' WHERE id = $1`, [auto.batchId]);
+  check("an add that died with the server is sent again", await due());
+  await pool.query(`UPDATE upload_batches SET created_at = now() WHERE id = $1`, [auto.batchId]);
+  await finishAdd(pool, { tableId: pull.table_id, batchId: auto.batchId, batchAt: auto.batchAt, people: auto.people });
+  check("someone the import couldn't store is left to the button: no endless retries", !(await due()) && (await one(`SELECT status FROM enrich_cells WHERE row_id = $1 AND column_key = 'add_to_database'`, [hasEmail])).status === "error");
+  await pool.query(`INSERT INTO leads (email, company, source) VALUES ($1, 'aiark test lead', 'AI Ark')`, [`pull1@${TEST_DOMAIN}`]);
+  await pool.query(`DELETE FROM enrich_cells WHERE row_id = $1 AND column_key = 'add_to_database'`, [hasEmail]);
+
+  section("D4. From the pipeline to the database");
+  check("no address, no change", !(await emailFound(pool, { rowId: noEmail, email: "  " })));
+  check("someone who already has an email isn't touched", !(await emailFound(pool, { rowId: hasEmail, email: `other@${TEST_DOMAIN}` })));
+  await pool.query(`UPDATE enrich_rows SET run_status = 'running' WHERE id = $1`, [noEmail]);
+  check("a row being worked isn't touched", !(await emailFound(pool, { rowId: noEmail, email: `found@${TEST_DOMAIN}` })));
+  await pool.query(`UPDATE enrich_rows SET run_status = 'done' WHERE id = $1`, [noEmail]);
+  await pool.query(`INSERT INTO aiark_people (person_id, demo, run_id, row_id) VALUES ($1, false, $2, $3)`, [`aiark-test-found-${pull.id}`, pull.id, noEmail]);
+  check("an address found is taken", await emailFound(pool, { rowId: noEmail, email: ` Found@${TEST_DOMAIN} ` }));
+  const cellOf = async (k) => (await one(`SELECT value #>> '{}' AS v FROM enrich_cells WHERE row_id = $1 AND column_key = $2`, [noEmail, k]))?.v;
+  check("the person's email cells hold it, lower-cased", (await cellOf("email")) === `found@${TEST_DOMAIN}` && (await cellOf("email_status")) === "VALID" && (await cellOf("email_domain_type")) === "SMTP");
+  const queued = await one(`SELECT run_status FROM enrich_rows WHERE id = $1`, [noEmail]);
+  check("the row goes back to be worked", queued.run_status === "queued", JSON.stringify(queued));
+  const held = await one(`SELECT email, email_status FROM aiark_people WHERE row_id = $1`, [noEmail]);
+  check("what was bought records the address", held.email === `found@${TEST_DOMAIN}` && held.email_status === "VALID", JSON.stringify(held));
+  check("while it is worked, nothing is sent", !(await due()) || (await one(`SELECT count(*)::int AS n FROM enrich_rows WHERE table_id = $1 AND run_status = 'queued'`, [pull.table_id])).n === 0);
+  const tag = await rule("PIPELINE", { include: [{ city: "Dayton", state: "OH", country: "US" }] });
+  const worked = await workRow(runColumns(), tag, { email: `found@${TEST_DOMAIN}`, email_status: "VALID", email_domain_type: "SMTP", city: "Dayton", state: "Ohio", country: "United States", company: "Northgate Realty", title: "Office Manager", full_name: "Pat Example" });
+  check("worked again, the same checks make the person Ready to add", worked.cell("outcome").value === "Ready to add", JSON.stringify(worked.cell("outcome")));
+  await pool.query(`UPDATE enrich_cells SET value = to_jsonb('Ready to add'::text), display = 'Ready to add' WHERE row_id = $1 AND column_key = 'outcome'`, [noEmail]);
+  await pool.query(`UPDATE enrich_rows SET run_status = 'done' WHERE id = $1`, [noEmail]);
+  check("and the finished pull goes to the database again", await due());
+  await pool.query(`DELETE FROM aiark_people WHERE row_id = $1`, [noEmail]);
 }
 
 // ── E. The standard filters for cleaning clients ────────────────────────────
@@ -2647,39 +2739,71 @@ function cleaningFilters(geo) {
   const rules = { include_locations: [{ city: "Armonk", state: "NY", country: "US" }], exclude_terms: ["Bar", "JANITORIAL", "cafe"], commercial_cleaning: true };
   const std = buildRequests({ targeting: rules, people: CLEANING_DEFAULTS, geo, cleaning: true });
   const { contact, account } = std.requests[0];
-  const lower = (list) => list.map((s) => s.toLowerCase());
   const sourcesOf = (x) => x.sources.map((s) => `${s.source}:${s.mode}`).join();
 
   check("the supplied lists, whole", CLEANING_DEFAULTS.titles.length === 287 && CLEANING_DEFAULTS.exclude_titles.length === 265 && CLEANING_EXCLUDE_KEYWORDS.length === 76 && CLEANING_DEFAULTS.exclude_industries.length === 13);
   const saving = cleanPeopleFilters(CLEANING_DEFAULTS);
   check("a client can save them as its own copy, nothing refused or cut", saving.errors.length === 0 && saving.value.titles.length === 287 && saving.value.exclude_titles.length === 265 && saving.value.employee_bands.length === 1, saving.errors.join("; "));
-  const title = contact.experience.current?.title?.any;
-  check("titles on any current role, as words, none cut", !contact.experience.latest && title.include.mode === "WORD" && title.include.content.length === 287 && title.exclude.mode === "WORD" && title.exclude.content.length === 265);
+  const wordsIn = (x) => String(x).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  const within = (a, b) => {
+    for (let i = 0; i + a.length <= b.length; i++) if (a.every((w, j) => b[i + j] === w)) return true;
+    return false;
+  };
+  /** Every phrase still matches through what is sent, and nothing else was added. */
+  const sameMatches = (phrases, sent) => phrases.every((x) => sent.some((k) => within(wordsIn(k), wordsIn(x)))) && sent.every((k) => phrases.some((x) => x.toLowerCase() === k.toLowerCase()));
+  const titleOf = (q) => q.contact.experience.current.title.any;
+  const title = titleOf(std.requests[0]);
+  check("titles on any current role, as words", !contact.experience.latest && title.include.mode === "WORD" && title.exclude.mode === "WORD");
+  const titlesOut = std.requests.flatMap((q) => titleOf(q).include.content);
+  check("every supplied title still matches through what goes out, each in one group", titlesOut.length === new Set(titlesOut).size && titlesOut.length < 287 && sameMatches(CLEANING_DEFAULTS.titles, titlesOut), String(titlesOut.length));
+  check("every supplied title to leave out still matches, in every search", std.requests.every((q) => titleOf(q).exclude.content.length < 265 && sameMatches(CLEANING_DEFAULTS.exclude_titles, titleOf(q).exclude.content)));
   check("8–6,800 employees, and the plan says unknown sizes can't be asked for", JSON.stringify(account.employeeSize) === '{"type":"RANGE","range":[{"start":8,"end":6800}]}' && std.notes.some((n) => n.includes("doesn't know")));
   const inds = account.industries.any;
   check("13 industries left out as exact catalog values, none included", !inds.include && inds.exclude.mode === "STRICT" && inds.exclude.content.length === 13 && inds.exclude.content.every((v) => v === v.toLowerCase()));
   check("government agencies and the self-employed left out", JSON.stringify(account.type) === '{"any":{"exclude":["GOVERNMENT_AGENCY","SELF_EMPLOYED"]}}');
   const co = account.keyword.any.exclude;
   const ppl = contact.keyword.any.exclude;
-  check("company keywords: the standard list, then the client's sheet terms, no repeats",
-    co.content.length === 78 && JSON.stringify(lower(co.content.slice(0, 76))) === JSON.stringify(lower(CLEANING_EXCLUDE_KEYWORDS)) && JSON.stringify(co.content.slice(76)) === '["Bar","cafe"]', JSON.stringify(co.content.slice(70)));
-  check("looked for in every company field, as words", sourcesOf(co) === "NAME:WORD,KEYWORD:WORD,SEO:WORD,DESCRIPTION:WORD,INDUSTRY:WORD", sourcesOf(co));
-  check("the same list on people, in headline and summary", JSON.stringify(ppl.content) === JSON.stringify(co.content) && sourcesOf(ppl) === "HEADLINE:WORD,SUMMARY:WORD", sourcesOf(ppl));
-  check("the plan reports all of it", std.report.excludeTerms.standard === 76 && std.report.excludeTerms.total === 78 && std.report.peopleKeywords === 78 && std.report.excludeCompanyTypes.length === 2);
+  const coveredBy = (list, x) => list.some((k) => within(wordsIn(k), wordsIn(x)));
+  check("company keywords: every standard one is covered, and the client's sheet terms are added", CLEANING_EXCLUDE_KEYWORDS.every((x) => coveredBy(co.content, x)) && co.content.includes("Bar") && co.content.includes("cafe"), JSON.stringify(co.content.slice(-6)));
+  check("on the three company fields AI Ark accepted, as words", sourcesOf(co) === "NAME:WORD,INDUSTRY:WORD,DESCRIPTION:WORD", sourcesOf(co));
+  check("people keywords: the standard list only, in headline and summary", CLEANING_EXCLUDE_KEYWORDS.every((x) => coveredBy(ppl.content, x)) && !ppl.content.includes("Bar") && !ppl.content.includes("cafe") && sourcesOf(ppl) === "HEADLINE:WORD,SUMMARY:WORD", sourcesOf(ppl));
+  check("the plan reports all of it", std.report.excludeTerms.standard === 76 && std.report.excludeTerms.total === 78 && std.report.excludeTerms.sent === 78 && std.report.peopleKeywords === 76 && std.report.excludeCompanyTypes.length === 2, JSON.stringify(std.report.excludeTerms));
 
-  const crowded = { ...rules, exclude_terms: Array.from({ length: 320 }, (_, i) => `term${i}`) };
+  // What AI Ark accepted live on 2026-11-05, list by list, in bytes.
+  const ACCEPTED = { titles: 2203, excludeTitles: 2539, places: 958, people: 1317, company: 1939 };
+  const size = (x) => Buffer.byteLength(JSON.stringify(x));
+  const withinAccepted = (q) =>
+    size(titleOf(q).include.content) <= ACCEPTED.titles && size(titleOf(q).exclude.content) <= ACCEPTED.excludeTitles && size(q.contact.location.any.include) <= ACCEPTED.places &&
+    size(q.contact.keyword.any.exclude.content) <= ACCEPTED.people && size(q.account.keyword.any.exclude.content) <= ACCEPTED.company && q.account.keyword.any.exclude.sources.length === 3;
+  check("no list goes past what AI Ark accepted", std.requests.every(withinAccepted));
+  const manyPlaces = { ...rules, include_locations: Array.from({ length: 363 }, (_, i) => ({ state: "NY", country: "US", city: `Place Number ${i}` })) };
+  const wide = buildRequests({ targeting: manyPlaces, people: CLEANING_DEFAULTS, geo, cleaning: true });
+  const wideTitles = new Set(wide.requests.map((q) => titleOf(q).include.content.join()));
+  const widePlaces = new Set(wide.requests.flatMap((q) => q.contact.location.any.include));
+  check("363 places: every search fits, and every place goes out with every title group", wide.requests.length <= 50 && wide.requests.length > 2 && wide.requests.every(withinAccepted) && widePlaces.size === 363 && wide.requests.length === wideTitles.size * new Set(wide.requests.map((q) => q.contact.location.any.include.join())).size, String(wide.requests.length));
+  check("and the plan says a count costs a credit per search", wide.notes.some((n) => n.includes(`${wide.requests.length} searches`)));
+  const tooWide = buildRequests({ targeting: { ...rules, include_locations: Array.from({ length: 3000 }, (_, i) => ({ state: "NY", country: "US", city: `Place Number ${i}` })) }, people: CLEANING_DEFAULTS, geo, cleaning: true });
+  check("too many searches for one run: blocked, nothing to send", tooWide.requests.length === 0 && tooWide.blockers.some((b) => b.includes("more than one run can send")));
+  const longList = buildRequests({ targeting: rules, people: { ...CLEANING_DEFAULTS, exclude_titles: Array.from({ length: 280 }, (_, i) => `made up long title number ${i}`) }, geo, cleaning: true });
+  check("a list of titles to leave out over the limit: blocked, it can't be split", longList.requests.length === 0 && longList.blockers.some((b) => b.includes("too long")));
+
+  const crowded = { ...rules, exclude_terms: [...Array.from({ length: 318 }, (_, i) => `a much longer sheet phrase ${i}`), "pub", "tavern"] };
   const cut = buildRequests({ targeting: crowded, people: CLEANING_DEFAULTS, geo, cleaning: true });
   const cutCo = cut.requests[0].account.keyword.any.exclude.content;
-  check("over AI Ark's 300: every standard keyword is sent, only sheet terms are cut, and it says so",
-    cutCo.length === 300 && JSON.stringify(lower(cutCo.slice(0, 76))) === JSON.stringify(lower(CLEANING_EXCLUDE_KEYWORDS)) && cut.notes.some((n) => n.includes("first 300 of 396")));
+  check("too many sheet terms: every standard keyword still goes, within the size, and it says so", CLEANING_EXCLUDE_KEYWORDS.every((x) => coveredBy(cutCo, x)) && size(cutCo) <= ACCEPTED.company && cut.report.excludeTerms.sent < cut.report.excludeTerms.total && cut.notes.some((n) => n.includes("are checked after the pull")));
+  check("the broadest sheet terms go first", cutCo.includes("pub") && cutCo.includes("tavern"));
+  const covered = buildRequests({ targeting: { ...rules, exclude_terms: ["cleaning", "cleaning services", "janitorial"] }, people: CLEANING_DEFAULTS, geo, cleaning: true });
+  const coveredCo = covered.requests[0].account.keyword.any.exclude.content;
+  check("a sheet term that covers standard keywords stands in for them, and is never the one cut", coveredCo.some((k) => k.toLowerCase() === "cleaning") && !coveredCo.some((k) => k.toLowerCase() === "cleaning services") && CLEANING_EXCLUDE_KEYWORDS.every((x) => coveredBy(coveredCo, x)));
+  check("condensing keeps the shorter phrase and the order", JSON.stringify(condensePhrases(["facility manager", "owner", "Facility", "business owner", "front-desk", "front desk"])) === JSON.stringify(["owner", "Facility", "front-desk"]));
 
   const own = buildRequests({ targeting: rules, people: { ...EMPTY_PEOPLE_FILTERS, titles: ["Owner"] }, geo, cleaning: true });
   check("a client's saved filters replace titles and size; keywords and company types still apply",
-    own.requests[0].contact.experience.current.title.any.include.content.length === 1 && !own.requests[0].account.employeeSize && own.requests[0].account.keyword.any.exclude.content.length === 78 && Boolean(own.requests[0].contact.keyword) && Boolean(own.requests[0].account.type));
+    titleOf(own.requests[0]).include.content.length === 1 && !own.requests[0].account.employeeSize && CLEANING_EXCLUDE_KEYWORDS.every((x) => coveredBy(own.requests[0].account.keyword.any.exclude.content, x)) && Boolean(own.requests[0].contact.keyword) && Boolean(own.requests[0].account.type));
 
   const other = buildRequests({ targeting: rules, people: { ...EMPTY_PEOPLE_FILTERS, titles: ["Owner"] }, geo });
   const otherCo = other.requests[0].account.keyword.any.exclude;
-  check("any other client gets none of it: only its own terms, on its company", otherCo.content.length === 3 && sourcesOf(otherCo) === "NAME:WORD,INDUSTRY:WORD,DESCRIPTION:WORD" && !other.requests[0].contact.keyword && !other.requests[0].account.type && other.report.excludeTerms.standard === 0 && other.report.peopleKeywords === 0);
+  check("any other client gets none of it: only its own terms, on its company", other.requests.length === 1 && otherCo.content.length === 3 && sourcesOf(otherCo) === "NAME:WORD,INDUSTRY:WORD,DESCRIPTION:WORD" && !other.requests[0].contact.keyword && !other.requests[0].account.type && other.report.excludeTerms.standard === 0 && other.report.peopleKeywords === 0);
 
   const elsewhere = ["scripts/lib/enrich/client-checks.mjs", "scripts/lib/enrich/engine.mjs", "scripts/lib/aiark/add.mjs", "scripts/push-worker.mjs", "scripts/sync-client-targeting-from-sheet.mjs"];
   check("the lists are for AI Ark's search only: the database's rules, the Outcome, adding leads and pushes never read them", elsewhere.every((f) => !/cleaning-filters|CLEANING_(TITLES|EXCLUDE|DEFAULTS|EMPLOYEE)/.test(source(f))));
