@@ -2142,9 +2142,9 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   in the pull's table; the email-finding steps (`find_email`, phase 3) are not built.
   When they are, they hand an address to `emailFound()`, which works the person again
   so they go to the database like anyone else. Those steps need a real name and
-  company, which only the export strategy returns (a Preview has a masked last name
-  and no LinkedIn or domain, and Export Single returns nothing without an email), so
-  Export job is the tab's default.
+  company, which only the export strategy should return (a Preview has a masked last
+  name and no LinkedIn or domain, and Export Single returns nothing without an email),
+  so Export job is the tab's default.
 - **Before the pipeline, the database is checked** (`lead_lookup`,
   `scripts/lib/enrich/client-checks.mjs`). Only someone whose Outcome is "No email"
   goes to the pipeline, and that Outcome now comes last: bought before, never contact,
@@ -2154,14 +2154,18 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   on the row must agree, as jsmith@ may be Jane; 87% of 2,165 random leads on a company
   domain had one of these shapes), then by the same name and company in `leads`,
   whatever the case (the trigram index on `company`; a Preview's masked last name fits
-  by the letters it shows). Nothing indexes a name or company in the Bison copy, and
-  `leads` has almost no `person_linkedin`, so neither is used. Measured 2026-11-05 on
-  production: both exported test people found by likely address (name and company found
-  one), 29 of 100 Preview people found (where both sides had a title, 16 of 18 were the
-  same), about 180 ms median beyond the network, about 250 ms for a company of 14,800
-  leads. No new index. A miss is safe: the finder's address gets the exact check.
-  Someone with a usable email is still matched by that address alone, so the same
-  person under a new address is added as a new lead.
+  by the letters it shows). Last names are written many ways: what follows a comma or
+  bracket doesn't count, and one may start with the other, word by word ("Smith" agrees
+  with "Smith, CPA" and "Smith Jones"). ⚠ 38% of `leads` rows have the last name
+  `(General Email)` and a company-like first name: general inboxes, never a person, so
+  a bracketed last name must not count as blank. Nothing indexes a name or company in the
+  Bison copy, and `leads` has almost no `person_linkedin`, so neither is used. Measured
+  2026-11-05 on production with the real test people, emails hidden: all 4 of the 6
+  exported people held by address were found, and the 2 new ones matched nothing. 32 of
+  100 Preview people were found. About 0.1 s median beyond the network, about 0.7 s for a
+  common first name at the company with the most leads, and no new index. A miss is safe:
+  the finder's address gets the exact check. Someone with a usable email is still matched by that address alone, so
+  the same person under a new address is added as a new lead.
 - **Add to the database** (a bar above a finished live run's table on the Clay
   tab; `POST /api/aiark/add`, `src/lib/aiark/add-run.ts`, logic in
   `scripts/lib/aiark/add.mjs`): the people whose Outcome is "Ready to add" become
@@ -2206,11 +2210,19 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   person from an export is still unseen. Both were already in the database. Short
   exclusions are whole-word: of 100 titles, "it" sat inside 6 and "cto" inside 9, as a
   word in none. `experience.current` means all active roles, so 15 of the 100 had a
-  main title on no list (a side role matched): searches now use `experience.latest`, ⚠
-  not yet run live, so the first Count confirms it. An "anywhere in the text" check on
-  company descriptions caught 13 of the 100 on "pub" and "bar" inside longer words
-  ("public", "barriers"): descriptions now match as whole words (1 of the same 100 is
-  excluded now, on a job title).
+  main title on no list (a side role matched): searches now use `experience.latest`. An
+  "anywhere in the text" check on company descriptions caught 13 of the 100 on "pub" and
+  "bar" inside longer words ("public", "barriers"): descriptions now match as whole words
+  (1 of the same 100 is excluded now, on a job title).
+- **Second live test, same day (5 more credits, same client):** `experience.latest` is
+  accepted. The same request gave 2,992 matches against 3,377 with `current` (11% fewer),
+  and main titles on no list fell from 15 of 100 to 1 of 100. An export job built by the
+  app's code with an exclusion list was accepted and DONE in 237 s. The list was free and
+  worked: none of the 4 were the 2 bought before. The job's POST answers `x-credit: -4.0`
+  for 4 people, so it charges 1 a person up front. ⚠ All 4 had emails, 6 of 6 across both
+  tests, so what an export returns for someone with no email, and any refund, are
+  still unseen. 2 of the 4 and about 30 of 100 on the page were already in the database,
+  and an export charges for them too.
 - **Before the first live pull:** a small supervised pull of each strategy; Export
   Single's answer has never been read live. Storing AI Ark's data in the lead database
   was approved by the owner on 2026-11-03 (terms §6.2).

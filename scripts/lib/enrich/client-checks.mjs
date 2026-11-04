@@ -87,6 +87,9 @@ const FREE_MAIL = new Set(["gmail.com", "googlemail.com", "yahoo.com", "hotmail.
 /** A name's letters and digits, without case or accents: "José-Luis" is "joseluis". */
 const nameKey = (s) => text(s).normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 
+/** A last name without what follows a comma or bracket: "Smith, CPA" and "Smith (he/him)" are "Smith". */
+const surname = (s) => text(s).split(/[,(]/)[0];
+
 /** Text for LIKE, taken literally. */
 const likeText = (s) => s.replace(/[\\%_]/g, "\\$&");
 
@@ -100,16 +103,46 @@ const companyAsHeld = (v) => text(v).split("|").map((s) => s.replace(/\s+/g, " "
  */
 export function likelyAddresses(first, last, domain) {
   const f = nameKey(first).replace(/[^a-z0-9]/g, "");
-  const l = nameKey(last).replace(/[^a-z0-9]/g, "");
+  const l = nameKey(surname(last)).replace(/[^a-z0-9]/g, "");
   const d = text(domain).toLowerCase().replace(/^www\./, "");
   if (!f || !l || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(d) || FREE_MAIL.has(d)) return [];
   const shapes = [f, `${f}.${l}`, `${f}${l}`, `${f[0]}${l}`, `${f[0]}.${l}`, `${f}_${l}`, `${f}-${l}`, l, `${f}${l[0]}`, `${l}.${f}`, `${l}${f}`, `${l}${f[0]}`, `${f}.${l[0]}`];
   return [...new Set(shapes)].map((s) => `${s}@${d}`);
 }
 
+/**
+ * Whether two last names can be one person's. What follows a comma or bracket
+ * doesn't count, and one may start with the other, word by word: "Smith" agrees
+ * with "Smith, CPA" and "Smith Jones", not "Smithson" or "Jones Smith". A name
+ * that is only brackets, like the database's "(General Email)", agrees with nothing.
+ */
+function sameLastName(a, b) {
+  const x = surname(a);
+  const y = surname(b);
+  if (!nameKey(x) || !nameKey(y)) return false;
+  if (nameKey(x) === nameKey(y)) return true;
+  const words = (s) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  const [short, long] = [words(x), words(y)].sort((p, q) => p.length - q.length);
+  return short.every((w, i) => long[i] === w);
+}
+
+/**
+ * Whether a held last name fits a Preview's masked one: the letters it shows at
+ * the start, and at the end unless that is a symbol ("Sm***)", "Sm***®"), the end
+ * of something the held name needn't have. Only-brackets names fit nothing.
+ */
+function fitsMask(mask, held) {
+  const parts = text(mask).split(/\*+/);
+  const start = nameKey(parts[0]);
+  const end = /^\p{L}+$/u.test(parts.at(-1)) ? nameKey(parts.at(-1)) : "";
+  const short = nameKey(surname(held));
+  if (!start || !short) return false;
+  return [short, nameKey(held)].some((h) => h.startsWith(start) && h.endsWith(end) && h.length >= start.length + end.length);
+}
+
 /** Whoever holds a guessed address has this name: the same first name, and the same last name unless the row has none. */
 function sameName(first, last, heldFirst, heldLast) {
-  return Boolean(nameKey(heldFirst)) && nameKey(heldFirst) === nameKey(first) && (!nameKey(heldLast) || nameKey(heldLast) === nameKey(last));
+  return Boolean(nameKey(heldFirst)) && nameKey(heldFirst) === nameKey(first) && (!nameKey(heldLast) || sameLastName(last, heldLast));
 }
 
 /** The answer for an address the database holds. `matched` says how someone with no usable email was tied to it. */
@@ -172,25 +205,26 @@ async function byLikelyAddress(db, first, last, domain) {
 }
 
 /**
- * Leads with the same name at the same company, whatever its case. A Preview's
- * last name is masked ("Sm***h", a short one "N***"): the letters it shows must
- * fit. Only `leads` can be asked: nothing indexes a name or company in the Bison copy.
+ * Leads with the same name at the same company, whatever its case. The company's
+ * index finds the rows and the last name is compared here, as it is written many
+ * ways. A Preview's is masked ("Sm***h", a short one "N***"). Only `leads` can be
+ * asked: nothing indexes a name or company in the Bison copy. The limit only
+ * matters past 200 people with one first name at one company.
  */
 async function byNameAndCompany(db, first, last, company) {
-  const parts = last.split(/\*+/);
-  const lastName = !last.includes("*") ? likeText(last) : parts[0] || parts.at(-1) ? `${likeText(parts[0])}%${likeText(parts.at(-1))}` : "";
-  if (!company || !lastName) return [];
+  if (!company || !nameKey(last)) return [];
   const { rows } = await db.query(
-    `SELECT l.email, l.id AS lead_id, l.is_bounced, l.bounce_type, l.is_suppressed,
+    `SELECT l.email, l.id AS lead_id, l.last_name, l.is_bounced, l.bounce_type, l.is_suppressed,
             s.email IS NOT NULL AS listed, s.reason,
             EXISTS (SELECT 1 FROM bison_leads b WHERE lower(b.email) = l.email) AS in_bison
        FROM leads l
        LEFT JOIN suppressed_emails s ON s.email = l.email
-      WHERE l.company ILIKE $1 AND lower(l.first_name) = lower($2) AND lower(l.last_name) LIKE lower($3)
-      LIMIT 20`,
-    [likeText(company), first, lastName]
+      WHERE l.company ILIKE $1 AND lower(trim(l.first_name)) = lower($2)
+      LIMIT 200`,
+    [likeText(company), first]
   );
-  return rows;
+  const fits = last.includes("*") ? fitsMask : sameLastName;
+  return rows.filter((r) => fits(last, r.last_name));
 }
 
 // What decides the Outcome comes first.

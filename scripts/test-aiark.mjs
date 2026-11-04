@@ -2662,6 +2662,60 @@ async function beforeThePipeline() {
   check('a short mask fits too ("E***")', (await outcome({ domain: undefined, last_name: "E***", full_name: "Pat E***" })) === "Already in the database");
   check('a mask that doesn\'t fit: No email ("Sm***h")', (await outcome({ domain: undefined, last_name: "Sm***h", full_name: "Pat Sm***h" })) === "No email");
   check("a mask with no letters says nothing", (await outcome({ domain: undefined, last_name: "***", full_name: "Pat ***" })) === "No email");
+  for (const mask of ["Ex***)", "Ex***®", "Ex***."]) {
+    check(`a symbol at the end of a mask doesn't count ("${mask}")`, (await outcome({ domain: undefined, last_name: mask, full_name: `Pat ${mask}` })) === "Already in the database");
+  }
+  check('nor do the letters of a mask that fit nothing, with a symbol ("Sm***)")', (await outcome({ domain: undefined, last_name: "Sm***)", full_name: "Pat Sm***)" })) === "No email");
+
+  // Last names written different ways, as the live test found: a credential after a comma.
+  for (const given of ["Example, CPA", "Example, CPA, MBA", "EXAMPLE (he/him)", "Example Jones", "Example Jr.", "Example, Jr."]) {
+    check(`"${given}" from AI Ark is the lead "Example", by name and company`, (await outcome({ domain: undefined, last_name: given, full_name: `Pat ${given}` })) === "Already in the database");
+  }
+  for (const given of ["Examples", "Jones Example", "Exam"]) {
+    check(`"${given}" from AI Ark is not the lead "Example"`, (await outcome({ domain: undefined, last_name: given, full_name: `Pat ${given}` })) === "No email");
+  }
+  check('the same letters are the same name, as with "De Luca" and "DeLuca"', (await outcome({ domain: undefined, last_name: "Exam-Ple", full_name: "Pat Exam-Ple" })) === "Already in the database");
+  await reset();
+  for (const held of ["Example, CPA", "Example (She/Her)", "Example Jones", "  Example  ", "EXAMPLE, Jr."]) {
+    await lead(`someone@${d}`, { company: "Northgate Realty", last_name: held });
+    check(`the lead "${held}" is "Example" from AI Ark, by name and company`, (await outcome({ domain: undefined })) === "Already in the database");
+    await reset();
+    await lead(`pexample@${d}`, { last_name: held });
+    check(`and by a likely address, the same`, (await outcome()) === "Already in the database");
+    await reset();
+  }
+  await lead(`someone@${d}`, { company: "Northgate Realty", first_name: " Pat " });
+  check("spaces around the lead's first name don't count", (await outcome({ domain: undefined })) === "Already in the database");
+  await reset();
+
+  check("the address guesses leave out a credential", likelyAddresses("Pat", "Example, CPA", d).includes(`pexample@${d}`) && likelyAddresses("Pat", "Example (he/him)", d).includes(`pat.example@${d}`) && !likelyAddresses("Pat", "Example, CPA", d).some((x) => x.includes("cpa")));
+  check("and a last name that is only brackets makes none", !likelyAddresses("Pat", "(he/him)", d).length);
+  await lead(`pexample@${d}`);
+  const credential = await work({ last_name: "Example, CPA", full_name: "Pat Example, CPA" });
+  check('"Example, CPA" from AI Ark finds pexample@, held by "Example"', credential.cell("outcome").value === "Already in the database" && credential.cell("in_database").value.matched_on === "likely address", JSON.stringify(credential.cell("in_database")));
+  await reset();
+
+  // The database's placeholder on a general inbox is not a person's name.
+  await lead(`pat@${d}`, { last_name: "(General Email)" });
+  check('a general inbox\'s "(General Email)" is not the person, by a likely address', (await outcome()) === "No email");
+  await reset();
+  await lead(`someone@${d}`, { company: "Northgate Realty", last_name: "(General Email)" });
+  check("nor by name and company", (await outcome({ domain: undefined })) === "No email");
+  check("nor by a mask that would fit its words", (await outcome({ domain: undefined, last_name: "Ge***l", full_name: "Pat Ge***l" })) === "No email");
+  await reset();
+
+  // Only the person's own rows decide the answer.
+  await lead(`other1@${d}`, { company: "Northgate Realty", last_name: "Other", is_bounced: true });
+  await lead(`other2@${d}`, { company: "Northgate Realty", last_name: "Other Two", is_suppressed: true });
+  await lead(`someone@${d}`, { company: "Northgate Realty" });
+  const own = await work({ domain: undefined });
+  check("another Pat at the company, bounced or never contact, doesn't change this Pat's answer", own.cell("outcome").value === "Already in the database" && own.cell("in_database").value.address === `someone@${d}`, JSON.stringify(own.cell("in_database")));
+  await reset();
+  await lead(`other1@${d}`, { company: "Northgate Realty", last_name: "Other" });
+  check("only another Pat at the company: No email", (await outcome({ domain: undefined })) === "No email");
+  await reset();
+  await lead(`someone@${d}`, { company: "Northgate Realty" });
+
   let asked = 0;
   const counting = { query: (sql, params) => { if (/unnest\(\$1::text\[\]\) AS e/.test(sql)) asked++; return pool.query(sql, params); } };
   check("a masked last name makes no address guesses, even with a domain", (await work({ last_name: "Ex***e", full_name: "Pat Ex***e" }, { db: counting })).cell("outcome").value === "Already in the database" && asked === 0, String(asked));
