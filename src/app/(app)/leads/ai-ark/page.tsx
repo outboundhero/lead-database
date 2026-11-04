@@ -562,7 +562,7 @@ function AiArkTab() {
                 </p>
               )}
               <div className="space-y-4">
-                <Field label={`Job titles (${fmt(form.titles.length)})`} hint="Any of their current roles. Smart also finds related titles (“CEO” finds “Chief Executive Officer”); Word needs the words; Strict needs the exact title.">
+                <Field label={`Job titles (${fmt(form.titles.length)})`} hint="Their main current job. Smart also finds related titles (“CEO” finds “Chief Executive Officer”); Word needs the words; Strict needs the exact title.">
                   <TagInput values={form.titles} onChange={(v) => set("titles", v)} placeholder="Office Manager, Facilities Director…" maxTags={300} listClassName={LONG_LIST} />
                   <IosSegmentedControl
                     size="sm"
@@ -694,7 +694,7 @@ function AiArkTab() {
 
             <Card
               title="Pull people"
-              sub="People with an email go to the database. People without one go to the enrichment pipeline on the Clay tab, and on to the database once it finds an email."
+              sub="People with an email go to the database. People without one go to the enrichment pipeline on the Clay tab, unless the database already holds them, and on to the database once it finds an email."
             >
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">

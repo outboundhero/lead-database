@@ -48,7 +48,7 @@ import { RUN_COLUMNS } from "./lib/aiark/columns.mjs";
 import { addState, autoAddConfig, beginAdd, emailFound, EXTRA_FIELDS, finishAdd, headcount, IMPORT_COLUMNS, importRow, names, pullsToAdd, requestAdd } from "./lib/aiark/add.mjs";
 import { cityKey, findState } from "./lib/aiark/geo.mjs";
 import { advanceOneRun, aiArkFor, createRun, runDue, webhookFor } from "./lib/aiark/runs.mjs";
-import { CLIENT_ACTIONS, resetClientChecks, wholeTermSource } from "./lib/enrich/client-checks.mjs";
+import { CLIENT_ACTIONS, likelyAddresses, resetClientChecks, wholeTermSource } from "./lib/enrich/client-checks.mjs";
 import { runRow as engineRow } from "./lib/enrich/engine.mjs";
 import { order } from "./lib/enrich/formula.mjs";
 
@@ -124,8 +124,8 @@ async function partA(geo) {
   const kw = r.requests[0]?.account?.keyword?.any?.exclude;
   check("exclusion terms as WORD company keywords on NAME/INDUSTRY/DESCRIPTION",
     JSON.stringify(kw?.content) === '["bar","cafe"]' && kw.sources.map((s) => `${s.source}:${s.mode}`).join() === "NAME:WORD,INDUSTRY:WORD,DESCRIPTION:WORD");
-  const title = r.requests[0]?.contact?.experience?.current?.title?.any;
-  check("titles on any current role, WORD include + WORD exclude", title?.include?.mode === "WORD" && JSON.stringify(title.include.content) === JSON.stringify(condensePhrases(TEST_PEOPLE.titles)) && title.exclude.mode === "WORD");
+  const title = r.requests[0]?.contact?.experience?.latest?.title?.any;
+  check("titles on the main current job, WORD include + WORD exclude", title?.include?.mode === "WORD" && JSON.stringify(title.include.content) === JSON.stringify(condensePhrases(TEST_PEOPLE.titles)) && title.exclude.mode === "WORD");
   check("no pull blockers with titles", r.pullBlockers.length === 0 && r.blockers.length === 0);
 
   const many = { include_locations: Array.from({ length: 310 }, (_, i) => ({ city: `Town${i}`, state: "NY", country: "US" })), exclude_terms: Array.from({ length: 320 }, (_, i) => `term${i}`) };
@@ -2087,32 +2087,30 @@ async function partC({ r1 }) {
   for (const p of people) {
     const v = p.v ?? {};
     const usableEmail = v.email && v.email_status === "VALID";
-    let expect;
-    if (!usableEmail) expect = "No email";
-    else {
-      const o = await one(
-        `WITH t AS (SELECT * FROM client_targeting WHERE client_tag = $1),
-              pc AS (SELECT code FROM supported_countries WHERE lower(name) = lower($5))
-         SELECT EXISTS (SELECT 1 FROM suppressed_emails WHERE email = $2) OR EXISTS (SELECT 1 FROM leads WHERE email = $2 AND is_suppressed) AS never,
-                EXISTS (SELECT 1 FROM leads WHERE email = $2 AND is_bounced) AS bounced,
-                EXISTS (SELECT 1 FROM leads WHERE email = $2) OR EXISTS (SELECT 1 FROM bison_leads WHERE lower(email) = $2) AS indb,
-                EXISTS (SELECT 1 FROM t, jsonb_array_elements(t.include_locations) e
-                         WHERE upper(e->>'country') = (SELECT code FROM pc)
-                           AND (e->>'state' IS NULL OR upper(e->>'state') = (SELECT state_code FROM geo_admin1 g WHERE g.country_code = (SELECT code FROM pc) AND lower(g.name) = lower($4)))
-                           AND (e->>'city' IS NULL OR regexp_replace(lower(e->>'city'), '[^a-z]', '', 'g') = regexp_replace(lower($3), '[^a-z]', '', 'g'))) AS inside,
-                EXISTS (SELECT 1 FROM t, unnest(t.exclude_terms) term
-                         WHERE $6 ~* fn_regex_escape(term) OR $7 ~* fn_regex_escape(term) OR $8 ~* fn_regex_escape(term)) AS excluded,
-                (SELECT commercial_cleaning FROM t) AS cleaning`,
-        [TAG, v.email, v.city ?? "", v.state ?? "", v.country ?? "", v.company ?? "", v.company_industry ?? "", v.company_description ?? ""]
-      );
-      const titleOut = o.cleaning ? (await one(`SELECT NOT (${cond}) AS out FROM (SELECT $1::text AS title) l`, [v.title ?? null])).out : false;
-      expect = o.never ? "On the never-contact list"
-        : o.bounced ? "Bounced"
-        : o.indb ? "Already in the database"
-        : !o.inside ? "Outside the client's area"
-        : o.excluded || titleOut ? "Excluded by the client's rules"
-        : "Ready to add";
-    }
+    const o = await one(
+      `WITH t AS (SELECT * FROM client_targeting WHERE client_tag = $1),
+            pc AS (SELECT code FROM supported_countries WHERE lower(name) = lower($5))
+       SELECT EXISTS (SELECT 1 FROM suppressed_emails WHERE email = $2) OR EXISTS (SELECT 1 FROM leads WHERE email = $2 AND is_suppressed) AS never,
+              EXISTS (SELECT 1 FROM leads WHERE email = $2 AND is_bounced) AS bounced,
+              EXISTS (SELECT 1 FROM leads WHERE email = $2) OR EXISTS (SELECT 1 FROM bison_leads WHERE lower(email) = $2) AS indb,
+              EXISTS (SELECT 1 FROM t, jsonb_array_elements(t.include_locations) e
+                       WHERE upper(e->>'country') = (SELECT code FROM pc)
+                         AND (e->>'state' IS NULL OR upper(e->>'state') = (SELECT state_code FROM geo_admin1 g WHERE g.country_code = (SELECT code FROM pc) AND lower(g.name) = lower($4)))
+                         AND (e->>'city' IS NULL OR regexp_replace(lower(e->>'city'), '[^a-z]', '', 'g') = regexp_replace(lower($3), '[^a-z]', '', 'g'))) AS inside,
+              EXISTS (SELECT 1 FROM t, unnest(t.exclude_terms) term
+                       WHERE $6 ~* fn_regex_escape(term) OR $7 ~* fn_regex_escape(term) OR $8 ~* fn_whole_term_regex(term)) AS excluded,
+              (SELECT commercial_cleaning FROM t) AS cleaning`,
+      [TAG, v.email ?? "", v.city ?? "", v.state ?? "", v.country ?? "", v.company ?? "", v.company_industry ?? "", v.company_description ?? ""]
+    );
+    const titleOut = o.cleaning ? (await one(`SELECT NOT (${cond}) AS out FROM (SELECT $1::text AS title) l`, [v.title ?? null])).out : false;
+    // The demo's names match no test lead: C9 checks the look-up by name.
+    const expect = o.never ? "On the never-contact list"
+      : o.bounced ? "Bounced"
+      : o.indb ? "Already in the database"
+      : !o.inside ? "Outside the client's area"
+      : o.excluded || titleOut ? "Excluded by the client's rules"
+      : !usableEmail ? "No email"
+      : "Ready to add";
     counts[v.outcome] = (counts[v.outcome] ?? 0) + 1;
     if (v.outcome !== expect) {
       wrong++;
@@ -2412,8 +2410,15 @@ async function failedChecks() {
   check("the rules can't be read → both checks and Outcome are errors", rules.cell("in_area").status === "error" && rules.cell("rule_match").status === "error" && rules.cell("outcome").status === "error");
   check("the Outcome cell names both", /Inside the client's area/.test(rules.cell("outcome").note) && /Client exclusions/.test(rules.cell("outcome").note), rules.cell("outcome").note);
   const noEmail = Object.fromEntries(Object.entries(person).filter(([k]) => k !== "email" && k !== "email_status"));
+  resetClientChecks();
+  const blind = await workRow(columns, tag, noEmail, { db: failing(/client_targeting/) });
+  check("no email and the rules can't be read → an error, retried, not sent to the pipeline", blind.cell("outcome").status === "error" && /Inside the client's area/.test(blind.retryable ?? ""), JSON.stringify(blind.cell("outcome")));
+  resetClientChecks();
+  for (const pattern of [/bison_leads/, /ILIKE/]) {
+    const lost = await workRow(columns, tag, { ...noEmail, first_name: "Pat", last_name: "Example", domain: TEST_DOMAIN }, { db: failing(pattern) });
+    check(`no email and the database check fails (${pattern.source}) → an error, retried, not sent to the pipeline`, lost.cell("in_database").status === "error" && lost.cell("outcome").status === "error" && /Lead database/.test(lost.retryable ?? ""), JSON.stringify(lost.cell("outcome")));
+  }
   for (const [label, inputs, want] of [
-    ["no email", noEmail, "No email"],
     ["an email AI Ark was still checking", { ...noEmail, email_status: "PENDING" }, "Email still being checked"],
     ["bought in an earlier run", { ...person, pulled_before: "Bought 2026-01-01" }, "Bought in an earlier run"],
   ]) {
@@ -2471,6 +2476,22 @@ async function companyText() {
   check("both answers came up", answers.includes(true) && answers.includes(false));
   check('"Acme | Commercial Cleaning" is judged as "Acme"', answers[0] === true);
   check('"Fast  Food Express" is judged with one space', answers[1] === false);
+
+  // The words that caught 13 of 100 people in the live test: none is a word for "pub" or "bar".
+  const short = await rule("SHORTTERMS", { terms: ["pub", "bar", "fast food"] });
+  const excluded = (inputs) => CLIENT_ACTIONS.client_exclusions.run({ inputs, table: { client_tag: short }, db: pool });
+  for (const description of ["A publicly traded company", "Removing barriers to care", "Bariatric surgery", "Barney's", "We embark on projects"]) {
+    const r = await excluded({ company: "Northgate Realty", description });
+    check(`description "${description}" is clear: the term is inside a longer word`, r.status === "empty", JSON.stringify(r));
+  }
+  for (const [description, term] of [["A family pub", "pub"], ["Sports bars and grills", "bar"], ["PUB & GRILL", "pub"], ["The bar, downtown", "bar"], ["Fast  food chain", "fast food"]]) {
+    const r = await excluded({ company: "Northgate Realty", description });
+    check(`description "${description}" is excluded: "${term}" is a word in it`, r.status === "done" && r.display === `"${term}" in the company description`, JSON.stringify(r));
+  }
+  const inName = await excluded({ company: "Republic Holdings", description: "A property company" });
+  check("in the company name the term still matches inside a word: the send gate would refuse it", inName.status === "done" && /company name/.test(inName.display), JSON.stringify(inName));
+  const inIndustry = await excluded({ company: "Northgate Realty", industry: "Public Safety" });
+  check("so it does in the industry", inIndustry.status === "done" && /industry/.test(inIndustry.display), JSON.stringify(inIndustry));
 }
 
 async function ruleChanges() {
@@ -2541,6 +2562,177 @@ async function emailBisonCopy() {
   check("an index serves the lookup", idx.n > 0);
 }
 
+async function beforeThePipeline() {
+  section("C9. Before the pipeline: is this person with no email already held?");
+  resetClientChecks();
+  const tag = await rule("HELD", { include: [{ city: "Dayton", state: "OH", country: "US" }], terms: ["bistro"] });
+  const columns = runColumns();
+  const d = TEST_DOMAIN;
+  const person = { full_name: "Pat Example", first_name: "Pat", last_name: "Example", title: "Office Manager", company: "Northgate Realty", domain: d, city: "Dayton", state: "Ohio", country: "United States", aiark_id: "abc" };
+  const work = (over = {}, opts = {}) => workRow(columns, tag, Object.fromEntries(Object.entries({ ...person, ...over }).filter(([, v]) => v !== undefined)), opts);
+  const outcome = async (over) => (await work(over)).cell("outcome").value;
+  const lead = (email, fields = {}) => {
+    const row = { email, company: "aiark test lead", first_name: "Pat", last_name: "Example", ...fields };
+    const keys = Object.keys(row);
+    return pool.query(`INSERT INTO leads (${keys.join(", ")}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(", ")})`, Object.values(row));
+  };
+  const reset = async () => {
+    await pool.query(`DELETE FROM leads WHERE email LIKE $1`, [`%@${d}`]);
+    await pool.query(`DELETE FROM bison_leads WHERE instance_url = $1`, [d]);
+    await pool.query(`DELETE FROM suppressed_emails WHERE email LIKE $1`, [`%@${d}`]);
+  };
+  await reset();
+
+  const guesses = likelyAddresses("Pat", "Example", d);
+  check("13 likely addresses, the three commonest among them", guesses.length === 13 && [`pat@${d}`, `pexample@${d}`, `pat.example@${d}`].every((x) => guesses.includes(x)), guesses.join());
+  check("accents, case and punctuation don't count", likelyAddresses("José", "O'Brien-Díaz", "WWW.Acme.Example").includes("jose.obriendiaz@acme.example"));
+  check("no domain, or a free-mail one, no guess: john.smith@gmail.com is many people", !likelyAddresses("Pat", "Example", "").length && !likelyAddresses("Pat", "Example", "Gmail.com").length && !likelyAddresses("Pat", "", d).length && !likelyAddresses("李", "王", d).length);
+
+  check("nobody holds them: No email, in the pipeline", (await outcome()) === "No email");
+  const missing = await work();
+  check("and the cell says why", missing.cell("in_database").status === "empty" && /no usable email/.test(missing.cell("in_database").note), JSON.stringify(missing.cell("in_database")));
+
+  const notFound = [];
+  for (const address of guesses) {
+    await lead(address);
+    const r = await work();
+    const v = r.cell("in_database").value;
+    if (r.cell("outcome").value !== "Already in the database" || v?.matched_on !== "likely address" || v?.address !== address || !v?.lead_id) notFound.push(address);
+    await reset();
+  }
+  check("a lead at any of the 13, under the same name: Already in the database", notFound.length === 0, notFound.join());
+
+  await lead(`pexample@${d}`, { first_name: "Priya" });
+  check("the same address under another first name is someone else: No email", (await outcome()) === "No email");
+  await reset();
+  await lead(`pat@${d}`, { last_name: "Other" });
+  check("under another last name, the same", (await outcome()) === "No email");
+  await reset();
+  await lead(`pat.example@${d}`, { last_name: null });
+  check("the row has no last name, the first agrees: held", (await outcome()) === "Already in the database");
+  await reset();
+  await lead(`pat.example@${d}`, { first_name: null, last_name: null });
+  check("the row has no name at all: nothing confirms it", (await outcome()) === "No email");
+  await reset();
+  await lead(`jose.diaz@${d}`, { first_name: "JOSE", last_name: "Diaz" });
+  check("accents and case don't hide the name", (await outcome({ first_name: "José", last_name: "Díaz", full_name: "José Díaz" })) === "Already in the database");
+  await reset();
+
+  await pool.query(`INSERT INTO bison_leads (instance_url, bison_id, email, first_name, last_name) VALUES ($1, 11, $2, 'Pat', 'Example')`, [d, `Pat.Example@${d}`.toUpperCase()]);
+  const copy = await work();
+  check("only in the copy of Email Bison, same name: held", copy.cell("outcome").value === "Already in the database" && copy.cell("in_database").value.in_bison === true && copy.cell("in_database").value.lead_id === null, JSON.stringify(copy.cell("in_database")));
+  await reset();
+  await pool.query(`INSERT INTO bison_leads (instance_url, bison_id, email, first_name, last_name) VALUES ($1, 13, $2, 'Priya', 'Example')`, [d, `pexample@${d}`]);
+  check("in the copy under another name: No email", (await outcome()) === "No email");
+  await reset();
+
+  await lead(`pat.example@${d}`, { is_bounced: true, bounce_type: "hard" });
+  check("the matched lead bounced: Bounced", (await outcome()) === "Bounced");
+  await reset();
+  await lead(`pat.example@${d}`, { is_suppressed: true });
+  check("the matched lead is marked never contact: on the list", (await outcome()) === "On the never-contact list");
+  await reset();
+  await lead(`pat.example@${d}`);
+  await pool.query(`INSERT INTO suppressed_emails (email, reason) VALUES ($1, 'aiark test')`, [`pat.example@${d}`]);
+  check("the matched address is on the list: on the list", (await outcome()) === "On the never-contact list");
+  await reset();
+  await lead(`pat@${d}`);
+  await lead(`pat.example@${d}`, { is_bounced: true });
+  await lead(`pexample@${d}`, { is_suppressed: true });
+  check("three addresses for one name: the strongest answer", (await outcome()) === "On the never-contact list");
+  await reset();
+  await pool.query(`INSERT INTO suppressed_emails (email, reason) VALUES ($1, 'aiark test')`, [`pexample@${d}`]);
+  check("a guess only on the never-contact list has no name to check: the pipeline may run, the address check stops it", (await outcome()) === "No email");
+  await reset();
+
+  await lead(`someone@${d}`, { company: "Northgate Realty" });
+  const sameCompany = await work({ domain: undefined });
+  check("no domain, same name and company: held", sameCompany.cell("outcome").value === "Already in the database" && sameCompany.cell("in_database").value.matched_on === "name and company", JSON.stringify(sameCompany.cell("in_database")));
+  check("the company's case doesn't count", (await outcome({ domain: undefined, company: "NORTHGATE realty" })) === "Already in the database");
+  check('the first "|" part is the company', (await outcome({ domain: undefined, company: " Northgate  Realty | Property Management" })) === "Already in the database");
+  check("no first and last name cells: the full name is split", (await outcome({ domain: undefined, first_name: undefined, last_name: undefined })) === "Already in the database");
+  check("a different domain doesn't stop the name match", (await outcome({ domain: "other.example" })) === "Already in the database");
+  check("another company: No email", (await outcome({ domain: undefined, company: "Northgate Realty Group" })) === "No email");
+  check("another first name: No email", (await outcome({ domain: undefined, first_name: "Priya" })) === "No email");
+  check("another last name: No email", (await outcome({ domain: undefined, last_name: "Sample" })) === "No email");
+  check("no company and no domain: nothing to go on", (await outcome({ domain: undefined, company: undefined })) === "No email");
+  check("only a first name: nothing to go on", (await outcome({ domain: undefined, last_name: undefined, full_name: "Pat" })) === "No email");
+
+  check('a masked last name fits by its letters ("Ex***e")', (await outcome({ domain: undefined, last_name: "Ex***e", full_name: "Pat Ex***e" })) === "Already in the database");
+  check('a short mask fits too ("E***")', (await outcome({ domain: undefined, last_name: "E***", full_name: "Pat E***" })) === "Already in the database");
+  check('a mask that doesn\'t fit: No email ("Sm***h")', (await outcome({ domain: undefined, last_name: "Sm***h", full_name: "Pat Sm***h" })) === "No email");
+  check("a mask with no letters says nothing", (await outcome({ domain: undefined, last_name: "***", full_name: "Pat ***" })) === "No email");
+  let asked = 0;
+  const counting = { query: (sql, params) => { if (/unnest\(\$1::text\[\]\) AS e/.test(sql)) asked++; return pool.query(sql, params); } };
+  check("a masked last name makes no address guesses, even with a domain", (await work({ last_name: "Ex***e", full_name: "Pat Ex***e" }, { db: counting })).cell("outcome").value === "Already in the database" && asked === 0, String(asked));
+  await reset();
+
+  await lead(`someone@${d}`, { company: "100xxClean" });
+  check("% and _ in a company are plain text", (await outcome({ domain: undefined, company: "100%_Clean" })) === "No email");
+  await reset();
+  await lead(`someone@${d}`, { company: "Northgate Realty" });
+  check("and in a last name", (await outcome({ domain: undefined, last_name: "Ex_mple" })) === "No email" && (await outcome({ domain: undefined, last_name: "%" })) === "No email");
+  await reset();
+
+  const usable = { email: `new@${d}`, email_status: "VALID", email_domain_type: "SMTP" };
+  await lead(`pat.example@${d}`);
+  await lead(`someone@${d}`, { company: "Northgate Realty" });
+  check("a usable address nobody holds is looked up by that address alone: Ready to add", (await outcome(usable)) === "Ready to add");
+  check("a catch-all address the same", (await outcome({ ...usable, email_domain_type: "CATCH_ALL" })) === "Ready to add");
+  const invalid = { email: `dead@${d}`, email_status: "INVALID (MAILBOX_NOT_FOUND)", email_domain_type: "UNKNOWN" };
+  check("an address AI Ark rejected is no use: looked for by name", (await outcome(invalid)) === "Already in the database");
+  await reset();
+  check("an address AI Ark rejected, nobody holds it, no name match: No email", (await outcome(invalid)) === "No email");
+  await lead(`dead@${d}`, { first_name: "Someone", last_name: "Else" });
+  const rejected = await work(invalid);
+  check("the rejected address is itself held: already in the database, by address", rejected.cell("outcome").value === "Already in the database" && !rejected.cell("in_database").value.matched_on, JSON.stringify(rejected.cell("in_database")));
+  await reset();
+
+  await lead(`pat.example@${d}`);
+  let looked = 0;
+  const watching = { query: (sql, params) => { if (/\bleads\b/.test(sql)) looked++; return pool.query(sql, params); } };
+  const pending = await work({ email_status: "PENDING" }, { db: watching });
+  check("AI Ark still checking: not looked up, and the Outcome says so", pending.cell("in_database").status === "skipped" && pending.cell("outcome").value === "Email still being checked" && looked === 0, String(looked));
+  const before = await work({ pulled_before: "Bought 2026-01-01" });
+  check("bought in an earlier run is said first", before.cell("outcome").value === "Bought in an earlier run");
+  await reset();
+  check("bought in an earlier run, no email: not sent to the pipeline twice", (await outcome({ pulled_before: "Bought 2026-01-01" })) === "Bought in an earlier run");
+  check("no email, outside the client's area: no finder would be paid for someone refused anyway", (await outcome({ city: "Springfield", state: "Missouri" })) === "Outside the client's area");
+  check("no email, excluded by the client's rules: the same", (await outcome({ company: "Harbor Bistro" })) === "Excluded by the client's rules");
+
+  const find = RUN_COLUMNS.find((c) => c.key === "find_email");
+  check("the email-finding step takes only the Outcome No email", find.run_if === `{{outcome}} === "No email"` && find.phase === 3);
+  const engineFind = order(RUN_COLUMNS.map((c) => (c.key === "find_email" ? { ...c, action: "client_exclusions", phase: 1 } : { ...c })));
+  const stepped = (await workRow(engineFind, tag, person)).cell("find_email");
+  await lead(`pat.example@${d}`);
+  const held = (await workRow(engineFind, tag, person)).cell("find_email");
+  check("run for real, the step runs for someone new and is skipped for someone held", stepped.status !== "skipped" && held.status === "skipped", JSON.stringify([stepped, held]));
+  await reset();
+
+  // Through the real lookups, a person held comes out of the pipeline's count.
+  const run = await newRun({ size: 2 });
+  const { source_id } = await one(`SELECT source_id FROM aiark_runs WHERE id = $1`, [run.id]);
+  const seat = async (n, outcomeCell) => {
+    const { id } = await one(`INSERT INTO enrich_rows (table_id, source_id, row_key, run_status) VALUES ($1, $2, $3, 'done') RETURNING id`, [run.table_id, source_id, `aiark:held-${n}`]);
+    await pool.query(`INSERT INTO enrich_cells (row_id, column_key, table_id, status, value, display) VALUES ($1, 'outcome', $2, 'done', to_jsonb($3::text), $3)`, [id, run.table_id, outcomeCell]);
+    return Number(id);
+  };
+  const newcomer = await seat(1, (await work()).cell("outcome").value);
+  await lead(`pat.example@${d}`);
+  const heldRow = await seat(2, (await work()).cell("outcome").value);
+  const state = await addState(pool, run.table_id);
+  check("the pipeline counts the newcomer, not the person held", state.pipeline === 1, JSON.stringify(state));
+  check("emailFound takes the newcomer", await emailFound(pool, { rowId: newcomer, email: `found-held@${d}` }));
+  check("and refuses the person held: they never went to the pipeline", !(await emailFound(pool, { rowId: heldRow, email: `found-held2@${d}` })));
+  await pool.query(`UPDATE enrich_rows SET run_status = 'done' WHERE table_id = $1`, [run.table_id]);
+  await pool.query(`UPDATE aiark_runs SET status = 'done', finished_at = now() WHERE id = $1`, [run.id]);
+  await reset();
+
+  const indexes = await one(`SELECT count(*)::int AS n FROM pg_indexes WHERE tablename = 'leads' AND indexdef ILIKE '%gin_trgm_ops%' AND indexdef ILIKE '%(company %'`);
+  check("a trigram index on the company serves the name look-up", indexes.n > 0);
+  resetClientChecks();
+}
+
 // ── D. Add to the database ──────────────────────────────────────────────────
 
 async function addToDatabase() {
@@ -2557,12 +2749,15 @@ async function addToDatabase() {
   check("without them, the full name splits at its first space", JSON.stringify(names({ full_name: " Mary  Ann Smith " })) === '["Mary","Ann Smith"]');
   check("employees only when AI Ark gave a headcount", headcount("1,234 (1,001–5,000)") === "1234" && headcount("1,001–5,000") === "" && headcount("5,001+") === "" && headcount(undefined) === "");
   check("a catch-all address goes in as catch_all, a valid one as valid", row[at("validation_status")] === "catch_all" && importRow({ email: "a@b.example", email_verdict: "Valid" })[at("validation_status")] === "valid");
-  check("industry and description go to general_industry and specific_industry, with source AI Ark",
-    row[at("general_industry")] === "Facilities Services" && row[at("specific_industry")] === "We clean offices" && row[at("source")] === "AI Ark" && row[at("person_linkedin")].endsWith("/in/pat"));
+  check("the industry goes to general_industry, with source AI Ark",
+    row[at("general_industry")] === "Facilities Services" && row[at("source")] === "AI Ark" && row[at("person_linkedin")].endsWith("/in/pat"));
+  check("the company description stays out of the lead, in the pull's table", !row.includes("We clean offices") && !IMPORT_COLUMNS.some(([h, k]) => /description/i.test(h) || k === "specific_industry" || k === "company_overview") && RUN_COLUMNS.some((c) => c.key === "company_description"));
   check("every extra field is an import column", EXTRA_FIELDS.every((k) => at(k) >= 0));
   const { d: gate } = await one(`SELECT pg_get_functiondef('fn_client_eligibility_conditions'::regproc) AS d`);
-  check("the send gate looks for exclusion terms in both", /l\.general_industry/.test(gate) && /l\.specific_industry/.test(gate));
-  check("and a push sends neither to Email Bison", !/general_industry|specific_industry/.test(source("scripts/push-worker.mjs") + source("src/lib/bison/push-leads.ts")));
+  check("the send gate looks for exclusion terms in the industry", /l\.general_industry/.test(gate));
+  check("and a push doesn't send it to Email Bison", !/general_industry/.test(source("scripts/push-worker.mjs") + source("src/lib/bison/push-leads.ts")));
+  const { d: leadsFilter } = await one(`SELECT pg_get_functiondef(p.oid) AS d FROM pg_proc p WHERE p.proname = 'fn_lead_filter_conditions' LIMIT 1`);
+  check("why not on the lead: the gate reads specific_industry, the Leads page's exclusion filter company_overview too", /l\.specific_industry/.test(gate) && /l\.company_overview/.test(leadsFilter));
 
   section("D2. Who an add takes, skips and settles");
   const run = await newRun({ size: 5 });
@@ -2751,9 +2946,9 @@ function cleaningFilters(geo) {
   };
   /** Every phrase still matches through what is sent, and nothing else was added. */
   const sameMatches = (phrases, sent) => phrases.every((x) => sent.some((k) => within(wordsIn(k), wordsIn(x)))) && sent.every((k) => phrases.some((x) => x.toLowerCase() === k.toLowerCase()));
-  const titleOf = (q) => q.contact.experience.current.title.any;
+  const titleOf = (q) => q.contact.experience.latest.title.any;
   const title = titleOf(std.requests[0]);
-  check("titles on any current role, as words", !contact.experience.latest && title.include.mode === "WORD" && title.exclude.mode === "WORD");
+  check("titles on the main current job, as words", !contact.experience.current && title.include.mode === "WORD" && title.exclude.mode === "WORD");
   const titlesOut = std.requests.flatMap((q) => titleOf(q).include.content);
   check("every supplied title still matches through what goes out, each in one group", titlesOut.length === new Set(titlesOut).size && titlesOut.length < 287 && sameMatches(CLEANING_DEFAULTS.titles, titlesOut), String(titlesOut.length));
   check("every supplied title to leave out still matches, in every search", std.requests.every((q) => titleOf(q).exclude.content.length < 265 && sameMatches(CLEANING_DEFAULTS.exclude_titles, titleOf(q).exclude.content)));
@@ -2851,6 +3046,7 @@ try {
   await companyText();
   await ruleChanges();
   await emailBisonCopy();
+  await beforeThePipeline();
   await addToDatabase();
   cleaningFilters(geo);
 } catch (e) {

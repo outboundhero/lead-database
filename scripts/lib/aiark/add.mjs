@@ -2,9 +2,10 @@
 // to add" and they become leads, once each. The web app (src/lib/aiark/add-run.ts)
 // starts an add here, runs the import through the Uploads page's engine
 // (src/lib/uploads/import-rows.ts, duplicates skipped, never merged) and then
-// settles each person here. With no email: the pipeline. They wait in the pull's
-// table for the email-finding steps, and emailFound() brings them back: a person
-// given an address is worked again, and goes to the database like anyone else.
+// settles each person here. With no email: the pipeline, unless the database already
+// holds them (lead_lookup, in the Outcome). They wait in the pull's table for the
+// email-finding steps, and emailFound() brings them back: a person given an address
+// is worked again, and goes to the database like anyone else.
 //
 // The worker starts an add when a pull has finished (pullsToAdd, requestAdd), if
 // AIARK_AUTO_ADD_URL and AIARK_AUTO_ADD_KEY are set on it and the key on the web
@@ -33,14 +34,16 @@ export const STALE_HOURS = 3;
 /** The cells an add reads for each person. */
 export const ADD_INPUT_KEYS = [
   "email", "first_name", "last_name", "full_name", "title", "seniority", "company", "domain", "company_industry",
-  "company_size", "city", "state", "country", "linkedin", "company_linkedin", "company_description", "email_verdict",
+  "company_size", "city", "state", "country", "linkedin", "company_linkedin", "email_verdict",
 ];
 
 /**
- * The import's columns: [header, leads field]. AI Ark's industry and company
- * description go to general_industry and specific_industry: both are among the
- * columns the send gate checks for the client's exclusion terms (the Outcome
- * checked the same two texts), and neither is sent to Email Bison. Category
+ * The import's columns: [header, leads field]. AI Ark's industry goes to
+ * general_industry: the send gate checks it for the client's exclusion terms (the
+ * Outcome checked the same text), and it isn't sent to Email Bison. The company
+ * description stays in the pull's table: specific_industry and company_overview
+ * are read for exclusion terms by the gate or the Leads page, anywhere in the text,
+ * so "pub" would catch "public" and the lead would be refused or hidden. Category
  * stays empty: AI Ark's industries are not the database's categories.
  */
 export const IMPORT_COLUMNS = [
@@ -57,14 +60,13 @@ export const IMPORT_COLUMNS = [
   ["Company LinkedIn", "company_linkedin"],
   ["Seniority", "seniority"],
   ["Industry", "general_industry"],
-  ["Company Description", "specific_industry"],
   ["Employees", "company_size"],
   ["Validation Status", "validation_status"],
   ["Source", "source"],
 ];
 
 /** leads columns the import writes that the Uploads page doesn't offer (ImportConfig.extraFields). */
-export const EXTRA_FIELDS = ["country", "seniority", "general_industry", "specific_industry", "company_size"];
+export const EXTRA_FIELDS = ["country", "seniority", "general_industry", "company_size"];
 
 /** First and last name: AI Ark's own when the row has them, else the full name split at its first space. */
 export function names(c) {
@@ -104,7 +106,6 @@ export function importRow(c) {
     company_linkedin: c.company_linkedin,
     seniority: c.seniority,
     general_industry: c.company_industry,
-    specific_industry: c.company_description,
     company_size: headcount(c.company_size),
     validation_status: c.email_verdict === "Catch-all" ? "catch_all" : "valid",
     source: SOURCE,

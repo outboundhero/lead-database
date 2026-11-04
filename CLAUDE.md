@@ -2108,8 +2108,9 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
 - **Standard filters for cleaning clients** (`scripts/lib/aiark/cleaning-filters.mjs`;
   AI Ark searches only, never the send gate, `client_targeting`, the Outcome checks
   or Clay tables): the owner's final lists, overlaps included (2026-11-03). A client
-  whose `client_tags.client_type` is `Cleaning` searches on 287 current-job titles
-  with 265 left out (WORD; an exclusion always wins), 8–6,800 employees, 13 industries
+  whose `client_tags.client_type` is `Cleaning` searches on 287 titles for the person's
+  main job (`experience.latest`, not `current`, which also matches side roles) with
+  265 left out (WORD; an exclusion always wins), 8–6,800 employees, 13 industries
   left out (STRICT, exact catalog values), company types `GOVERNMENT_AGENCY` and
   `SELF_EMPLOYED` left out, and 76 keywords left out for companies (NAME, INDUSTRY,
   DESCRIPTION) and people (HEADLINE, SUMMARY). Its onboarding-sheet exclusion terms
@@ -2144,6 +2145,23 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   company, which only the export strategy returns (a Preview has a masked last name
   and no LinkedIn or domain, and Export Single returns nothing without an email), so
   Export job is the tab's default.
+- **Before the pipeline, the database is checked** (`lead_lookup`,
+  `scripts/lib/enrich/client-checks.mjs`). Only someone whose Outcome is "No email"
+  goes to the pipeline, and that Outcome now comes last: bought before, never contact,
+  bounced, already held, outside the area and excluded all come first, so no finder is
+  paid for someone who would be refused. Someone with no usable email is looked for by
+  13 likely addresses at the company's domain in `leads` and the Bison copy (the name
+  on the row must agree, as jsmith@ may be Jane; 87% of 2,165 random leads on a company
+  domain had one of these shapes), then by the same name and company in `leads`,
+  whatever the case (the trigram index on `company`; a Preview's masked last name fits
+  by the letters it shows). Nothing indexes a name or company in the Bison copy, and
+  `leads` has almost no `person_linkedin`, so neither is used. Measured 2026-11-05 on
+  production: both exported test people found by likely address (name and company found
+  one), 29 of 100 Preview people found (where both sides had a title, 16 of 18 were the
+  same), about 180 ms median beyond the network, about 250 ms for a company of 14,800
+  leads. No new index. A miss is safe: the finder's address gets the exact check.
+  Someone with a usable email is still matched by that address alone, so the same
+  person under a new address is added as a new lead.
 - **Add to the database** (a bar above a finished live run's table on the Clay
   tab; `POST /api/aiark/add`, `src/lib/aiark/add-run.ts`, logic in
   `scripts/lib/aiark/add.mjs`): the people whose Outcome is "Ready to add" become
@@ -2153,12 +2171,14 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   (`importRows`, strategy `skip`, never merged) as one `upload_batches` row, so
   each add is on the Uploads page. Each lead gets the client's tag, `source` =
   `AI Ark`, `validation_status` from AI Ark's check (valid / catch_all), AI Ark's
-  first and last name, and the industry in `general_industry` and the company
-  description in `specific_industry`: both are among the columns
+  first and last name, and the industry in `general_industry`, which
   `fn_client_eligibility_conditions` checks for exclusion terms (the Outcome
-  checked the same two texts), and neither is sent to Email Bison. Those and
+  checked the same text) and which isn't sent to Email Bison. That and
   `country` / `seniority` / `company_size` are outside the Uploads page's fields,
   so the import takes them as `ImportConfig.extraFields`. Category stays empty.
+  The company description stays in the pull's table, off the lead: the send gate reads
+  `specific_industry` and the Leads page's exclusion filter also `company_overview`,
+  anywhere in the text, so "pub" would catch "public" and refuse or hide the lead.
   Each person's result is the run table's `add_to_database` cell: running
   (being added), done (Added, or skipped with its reason), error (not stored;
   the next add retries). The engine never works that column (phase 4). A
@@ -2185,11 +2205,12 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   full names, LinkedIn and company domain back. Both people had emails, so a no-email
   person from an export is still unseen. Both were already in the database. Short
   exclusions are whole-word: of 100 titles, "it" sat inside 6 and "cto" inside 9, as a
-  word in none. ⚠ `experience.current` means all active roles, so 15 of the 100 had a
-  main title on no list (a side role matched). ⚠ The Outcome's "anywhere in the text"
-  check on company descriptions caught 13 of the 100 on "pub" and "bar", probably
-  inside longer words like "public". Not fixed: the send gate checks
-  `specific_industry`, where the add stores the description, the same way.
+  word in none. `experience.current` means all active roles, so 15 of the 100 had a
+  main title on no list (a side role matched): searches now use `experience.latest`, ⚠
+  not yet run live, so the first Count confirms it. An "anywhere in the text" check on
+  company descriptions caught 13 of the 100 on "pub" and "bar" inside longer words
+  ("public", "barriers"): descriptions now match as whole words (1 of the same 100 is
+  excluded now, on a job title).
 - **Before the first live pull:** a small supervised pull of each strategy; Export
   Single's answer has never been read live. Storing AI Ark's data in the lead database
   was approved by the owner on 2026-11-03 (terms §6.2).

@@ -52,8 +52,9 @@ const COLUMNS = [
   },
   {
     key: "in_database", name: "Lead database", kind: "action", action: "lead_lookup", data_type: "json",
-    inputs: { email: "{{email}}" }, run_if: USABLE, provider: "Lead database",
-    description: "Looks the address up in the lead database, in its copy of Email Bison and on the never-contact list (which survives a lead being deleted). An address only in the Email Bison copy counts as already in the database. Bounced means the lead is marked bounced: a hard bounce, or one not classified or not yet checked.",
+    inputs: { email: "{{email}}", verdict: "{{email_verdict}}", first_name: "{{first_name}}", last_name: "{{last_name}}", full_name: "{{full_name}}", company: "{{company}}", domain: "{{domain}}" },
+    run_if: `{{email_verdict}} !== "Pending"`, provider: "Lead database",
+    description: "Looks the person up in the lead database, in its copy of Email Bison and on the never-contact list (which survives a lead being deleted). An address only in the Email Bison copy counts as already in the database. Bounced means the lead is marked bounced: a hard bounce, or one not classified or not yet checked. Someone with a usable email is looked up by that address alone. Someone with none is also looked for by the addresses people usually have at their company's domain, with the same name on the row, and then by the same name and company, so a person already held doesn't go to the pipeline.",
   },
   {
     key: "in_area", name: "Inside the client's area", kind: "action", action: "client_area", data_type: "boolean",
@@ -64,29 +65,29 @@ const COLUMNS = [
     key: "rule_match", name: "Client exclusions", kind: "action", action: "client_exclusions",
     inputs: { company: "{{company}}", industry: "{{company_industry}}", description: "{{company_description}}", title: "{{title}}" },
     provider: "Client rules",
-    description: "Re-checks the company against the client's exclusion terms the way the lead database does (the term anywhere in the text), which is stricter than AI Ark's whole-word match. For cleaning clients the job title is also checked against the cleaning title exclusions.",
+    description: "Re-checks the company against the client's exclusion terms. The company name and industry the way the lead database does (the term anywhere in the text), which is stricter than AI Ark's whole-word match. The company description as whole words, as the lead never holds it: \"pub\" doesn't catch \"public\". For cleaning clients the job title is also checked against the cleaning title exclusions.",
   },
   {
     key: "outcome", name: "Outcome", kind: "formula",
     formula:
       `{{email_verdict}} === "Pending" ? "Email still being checked"` +
-      ` : !${USABLE} ? "No email"` +
       ` : {{pulled_before}} ? "Bought in an earlier run"` +
       ` : {{in_database}}?.never_contact ? "On the never-contact list"` +
       ` : {{in_database}}?.bounced ? "Bounced"` +
       ` : {{in_database}}?.lead_id || {{in_database}}?.in_bison ? "Already in the database"` +
       ` : {{in_area}} === false ? "Outside the client's area"` +
       ` : {{rule_match}} ? "Excluded by the client's rules"` +
+      ` : !${USABLE} ? "No email"` +
       ` : "Ready to add"`,
-    description: "Ready to add: a valid email, not already in the database or on the never-contact list, inside the client's area and clear of its exclusions. Those people go to the lead database when the pull has finished. No email: waits here for the email-finding steps, and goes to the database if one finds an address. Email still being checked: AI Ark had not finished when the run stopped waiting; nothing updates these rows later, and later runs leave the person out.",
+    description: "Ready to add: a valid email, not already in the database or on the never-contact list, inside the client's area and clear of its exclusions. Those people go to the lead database when the pull has finished. No email: the same checks passed, and no usable address. They wait here for the email-finding steps, and go to the database if one finds an address. Email still being checked: AI Ark had not finished when the run stopped waiting; nothing updates these rows later, and later runs leave the person out.",
   },
 
   // ── Later phases: two of the steps still to come, shown and not run yet.
   // The others planned for these people have no column.
   {
     key: "find_email", name: "Find email", kind: "action", action: "later", phase: 3, provider: "Email finders",
-    run_if: `!${USABLE}`,
-    description: "People AI Ark returns without a valid email wait here for the email-finding steps (Findymail, Prospeo, Anymail Finder), which aren't switched on yet. An address found goes through the same checks, then to the database. Built in Phase 3.",
+    run_if: `{{outcome}} === "No email"`,
+    description: "People whose Outcome is No email wait here for the email-finding steps (Findymail, Prospeo, Anymail Finder), which aren't switched on yet. An address found goes through the same checks, then to the database. Built in Phase 3.",
   },
   // Phase 4 keeps the engine off it: only adding to the database (scripts/lib/aiark/add.mjs) writes these cells.
   {

@@ -2,19 +2,23 @@
 // person before they are added (the AI Ark run tables' step columns):
 //
 //   lead_lookup        the address in `leads`, in the copy of Email Bison
-//                      (bison_leads) and on the never-contact list
+//                      (bison_leads) and on the never-contact list. Someone
+//                      with no usable email is looked for by name too, so a
+//                      person the database holds never goes to the pipeline
 //   client_area        the person's city/state against the client's locations
 //   client_exclusions  the company against the client's exclusion terms, and
 //                      for cleaning clients the job title against the cleaning
 //                      title exclusions
 //
 // Each mirrors the database's own rule (fn_client_eligibility_conditions):
-// exclusion terms match anywhere in the text, cleaning titles match as whole
-// words, plural-tolerant, and a place counts only as the location resolver
-// (scripts/backfill-lead-locations.mjs) and then the gate would place it. Free
-// lookups, so every run re-reads them (cache: false): a lead added or a rule
-// changed since the last run counts.
+// exclusion terms match anywhere in the company name and industry, cleaning
+// titles match as whole words, plural-tolerant, and a place counts only as the
+// location resolver (scripts/backfill-lead-locations.mjs) and then the gate would
+// place it. The gate never sees a company description, so terms match it as
+// whole words: "pub" must not catch "public". Free lookups, so every run re-reads
+// them (cache: false): a lead added or a rule changed since the last run counts.
 
+import { names } from "../aiark/add.mjs";
 import { cityKey, entryKey, findState, loadGeo } from "../aiark/geo.mjs";
 
 const TTL_MS = 30_000;
@@ -74,25 +78,44 @@ async function cleaningTitles(db, since) {
 
 // ── lead_lookup ─────────────────────────────────────────────────────────────
 
-async function leadLookup({ inputs, db }) {
-  const email = text(inputs.email).toLowerCase();
-  if (!email) return { status: "empty", note: "No email to look up" };
-  const { rows } = await db.query(
-    `SELECT l.id AS lead_id, l.is_bounced, l.bounce_type, l.is_suppressed,
-            s.email IS NOT NULL AS listed, s.reason,
-            EXISTS (SELECT 1 FROM bison_leads b WHERE lower(b.email) = e.email) AS in_bison
-       FROM (SELECT $1::text AS email) e
-       LEFT JOIN leads l ON l.email = e.email
-       LEFT JOIN suppressed_emails s ON s.email = e.email`,
-    [email]
-  );
-  const r = rows[0] ?? {};
+const USABLE_VERDICTS = new Set(["Valid", "Catch-all"]);
+const LIKELY_ADDRESS = "likely address";
+const NAME_AND_COMPANY = "name and company";
+// A company "on" one of these says nothing about the address: john.smith@gmail.com is many people.
+const FREE_MAIL = new Set(["gmail.com", "googlemail.com", "yahoo.com", "hotmail.com", "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com", "me.com", "comcast.net"]);
+
+/** A name's letters and digits, without case or accents: "José-Luis" is "joseluis". */
+const nameKey = (s) => text(s).normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+
+/** Text for LIKE, taken literally. */
+const likeText = (s) => s.replace(/[\\%_]/g, "\\$&");
+
+/** The company as the lead database holds it: the first "|" part with its spaces collapsed (cleanCompanyName, src/lib/uploads/normalize-row.ts). */
+const companyAsHeld = (v) => text(v).split("|").map((s) => s.replace(/\s+/g, " ").trim()).find(Boolean) ?? "";
+
+/**
+ * The addresses a person most likely has at their company. These shapes reached
+ * 87% of 2,165 random leads on a company domain (2026-11-05); first@, flast@ and
+ * first.last@ alone reached 77%.
+ */
+export function likelyAddresses(first, last, domain) {
+  const f = nameKey(first).replace(/[^a-z0-9]/g, "");
+  const l = nameKey(last).replace(/[^a-z0-9]/g, "");
+  const d = text(domain).toLowerCase().replace(/^www\./, "");
+  if (!f || !l || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(d) || FREE_MAIL.has(d)) return [];
+  const shapes = [f, `${f}.${l}`, `${f}${l}`, `${f[0]}${l}`, `${f[0]}.${l}`, `${f}_${l}`, `${f}-${l}`, l, `${f}${l[0]}`, `${l}.${f}`, `${l}${f}`, `${l}${f[0]}`, `${f}.${l[0]}`];
+  return [...new Set(shapes)].map((s) => `${s}@${d}`);
+}
+
+/** Whoever holds a guessed address has this name: the same first name, and the same last name unless the row has none. */
+function sameName(first, last, heldFirst, heldLast) {
+  return Boolean(nameKey(heldFirst)) && nameKey(heldFirst) === nameKey(first) && (!nameKey(heldLast) || nameKey(heldLast) === nameKey(last));
+}
+
+/** The answer for an address the database holds. `matched` says how someone with no usable email was tied to it. */
+function heldAnswer(r, matched = null) {
   const neverContact = Boolean(r.listed || r.is_suppressed);
-  const inBison = Boolean(r.in_bison);
-  if (!r.lead_id && !neverContact && !inBison) {
-    return { status: "empty", note: "Not in the lead database, its copy of Email Bison or on the never-contact list" };
-  }
-  const value = { lead_id: r.lead_id ?? null, bounced: Boolean(r.is_bounced), never_contact: neverContact, in_bison: inBison };
+  const value = { lead_id: r.lead_id ?? null, bounced: Boolean(r.is_bounced), never_contact: neverContact, in_bison: Boolean(r.in_bison) };
   const display = neverContact ? "Never contact" : r.is_bounced ? "Bounced" : r.lead_id ? "In the database" : "In Email Bison";
   const note = neverContact
     ? `On the never-contact list${r.reason ? `: ${r.reason}` : ""}${r.lead_id ? "" : " (the lead itself was deleted)"}`
@@ -101,7 +124,95 @@ async function leadLookup({ inputs, db }) {
       : r.lead_id
         ? "A lead with this address is already in the database"
         : "This address is in the copy of Email Bison and not yet in leads, which counts as already in the database";
-  return { status: "done", value, display, note };
+  if (!matched) return { status: "done", value, display, note };
+  const how = matched === NAME_AND_COMPANY ? "has the same name and company" : "is at the company's domain, under the same name";
+  return {
+    status: "done",
+    value: { ...value, matched_on: matched, address: r.email },
+    display,
+    note: `AI Ark gave no usable email, and ${r.email} ${how}, so this person stays out of the pipeline. ${note}`,
+  };
+}
+
+async function byAddress(db, email) {
+  const { rows } = await db.query(
+    `SELECT e.email, l.id AS lead_id, l.is_bounced, l.bounce_type, l.is_suppressed,
+            s.email IS NOT NULL AS listed, s.reason,
+            EXISTS (SELECT 1 FROM bison_leads b WHERE lower(b.email) = e.email) AS in_bison
+       FROM (SELECT $1::text AS email) e
+       LEFT JOIN leads l ON l.email = e.email
+       LEFT JOIN suppressed_emails s ON s.email = e.email`,
+    [email]
+  );
+  const r = rows[0];
+  return r && (r.lead_id || r.listed || r.is_suppressed || r.in_bison) ? r : null;
+}
+
+/**
+ * Holders of the person's likely addresses. A guess proves nothing alone (jsmith@
+ * may be Jane), so the name on the row has to agree. An address only on the
+ * never-contact list has no name to check: if the pipeline finds it, the address
+ * check stops it there.
+ */
+async function byLikelyAddress(db, first, last, domain) {
+  const addresses = likelyAddresses(first, last, domain);
+  if (!addresses.length) return [];
+  const { rows } = await db.query(
+    `SELECT e.email, l.id AS lead_id, l.first_name, l.last_name, l.is_bounced, l.bounce_type, l.is_suppressed,
+            s.email IS NOT NULL AS listed, s.reason,
+            b.email IS NOT NULL AS in_bison, b.first_name AS bison_first, b.last_name AS bison_last
+       FROM unnest($1::text[]) AS e(email)
+       LEFT JOIN leads l ON l.email = e.email
+       LEFT JOIN suppressed_emails s ON s.email = e.email
+       LEFT JOIN LATERAL (SELECT x.email, x.first_name, x.last_name FROM bison_leads x WHERE lower(x.email) = e.email LIMIT 1) b ON true
+      WHERE l.id IS NOT NULL OR b.email IS NOT NULL`,
+    [addresses]
+  );
+  return rows.filter((r) => (r.lead_id && sameName(first, last, r.first_name, r.last_name)) || (r.in_bison && sameName(first, last, r.bison_first, r.bison_last)));
+}
+
+/**
+ * Leads with the same name at the same company, whatever its case. A Preview's
+ * last name is masked ("Sm***h", a short one "N***"): the letters it shows must
+ * fit. Only `leads` can be asked: nothing indexes a name or company in the Bison copy.
+ */
+async function byNameAndCompany(db, first, last, company) {
+  const parts = last.split(/\*+/);
+  const lastName = !last.includes("*") ? likeText(last) : parts[0] || parts.at(-1) ? `${likeText(parts[0])}%${likeText(parts.at(-1))}` : "";
+  if (!company || !lastName) return [];
+  const { rows } = await db.query(
+    `SELECT l.email, l.id AS lead_id, l.is_bounced, l.bounce_type, l.is_suppressed,
+            s.email IS NOT NULL AS listed, s.reason,
+            EXISTS (SELECT 1 FROM bison_leads b WHERE lower(b.email) = l.email) AS in_bison
+       FROM leads l
+       LEFT JOIN suppressed_emails s ON s.email = l.email
+      WHERE l.company ILIKE $1 AND lower(l.first_name) = lower($2) AND lower(l.last_name) LIKE lower($3)
+      LIMIT 20`,
+    [likeText(company), first, lastName]
+  );
+  return rows;
+}
+
+// What decides the Outcome comes first.
+const weight = (r) => (r.listed || r.is_suppressed ? 0 : r.is_bounced ? 1 : r.lead_id ? 2 : 3);
+const strongest = (rows) => rows.reduce((a, b) => (weight(b) < weight(a) ? b : a));
+
+async function leadLookup({ inputs, db }) {
+  const email = text(inputs.email).toLowerCase();
+  const known = email ? await byAddress(db, email) : null;
+  if (known) return heldAnswer(known);
+  // A usable address nobody holds is a new lead: only someone with none is looked for by name.
+  const verdict = text(inputs.verdict);
+  if (!verdict || USABLE_VERDICTS.has(verdict)) {
+    return { status: "empty", note: email ? "Not in the lead database, its copy of Email Bison or on the never-contact list" : "No email to look up" };
+  }
+  const [first, last] = names(inputs);
+  if (!first || !last) return { status: "empty", note: "AI Ark gave no usable email and no full name, so there is nothing to look up" };
+  const likely = last.includes("*") ? [] : await byLikelyAddress(db, first, last, inputs.domain);
+  if (likely.length) return heldAnswer(strongest(likely), LIKELY_ADDRESS);
+  const same = await byNameAndCompany(db, first, last, companyAsHeld(inputs.company));
+  if (same.length) return heldAnswer(strongest(same), NAME_AND_COMPANY);
+  return { status: "empty", note: "AI Ark gave no usable email. Nothing in the lead database or its copy of Email Bison matches this person's likely addresses, and no lead has the same name and company" };
 }
 
 // ── client_area ─────────────────────────────────────────────────────────────
@@ -195,13 +306,9 @@ async function clientExclusions({ inputs, table, row, db }) {
   const t = await targetingFor(db, table.client_tag, row?.next_run_at);
   if (!t) return { status: "error", note: `${table.client_tag} has no targeting rules`, retryable: false };
   const terms = (Array.isArray(t.exclude_terms) ? t.exclude_terms : []).map((s) => text(s).toLowerCase()).filter(Boolean);
-  // The company as the lead database will hold it: the first "|" part with its
-  // spaces collapsed, the rule of cleanCompanyName (src/lib/uploads/normalize-row.ts).
-  const company = text(inputs.company).split("|").map((s) => s.replace(/\s+/g, " ").trim()).find(Boolean) ?? "";
   const fields = [
-    ["company name", company],
+    ["company name", companyAsHeld(inputs.company)],
     ["industry", text(inputs.industry)],
-    ["company description", text(inputs.description)],
   ];
   for (const [label, value] of fields) {
     const v = value.toLowerCase();
@@ -211,6 +318,12 @@ async function clientExclusions({ inputs, table, row, db }) {
       const display = `"${term}" in the ${label}`;
       return { status: "done", value: display, display, note: `Matches the client's exclusion term "${term}" (matched anywhere in the text, as the lead database does)` };
     }
+  }
+  const description = text(inputs.description);
+  const word = description ? terms.find((x) => new RegExp(wholeTermSource(x), "iu").test(description)) : null;
+  if (word) {
+    const display = `"${word}" in the company description`;
+    return { status: "done", value: display, display, note: `The description has the client's exclusion term "${word}" as a whole word` };
   }
   let titleNote = "";
   if (t.commercial_cleaning) {

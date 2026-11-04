@@ -304,11 +304,12 @@ export function buildRequests({ targeting, people, geo, cleaning = false }) {
   const body = (titleGroup, placeGroup) => {
     return {
       contact: {
-        // current: all the person's active roles (latest is only the primary one).
+        // latest: the person's main job. `current` also matches any side role: in the
+        // 2026-11-05 live test, 15 of 100 had a main title on no list that way.
         ...(titleGroup.length || excludeTitlesSent.length
           ? {
               experience: {
-                current: {
+                latest: {
                   title: {
                     any: {
                       ...(titleGroup.length ? { include: { mode, content: titleGroup } } : {}),
