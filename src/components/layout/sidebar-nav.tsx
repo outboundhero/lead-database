@@ -15,6 +15,7 @@ import {
   Sparkles,
   MapPin,
   ListChecks,
+  Store,
   Table2,
   UserSearch,
 } from "lucide-react";
@@ -29,6 +30,7 @@ const NAV_SECTIONS = [
     label: "Main",
     items: [
       { title: "Leads", href: "/leads", icon: Users, minRole: "viewer" as UserRole, tint: "text-[oklch(0.586_0.214_263)]" },
+      { title: "Companies", href: "/leads/companies", icon: Store, minRole: "manager" as UserRole, tint: "text-[oklch(0.64_0.15_50)]" },
       { title: "Clay", href: "/leads/clay", icon: Table2, minRole: "manager" as UserRole, tint: "text-[oklch(0.6_0.16_200)]" },
       { title: "AI Ark", href: "/leads/ai-ark", icon: UserSearch, minRole: "manager" as UserRole, tint: "text-[oklch(0.62_0.17_285)]" },
       { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard, minRole: "manager" as UserRole, tint: "text-[oklch(0.745_0.183_145)]" },

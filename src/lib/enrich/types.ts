@@ -30,6 +30,12 @@ export interface EnrichTableSummary {
   client_name: string | null;
   /** ai_ark: one table per AI Ark run (the AI Ark tab), several per client. */
   kind: "companies" | "people" | "inboxes" | "ai_ark";
+  /**
+   * Set on a table made from a template (migration 124): companies_v1 is a
+   * client's Companies table filled by pulls on the Companies tab. Null on a
+   * hand-seeded table.
+   */
+  template?: string | null;
   name: string;
   row_count: number;
   is_paused: boolean;
@@ -66,6 +72,10 @@ export interface WorkerState {
     failed?: number;
     keys?: Record<string, boolean>;
     stopped?: boolean;
+    /** What this worker can work: company pulls need "company_runs" (migration 124). */
+    capabilities?: string[];
+    /** The last Reoon balance the worker read for the company pipeline's checks. */
+    reoon?: { daily?: number | null; instant?: number | null; read_at?: string | null } | null;
   };
 }
 

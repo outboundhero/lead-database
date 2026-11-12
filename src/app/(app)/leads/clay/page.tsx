@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   ChevronLeft,
@@ -12,6 +13,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Store,
   Table2,
   Trash2,
   Upload,
@@ -37,7 +39,7 @@ import { useHasPermission } from "@/lib/context/role-context";
 import { ClayGrid, FILTER_LABELS, type GridFilter } from "@/components/clay/clay-grid";
 import { CellPanel } from "@/components/clay/cell-panel";
 import { ImportDialog } from "@/components/clay/import-dialog";
-import type { EnrichColumn, EnrichTableSummary, RowsPage, RowStatus, TableDetail, WorkerState } from "@/lib/enrich/types";
+import { ROW_STATUSES, type EnrichColumn, type EnrichTableSummary, type RowsPage, type RowStatus, type TableDetail, type WorkerState } from "@/lib/enrich/types";
 import type { AddState } from "@/lib/aiark/types";
 
 // The Clay tab: a client's Clay tables, rebuilt inside the lead database.
@@ -85,7 +87,40 @@ const STATUS_PILLS: { value: RowStatus | ""; label: string }[] = [
   { value: "error", label: "Errors" },
 ];
 
-const KEY_LABELS: Record<string, string> = { OPENAI_API_KEY: "OpenAI", CLEARBIT_API_KEY: "Clearbit" };
+const KEY_LABELS: Record<string, string> = { OPENAI_API_KEY: "OpenAI", CLEARBIT_API_KEY: "Clearbit", ENRICH_REOON_API_KEY: "Reoon" };
+
+// A client's Companies table made by the Companies tab's pulls (enrich_tables.template).
+const TEMPLATE_NOTE = "Companies arrive from pulls on the Companies tab.";
+
+/** One of a client's Companies tables, as the table picker shows it. */
+const companyTableLabel = (t: EnrichTableSummary) => `${t.name} · ${fmt(t.row_count)} rows${t.template ? " · from pulls" : ""}`;
+
+// Filters a link can open the grid with (the Companies tab's counts and rows):
+// ?q= fills the search box, ?status= picks a row status, ?f= holds column
+// filters in the rows route's own col:state form, comma separated.
+const FILTER_KEY = /^[a-z][a-z0-9_]*$/;
+const FILTER_STATES = new Set([...Object.keys(FILTER_LABELS)]);
+
+function filtersFromLink(raw: string): GridFilter[] {
+  const out: GridFilter[] = [];
+  for (const part of raw.split(",").filter(Boolean).slice(0, 8)) {
+    const [col, state = ""] = part.split(":");
+    if (FILTER_KEY.test(col ?? "") && (FILTER_STATES.has(state) || (state.startsWith("is.") && state.length > 3))) out.push({ col, state });
+  }
+  return out;
+}
+
+/** A filter chip's text: the grid's own labels, or the exact value an is. filter matches. */
+function filterLabel(state: string) {
+  if (state.startsWith("is.")) {
+    try {
+      return `“${decodeURIComponent(state.slice(3))}”`;
+    } catch {
+      return state.slice(3);
+    }
+  }
+  return FILTER_LABELS[state] ?? state;
+}
 
 // Where an empty table's rows will come from, as in Clay's workbook: Maps
 // places land in Companies, and the Companies steps write the people and inboxes.
@@ -112,7 +147,9 @@ export default function ClayPage() {
 function ClayTab() {
   const canView = useHasPermission("manager");
   const router = useRouter();
-  const tableId = useSearchParams().get("t");
+  const params = useSearchParams();
+  const tableId = params.get("t");
+  const link = { q: params.get("q") ?? "", status: params.get("status") ?? "", f: params.get("f") ?? "" };
   const [tables, setTables] = useState<EnrichTableSummary[] | null>(null);
   const [tablesError, setTablesError] = useState(false);
   const [worker, setWorker] = useState<WorkerState | null>(null);
@@ -163,6 +200,11 @@ function ClayTab() {
   // The client's AI Ark run tables, newest first (the route's order).
   const runTables = useMemo(
     () => (tables ?? []).filter((t) => t.kind === "ai_ark" && t.client_tag === table?.client_tag),
+    [tables, table?.client_tag]
+  );
+  // The client's Companies tables: the one its pulls fill first, then a hand-seeded one (the route's order).
+  const companyTables = useMemo(
+    () => (tables ?? []).filter((t) => t.kind === "companies" && t.client_tag === table?.client_tag),
     [tables, table?.client_tag]
   );
 
@@ -243,9 +285,11 @@ function ClayTab() {
           <div className="flex items-center gap-1 border-b border-border/60">
             {KIND_TABS.map(({ kind, label }) => {
               // AI Ark: one table per run, newest first — the tab opens the newest.
+              // Companies: the pulls' table first when the client has two (the picker shows both).
               const runs = kind === "ai_ark" ? runTables : null;
-              const t = runs ? runs[0] : tables?.find((x) => x.client_tag === table.client_tag && x.kind === kind);
-              const active = runs ? table.kind === "ai_ark" : t?.id === table.id;
+              const first = runs ? runs[0] : tables?.find((x) => x.client_tag === table.client_tag && x.kind === kind);
+              const active = table.kind === kind;
+              const t = active && !runs ? table : first;
               return (
                 <button
                   key={kind}
@@ -289,6 +333,29 @@ function ClayTab() {
                 </Button>
               </div>
             )}
+            {table.kind === "companies" && (companyTables.length > 1 || table.template) && (
+              <div className="mb-1 ml-auto flex items-center gap-2">
+                {companyTables.length > 1 && (
+                  <Select value={table.id} onValueChange={(id) => router.replace(`/leads/clay?t=${id}`)}>
+                    <SelectTrigger className="h-8 w-[320px] rounded-full text-[12.5px]" aria-label="Companies table">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {companyTables.map((t) => (
+                        <SelectItem key={t.id} value={t.id}>
+                          {companyTableLabel(t)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+                {table.template && (
+                  <Button size="sm" variant="outline" onClick={() => router.push(`/leads/companies?client=${encodeURIComponent(table.client_tag)}`)}>
+                    <Store /> Companies tab
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
           {table.run && (table.run.stop_reason || table.run.last_error || finishing(table.run)) && (
             <p className={cn("text-[12.5px]", table.run.status === "error" ? "text-destructive" : "text-muted-foreground")}>
@@ -297,8 +364,14 @@ function ClayTab() {
                 : [table.run.stop_reason, table.run.last_error].filter(Boolean).join(" · ")}
             </p>
           )}
-          {/* keyed: switching tables starts every filter, page and selection afresh */}
-          <TableView key={table.id} table={table} onWorker={setWorker} onRowsChanged={loadTables} />
+          {/* keyed: switching tables, or following a link with its own filters, starts every filter, page and selection afresh */}
+          <TableView
+            key={`${table.id}|${link.q}|${link.status}|${link.f}`}
+            table={table}
+            link={link}
+            onWorker={setWorker}
+            onRowsChanged={loadTables}
+          />
         </>
       )}
     </div>
@@ -407,25 +480,32 @@ function AddToDatabase({ table, onAdded }: { table: EnrichTableSummary; onAdded:
 
 function TableView({
   table,
+  link,
   onWorker,
   onRowsChanged,
 }: {
   table: EnrichTableSummary;
+  /** Filters from the page's address (?q=, ?status=, ?f=), applied when the table opens. */
+  link: { q: string; status: string; f: string };
   onWorker: (w: WorkerState | null) => void;
   onRowsChanged: () => void;
 }) {
   const canDelete = useHasPermission("admin");
   // An AI Ark run's table: its rows come from AI Ark, never from a CSV.
   const isRun = table.kind === "ai_ark";
+  // A template table (the Companies tab's pulls) takes no CSV either.
+  const takesCsv = !isRun && !table.template;
   const [detail, setDetail] = useState<TableDetail | null>(null);
   const [page, setPage] = useState<RowsPage | null>(null);
   const [shownQuery, setShownQuery] = useState<string | null>(null);
   const [pageNo, setPageNo] = useState(1);
   const [size, setSize] = useState(50);
-  const [q, setQ] = useState("");
-  const [dq, setDq] = useState("");
-  const [status, setStatus] = useState<RowStatus | "">("");
-  const [filters, setFilters] = useState<GridFilter[]>([]);
+  const [q, setQ] = useState(link.q);
+  const [dq, setDq] = useState(link.q.trim());
+  const [status, setStatus] = useState<RowStatus | "">(() =>
+    ROW_STATUSES.includes(link.status as RowStatus) ? (link.status as RowStatus) : ""
+  );
+  const [filters, setFilters] = useState<GridFilter[]>(() => filtersFromLink(link.f));
   const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
   const [showLater, setShowLater] = useState(true);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -569,7 +649,9 @@ function TableView({
           <Input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder={isRun ? "Search name, title, company, email…" : "Search name, address, website…"}
+            placeholder={
+              isRun ? "Search name, title, company, email…" : table.template ? "Search company, website, email, city…" : "Search name, address, website…"
+            }
             className="h-9 rounded-full pl-8 text-[13px]"
           />
         </div>
@@ -599,7 +681,7 @@ function TableView({
         </div>
         {filters.map((f) => (
           <span key={`${f.col}:${f.state}`} className="flex items-center gap-1 rounded-full bg-primary/12 py-1 pl-3 pr-1.5 text-[12px] font-medium text-primary">
-            {nameOf(f.col)}: {FILTER_LABELS[f.state] ?? f.state}
+            {nameOf(f.col)}: {filterLabel(f.state)}
             <button
               type="button"
               aria-label="Remove filter"
@@ -624,7 +706,7 @@ function TableView({
           <Button size="sm" variant="outline" onClick={refresh} aria-label="Refresh">
             <RefreshCw />
           </Button>
-          {!isRun && (
+          {takesCsv && (
             <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
               <Upload /> Import CSV
             </Button>
@@ -729,10 +811,19 @@ function TableView({
             {rowCount === 0 && (
               <div className="sticky left-0 flex max-w-[calc(100vw-22rem)] flex-col items-center gap-3 p-10 text-center">
                 <p className="text-[15px] font-semibold">No rows yet</p>
-                <p className="max-w-lg text-[13px] leading-relaxed text-muted-foreground">{EMPTY_NOTE[table.kind](table.client_tag)}</p>
-                {!isRun && (
+                <p className="max-w-lg text-[13px] leading-relaxed text-muted-foreground">
+                  {table.template ? TEMPLATE_NOTE : EMPTY_NOTE[table.kind](table.client_tag)}
+                </p>
+                {takesCsv && (
                   <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
                     <Upload /> Import CSV
+                  </Button>
+                )}
+                {table.template && (
+                  <Button size="sm" variant="outline" asChild>
+                    <Link href={`/leads/companies?client=${encodeURIComponent(table.client_tag)}`}>
+                      <Store /> Open the Companies tab
+                    </Link>
                   </Button>
                 )}
               </div>

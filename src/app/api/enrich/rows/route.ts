@@ -9,7 +9,10 @@ import { ROW_STATUSES, type GridRow, type RowStatus, type RowsPage } from "@/lib
 //   GET    ?table=&page=&size=&q=&status=&f=col:state,…&sort=col:asc|desc
 //          One page, filtered, searched and sorted on the server (no client-side cap).
 //          f states: done | empty | skipped | error | needs_key | running | true | false | none
-//   POST   { table, label, rows: [{ inputs, reference }] }  — CSV import, at most 2,000 rows a call
+//                    | is.<value>: the cell holds exactly this text (encodeURIComponent'd, so
+//                      commas and colons can't split it), for the Companies tab's count links
+//   POST   { table, label, rows: [{ inputs, reference }] }  — CSV import, at most 2,000 rows a call;
+//          never into an AI Ark run's table or a template table (409)
 //   DELETE { table, ids }                                    — admins only
 
 export const dynamic = "force-dynamic";
@@ -23,6 +26,16 @@ const int = (v: string | null, d: number) => {
   const n = Number.parseInt(v ?? "", 10);
   return Number.isFinite(n) ? n : d;
 };
+
+/** The text of an `is.` filter, or null when it isn't one that can be matched. */
+function filterText(raw: string): string | null {
+  try {
+    const s = decodeURIComponent(raw);
+    return s && s.length <= 300 ? s : null;
+  } catch {
+    return null;
+  }
+}
 
 export async function GET(req: NextRequest) {
   const auth = await requireRole("manager");
@@ -44,17 +57,24 @@ export async function GET(req: NextRequest) {
   if (q) where.push(`r.search_text LIKE ${p(`%${q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`)}`);
   if (status && ROW_STATUSES.includes(status as RowStatus)) where.push(`r.run_status = ${p(status)}`);
   for (const f of (sp.get("f") ?? "").split(",").filter(Boolean).slice(0, 8)) {
-    const [col, state] = f.split(":");
+    const [col, state = ""] = f.split(":");
     if (!KEY.test(col ?? "")) continue;
-    const c = p(col);
+    // The column's parameter is added only with a clause that uses it: an unused one fails the query.
     if (state === "true" || state === "false") {
       where.push(
-        `EXISTS (SELECT 1 FROM enrich_cells c WHERE c.row_id = r.id AND c.column_key = ${c} AND c.status = 'done' AND c.value = to_jsonb(${p(state === "true")}::boolean))`
+        `EXISTS (SELECT 1 FROM enrich_cells c WHERE c.row_id = r.id AND c.column_key = ${p(col)} AND c.status = 'done' AND c.value = to_jsonb(${p(state === "true")}::boolean))`
       );
     } else if (state === "none") {
-      where.push(`NOT EXISTS (SELECT 1 FROM enrich_cells c WHERE c.row_id = r.id AND c.column_key = ${c})`);
+      where.push(`NOT EXISTS (SELECT 1 FROM enrich_cells c WHERE c.row_id = r.id AND c.column_key = ${p(col)})`);
     } else if (CELL_STATES.has(state)) {
-      where.push(`EXISTS (SELECT 1 FROM enrich_cells c WHERE c.row_id = r.id AND c.column_key = ${c} AND c.status = ${p(state)})`);
+      where.push(`EXISTS (SELECT 1 FROM enrich_cells c WHERE c.row_id = r.id AND c.column_key = ${p(col)} AND c.status = ${p(state)})`);
+    } else if (state.startsWith("is.")) {
+      const value = filterText(state.slice(3));
+      if (value !== null) {
+        where.push(
+          `EXISTS (SELECT 1 FROM enrich_cells c WHERE c.row_id = r.id AND c.column_key = ${p(col)} AND c.status = 'done' AND c.value = to_jsonb(${p(value)}::text))`
+        );
+      }
     }
   }
   const filtered = where.length > 1;
@@ -129,8 +149,13 @@ export async function POST(req: NextRequest) {
     const result = await withTx(
       async (c) => {
         // An AI Ark run's table holds only people AI Ark returned: a CSV row there could reach "Ready to add" unbought.
-        const { rows: [t] } = await c.query<{ kind: string }>(`SELECT kind FROM enrich_tables WHERE id = $1`, [body.table]);
+        const { rows: [t] } = await c.query<{ kind: string; template: string | null }>(
+          `SELECT kind, template FROM enrich_tables WHERE id = $1`,
+          [body.table]
+        );
         if (t?.kind === "ai_ark") return "ai_ark" as const;
+        // A template table holds only the companies its pulls bring in from AI Ark, keyed by their AI Ark id.
+        if (t?.template) return "template" as const;
         const { rows: cols } = await c.query<{ key: string }>(
           `SELECT key FROM enrich_columns WHERE table_id = $1 AND kind = 'input'`,
           [body.table]
@@ -148,6 +173,12 @@ export async function POST(req: NextRequest) {
     if (!result) return NextResponse.json({ error: "No such table" }, { status: 404 });
     if (result === "ai_ark") {
       return NextResponse.json({ error: "An AI Ark run's table takes only the people its run pulls, not CSV rows" }, { status: 409 });
+    }
+    if (result === "template") {
+      return NextResponse.json(
+        { error: "This Companies table takes only the companies its pulls bring in on the Companies tab, not CSV rows" },
+        { status: 409 }
+      );
     }
     return NextResponse.json(result);
   } catch (err) {

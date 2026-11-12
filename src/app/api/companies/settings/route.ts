@@ -1,0 +1,76 @@
+import { NextRequest, NextResponse } from "next/server";
+import { requireRole } from "@/lib/enrich/auth";
+import { withTx } from "@/lib/enrich/db";
+import { logAudit } from "@/lib/api/log-audit";
+import { cleanSettingsInput, readPipelineSettings } from "@/lib/companies/server";
+import type { SettingsState } from "@/lib/companies/types";
+
+// GET /api/companies/settings: the company pipeline's settings as stored in
+//     enrich_settings (the switch, the largest pull, the checks per company and
+//     the model for each AI step), with their version.
+// PUT /api/companies/settings {version, company_pipeline, models}: saves the
+//     settings sheet's edits. Model ids must match ^[a-z0-9][a-z0-9.\-]{1,60}$;
+//     a reasoning effort is none, minimal, low, medium, high, xhigh or max (or
+//     not sent); searches 1 to 5; checks 1 to 5; the largest pull 1 to 10,000.
+//     Keys the sheet doesn't edit are kept. A version other than the stored one
+//     answers 409 with `changed`. The worker reads the settings every 30 s, so
+//     a change reaches it within that, with no deploy.
+// Admin and up.
+
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+  const auth = await requireRole("admin");
+  if ("error" in auth) return auth.error;
+  try {
+    const out = await withTx<SettingsState>((c) => readPipelineSettings(c), { readOnly: true, timeoutMs: 8_000 });
+    return NextResponse.json(out, { headers: { "Cache-Control": "no-store" } });
+  } catch (err) {
+    console.error("companies/settings GET:", err);
+    return NextResponse.json({ error: "Could not load the settings" }, { status: 500 });
+  }
+}
+
+export async function PUT(req: NextRequest) {
+  const auth = await requireRole("admin");
+  if ("error" in auth) return auth.error;
+  let body: { version?: unknown; company_pipeline?: unknown; models?: unknown };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Body is not JSON" }, { status: 400 });
+  }
+  if (typeof body.version !== "string") return NextResponse.json({ error: "version is required" }, { status: 400 });
+  try {
+    const out = await withTx(
+      async (c) => {
+        const current = await readPipelineSettings(c, { lock: true });
+        if (current.version !== body.version) {
+          return { status: 409, error: "The settings changed since this sheet loaded them, so nothing was saved. It now shows them as they are.", changed: true };
+        }
+        const { value, errors, changes } = cleanSettingsInput(body, current.value);
+        if (!value) return { status: 400, error: errors.join(" "), errors };
+        if (!changes.length) return { saved: current, changes };
+        for (const [key, v] of [["company_pipeline", value.company_pipeline], ["models", value.models]] as const) {
+          await c.query(
+            `INSERT INTO enrich_settings (key, value, updated_by) VALUES ($1, $2, $3)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+            [key, JSON.stringify(v), auth.user.id]
+          );
+        }
+        return { saved: await readPipelineSettings(c), changes };
+      },
+      { timeoutMs: 10_000 }
+    );
+    if ("error" in out) {
+      return NextResponse.json({ error: out.error, changed: "changed" in out, errors: "errors" in out ? out.errors : undefined }, { status: out.status });
+    }
+    if (out.changes.length) {
+      await logAudit({ action: "enrich_settings", performedBy: auth.user.id, details: `Company pipeline: ${out.changes.join("; ")}` });
+    }
+    return NextResponse.json({ ...out.saved, changes: out.changes });
+  } catch (err) {
+    console.error("companies/settings PUT:", err);
+    return NextResponse.json({ error: "Could not save the settings" }, { status: 500 });
+  }
+}

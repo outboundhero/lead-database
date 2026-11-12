@@ -16,6 +16,8 @@ import { rowsFromPostback } from "@/lib/enrich/gmaps";
 // scraper gets its answer fast. 2xx comes only after the commit, so the
 // scraper may forget a chunk once it has a 2xx. 404 = no Clay-tab table for the
 // client, 422 = a chunk Clay would also have dropped; the scraper parks those.
+// Places land only in a hand-seeded Companies table, never in a template table
+// (template companies_v1 is filled by pulls on the Companies tab).
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -49,7 +51,7 @@ export async function POST(req: NextRequest) {
     const result = await withTx(
       async (c) => {
         const { rows: [t] } = await c.query<{ id: string }>(
-          `SELECT id FROM enrich_tables WHERE client_tag = $1 AND kind = 'companies' ORDER BY created_at LIMIT 1`,
+          `SELECT id FROM enrich_tables WHERE client_tag = $1 AND kind = 'companies' AND template IS NULL ORDER BY created_at LIMIT 1`,
           [tag]
         );
         if (!t) return null;

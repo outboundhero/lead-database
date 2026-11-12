@@ -619,6 +619,10 @@ function AiArkTab() {
                 <Field label="Leave out industries" hint="Exact AI Ark industry names: “real estate” doesn't also leave out “commercial real estate”.">
                   <TagInput values={form.exclude_industries} onChange={(v) => set("exclude_industries", v)} placeholder="restaurants…" maxTags={300} splitOn={null} />
                 </Field>
+                <p className="text-[12px] leading-relaxed text-muted-foreground">
+                  Company size and industries also apply to company pulls on the{" "}
+                  <Link className="underline" href={`/leads/companies?client=${encodeURIComponent(tag)}`}>Companies tab</Link>.
+                </p>
                 {planErrors.length > 0 && (
                   <ul className="space-y-1 rounded-xl bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">
                     {planErrors.map((e) => (

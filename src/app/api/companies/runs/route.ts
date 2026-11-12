@@ -1,0 +1,175 @@
+import { NextRequest, NextResponse } from "next/server";
+import { requireRole } from "@/lib/enrich/auth";
+import { withTx } from "@/lib/enrich/db";
+import { workerState } from "@/lib/enrich/queries";
+import { logAudit } from "@/lib/api/log-audit";
+import {
+  cleanTag,
+  clientInfo,
+  COMPANY_RUN_FIELDS,
+  companyFiltersFor,
+  companyModes,
+  companyPlan,
+  companyRunsFor,
+  countsFor,
+  createCompanyRun,
+  ensureTemplateTable,
+  geo,
+  pipelineView,
+  PULL_SIZE_LIMIT,
+  readPipelineSettings,
+  savedPeople,
+  TAG_RE,
+  targetingOf,
+  workerView,
+} from "@/lib/companies/server";
+import type { RunMode } from "@/lib/aiark/types";
+
+// GET  /api/companies/runs?tag=ABC: a client's 10 newest company pulls, the
+//      worker, the counts on its list and the settings' switch. The tab polls this.
+// POST /api/companies/runs {tag, mode, size, matchCount, rulesVersion,
+//      filtersVersion}: queues a pull. It uses the client's current rules and
+//      saved company filters, never filters from the request; the page sends the
+//      versions it showed, and a 409 with `changed` answers any change since. In
+//      one transaction it makes the client's Companies table on the Clay tab (or
+//      brings its columns up to date), the pull's source and its
+//      aiark_company_runs row; the enrichment worker does the buying.
+//      Refused with a 409 while company pulls are switched off, while the worker
+//      is offline or doesn't do company pulls, while the client has a pull
+//      going, without a count, or when the rules or filters changed. The size
+//      is at most the settings' largest pull. Manager and up: a live pull spends
+//      AI Ark credits.
+
+export const dynamic = "force-dynamic";
+
+const fmt = (n: number) => n.toLocaleString("en-US");
+
+export async function GET(req: NextRequest) {
+  const auth = await requireRole("manager");
+  if ("error" in auth) return auth.error;
+  const tag = cleanTag(req.nextUrl.searchParams.get("tag"));
+  if (!TAG_RE.test(tag)) return NextResponse.json({ error: "tag is not a client tag" }, { status: 400 });
+  try {
+    const out = await withTx(
+      async (c) => ({
+        runs: await companyRunsFor(c, tag),
+        worker: workerView(await workerState(c)),
+        counts: await countsFor(c, tag),
+        pipeline: pipelineView((await readPipelineSettings(c)).value),
+      }),
+      { readOnly: true, timeoutMs: 8_000 }
+    );
+    return NextResponse.json(out, { headers: { "Cache-Control": "no-store" } });
+  } catch (err) {
+    console.error("companies/runs GET:", err);
+    return NextResponse.json({ error: "Could not load the pulls" }, { status: 500 });
+  }
+}
+
+export async function POST(req: NextRequest) {
+  const auth = await requireRole("manager");
+  if ("error" in auth) return auth.error;
+  let body: { tag?: unknown; mode?: unknown; size?: unknown; matchCount?: unknown; rulesVersion?: unknown; filtersVersion?: unknown };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Body is not JSON" }, { status: 400 });
+  }
+  const tag = cleanTag(body.tag);
+  if (!TAG_RE.test(tag)) return NextResponse.json({ error: "tag is not a client tag" }, { status: 400 });
+  const mode = body.mode === "live" || body.mode === "demo" ? (body.mode as RunMode) : null;
+  if (!mode) return NextResponse.json({ error: "mode must be live or demo" }, { status: 400 });
+  const size = Number(body.size);
+  if (!Number.isInteger(size) || size < 1 || size > PULL_SIZE_LIMIT) {
+    return NextResponse.json({ error: `size must be a whole number from 1 to ${fmt(PULL_SIZE_LIMIT)}` }, { status: 400 });
+  }
+  const ready = companyModes()[mode];
+  if (!ready.ready) return NextResponse.json({ error: ready.why, needsKey: mode === "live" }, { status: 409 });
+  const matchCount = typeof body.matchCount === "number" && Number.isSafeInteger(body.matchCount) && body.matchCount >= 0 ? body.matchCount : null;
+  if (matchCount === null) {
+    return NextResponse.json({ error: "Count the matches first: a pull starts only after a count for these rules and filters." }, { status: 409 });
+  }
+  const rulesVersion = typeof body.rulesVersion === "string" ? body.rulesVersion : null;
+  const filtersVersion = typeof body.filtersVersion === "string" ? body.filtersVersion : null;
+
+  try {
+    const out = await withTx(
+      async (c) => {
+        // Two clicks at once must not start two pulls for the client.
+        await c.query(`SELECT pg_advisory_xact_lock(hashtext('aiark-company-run:' || $1))`, [tag]);
+        const settings = (await readPipelineSettings(c)).value.company_pipeline;
+        if (!settings.enabled) {
+          return { status: 409, error: "Company pulls are off, so nothing was started. An admin can switch them on in the settings." };
+        }
+        if (size > settings.max_pull_size) {
+          return { status: 400, error: `A pull takes at most ${fmt(settings.max_pull_size)} companies for now (the largest pull in the settings).` };
+        }
+        const { rows: active } = await c.query(
+          `SELECT id FROM aiark_company_runs WHERE client_tag = $1 AND status IN ('queued', 'running') LIMIT 1`,
+          [tag]
+        );
+        if (active.length) return { status: 409, error: `${tag} already has a company pull going. Cancel it or let it finish first.` };
+        // A pull queued now would start spending the moment a worker that knows company pulls appears.
+        const worker = workerView(await workerState(c));
+        if (!worker?.online) {
+          return { status: 409, error: "Pulls can't start yet: the service that runs them is off, so nothing was started." };
+        }
+        if (!worker.companyRuns) {
+          return { status: 409, error: "The worker that is running doesn't do company pulls yet, so nothing was started. Deploy the latest worker first." };
+        }
+        const client = await clientInfo(c, tag);
+        if (!client) return { status: 404, error: `${tag} is not a client` };
+        const targeting = await targetingOf(c, tag);
+        const saved = await savedPeople(c, tag);
+        const filtersChanged = (saved?.version ?? null) !== filtersVersion;
+        if (filtersChanged || (targeting?.version ?? null) !== rulesVersion) {
+          const what = filtersChanged ? "company filters (size and industries, on the AI Ark tab)" : "rules (locations and exclusions)";
+          return { status: 409, error: `${tag}'s ${what} changed since this page loaded them, so nothing was started.`, changed: true };
+        }
+        const filters = companyFiltersFor(saved, client.client_type ?? null);
+        const p = companyPlan(targeting, filters.value, await geo(c), client.client_type ?? null);
+        const blocked = [...p.blockers, ...p.pullBlockers];
+        if (blocked.length) return { status: 400, error: blocked.join(" ") };
+        // The client's Companies table (template companies_v1): made on its first pull, its columns brought up to date on every pull.
+        const table = await ensureTemplateTable(c, tag);
+        const run = await createCompanyRun(c, {
+          tag,
+          mode,
+          size,
+          tableId: table.id,
+          filters: {
+            company: filters.value,
+            defaults_from: filters.defaultsFrom,
+            rules_version: rulesVersion,
+            filters_version: filtersVersion,
+            targeting_updated_at: targeting?.updated_at ?? null,
+            filters_updated_at: saved?.updated_at ?? null,
+            report: p.report,
+            notes: p.notes,
+          },
+          requests: p.requests,
+          matchCount,
+          createdBy: auth.user.id,
+        });
+        const { rows } = await c.query(
+          `SELECT ${COMPANY_RUN_FIELDS} FROM aiark_company_runs r LEFT JOIN user_profiles up ON up.id = r.created_by WHERE r.id = $1`,
+          [run.id]
+        );
+        return { run: rows[0] };
+      },
+      { timeoutMs: 20_000 }
+    );
+    if ("error" in out) {
+      return NextResponse.json({ error: out.error, changed: "changed" in out }, { status: out.status });
+    }
+    await logAudit({
+      action: "companies_run",
+      performedBy: auth.user.id,
+      details: `${tag}: ${mode} pull of ${size} companies queued (run ${out.run.id})`,
+    });
+    return NextResponse.json({ run: out.run }, { status: 201 });
+  } catch (err) {
+    console.error("companies/runs POST:", err);
+    return NextResponse.json({ error: "Could not start the pull" }, { status: 500 });
+  }
+}
