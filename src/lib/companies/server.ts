@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { buildCompanyRequests } from "../../../scripts/lib/aiark/company-filters.mjs";
-import { bareDomain } from "../../../scripts/lib/enrich/actions.mjs";
+import { bareDomain } from "../../../scripts/lib/enrich/domain.mjs";
 import { geo, modes, peopleOrDefaults } from "@/lib/aiark/server";
 import type { RowStatus, WorkerState } from "@/lib/enrich/types";
 import {
@@ -33,9 +33,10 @@ export {
   TAG_RE,
   targetingOf,
 } from "@/lib/aiark/server";
-// The pull's engine (the backend half of phase 1): the client's template
-// Companies table, and the aiark_company_runs row the worker buys from.
-export { createCompanyRun, ensureTemplateTable } from "../../../scripts/lib/aiark/company-runs.mjs";
+// The pull's engine (the backend half of phase 1): createCompanyRun makes or
+// updates the client's template Companies table, then the aiark_company_runs
+// row the worker buys from.
+export { createCompanyRun } from "../../../scripts/lib/aiark/company-runs.mjs";
 
 // Server side of the Companies tab. The request builder and the run engine are
 // shared with the worker (scripts/lib/aiark/company-*.mjs); the client's rules

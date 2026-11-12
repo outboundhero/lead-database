@@ -335,6 +335,35 @@ export async function reoonMayCheck(env) {
   return { ok: true };
 }
 
+/**
+ * The worker's hourly sweep: template rows waiting on a key are queued again
+ * once both paid keys are set and Reoon may be spent (daily credits left, no
+ * instant credits). Answers already held are reused, so only the waiting cells
+ * call a provider. Returns { queued, why }: why says what kept them waiting.
+ *
+ * @param {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[], rowCount?: number | null }> }} db
+ * @param {Record<string, string | undefined>} env
+ */
+export async function requeueWaitingTemplateRows(db, env) {
+  if (!text(env?.OPENAI_API_KEY) || !reoonKey(env)) {
+    return { queued: 0, why: "Needs OPENAI_API_KEY and ENRICH_REOON_API_KEY on the worker" };
+  }
+  const { rows: [{ any }] } = await db.query(
+    `SELECT EXISTS (SELECT 1 FROM enrich_rows r JOIN enrich_tables t ON t.id = r.table_id
+                     WHERE t.template IS NOT NULL AND r.run_status = 'waiting') AS any`
+  );
+  if (!any) return { queued: 0, why: null };
+  const gate = await reoonMayCheck(env);
+  if (!gate.ok) return { queued: 0, why: gate.why };
+  const { rowCount } = await db.query(
+    `UPDATE enrich_rows r
+        SET run_status = 'queued', next_run_at = now(), attempts = 0, last_error = NULL, updated_at = now()
+       FROM enrich_tables t
+      WHERE t.id = r.table_id AND t.template IS NOT NULL AND r.run_status = 'waiting'`
+  );
+  return { queued: rowCount ?? 0, why: null };
+}
+
 /** One paid check (power mode). { ok, status, native } or { ok: false, why, retryable, keyProblem }. */
 async function reoonVerify(email, env) {
   const key = reoonKey(env);

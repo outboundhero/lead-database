@@ -377,14 +377,16 @@ const COLUMNS = [
     description: "General when the address starts the way the lead database's general inboxes do (info@, office@ …), else Named.",
   },
   {
+    // A usable email wins over a dead website: AI Ark's head-office email is checked
+    // without one, and a company with a checked general email has the data the tab is for.
     key: "company_outcome", name: "Outcome", kind: "formula",
     formula:
       `!{{in_area}} ? "Outside the client's area"` +
       ` : {{rule_match}} ? "Excluded by the client's rules"` +
       ` : {{never_contact}} ? "On the never-contact list"` +
       ` : {{held_usable}} ? "Already in the database"` +
-      ` : !{{use_website}} ? "No working website"` +
       ` : {{general_email}} ? "Has a general email"` +
+      ` : !{{use_website}} ? "No working website"` +
       ` : "No general email found"`,
     description: "Listed on the Companies tab: Has a general email and Already in the database. Every other company is only counted there.",
   },

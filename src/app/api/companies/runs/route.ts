@@ -13,7 +13,6 @@ import {
   companyRunsFor,
   countsFor,
   createCompanyRun,
-  ensureTemplateTable,
   geo,
   pipelineView,
   PULL_SIZE_LIMIT,
@@ -130,13 +129,12 @@ export async function POST(req: NextRequest) {
         const p = companyPlan(targeting, filters.value, await geo(c), client.client_type ?? null);
         const blocked = [...p.blockers, ...p.pullBlockers];
         if (blocked.length) return { status: 400, error: blocked.join(" ") };
-        // The client's Companies table (template companies_v1): made on its first pull, its columns brought up to date on every pull.
-        const table = await ensureTemplateTable(c, tag);
+        // createCompanyRun makes the client's Companies table (template companies_v1) on its first
+        // pull and brings its columns up to date on every pull, then adds the pull's sources and row.
         const run = await createCompanyRun(c, {
           tag,
           mode,
           size,
-          tableId: table.id,
           filters: {
             company: filters.value,
             defaults_from: filters.defaultsFrom,

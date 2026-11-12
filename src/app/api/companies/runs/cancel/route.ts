@@ -28,14 +28,18 @@ export async function POST(req: NextRequest) {
         `UPDATE aiark_company_runs
             SET status = 'cancelled', finished_at = coalesce(finished_at, now())
           WHERE id = $1 AND status IN ('queued', 'running')
-          RETURNING id, client_tag, pulled, from_registry, source_id, registry_source_id`,
+          RETURNING id, client_tag, pulled, from_registry, source_id, registry_source_id,
+                    coalesce((progress->>'bought')::int, 0) AS returned`,
         [body.id]
       );
       const r = rows[0];
       if (!r) return null;
-      // Bought rows are the pull's own source; copies from earlier pulls are the registry source.
+      // Bought rows are the pull's own source (received: the companies AI Ark returned; created: the
+      // new rows), as the worker records them when a pull finishes; copies are the registry source.
       const bought = Math.max(0, Number(r.pulled) - Number(r.from_registry));
-      if (r.source_id) await c.query(`UPDATE enrich_sources SET received = $2, created = $2 WHERE id = $1`, [r.source_id, bought]);
+      if (r.source_id) {
+        await c.query(`UPDATE enrich_sources SET received = $2, created = $3 WHERE id = $1`, [r.source_id, Number(r.returned), bought]);
+      }
       if (r.registry_source_id) {
         await c.query(`UPDATE enrich_sources SET received = $2, created = $2 WHERE id = $1`, [r.registry_source_id, Number(r.from_registry)]);
       }

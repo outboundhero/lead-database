@@ -123,7 +123,7 @@ export async function ensureTemplateTable(db, tag) {
  * @param {{ tag: string, mode: "live" | "demo", size: number, filters: object, requests: object[],
  *           matchCount?: number | null, createdBy?: string | null }} opts
  *   filters: what the tab showed (versions, report, notes); requests: buildCompanyRequests()'s bodies
- * @returns {Promise<object>} the aiark_company_runs row
+ * @returns {Promise<{ id: string, table_id: string, status: string } & Record<string, unknown>>} the aiark_company_runs row
  */
 export async function createCompanyRun(db, { tag, mode, size, filters, requests, matchCount = null, createdBy = null }) {
   const id = randomUUID();

@@ -2284,7 +2284,10 @@ fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`)
   `email_checks_per_company` paid checks, a verdict in `email_validations` from the
   last 90 days reused free), then the Outcome. Listed: "Has a general email" and
   "Already in the database" (once per domain, state and city: a second row is
-  "Listed under another row"). Every paid step needs `passes_filters`. A template
+  "Listed under another row"). A checked general email comes before the website in
+  the Outcome: AI Ark's head-office email is checked without one, so a company whose
+  site is dead but whose email checks out is listed, not "No working website".
+  Every paid step needs `passes_filters`. A template
   change reaches a client's table on its next pull (`ensureTemplateTable()` upserts
   the columns by key, never removes one); rows already worked are not re-run.
 - ⚠ **Template tables are strict** (`engine.mjs`): a formula, waterfall step, run
@@ -2311,20 +2314,52 @@ fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`)
   and the cell waits ("Needs key", the row 'waiting'). Without the key, cached
   verdicts still work. `ENRICH_REOON_THREADS` (4, at most 5). Once an hour, with
   both keys set and daily credits left, the worker queues waiting template rows
-  again. The heartbeat carries `capabilities: ["company_runs"]` (the pull route
-  refuses a worker without it) and the last Reoon balance read.
+  again (`requeueWaitingTemplateRows()` in `company-actions.mjs`). The heartbeat
+  carries `capabilities: ["company_runs"]` (the pull route refuses a worker without
+  it) and the last Reoon balance read.
+- **The Companies tab** (`/leads/companies`, manager and up; the settings sheet is
+  admin): pick a client, see what AI Ark will be asked, its company filters (read
+  only: size and industries are saved on the AI Ark tab), count (one Company Search
+  page per search: 0.5 credit, plus 0.1 for each further search), pull (at most
+  `max_pull_size`), the 10 newest pulls with Cancel, counts by outcome that open the
+  Clay section filtered (`?q=`, `?status=`, `?f=col:is.<value>`), and the listed
+  companies in keyset pages (no OFFSET, no row limit). Routes under
+  `src/app/api/companies/` (setup, count, runs, runs/cancel, list, settings), shared
+  code in `src/lib/companies/server.ts`. The pull route refuses (409) while pulls are
+  off, the worker is offline or lacks `company_runs`, the client has a pull going,
+  there is no count, or the rules or filters changed since the page loaded them.
+  The routes read `enrich_settings` fresh, never through the worker's 30-second
+  cache, so a saved switch applies at once. In the Clay section a template table
+  comes first, takes no CSV (409), and the Maps intake never writes into it.
+- ⚠ **A company can still be bought twice in one case:** AI Ark matched it to a
+  client's place, but the lead database places all its offices elsewhere. It is
+  then neither copied to another client of that place nor on that client's
+  exclusion lists, so the other client's pull pays for it again (0.1 credit) and its
+  row says "Outside the client's area". `test-companies.mjs` B5 checks that this is
+  the only case.
 - ⚠ **Migration 124 must be in the database before this code runs:** people runs'
   list count and the demo balance read `aiark_company_runs` too.
 - ⚠ **Demo pulls' rows are enriched like any other row.** With `OPENAI_API_KEY` or
   `ENRICH_REOON_API_KEY` set locally, the worker spends real money on made-up
   `.example` companies; the tests stub `fetch` instead.
 - **Tests:** stop the worker, then `node --env-file=.env.local scripts/test-companies.mjs`
-  (local database only; made-up `CPTEST_` clients, removed at the end). The demo
-  transport's Company Search takes test faults: `companyAnswers` (statuses to answer
-  in order, `0` for no answer, `{ status, charge: true }` for a charged page whose
-  answer is lost), `searchCap`, `noCreditHeader`, `badCreditHeader`, `noContent`,
-  `ignoreLists`; `advanceOneCompanyRun({ searchCap })` lowers the engine's cap to match.
-  `test-aiark.mjs` must still pass (shared code changed).
+  (local database only, migration 124 applied; made-up `CPTEST_` clients and
+  `.cptest.example` addresses, removed at the end; about 15 s). Nothing reaches a
+  network: AI Ark answers through the demo transport, and `fetch` is replaced for
+  the run (OpenAI, Reoon and the website checks answer from a stub; any other address
+  is refused and counted). The routes run for real through a small TypeScript loader
+  in the script, with stand-ins only for the session, the audit log and the worker's
+  heartbeat; the real worker is spawned once (`ENRICH_ONCE=1`, `fetch` stubbed, no
+  keys). The demo transport's Company Search takes test faults: `companyAnswers`
+  (statuses to answer in order, `0` for no answer, `{ status, charge: true }` for a
+  charged page whose answer is lost), `searchCap`, `noCreditHeader`,
+  `badCreditHeader`, `noContent`, `ignoreLists`; `advanceOneCompanyRun({ searchCap })`
+  lowers the engine's cap to match. `test-aiark.mjs` must still pass (shared code
+  changed).
+- **Before a push:** the two test scripts above, the type check, the linter on the
+  changed files and a production build, then a scan of the added lines for client
+  tags and names (read from the local `client_tags` into a scratch file outside the
+  repo) and for anything shaped like a key.
 
 ## Known issues / TODO
 
@@ -2332,6 +2367,7 @@ fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`)
 - [ ] "(general)" field location — voice memo wasn't precise; current detection covers first_name/last_name/job_title. Adjust regex when a sample Email Bison export is available.
 - [ ] Email Bison webhook for live bounces — out of scope for v1; CSV upload + bounce-worker polling
 - [ ] Initial validation cost — first export of imported leads will validate from scratch. Recommend opt-in per pull rather than bulk run; cap with `VALIDATION_DAILY_BUDGET` if needed.
+- [ ] `loadGeo()` (`scripts/lib/aiark/geo.mjs`) sends its three queries at once on one client (`Promise.all`). pg 8 only warns ("already executing a query"), but pg 9 will refuse it, and the AI Ark and Companies routes pass it a transaction's client. Run them one after another before upgrading pg.
 
 ### Open after the 2026-08-17 incident
 

@@ -56,7 +56,7 @@ import { order } from "./lib/enrich/formula.mjs";
 import { runRow } from "./lib/enrich/engine.mjs";
 import { readSettings } from "./lib/enrich/settings.mjs";
 import { projectCompany } from "./lib/enrich/project-company.mjs";
-import { reoonBalance, reoonBalanceInfo } from "./lib/enrich/company-actions.mjs";
+import { reoonBalanceInfo, requeueWaitingTemplateRows } from "./lib/enrich/company-actions.mjs";
 import { advanceOneRun, runDue } from "./lib/aiark/runs.mjs";
 import { advanceOneCompanyRun, companyRunDue } from "./lib/aiark/company-runs.mjs";
 import { autoAddConfig, pullsToAdd, requestAdd } from "./lib/aiark/add.mjs";
@@ -399,23 +399,9 @@ async function sweepWaitingTemplateRows() {
   if (sweepBusy || !env.OPENAI_API_KEY || !env.ENRICH_REOON_API_KEY) return;
   sweepBusy = true;
   try {
-    const { rows: [{ any }] } = await pool.query(
-      `SELECT EXISTS (SELECT 1 FROM enrich_rows r JOIN enrich_tables t ON t.id = r.table_id
-                       WHERE t.template IS NOT NULL AND r.run_status = 'waiting') AS any`
-    );
-    if (!any) return;
-    const b = await reoonBalance(env);
-    if (!b.ok || b.instant !== 0 || !(b.daily > 0)) {
-      log(`waiting Companies rows left waiting: ${b.ok ? `Reoon has ${b.daily} daily and ${b.instant ?? "unknown"} instant credits` : b.why}`);
-      return;
-    }
-    const { rowCount } = await pool.query(
-      `UPDATE enrich_rows r
-          SET run_status = 'queued', next_run_at = now(), attempts = 0, last_error = NULL, updated_at = now()
-         FROM enrich_tables t
-        WHERE t.id = r.table_id AND t.template IS NOT NULL AND r.run_status = 'waiting'`
-    );
-    if (rowCount) log(`queued ${rowCount} waiting Companies row(s) again: both keys are set and Reoon has daily credits`);
+    const { queued, why } = await requeueWaitingTemplateRows(pool, env);
+    if (queued) log(`queued ${queued} waiting Companies row(s) again: both keys are set and Reoon has daily credits`);
+    else if (why) log(`waiting Companies rows left waiting: ${why}`);
   } catch (e) {
     log(`sweeping waiting Companies rows: ${e.message}`);
   } finally {
