@@ -9,8 +9,15 @@
 //   cache: false — free lookups that must see new data (keys imported since the
 //                  last run) are re-done every run instead of reused.
 //   emptyAs: ''  — empty cells read as "" while the inputs are bound (prompts).
+//
+// Every run() also gets `settings` (scripts/lib/enrich/settings.mjs): ai_web
+// takes its model from there when its column names a setting.
 
 import { CLIENT_ACTIONS } from "./client-checks.mjs";
+import { COMPANY_ACTIONS } from "./company-actions.mjs";
+import { bareDomain } from "./domain.mjs";
+
+export { bareDomain };
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
@@ -52,18 +59,7 @@ async function httpJson(url, { method = "GET", headers = {}, body, timeoutMs = 3
 
 const retryableStatus = (s) => s === 0 || s === 429 || s >= 500;
 
-// ── normalize-url (Clay "Normalize a Domain", type "bare") ──────────────────
-
-export function bareDomain(input) {
-  let s = text(input).toLowerCase();
-  if (!s) return null;
-  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, "");
-  s = s.replace(/^[^/@]*@/, "");
-  s = s.split(/[/?#\s]/)[0];
-  s = s.replace(/:\d+$/, "").replace(/\.+$/, "");
-  s = s.replace(/^www\d?\./, "");
-  return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(s) ? s : null;
-}
+// ── normalize-url (Clay "Normalize a Domain", type "bare"; bareDomain is in domain.mjs) ──
 
 async function normalizeUrl({ inputs }) {
   const domain = bareDomain(inputs.url);
@@ -207,11 +203,49 @@ async function domainFromName({ inputs, env }) {
 // ── use-ai (Clay "Claygent": an AI agent with web search) ───────────────────
 // OpenAI Responses API with web search and a strict JSON answer, as Corofy's
 // production enrichment does (gpt-4o-mini, the model Clay's column uses).
+//
+// A column can name a model setting (config.model_setting, a key of
+// enrich_settings.models): the model, the most searches (max_tool_calls) and
+// the reasoning effort then come from that setting at run time, and a setting
+// that is missing is an error, never some other model. config.tool picks the
+// search tool: "web_search" ($10 per 1,000 calls), else the old default
+// "web_search_preview" ($25 per 1,000 on non-reasoning models), which a column
+// with no tool keeps, so its requests are unchanged. Inputs city, region and
+// country, when given, tell the search where the office is (user_location).
 
-async function aiWeb({ inputs, config, env }) {
+/** OpenAI's approximate user location, from the inputs, or null. country is a 2-letter code. */
+function userLocation(inputs) {
+  const city = text(inputs.city);
+  const region = text(inputs.region);
+  const country = text(inputs.country).toUpperCase();
+  if (!city && !region && !country) return null;
+  return {
+    type: "approximate",
+    ...(/^[A-Z]{2}$/.test(country) ? { country } : {}),
+    ...(region ? { region } : {}),
+    ...(city ? { city } : {}),
+  };
+}
+
+async function aiWeb({ inputs, config, env, settings }) {
   const prompt = text(inputs.prompt);
   if (!prompt) return { status: "empty", note: "Empty prompt" };
-  const model = config.model || "gpt-4o-mini";
+  let model = config.model || "gpt-4o-mini";
+  let setting = null;
+  if (config.model_setting) {
+    setting = settings?.models?.[config.model_setting] ?? null;
+    if (!setting?.model) {
+      return {
+        status: "error",
+        note: `No model is set for "${config.model_setting}" (the Companies tab's settings), so nothing was sent`,
+        retryable: false,
+      };
+    }
+    model = setting.model;
+  }
+  const toolType = config.tool || "web_search_preview";
+  const location = userLocation(inputs);
+  const tool = { type: toolType, ...(location ? { user_location: location } : {}) };
   const fields = Object.keys(config.answer ?? { response: "text" });
   const schema = {
     type: "object",
@@ -224,13 +258,22 @@ async function aiWeb({ inputs, config, env }) {
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify({
       model,
-      tools: [{ type: "web_search_preview" }],
+      tools: [tool],
       input: prompt,
+      ...(setting?.max_searches ? { max_tool_calls: setting.max_searches } : {}),
+      ...(setting?.reasoning_effort ? { reasoning: { effort: setting.reasoning_effort } } : {}),
       text: { format: { type: "json_schema", name: "answer", schema, strict: true } },
     }),
     timeoutMs: 120_000,
   });
-  const request = { model, prompt: prompt.slice(0, 8_000) };
+  const request = {
+    model,
+    ...(config.model_setting ? { model_setting: config.model_setting, tool: toolType } : {}),
+    ...(setting?.max_searches ? { max_tool_calls: setting.max_searches } : {}),
+    ...(setting?.reasoning_effort ? { reasoning_effort: setting.reasoning_effort } : {}),
+    ...(location ? { user_location: location } : {}),
+    prompt: prompt.slice(0, 8_000),
+  };
   if (!r.ok) {
     const keyProblem = r.status === 401 || r.status === 403;
     return {
@@ -250,15 +293,23 @@ async function aiWeb({ inputs, config, env }) {
     .flatMap((c) => c?.annotations ?? [])
     .filter((a) => a?.type === "url_citation")
     .map((a) => a.url);
-  const run = { request, response: capped({ answer, sources, usage: out.usage ?? null }), http_status: r.status };
-  if (!answer) return { status: "error", note: "The agent's answer was not valid JSON", retryable: true, run };
+  // Each search the model made is billed on its own: kept beside the tokens for the cost query.
+  const webSearches = (out.output ?? []).filter((o) => o?.type === "web_search_call").length;
+  const run = { request, response: capped({ answer, sources, usage: out.usage ?? null, web_searches: webSearches }), http_status: r.status };
+  if (!answer) return { status: "error", note: "The agent's answer was not valid JSON", retryable: true, run, model };
   const main = text(answer[fields[0]]);
   // The prompt tells the agent to answer "N/A" when it cannot confirm a site.
   // That is kept as an empty cell rather than passed on as if it were a URL.
   if (!main || /^n\/?a\.?$/i.test(main)) {
-    return { status: "empty", note: `The agent answered "${main || "(nothing)"}"`, run };
+    return { status: "empty", note: `The agent answered "${main || "(nothing)"}"`, run, model };
   }
-  return { status: "done", value: answer, display: main, run };
+  return { status: "done", value: answer, display: main, run, model };
+}
+
+// A later phase's column is shown and never run (the engine skips phase > 1);
+// this entry only makes "later" a known action.
+async function later() {
+  return { status: "skipped", note: "Built in a later phase" };
 }
 
 export const ACTIONS = {
@@ -267,5 +318,7 @@ export const ACTIONS = {
   lookup_key: { run: lookupKey, cache: false },
   domain_from_name: { run: domainFromName, cache: true },
   ai_web: { run: aiWeb, cache: true, emptyAs: "" },
+  later: { run: later, cache: false },
   ...CLIENT_ACTIONS, // AI Ark run tables: lead_lookup, client_area, client_exclusions
+  ...COMPANY_ACTIONS, // the Companies template: client_office, held_general_email, pick_emails, verify_emails
 };

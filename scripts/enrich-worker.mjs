@@ -22,8 +22,24 @@
 // page of people into the run's table, and the row loop then works out each
 // person's outcome like any other row.
 //
+// Company pulls (the Companies tab, scripts/lib/aiark/company-runs.mjs) share
+// that loop: people slices and company slices take turns, through one AI Ark
+// client, so one throttle holds both at AIARK_RPS. A pull's companies land in
+// the client's template Companies table, and when one of those rows finishes
+// the worker writes its summary into enrich_companies (fenced on the row's
+// claim), which the Companies tab lists. Once an hour, with both paid keys set
+// and Reoon daily credits left, template rows waiting on a key are queued
+// again; answers already held are reused, so only the waiting cells pay.
+//
+// Settings (enrich_settings: the models, the email check cap, how long paid
+// answers are remembered) are read at most every 30 s and handed to the
+// actions, so a model is swapped without a deploy.
+//
 // Env: DATABASE_URL (required). OPENAI_API_KEY, CLEARBIT_API_KEY — optional;
 // without one, the columns that need it show "Needs key" and the row waits.
+// ENRICH_REOON_API_KEY: the company pipeline's own Reoon account (never the
+// validation worker's REOON_API_KEY), spent on daily credits only;
+// ENRICH_REOON_THREADS (4, at most 5) Reoon checks at once.
 // AIARK_API_KEY — live AI Ark runs; AIARK_DEMO=1 — demo runs with made-up
 // people (AIARK_DEMO_CREDITS, 25000); AIARK_WEBHOOK_URL — needed only for the
 // export strategy; AIARK_RPS (4). AIARK_AUTO_ADD_URL and AIARK_AUTO_ADD_KEY — a
@@ -38,7 +54,11 @@ import { randomUUID } from "node:crypto";
 import dotenv from "dotenv";
 import { order } from "./lib/enrich/formula.mjs";
 import { runRow } from "./lib/enrich/engine.mjs";
+import { readSettings } from "./lib/enrich/settings.mjs";
+import { projectCompany } from "./lib/enrich/project-company.mjs";
+import { reoonBalance, reoonBalanceInfo } from "./lib/enrich/company-actions.mjs";
 import { advanceOneRun, runDue } from "./lib/aiark/runs.mjs";
+import { advanceOneCompanyRun, companyRunDue } from "./lib/aiark/company-runs.mjs";
 import { autoAddConfig, pullsToAdd, requestAdd } from "./lib/aiark/add.mjs";
 import { PERSON_SEARCH_KEYS } from "./lib/aiark/columns.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname, quiet: true });
@@ -54,10 +74,16 @@ const STALE_MIN = Math.max(5, num(env.ENRICH_STALE_MIN, 15));
 const MAX_ATTEMPTS = 3;
 const ONCE = env.ENRICH_ONCE === "1";
 const WORKER_ID = env.ENRICH_WORKER_ID || "enrich-worker";
-const PROVIDER_KEYS = ["OPENAI_API_KEY", "CLEARBIT_API_KEY"];
+const PROVIDER_KEYS = ["OPENAI_API_KEY", "CLEARBIT_API_KEY", "ENRICH_REOON_API_KEY"];
 const SEARCH_KEYS = [
-  ...new Set(["company", "address", "website", "domain", "use_website", "use_domain", "place_id", "phone", "use_city", ...PERSON_SEARCH_KEYS]),
+  ...new Set([
+    "company", "address", "website", "domain", "use_website", "use_domain", "place_id", "phone", "use_city", "use_state",
+    "general_email", ...PERSON_SEARCH_KEYS,
+  ]),
 ];
+// What this worker can run: the Companies tab starts a pull only when the worker says it can.
+const CAPABILITIES = ["company_runs"];
+const SWEEP_WAITING_MS = 3600_000;
 
 if (!env.DATABASE_URL) {
   console.error("DATABASE_URL is not set");
@@ -83,7 +109,7 @@ process.on("SIGINT", () => { shuttingDown = true; });
 
 const stats = { processed: 0, failed: 0, calls: 0 };
 let inFlight = 0;
-const aiark = { slices: 0, active: null, idle: true };
+const aiark = { slices: 0, company_slices: 0, active: null, idle: true };
 
 // ── Table definitions (columns change rarely; re-read every 30 s) ───────────
 
@@ -92,7 +118,7 @@ async function tableDef(id) {
   const hit = defs.get(id);
   if (hit && Date.now() - hit.at < 30_000) return hit;
   const { rows: [table] } = await pool.query(
-    `SELECT id, client_tag, kind, name FROM enrich_tables WHERE id = $1`, [id]);
+    `SELECT id, client_tag, kind, name, template FROM enrich_tables WHERE id = $1`, [id]);
   if (!table) throw new Error(`table ${id} no longer exists`);
   const { rows: columns } = await pool.query(
     `SELECT key, name, position, kind, action, formula, waterfall, inputs, config, run_if, provider, needs_env, phase
@@ -205,6 +231,7 @@ async function processRow(r) {
     held = await writeCells(r, batch, hist);
   };
 
+  const settings = await readSettings(pool);
   const result = await runRow({
     row: r,
     table: def.table,
@@ -212,6 +239,7 @@ async function processRow(r) {
     cells,
     env,
     db: pool,
+    settings,
     hooks: {
       changed: (key, cell) => pending.set(key, cell),
       running: async (key, prev) => {
@@ -239,13 +267,25 @@ async function processRow(r) {
     .join(" ")
     .toLowerCase()
     .slice(0, 2000);
+  // A template Companies row's summary goes to the Companies tab when the row
+  // finishes (not when it is queued again), while this worker still holds it.
+  const project = (status) =>
+    def.table.template
+      ? projectCompany(pool, {
+          rowId: r.id, claimToken: r.claim_token, tableId: r.table_id, clientTag: def.table.client_tag, values: result.values,
+          waiting: status === "waiting", failed: status === "error",
+        })
+      : null;
   if (result.retryable && r.attempts < MAX_ATTEMPTS) {
     const delay = 30_000 * 2 ** (r.attempts - 1);
     await finish(r, { status: "queued", nextRunAt: new Date(Date.now() + delay).toISOString(), lastError: result.retryable, search });
   } else if (result.errors) {
+    await project("error");
     await finish(r, { status: "error", lastError: result.retryable ?? `${result.errors} cell(s) failed`, search });
   } else {
-    await finish(r, { status: result.needsKey ? "waiting" : "done", search });
+    const status = result.needsKey ? "waiting" : "done";
+    await project(status);
+    await finish(r, { status, search });
   }
   stats.processed++;
 }
@@ -274,6 +314,9 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
     in_flight: inFlight,
     ...stats,
     keys: Object.fromEntries(PROVIDER_KEYS.map((k) => [k, Boolean(env[k])])),
+    capabilities: CAPABILITIES,
+    // The pipeline's Reoon account as last read (daily credits, instant credits, when): the Companies tab shows the checks left today.
+    reoon: reoonBalanceInfo(),
     aiark: {
       key: Boolean(env.AIARK_API_KEY),
       demo: env.AIARK_DEMO === "1",
@@ -281,6 +324,7 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
       auto_add: Boolean(autoAdd),
       active_run: aiark.active,
       slices: aiark.slices,
+      company_slices: aiark.company_slices,
     },
     host: os.hostname(),
     pid: process.pid,
@@ -296,20 +340,86 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
 }
 
 // ── AI Ark runs (one at a time: the API's rate limit is per key) ────────────
+// People slices and company slices take turns going first, so neither kind of
+// pull waits behind the other; both use the same AI Ark client and throttle.
+
+async function peopleSlice() {
+  const id = await advanceOneRun({ pool, env, log, shouldStop: () => shuttingDown });
+  if (id) aiark.slices++;
+  return id;
+}
+
+async function companySlice() {
+  const id = await advanceOneCompanyRun({ pool, env, log, shouldStop: () => shuttingDown });
+  if (id) aiark.company_slices++;
+  return id;
+}
+
+let companiesFirst = false;
+
+/**
+ * One slice of whichever kind has work, the kinds taking turns to go first.
+ * An error in one kind is logged and the other still gets its turn.
+ */
+async function advanceOneRunInTurn() {
+  const turn = companiesFirst ? [companySlice, peopleSlice] : [peopleSlice, companySlice];
+  companiesFirst = !companiesFirst;
+  for (const slice of turn) {
+    if (shuttingDown) break;
+    try {
+      const id = await slice();
+      if (id) return id;
+    } catch (e) {
+      log(`AI Ark loop error (${slice === companySlice ? "company pulls" : "people runs"}): ${e.message}`);
+    }
+  }
+  return null;
+}
 
 async function aiarkLoop() {
   while (!shuttingDown) {
     let worked = null;
     aiark.idle = false;
     try {
-      worked = await advanceOneRun({ pool, env, log, shouldStop: () => shuttingDown });
-      if (worked) aiark.slices++;
+      worked = await advanceOneRunInTurn();
     } catch (e) {
       log(`AI Ark loop error: ${e.message}`);
     }
     aiark.active = worked;
     aiark.idle = !worked;
     await sleep(worked ? 50 : POLL_MS);
+  }
+}
+
+// ── Template rows waiting on a key: queued again once the keys can pay ──────
+
+let sweepBusy = false;
+
+async function sweepWaitingTemplateRows() {
+  if (sweepBusy || !env.OPENAI_API_KEY || !env.ENRICH_REOON_API_KEY) return;
+  sweepBusy = true;
+  try {
+    const { rows: [{ any }] } = await pool.query(
+      `SELECT EXISTS (SELECT 1 FROM enrich_rows r JOIN enrich_tables t ON t.id = r.table_id
+                       WHERE t.template IS NOT NULL AND r.run_status = 'waiting') AS any`
+    );
+    if (!any) return;
+    const b = await reoonBalance(env);
+    if (!b.ok || b.instant !== 0 || !(b.daily > 0)) {
+      log(`waiting Companies rows left waiting: ${b.ok ? `Reoon has ${b.daily} daily and ${b.instant ?? "unknown"} instant credits` : b.why}`);
+      return;
+    }
+    const { rowCount } = await pool.query(
+      `UPDATE enrich_rows r
+          SET run_status = 'queued', next_run_at = now(), attempts = 0, last_error = NULL, updated_at = now()
+         FROM enrich_tables t
+        WHERE t.id = r.table_id AND t.template IS NOT NULL AND r.run_status = 'waiting'`
+    );
+    if (rowCount) log(`queued ${rowCount} waiting Companies row(s) again: both keys are set and Reoon has daily credits`);
+  } catch (e) {
+    log(`sweeping waiting Companies rows: ${e.message}`);
+  } finally {
+    sweepBusy = false;
   }
 }
 
@@ -345,11 +455,16 @@ async function main() {
   let lastSweep = 0;
   let lastBeat = Date.now();
   let lastAdd = 0;
+  let lastWaitingSweep = 0;
   while (!shuttingDown) {
     try {
       if (Date.now() - lastAdd > AUTO_ADD_EVERY_MS) {
         lastAdd = Date.now();
         addFinishedPulls();
+      }
+      if (Date.now() - lastWaitingSweep > SWEEP_WAITING_MS) {
+        lastWaitingSweep = Date.now();
+        sweepWaitingTemplateRows();
       }
       if (Date.now() - lastSweep > 60_000) {
         await reclaimStale();
@@ -365,7 +480,7 @@ async function main() {
         inFlight++;
         safeProcess(r).finally(() => { inFlight--; });
       }
-      if (ONCE && !claimed.length && inFlight === 0 && aiark.idle && !(await runDue(pool))) break;
+      if (ONCE && !claimed.length && inFlight === 0 && aiark.idle && !(await runDue(pool)) && !(await companyRunDue(pool))) break;
       await sleep(claimed.length ? 50 : inFlight ? 250 : POLL_MS);
     } catch (e) {
       log(`loop error: ${e.message}`);

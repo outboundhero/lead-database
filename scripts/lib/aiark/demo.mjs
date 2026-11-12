@@ -11,13 +11,20 @@
 // reserved ".example" domain. The same filters always give the same people,
 // so a demo run can be repeated, resumed and tested.
 //
+// Company Search (POST /v1/companies, the Companies tab's pulls) answers with
+// made-up companies (./demo-companies.mjs): each place has its own, so two
+// clients that share a place share companies. 0.1 credit per company returned,
+// with X-Credit, company_id exclusion lists and the 10,000-record cap.
+//
 // State (lists, export jobs, the credit balance) lives in this process only.
 
 import { createHash, randomUUID } from "node:crypto";
 import { demoId, hash32, makePerson } from "./demo-people.mjs";
+import { excludedByAccount, makeCompany } from "./demo-companies.mjs";
 
 export const DEMO_TOKEN = "demo-key";
 const PEOPLE_CACHE = 8;
+const COMPANY_CACHE = 64;
 
 /** JSON with sorted keys, so the same filters always hash the same. */
 function stable(v) {
@@ -122,14 +129,26 @@ function excludedByFilters(p, ask) {
  *                 refundAtReadOnce         the first results read finds it refunded (after DONE)
  *                 expireJobOnce            the first results read answers 404, not refunded
  *                 expireRefundedOnce       the same 404, for a job AI Ark did refund
- *                 ignoreLists              exclusion lists leave nobody out
+ *                 ignoreLists              exclusion lists leave nobody (and no company) out
+ *               Company Search only:
+ *                 companyAnswers           what the next Company Search calls answer, in order, before
+ *                                          any normal answer: a status (402, 401, 400, 429, 500 …),
+ *                                          0 for no answer at all (the transport throws), or
+ *                                          { status, charge: true } to charge the page first and then
+ *                                          lose its answer (a 5xx or 0)
+ *                 searchCap                the most records one search pages through (10,000)
+ *                 noCreditHeader           no X-Credit header on a charged page
+ *                 badCreditHeader          an X-Credit header that is not a number
+ *                 noContent                a 200 answer with no list of companies
+ *   companiesPerPlace  a fixed number of companies per place (default 30 to 119, by place)
  */
-export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4_000, processingMs = 0, faults = {} } = {}) {
-  const lists = new Map(); // list id -> Set of person ids
+export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4_000, processingMs = 0, faults = {}, companiesPerPlace = null } = {}) {
+  const lists = new Map(); // list id -> Set of person or company ids
   const jobs = new Map(); // trackId -> job
   const people = new Map(); // person id -> person, for single exports
   const cache = new Map(); // filter seed -> people[]
-  const state = { balance, calls: 0, charged: 0, listsMade: 0, refundedOnce: false, expiredOnce: false };
+  const companyCache = new Map(); // place -> companies[]
+  const state = { balance, calls: 0, charged: 0, listsMade: 0, companyCalls: 0, refundedOnce: false, expiredOnce: false };
   const REFUNDED = "this request was automatically refunded because the results were not delivered within the time limit. you can submit it again.";
 
   const answer = (status, json, headers = {}) => ({
@@ -180,6 +199,78 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
     return populationOf(body).filter((p) => !excluded.has(p.id));
   }
 
+  /** The companies a Company Search body matches, in a stable order, before its exclusion lists. */
+  function companiesFor(body) {
+    const account = body.account ?? {};
+    const seen = new Set();
+    const out = [];
+    for (const place of contentOf(account.location?.any?.include).map(String)) {
+      let all = companyCache.get(place);
+      if (!all) {
+        const n = companiesPerPlace ?? 30 + (hash32(`place|${place}`) % 90);
+        all = Array.from({ length: n }, (_, i) => makeCompany(place, i));
+        companyCache.set(place, all);
+        if (companyCache.size > COMPANY_CACHE) companyCache.delete(companyCache.keys().next().value);
+      }
+      for (const c of all) {
+        if (seen.has(c.id) || excludedByAccount(c, account)) continue;
+        seen.add(c.id);
+        out.push(c);
+      }
+    }
+    return out;
+  }
+
+  function companySearch(req, path) {
+    const companyFault = faults.companyAnswers?.length ? faults.companyAnswers.shift() : null;
+    const page = Number(req.page);
+    const size = Number(req.size);
+    if (!Number.isInteger(page) || page < 0 || !Number.isInteger(size) || size < 1 || size > 100) return appError(400, "invalid page or size", path);
+    const account = req.account ?? {};
+    const includes = [
+      contentOf(account.location?.any?.include), contentOf(account.industries?.any?.include), contentOf(account.domain?.any?.include),
+      contentOf(account.name?.any?.include),
+    ];
+    if (!includes.some((x) => x.length)) return appError(400, "a search cannot consist of exclude filters only", path);
+    if ((page + 1) * size > (faults.searchCap ?? 10_000)) return appError(400, "pagination limit exceeded", path);
+    const excluded = new Set();
+    if (!faults.ignoreLists) for (const id of contentOf(req.lists?.company_id?.exclude)) for (const c of lists.get(id) ?? []) excluded.add(c);
+    const all = companiesFor(req).filter((c) => !excluded.has(c.id));
+    const content = all.slice(page * size, page * size + size);
+    const price = Math.round(content.length * 10) / 100;
+    if (companyFault !== null) {
+      const fault = typeof companyFault === "object" ? companyFault : { status: companyFault };
+      if (fault.charge && content.length) charge(price);
+      if (!fault.status) throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
+      if (fault.status === 429) return answer(429, { message: "API rate limit exceeded" }, { "Retry-After": "1" });
+      if (fault.status === 402) return answer(402, { status: 402, error: "not enough balance" });
+      if (fault.status === 401) return answer(401, { message: "No API key found in request" });
+      if (fault.status === 403) return answer(403, { status: 403, error: "account restricted" });
+      if (fault.status === 400) return appError(400, "request size must less or equal to {0,number} bytes", path);
+      return answer(fault.status, { status: fault.status, error: "unexpected error" });
+    }
+    if (!all.length) return appError(404, "data not found", path);
+    if (content.length && !charge(price)) return answer(402, { status: 402, error: "not enough balance" });
+    if (faults.noContent) return answer(200, { totalElements: all.length });
+    const credit = !content.length || faults.noCreditHeader ? {} : { "X-Credit": faults.badCreditHeader ? "abc" : `-${price.toFixed(1)}` };
+    return answer(
+      200,
+      {
+        content,
+        pageable: { pageNumber: page, pageSize: size, offset: page * size, paged: true, unpaged: false },
+        totalElements: all.length,
+        totalPages: Math.ceil(all.length / size),
+        last: (page + 1) * size >= all.length,
+        size,
+        number: page,
+        numberOfElements: content.length,
+        first: page === 0,
+        empty: content.length === 0,
+      },
+      credit
+    );
+  }
+
   async function handle({ method, url, headers, body }) {
     if (latencyMs) await new Promise((r) => setTimeout(r, latencyMs));
     state.calls++;
@@ -222,12 +313,17 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
       const values = Array.isArray(req.values) ? req.values.map(String) : null;
       if (!values) return appError(400, "values is required");
       if (values.length > 10_000) return appError(400, "terms_lookup_list_values_limit_exceeded 10000");
-      if (req.type !== "people_id") return appError(400, "type is required");
+      if (req.type !== "people_id" && req.type !== "company_id") return appError(400, "type is required");
       if (state.listsMade >= 50) return appError(400, "daily list quota exceeded");
       state.listsMade++;
       const id = randomUUID();
       lists.set(id, new Set(values));
-      return answer(200, { id, workspace: "demo", type: "people_id", values, created: Date.now() });
+      return answer(200, { id, workspace: "demo", type: req.type, values, created: Date.now() });
+    }
+
+    if (method === "POST" && path === "/v1/companies") {
+      state.companyCalls++;
+      return companySearch(req, path);
     }
 
     if (method === "POST" && path === "/v2/people/export/single") {

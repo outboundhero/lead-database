@@ -9,10 +9,11 @@
 //
 // Plain JavaScript so the worker and the Next.js routes share it.
 
-import { bareDomain } from "../enrich/actions.mjs";
+import { bareDomain } from "../enrich/domain.mjs";
 
 export const AIARK_BASE_URL = "https://api.ai-ark.com/api/developer-portal";
-export const PAGE_MAX = 100; // results per page: Preview and export results
+export const PAGE_MAX = 100; // results per page: Preview, export results and Company Search
+export const COMPANY_PRICE = 0.1; // credits per company Company Search returns (docs, 2026-11-13)
 export const SEARCH_CAP = 10_000; // matches one search can page through
 export const ARRAY_MAX = 300; // values per include/exclude array
 export const LIST_MAX = 10_000; // ids per exclusion list
@@ -194,12 +195,41 @@ export function createAiArk({ token, transport = fetchTransport, rps = 4, timeou
       };
     },
 
-    /** Saves ids as an exclusion list (free; 50 a day, 24 h life). Returns its id. */
-    async createList(ids) {
-      const { json } = await call("POST", "/v1/lists", { body: { type: "people_id", values: ids } });
+    /**
+     * Saves ids as an exclusion list (free; 50 a day, 24 h life). Returns its id.
+     * `type` is people_id (people searches and exports) or company_id (Company Search).
+     */
+    async createList(ids, type = "people_id") {
+      const { json } = await call("POST", "/v1/lists", { body: { type, values: ids } });
       const id = text(json?.id);
       if (!id) throw new AiArkError("server", "AI Ark created a list but returned no id");
       return id;
+    },
+
+    /**
+     * Company Search: one page of companies, 0.1 credit for each company
+     * returned. No matches comes back as 404 or as an empty page; both read as
+     * an empty page. Any other answer with no list of companies is a failed
+     * read. Only a 429 is tried again: AI Ark refused it before doing anything,
+     * while any other repeat could pay for the same page twice.
+     *
+     * credits: what AI Ark's X-Credit header says it charged (a negative
+     * number), or 0.1 for each company returned when the header is missing or
+     * not a number, so the spending brake never counts a page as free.
+     */
+    async companySearch(filters, { page = 0, size = PAGE_MAX, lists = null } = {}) {
+      const body = { ...filters, ...(lists?.length ? { lists: { company_id: { exclude: lists } } } : {}), page, size };
+      const r = await call("POST", "/v1/companies", { body, retry: "rate-only" });
+      if (r.empty) return { content: [], totalElements: 0, totalPages: 0, credits: 0 };
+      if (!Array.isArray(r.json?.content)) throw new AiArkError("server", "AI Ark's Company Search answer had no list of companies");
+      const content = r.json.content;
+      const charged = Math.abs(parseFloat(r.headers?.get?.("x-credit") ?? ""));
+      return {
+        content,
+        totalElements: Number(r.json.totalElements ?? 0) || 0,
+        totalPages: Number(r.json.totalPages ?? 0) || 0,
+        credits: Number.isFinite(charged) ? charged : Math.round(content.length * COMPANY_PRICE * 100) / 100,
+      };
     },
 
     /**
@@ -287,7 +317,8 @@ export function pickEmail(email) {
   return { state: text(email?.state).toUpperCase() || null, best: found.find((o) => o.status === "VALID") ?? found[0] ?? null };
 }
 
-function sizeText(staff) {
+/** AI Ark's headcount as text: "1,537 (5,001–10,000)", the band alone, or "". People and company inputs share it. */
+export function sizeText(staff) {
   const total = Number(staff?.total);
   const start = Number(staff?.range?.start);
   const end = Number(staff?.range?.end);

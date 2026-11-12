@@ -17,6 +17,10 @@
 // place it. The gate never sees a company description, so terms match it as
 // whole words: "pub" must not catch "public". Free lookups, so every run re-reads
 // them (cache: false): a lead added or a rule changed since the last run counts.
+//
+// The Companies template shares them (company-actions.mjs): client_office judges
+// each of a company's offices with judgePlace(), the rule client_area applies,
+// and held_general_email looks addresses up with heldAddresses().
 
 import { names } from "../aiark/add.mjs";
 import { cityKey, entryKey, findState, loadGeo } from "../aiark/geo.mjs";
@@ -34,7 +38,11 @@ let titleCache = null; // { at, readAt, terms, rx }
 // change reads rules at least as new as the click.
 const current = (hit, since) => hit && Date.now() - hit.at < TTL_MS && (!since || hit.readAt >= new Date(since));
 
-async function targetingFor(db, tag, since) {
+/**
+ * A client's rules (client_targeting), or null when it has none. Cached for
+ * 30 seconds, and never older than `since` (the row's next_run_at).
+ */
+export async function targetingFor(db, tag, since) {
   const hit = targetingCache.get(tag);
   if (current(hit, since)) return hit.row;
   const { rows: [r] } = await db.query(
@@ -48,7 +56,8 @@ async function targetingFor(db, tag, since) {
   return row;
 }
 
-async function geoFor(db) {
+/** The state and country names and codes (loadGeo), cached for 10 minutes: { geo, cities }. */
+export async function geoFor(db) {
   if (geoCache && Date.now() - geoCache.at < 10 * 60_000) return geoCache;
   geoCache = { at: Date.now(), geo: await loadGeo(db), cities: new Map() };
   return geoCache;
@@ -82,7 +91,7 @@ const USABLE_VERDICTS = new Set(["Valid", "Catch-all"]);
 const LIKELY_ADDRESS = "likely address";
 const NAME_AND_COMPANY = "name and company";
 // A company "on" one of these says nothing about the address: john.smith@gmail.com is many people.
-const FREE_MAIL = new Set(["gmail.com", "googlemail.com", "yahoo.com", "hotmail.com", "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com", "me.com", "comcast.net"]);
+export const FREE_MAIL = new Set(["gmail.com", "googlemail.com", "yahoo.com", "hotmail.com", "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com", "me.com", "comcast.net"]);
 
 /** A name's letters and digits, without case or accents: "José-Luis" is "joseluis". */
 const nameKey = (s) => text(s).normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
@@ -94,7 +103,7 @@ const surname = (s) => text(s).split(/[,(]/)[0];
 const likeText = (s) => s.replace(/[\\%_]/g, "\\$&");
 
 /** The company as the lead database holds it: the first "|" part with its spaces collapsed (cleanCompanyName, src/lib/uploads/normalize-row.ts). */
-const companyAsHeld = (v) => text(v).split("|").map((s) => s.replace(/\s+/g, " ").trim()).find(Boolean) ?? "";
+export const companyAsHeld = (v) => text(v).split("|").map((s) => s.replace(/\s+/g, " ").trim()).find(Boolean) ?? "";
 
 /**
  * The addresses a person most likely has at their company. These shapes reached
@@ -165,6 +174,25 @@ function heldAnswer(r, matched = null) {
     display,
     note: `AI Ark gave no usable email, and ${r.email} ${how}, so this person stays out of the pipeline. ${note}`,
   };
+}
+
+/**
+ * The addresses the database holds, of those given: each as a lead, in the
+ * copy of Email Bison (its lower(email) index) or on the never-contact list,
+ * with the fields heldAnswer reads. Exact matches only.
+ */
+export async function heldAddresses(db, emails) {
+  if (!emails.length) return [];
+  const { rows } = await db.query(
+    `SELECT e.email, l.id AS lead_id, l.is_bounced, l.bounce_type, l.is_suppressed,
+            s.email IS NOT NULL AS listed, s.reason,
+            EXISTS (SELECT 1 FROM bison_leads b WHERE lower(b.email) = e.email) AS in_bison
+       FROM unnest($1::text[]) AS e(email)
+       LEFT JOIN leads l ON l.email = e.email
+       LEFT JOIN suppressed_emails s ON s.email = e.email`,
+    [emails]
+  );
+  return rows.filter((r) => r.lead_id || r.listed || r.is_suppressed || r.in_bison);
 }
 
 async function byAddress(db, email) {
@@ -276,14 +304,25 @@ async function soleState(db, cities, key) {
   return place;
 }
 
-async function clientArea({ inputs, table, row, db }) {
-  const t = await targetingFor(db, table.client_tag, row?.next_run_at);
-  if (!t) return { status: "error", note: `${table.client_tag} has no targeting rules`, retryable: false };
+/**
+ * Is a place ({city, state, country} as AI Ark writes them) inside a client's
+ * area? Decided the way the location resolver and then the send gate would
+ * place a lead there. The answer is the cell client_area writes
+ * ({status: "done", value: true | false, display, note}), plus `place`: the
+ * {country, state} codes the lead database would give it (state null when it
+ * couldn't place it), or null when the country is unknown. client_office runs
+ * this for every office of a company.
+ *
+ * @param {{ city?: string, state?: string, country?: string }} inputs
+ * @param {{ targeting: object, db: { query: Function } }} opts  targeting: the client's client_targeting row
+ */
+export async function judgePlace(inputs, { targeting: t, db }) {
   const include = Array.isArray(t.include_locations) ? t.include_locations : [];
   const exclude = Array.isArray(t.exclude_locations) ? t.exclude_locations : [];
   const { geo, cities } = await geoFor(db);
   const placeText = [inputs.city, inputs.state, inputs.country].map(text).filter(Boolean).join(", ") || "(no place)";
-  const outside = (note) => ({ status: "done", value: false, display: "Outside", note });
+  let where = null; // the place's codes, once known
+  const outside = (note) => ({ status: "done", value: false, display: "Outside", note, place: where });
 
   // A country we don't know is someone really abroad, whatever the state says.
   const said = text(inputs.country) ? geo.countryCode.get(cityKey(inputs.country)) ?? null : null;
@@ -298,6 +337,7 @@ async function clientArea({ inputs, table, row, db }) {
   const country = place?.country ?? said;
   if (!country) return outside(`AI Ark gave no country we know for "${placeText}"`);
 
+  where = { country, state: place?.state ?? null };
   const allowed = (Array.isArray(t.countries) ? t.countries : []).map((c) => text(c).toUpperCase());
   if (!allowed.includes(country)) {
     return outside(allowed.length ? `${country} is not one of the client's countries (${allowed.join(", ")})` : "The client's rules list no countries");
@@ -324,14 +364,22 @@ async function clientArea({ inputs, table, row, db }) {
       value: false,
       display: "Can't tell",
       note: `AI Ark gave no state ("${placeText}") and the city doesn't settle one, so the lead database couldn't place this person`,
+      place: where,
     };
   }
-  if (!include.length) return { status: "done", value: true, display: "Inside", note: "The client's rules list no places, so every place counts" };
+  if (!include.length) return { status: "done", value: true, display: "Inside", note: "The client's rules list no places, so every place counts", place: where };
   const hit = include.find(matches);
-  if (hit) return { status: "done", value: true, display: "Inside", note: `Matches the client's place ${entryLabel(hit)}` };
+  if (hit) return { status: "done", value: true, display: "Inside", note: `Matches the client's place ${entryLabel(hit)}`, place: where };
   const accented = include.find((e) => inEntry(e, cityKey));
   if (accented) return outside(`The client's place ${entryLabel(accented)} has an accent, and the send gate can't match an accented place yet`);
   return outside(`"${placeText}" is not one of the client's ${include.length} places`);
+}
+
+async function clientArea({ inputs, table, row, db }) {
+  const t = await targetingFor(db, table.client_tag, row?.next_run_at);
+  if (!t) return { status: "error", note: `${table.client_tag} has no targeting rules`, retryable: false };
+  const { status, value, display, note } = await judgePlace(inputs, { targeting: t, db });
+  return { status, value, display, note };
 }
 
 // ── client_exclusions ───────────────────────────────────────────────────────

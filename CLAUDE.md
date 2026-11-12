@@ -2230,6 +2230,102 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   `AIARK_TEST_TAG=<cleaning client tag> node --env-file=.env.local scripts/test-aiark.mjs`
   (local database only; it refuses any other).
 
+### Company pipeline (migration 124, the Companies tab)
+
+Phase 1 of the Clay section restart: for any client tag, companies come from AI Ark's
+Company Search into that client's template Companies table on the Clay tab, are
+enriched there, and the Companies tab lists only those with a usable general email.
+Nothing in it writes `leads`, Email Bison or a campaign: phase 3 adds that, behind
+fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`).
+
+- **Tables (124):** `aiark_company_runs` (one row per pull, worked a slice at a time,
+  cursor in `progress`, as `aiark_runs`); `aiark_companies` (the registry: every
+  company any pull bought, keyed by AI Ark's id, a trimmed record with no
+  technologies, funding or logo, and `place_keys` such as `US`, `US|IL`,
+  `US|IL|springfield` for the head office and every office; `demo` rows never reach
+  a live pull); `enrich_memory` (paid answers shared by every row, table and client);
+  `enrich_companies` (one summary per template row, written by the worker; `listed`
+  rows are the tab); `enrich_settings` (the switch, caps and the model per AI step).
+  `enrich_tables.template` (`companies_v1`; one template table per client and kind)
+  and the `registry` source kind are new too.
+- **The request** (`buildCompanyRequests`, `scripts/lib/aiark/company-filters.mjs`):
+  one search per group of places (950 bytes, 300 values each), with the excluded
+  places and the same company filters people searches send (`accountFilters()` in
+  `filters.mjs`: saved size bands and industries, or a cleaning client's defaults;
+  cleaning company types; the exclusion terms as company keywords, 1,900 bytes).
+  No titles. Blockers: no rules, no places, more than 50 searches. AI Ark matches
+  a company on ANY office, and "City, State" is undocumented, so each row re-checks
+  its offices (`client_office`).
+- **A pull** (`scripts/lib/aiark/company-runs.mjs`, worked by the enrich-worker's AI
+  Ark loop, taking turns with people slices on the one client and throttle): each
+  slice (1) copies up to 1,000 registry companies with an office in the client's
+  places that pass the pull's company filters (free, they count toward the size),
+  or (2) makes AI Ark exclusion lists (`company_id`, free) of the registry companies
+  in the client's places and of those its pulls bought, newest first, or (3) buys
+  one page (0.1 credit a company; rows, cells, registry, counters and cursor in one
+  statement, counted once per page id). ⚠ **The 50 lists a day are shared with
+  people runs** (`listsMadeToday()` reads both run tables; 45 used at most). At
+  10,000 records a search makes its lists again and starts over, or with no list
+  budget moves on and records the cap. Company Search is retried only on a 429; a
+  page whose answer was lost may have been charged, so it counts against the brake
+  at full price, and 3 in a row stop the pull. Brake: `ceil(size × 0.125) +
+  searches + 2` credits, checked before each page. 401/403 and 400 end in an error,
+  402 stops. Past the lists (over 100,000 ids, or no budget) a company can be paid
+  again: written once, marked "Bought before", counted in `bought_before`.
+- **The template** (`scripts/lib/enrich/company-template.mjs`, plain JavaScript; no
+  client lists, names or prompts with client data): the office in the client's area
+  (`client_office`, every office judged by `judgePlace()`, the head office first),
+  the client's exclusions, a general inbox already held (`held_general_email`: 14
+  role addresses at the domain, then general-inbox leads at the same company, city
+  and state, through `idx_leads_company_norm`; never contact stops the company, a
+  bounced address is searched past), AI Ark's website checked for free and a paid
+  search only when it is missing or dead, AI Ark's email (head office only), then a
+  first and a second email search, each checked by `verify_emails` (Reoon, at most
+  `email_checks_per_company` paid checks, a verdict in `email_validations` from the
+  last 90 days reused free), then the Outcome. Listed: "Has a general email" and
+  "Already in the database" (once per domain, state and city: a second row is
+  "Listed under another row"). Every paid step needs `passes_filters`. A template
+  change reaches a client's table on its next pull (`ensureTemplateTable()` upserts
+  the columns by key, never removes one); rows already worked are not re-run.
+- ⚠ **Template tables are strict** (`engine.mjs`): a formula, waterfall step, run
+  condition or action input that reads a failed cell errors, and one that reads a
+  cell waiting on a key waits, so no paid step runs on a guess (a missing Reoon key
+  must not make the second email search read "nothing usable" and pay). Other tables
+  keep the old rule (only formulas react, to errors); `test-aiark.mjs` C5 checks it.
+- **Shared memory:** an action column with `config.memory` and an input
+  `memory_key` reuses any row's, table's or client's answer ("Reused: found for TAG
+  on DATE", no provider call, no run record): the website by AI Ark id
+  (`website_v1`), each email search by domain and office (`email_search_first_v1`,
+  `email_search_second_v1`). Kept 365 days (website), 90 (email), 30 (nothing
+  found). ⚠ A prompt change must bump the version in the kind's name.
+- **Settings** (`scripts/lib/enrich/settings.mjs`, read every 30 s; the defaults are
+  the seeded values): the model, reasoning effort and most searches for each AI step
+  (`config.model_setting`), so a model is swapped with no deploy and no answer
+  already held is paid for again (the cell hash holds the setting's name, not the
+  model). A missing model is an error, never a fallback. ⚠ **gpt-5-nano shuts down
+  on 11 Dec 2026** (OpenAI's deprecations page): move `email_search_first` before then.
+- **Keys:** `OPENAI_API_KEY` on the worker (the website and email searches);
+  `ENRICH_REOON_API_KEY`, the pipeline's **own** Reoon account (⚠ never the
+  validation worker's `REOON_API_KEY`). It spends daily credits only: nothing is
+  checked while the account holds any instant credit or has no daily credits left,
+  and the cell waits ("Needs key", the row 'waiting'). Without the key, cached
+  verdicts still work. `ENRICH_REOON_THREADS` (4, at most 5). Once an hour, with
+  both keys set and daily credits left, the worker queues waiting template rows
+  again. The heartbeat carries `capabilities: ["company_runs"]` (the pull route
+  refuses a worker without it) and the last Reoon balance read.
+- ⚠ **Migration 124 must be in the database before this code runs:** people runs'
+  list count and the demo balance read `aiark_company_runs` too.
+- ⚠ **Demo pulls' rows are enriched like any other row.** With `OPENAI_API_KEY` or
+  `ENRICH_REOON_API_KEY` set locally, the worker spends real money on made-up
+  `.example` companies; the tests stub `fetch` instead.
+- **Tests:** stop the worker, then `node --env-file=.env.local scripts/test-companies.mjs`
+  (local database only; made-up `CPTEST_` clients, removed at the end). The demo
+  transport's Company Search takes test faults: `companyAnswers` (statuses to answer
+  in order, `0` for no answer, `{ status, charge: true }` for a charged page whose
+  answer is lost), `searchCap`, `noCreditHeader`, `badCreditHeader`, `noContent`,
+  `ignoreLists`; `advanceOneCompanyRun({ searchCap })` lowers the engine's cap to match.
+  `test-aiark.mjs` must still pass (shared code changed).
+
 ## Known issues / TODO
 
 - [ ] Reoon bulk endpoint batch size — confirm exact cap from docs before tuning `VALIDATION_BATCH_SIZE`

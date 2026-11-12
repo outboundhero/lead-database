@@ -45,9 +45,9 @@ import { PERSON_SEARCH_KEYS, RUN_COLUMNS, RUN_INPUT_KEYS } from "./columns.mjs";
 export const LEASE_MIN = 10;
 const MAX_ATTEMPTS = 6;
 const BACKOFF_MAX_MS = 15 * 60_000;
-const LIST_BUDGET = LISTS_PER_DAY - 5; // a few spare for anyone using the key by hand
-const LIST_REFRESH_MS = 23 * 3600_000; // lists younger than this stay in use
-const LIST_LIFE_MS = 24 * 3600_000; // AI Ark drops a list after 24 h
+export const LIST_BUDGET = LISTS_PER_DAY - 5; // a few spare for anyone using the key by hand
+export const LIST_REFRESH_MS = 23 * 3600_000; // lists younger than this stay in use
+export const LIST_LIFE_MS = 24 * 3600_000; // AI Ark drops a list after 24 h
 const EXPORT_POLL_MS = 15_000;
 const EXPORT_WAIT_MAX_MS = 11 * 3600_000; // AI Ark auto-refunds a job it can't deliver within ~10 h, so by 11 it has delivered or refunded
 const PROCESSING_WAIT_MS = 2 * 3600_000; // per page: how long to wait for emails AI Ark is still checking
@@ -98,7 +98,11 @@ export async function aiArkFor(mode, { env = process.env, db, rps = null }) {
   if (mode === "demo") {
     if (env.AIARK_DEMO !== "1") return { client: null, why: "Demo runs are off (AIARK_DEMO=1 turns them on)" };
     const base = num(env.AIARK_DEMO_CREDITS, 25_000);
-    const { rows } = await db.query(`SELECT coalesce(sum(credits_used), 0)::float8 AS used FROM aiark_runs WHERE mode = 'demo'`);
+    // People runs and company pulls spend from the one demo account.
+    const { rows } = await db.query(
+      `SELECT ((SELECT coalesce(sum(credits_used), 0) FROM aiark_runs WHERE mode = 'demo')
+            + (SELECT coalesce(sum(credits_used), 0) FROM aiark_company_runs WHERE mode = 'demo'))::float8 AS used`
+    );
     if (!demoTransport) demoTransport = createDemoTransport({ latencyMs: num(env.AIARK_DEMO_LATENCY_MS, 120) });
     demoTransport.state.balance = Math.max(0, base - Number(rows[0].used));
     return { client: createAiArk({ token: DEMO_TOKEN, transport: demoTransport, rps: 5 }) };
@@ -439,6 +443,28 @@ const listsStale = (p) => !p.lists_at || Date.now() - Date.parse(p.lists_at) > L
 const listsAlive = (p) => Boolean(p.lists_at) && Date.now() - Date.parse(p.lists_at) < LIST_LIFE_MS;
 
 /**
+ * Exclusion lists this mode made in the last 24 hours, by people runs and
+ * company pulls together: AI Ark allows 50 a day, and its docs don't say the
+ * two kinds have budgets of their own, so they share one (LIST_BUDGET). Each
+ * run logs the lists it makes in progress.lists_log.
+ *
+ * @param {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> }} db
+ * @param {"live" | "demo"} mode
+ */
+export async function listsMadeToday(db, mode) {
+  const { rows: [{ made }] } = await db.query(
+    `SELECT count(*)::int AS made
+       FROM (SELECT progress FROM aiark_runs WHERE mode = $1
+             UNION ALL
+             SELECT progress FROM aiark_company_runs WHERE mode = $1) r,
+            jsonb_array_elements_text(coalesce(r.progress->'lists_log', '[]'::jsonb)) AS t(at)
+      WHERE t.at::timestamptz > now() - interval '24 hours'`,
+    [mode]
+  );
+  return made;
+}
+
+/**
  * Asks AI Ark to leave out the people already bought: the most recent up to
  * 10 × 10,000, as far as today's list budget allows. Lists are reused, because
  * the budget is what runs out: while they are younger than 23 hours, people
@@ -459,12 +485,7 @@ async function buildLists(ctx) {
   const { pool, client, run } = ctx;
   const demo = run.mode === "demo";
   const p = ctx.progress;
-  const { rows: [{ made }] } = await pool.query(
-    `SELECT count(*)::int AS made
-       FROM aiark_runs r, jsonb_array_elements_text(coalesce(r.progress->'lists_log', '[]'::jsonb)) AS t(at)
-      WHERE r.mode = $1 AND t.at::timestamptz > now() - interval '24 hours'`,
-    [run.mode]
-  );
+  const made = await listsMadeToday(pool, run.mode);
   const { rows: [{ held, fresh, at }] } = await pool.query(
     `SELECT count(*)::int AS held, count(*) FILTER (WHERE pulled_at >= $2::timestamptz)::int AS fresh, now()::text AS at
        FROM aiark_people WHERE demo = $1 AND pulled_at < now()`,
