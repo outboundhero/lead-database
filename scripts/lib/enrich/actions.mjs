@@ -16,6 +16,7 @@
 import { CLIENT_ACTIONS } from "./client-checks.mjs";
 import { COMPANY_ACTIONS } from "./company-actions.mjs";
 import { bareDomain } from "./domain.mjs";
+import { PIPELINE_ACTIONS } from "./pipeline-actions.mjs";
 
 export { bareDomain };
 
@@ -321,4 +322,5 @@ export const ACTIONS = {
   later: { run: later, cache: false },
   ...CLIENT_ACTIONS, // AI Ark run tables: lead_lookup, client_area, client_exclusions
   ...COMPANY_ACTIONS, // the Companies template: client_office, held_general_email, pick_emails, verify_emails
+  ...PIPELINE_ACTIONS, // the pipeline templates (pipeline-actions.mjs): write-tos, Reoon, the finders, Enrichley, people
 };

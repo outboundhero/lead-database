@@ -364,23 +364,53 @@ export async function requeueWaitingTemplateRows(db, env) {
   return { queued: rowCount ?? 0, why: null };
 }
 
-/** One paid check (power mode). { ok, status, native } or { ok: false, why, retryable, keyProblem }. */
-async function reoonVerify(email, env) {
+/**
+ * One paid Reoon check (power mode, GET /api/v1/verify?email=&key=&mode=power,
+ * as G#39 and P#11 ask), for the pipeline's reoon_verify step and phase 1's
+ * own check. It runs inside this process's one pool of Reoon slots
+ * (ENRICH_REOON_THREADS, at most 5) and spends from the one balance cache, so
+ * the worker never has two of either. The key is cut out of Reoon's answer
+ * before it is parsed, so `json` never holds it.
+ *
+ * It makes the call: the caller first asks reoonMayCheck() (daily credits
+ * only) and, for the pipeline, takes one of today's checks (spend.mjs). An
+ * unknown result is not charged by Reoon and is not taken off the balance.
+ *
+ * @param {string} email
+ * @param {Record<string, string | undefined>} env
+ * @returns {Promise<{ ok: true, native: string, status: string, json: Record<string, any> }
+ *   | { ok: false, why: string, retryable: boolean, keyProblem: boolean, http_status: number, json: Record<string, any> | null }>}
+ *   native: Reoon's own word (safe, role_account, catch_all, invalid, ...); status: it mapped as
+ *   email_validations holds it (mapReoonStatus); json: Reoon's whole answer, as G#40 and P#12 read it
+ */
+export async function reoonVerifyRaw(email, env) {
   const key = reoonKey(env);
+  if (!key) return { ok: false, keyProblem: true, retryable: false, why: "Needs ENRICH_REOON_API_KEY on the worker", http_status: 0, json: null };
   return withSlot(env, async () => {
     const r = await reoonGet(`/verify?email=${encodeURIComponent(email)}&key=${encodeURIComponent(key)}&mode=power`, key, VERIFY_TIMEOUT_MS);
     const native = text(r.json?.status).toLowerCase();
     if (r.ok && NATIVE.has(native)) {
       if (native !== "unknown" && balance.daily != null) balance.daily = Math.max(0, balance.daily - 1);
-      return { ok: true, native, status: mapReoonStatus(native) };
+      return { ok: true, native, status: mapReoonStatus(native), json: r.json };
     }
     balance.at = 0; // read the balance again before the next check
     const reason = text(r.json?.reason ?? r.json?.message) || r.error || (r.raw ? r.raw : "no answer");
     if (r.status === 401 || r.status === 403 || /api key|invalid key/i.test(reason)) {
-      return { ok: false, keyProblem: true, why: "Reoon refused ENRICH_REOON_API_KEY", status: r.status };
+      return { ok: false, keyProblem: true, retryable: false, why: "Reoon refused ENRICH_REOON_API_KEY", http_status: r.status, json: r.json };
     }
-    return { ok: false, retryable: r.status === 0 || r.status === 429 || r.status >= 500, why: `HTTP ${r.status || "no answer"}: ${reason}`, status: r.status };
+    return {
+      ok: false, keyProblem: false, retryable: r.status === 0 || r.status === 429 || r.status >= 500,
+      why: `HTTP ${r.status || "no answer"}: ${reason}`, http_status: r.status, json: r.json,
+    };
   });
+}
+
+/** One paid check (power mode), for phase 1's verify_emails. { ok, status, native } or { ok: false, why, retryable, keyProblem }. */
+async function reoonVerify(email, env) {
+  const r = await reoonVerifyRaw(email, env);
+  if (r.ok) return { ok: true, native: r.native, status: r.status };
+  if (r.keyProblem) return { ok: false, keyProblem: true, why: r.why, status: r.http_status };
+  return { ok: false, retryable: r.retryable, why: r.why, status: r.http_status };
 }
 
 /** Addresses out of the emails input: an array, or text separated by commas or spaces. */

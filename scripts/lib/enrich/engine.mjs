@@ -21,11 +21,26 @@
 // key makes its own cell wait, so a paid step never runs on a guess (with the
 // Reoon key missing, the second email search must not read "nothing usable"
 // and pay). Other tables keep their rule: only formulas react, to errors.
+//
+// Switches (pipeline templates): a column with config.flag (a list of
+// switches, settings.mjs FLAGS) runs only while every one of them is on for
+// the table's client (flagOn). Otherwise it is skipped, noted "Switched off:
+// <switch>", and read as empty.
+//
+// Keyed steps (pipeline templates): a column with config.key_env runs only
+// while that key is on the worker. Without it the cell is skipped, noted
+// "Needs <KEY> (not held)", read as empty, with no call and no run record, and
+// the row never waits for it (unlike needs_env, which makes the cell wait).
+//
+// TODO(A): memory keys over 200 characters hashed, with the model added for
+// ai_web; the day's caps (spend.mjs) making a cell wait; phase handling for
+// the v2 templates (2A.5).
 
 import { createHash } from "node:crypto";
 import { emptyAsText, evaluate, isEmpty, makeContext, refs } from "./formula.mjs";
 import { ACTIONS, capped } from "./actions.mjs";
-import { SETTINGS_DEFAULTS } from "./settings.mjs";
+import { absentKeyNote } from "./pipeline-actions.mjs";
+import { flagOn, SETTINGS_DEFAULTS, settingsFrom } from "./settings.mjs";
 
 const DISPLAY_MAX = 300;
 const msg = (e) => String(e?.message ?? e).slice(0, 300);
@@ -95,7 +110,7 @@ export function displayOf(v) {
 
 /**
  * @param row      { id, created_at, run_force, next_run_at }
- * @param table    { id, client_tag, keyCounts, template }
+ * @param table    { id, client_tag, keyCounts, template, variant? }  variant: the originals variant (templates.mjs)
  * @param columns  the table's columns in dependency order (formula.order)
  * @param cells    Map column key -> stored cell { status, value, display, note, input_hash }
  * @param settings readSettings()'s value (settings.mjs); the defaults when not given
@@ -105,7 +120,21 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {}, 
   const force = new Set(row.run_force ?? []);
   const forced = (key) => force.has("*") || force.has(key);
   const strict = Boolean(table?.template);
-  const config = settings ?? SETTINGS_DEFAULTS;
+  const config = settings ?? settingsFrom([]);
+  /** The first switch on a column that is off for this client, or null. An unknown switch counts as off. */
+  const switchedOff = (col) => {
+    const flags = Array.isArray(col.config?.flag) ? col.config.flag : [];
+    for (const f of flags) {
+      let on = false;
+      try {
+        on = flagOn(config, f, table?.client_tag, { variant: table?.variant });
+      } catch {
+        on = false;
+      }
+      if (!on) return f;
+    }
+    return null;
+  };
   const ctx = makeContext();
   const created = row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at;
   const values = { created_at: created };
@@ -179,6 +208,12 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {}, 
 
   for (const col of columns) {
     if (col.kind === "input" || col.phase > 1) continue;
+
+    const off = switchedOff(col);
+    if (off) {
+      put(col, { status: "skipped", note: `Switched off: ${off}` });
+      continue;
+    }
 
     if (col.kind === "formula") {
       // A failed cell reads as empty, and an empty check reads as "nothing
@@ -320,6 +355,11 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {}, 
     const missing = (col.needs_env ?? []).filter((k) => !env[k]);
     if (missing.length) {
       put(col, { status: "needs_key", note: `Needs ${missing.join(" and ")} on the worker` });
+      continue;
+    }
+    const keyEnv = text(col.config?.key_env);
+    if (keyEnv && !text(env?.[keyEnv])) {
+      put(col, { status: "skipped", note: absentKeyNote(keyEnv) });
       continue;
     }
 
