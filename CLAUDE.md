@@ -2189,12 +2189,17 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   batch still `processing` after 3 hours is dead and its people can be added
   again. Demo runs are refused.
 - **The worker** `scripts/enrich-worker.mjs` (`npm run enrich-worker`) fills the
-  Clay cells and works AI Ark runs. ⚠ It has **no Railway service yet**: until one
-  exists, nothing on either tab runs in production. Give it the no-op build command
+  Clay cells and works AI Ark runs. It runs as its own Railway service,
+  `enrich-worker` (since 2026-11-12), with the no-op build command
   (`echo 'worker service: no next build'`, see "Every worker service MUST override
-  the build command") and `DATABASE_URL`, and a draining time above 90 s
-  (`RAILWAY_DEPLOYMENT_DRAINING_SECONDS`, e.g. 120): on SIGTERM it waits for the
+  the build command"), `DATABASE_URL`, and a draining time above 90 s
+  (`RAILWAY_DEPLOYMENT_DRAINING_SECONDS=120`): on SIGTERM it waits for the
   AI Ark call in flight to be written, and an Export Single may take 90 s.
+  ⚠ The service is **not connected to GitHub** (a project token can't connect a
+  repo), so a push to main does not redeploy it: upload the code from a clean clone
+  of main with `RAILWAY_TOKEN=<project token> railway up --service enrich-worker
+  --environment production --detach`, or connect the repo once in the Railway
+  dashboard (Source, Connect Repo).
 - **Env:** `AIARK_API_KEY` on **both** the web service (count, balance) and the
   worker (pulls); `AIARK_WEBHOOK_URL` (export runs only) also on **both** — the
   web service offers Export only when it is set, and the worker posts the jobs
@@ -2308,8 +2313,12 @@ fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`)
   model). A missing model is an error, never a fallback. ⚠ **gpt-5-nano shuts down
   on 11 Dec 2026** (OpenAI's deprecations page): move `email_search_first` before then.
 - **Keys:** `OPENAI_API_KEY` on the worker (the website and email searches);
-  `ENRICH_REOON_API_KEY`, the pipeline's **own** Reoon account (⚠ never the
-  validation worker's `REOON_API_KEY`). It spends daily credits only: nothing is
+  `ENRICH_REOON_API_KEY`, the pipeline's Reoon key. In production it is the same
+  account as the validation worker's `REOON_API_KEY` (chosen 2026-11-13), so the two
+  share that account's daily credits; the validation worker leaves
+  `VALIDATION_DAILY_RESERVE` (2,000 by default) for other users of the key, and the
+  pipeline makes at most `email_checks_per_company` checks a company. Like the
+  validation worker, it spends daily credits only: nothing is
   checked while the account holds any instant credit or has no daily credits left,
   and the cell waits ("Needs key", the row 'waiting'). Without the key, cached
   verdicts still work. `ENRICH_REOON_THREADS` (4, at most 5). Once an hour, with

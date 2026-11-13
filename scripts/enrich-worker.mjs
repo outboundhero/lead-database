@@ -37,8 +37,8 @@
 //
 // Env: DATABASE_URL (required). OPENAI_API_KEY, CLEARBIT_API_KEY — optional;
 // without one, the columns that need it show "Needs key" and the row waits.
-// ENRICH_REOON_API_KEY: the company pipeline's own Reoon account (never the
-// validation worker's REOON_API_KEY), spent on daily credits only;
+// ENRICH_REOON_API_KEY: the company pipeline's Reoon key (in production the
+// validation worker's account, sharing its daily credits), spent on daily credits only;
 // ENRICH_REOON_THREADS (4, at most 5) Reoon checks at once.
 // AIARK_API_KEY — live AI Ark runs; AIARK_DEMO=1 — demo runs with made-up
 // people (AIARK_DEMO_CREDITS, 25000); AIARK_WEBHOOK_URL — needed only for the
