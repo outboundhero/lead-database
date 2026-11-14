@@ -9,6 +9,7 @@ import { findCursorForRangeStart } from "@/lib/exports/skip-cursor";
 import { getPool } from "@/lib/db/pool";
 import { isValidationEnabled } from "@/lib/validation/validate-leads";
 import { getTtlDays } from "@/lib/validation/cache-policy";
+import { FIT_HEADERS, fitCells, fitForLeads, fitGateOn, includeBadFitsFor, withBadFits, type LeadFit } from "@/lib/exports/fit-columns";
 
 // Kept for the auth/markJobError path. The actual export RPC calls go through
 // the direct pg pool below to bypass the Supabase HTTP gateway (~60s timeout).
@@ -38,6 +39,7 @@ export async function POST(request: NextRequest) {
 
   // Role gate: a `viewer` may filter and browse but not extract data. Without
   // this, any authenticated session could stream the entire leads table.
+  let role: string | null = null;
   {
     const { data: profile } = await createAdminClient()
       .from("user_profiles")
@@ -47,6 +49,7 @@ export async function POST(request: NextRequest) {
     if (!profile || !["owner", "admin", "manager"].includes(profile.role)) {
       return new Response("Forbidden: your role cannot export leads", { status: 403 });
     }
+    role = profile.role;
   }
 
   const body = await request.json();
@@ -58,7 +61,11 @@ export async function POST(request: NextRequest) {
     rangeTo?: number;
     jobId?: string;
     selectedIds?: string[];
+    includeBadFits?: boolean;
   };
+  // FIT GATE (migration 127; shipped OFF): bad fits stay in only when an owner
+  // or admin asks (src/lib/exports/fit-columns.ts).
+  const includeBadFits = includeBadFitsFor((body as { includeBadFits?: unknown }).includeBadFits, role);
 
   if (!filters || !columnSelection?.length) {
     return new Response("Missing required fields", { status: 400 });
@@ -93,7 +100,7 @@ export async function POST(request: NextRequest) {
   const maxRows = isSelectedExport ? selectedIds!.length : requestedMax;
   // Old clients / saved payloads may predate newer filter fields — normalize
   // onto DEFAULT_FILTER_STATE so buildRpcFilters never hits missing keys.
-  const p_filters = buildRpcFilters(normalizeFilterState(filters));
+  const p_filters = withBadFits(buildRpcFilters(normalizeFilterState(filters)), includeBadFits);
   // Larger batches = fewer round-trips to PG and fewer per-batch overhead.
   // 75K rows × ~20 cols × ~50 chars ≈ 75MB per batch in Node memory, well
   // within Railway's 8GB. Tested: 25K → 75K cuts ~30% off total export time.
@@ -168,6 +175,18 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  // A selected-row export reads leads by id, past the filters: while the fit
+  // gate is on, its blocked leads are left out per chunk (unless allowed above)
+  // and each row ends with "Fit score" and "Home office". Off, it is as before.
+  let fitGate = false;
+  if (isSelectedExport) {
+    try {
+      fitGate = await fitGateOn(getPool());
+    } catch (err) {
+      return new Response(`Could not read the fit gate: ${err instanceof Error ? err.message : "unknown"}`, { status: 500 });
+    }
+  }
+
   const stream = new ReadableStream({
     async start(controller) {
       let closed = false;
@@ -208,7 +227,7 @@ export async function POST(request: NextRequest) {
       });
 
       try {
-        safeEnqueue(encoder.encode(columnSelection.join(",") + "\n"));
+        safeEnqueue(encoder.encode([...columnSelection, ...(fitGate ? FIT_HEADERS : [])].join(",") + "\n"));
 
         // Background: queue this export's addresses for validation. Not awaited.
         if (willQueue) void queueForValidation();
@@ -273,6 +292,7 @@ export async function POST(request: NextRequest) {
           const take = Math.min(batchSize, maxRows - totalRows);
 
           let leads: Lead[];
+          let fitBy: Map<string, LeadFit> | null = null;
           if (isSelectedExport) {
             // Stream the explicitly-selected IDs directly, in chunks. No filter
             // and no validation/bounce gate — the user picked these rows.
@@ -285,6 +305,11 @@ export async function POST(request: NextRequest) {
                 [idChunk]
               );
               leads = r.rows as Lead[];
+              if (fitGate) {
+                const fit = await fitForLeads(pool, idChunk);
+                fitBy = fit;
+                if (!includeBadFits) leads = leads.filter((l) => !fit.get(l.id)?.blocked);
+              }
             } catch (err) {
               const msg = `Selected-export query error after ${totalRows.toLocaleString()} rows: ${err instanceof Error ? err.message : "unknown"}`;
               console.error("Stream export query error:", msg);
@@ -318,7 +343,9 @@ export async function POST(request: NextRequest) {
           // Build CSV chunk and stream it
           let chunk = "";
           for (const lead of leads) {
-            chunk += columnSelection.map((col) => escapeCsv(lead[col as keyof Lead])).join(",") + "\n";
+            const cells = columnSelection.map((col) => escapeCsv(lead[col as keyof Lead]));
+            if (fitGate) cells.push(...fitCells(fitBy?.get(lead.id)).map(escapeCsv));
+            chunk += cells.join(",") + "\n";
           }
           safeEnqueue(encoder.encode(chunk));
 

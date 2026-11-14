@@ -4,9 +4,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 // Cancel a queued Bison push batch. Only flips status while the batch is still
 // pending/gathering/processing — the worker checks status between chunks and
-// stops; already-pushed leads stay in Bison (there is no un-push).
+// stops; already-pushed leads stay in Bison (there is no un-push). A batch
+// waiting for fit scoring ('scoring', only while the fit gate covers its
+// client) is cancelled the same way; the fit loop moves it on only while it is
+// still 'scoring', so the cancel wins.
 
-const CANCELLABLE = ["pending", "gathering", "processing"];
+const CANCELLABLE = ["pending", "gathering", "processing", "scoring"];
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

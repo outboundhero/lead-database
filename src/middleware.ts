@@ -19,7 +19,9 @@ export const config = {
      * - api/enrich/intake (GMaps Scraper places for the Clay tab — Bearer ENRICH_INTAKE_KEY only)
      * - api/aiark/webhook (AI Ark's export callback — answers 200 and reads nothing)
      * - api/aiark/add/auto (the enrichment worker — Bearer AIARK_AUTO_ADD_KEY only)
+     * - api/companies/promote/auto (the enrichment worker's promotion of scored
+     *   pipeline emails into leads: Bearer AIARK_AUTO_ADD_KEY only)
      */
-    "/((?!_next/static|_next/image|favicon.ico|api/uploads/process|api/enrich_email|api/leads/first5|api/leads/search|api/leads/update|api/costing|api/enrich/intake|api/aiark/webhook|api/aiark/add/auto|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/uploads/process|api/enrich_email|api/leads/first5|api/leads/search|api/leads/update|api/costing|api/enrich/intake|api/aiark/webhook|api/aiark/add/auto|api/companies/promote/auto|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };

@@ -7,6 +7,7 @@ import { normalizeFilterState } from "@/types/filters";
 import { buildRpcFilters } from "@/lib/filters/build-rpc-filters";
 import { bisonInstances, normalizeDomain } from "@/lib/bison/keys";
 import { getPool } from "@/lib/db/pool";
+import { gateEnabled, scoringStatusFor } from "../../../../../scripts/lib/enrich/fit-push.mjs";
 
 // Queue an async Bison push batch. Unlike the synchronous /api/bison/push
 // (kept for targeted client "pulls"), this only validates + inserts a
@@ -252,6 +253,29 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  // FIT GATE (fit scoring, migration 127; shipped OFF). While the gate is on,
+  // a push must name its client: a tagless batch skips the client's
+  // conditions at push time, the fit condition with them. And while the gate
+  // covers this client (with require_scored), the batch waits in 'scoring'
+  // until its companies are scored (scripts/lib/enrich/fit-push.mjs); the
+  // worker gathers 'pending' batches only. With the gate off this changes
+  // nothing: no batch is refused and every batch starts 'pending'.
+  let startStatus: "pending" | "scoring" = "pending";
+  try {
+    if (!clientTag && (await gateEnabled(getPool()))) {
+      return NextResponse.json(
+        { error: "The fit gate is on, so a push must name its client: select the client (top bar) and push again." },
+        { status: 409 }
+      );
+    }
+    if (clientTag) startStatus = await scoringStatusFor(getPool(), clientTag);
+  } catch (e) {
+    return NextResponse.json(
+      { error: `Failed to read the fit gate: ${e instanceof Error ? e.message : String(e)}` },
+      { status: 500 }
+    );
+  }
+
   // A BATCH ACROSS TWO INSTALLS MUST KNOW WHICH SIDE EACH CAMPAIGN IS.
   //
   // The worker refuses to guess (push-side.mjs): a lead in a two-install batch
@@ -297,7 +321,7 @@ export async function POST(request: NextRequest) {
       .from("push_batches")
       .select("id, status, email_side, total, sent, created_at")
       .eq("client_tag", clientTag)
-      .in("status", ["pending", "gathering", "processing", "complete"])
+      .in("status", ["pending", "gathering", "processing", "complete", "scoring"])
       .gte("created_at", new Date(Date.now() - 24 * 3600 * 1000).toISOString())
       .order("created_at", { ascending: false })
       .limit(5);
@@ -309,7 +333,7 @@ export async function POST(request: NextRequest) {
           error:
             clash.status === "complete"
               ? `A ${clientTag} push already completed ${when} (${clash.sent ?? 0}/${clash.total ?? 0} sent). Queue again anyway?`
-              : `A ${clientTag} push is already ${clash.status} (queued ${when}). Queue another anyway?`,
+              : `A ${clientTag} push is already ${clash.status === "scoring" ? "waiting for fit scoring" : clash.status} (queued ${when}). Queue another anyway?`,
           duplicateOf: { id: clash.id, status: clash.status, created_at: clash.created_at, total: clash.total, sent: clash.sent },
         },
         { status: 409 }
@@ -395,7 +419,7 @@ export async function POST(request: NextRequest) {
             retryFailed: body.pushOptions.retryFailed === true,
           }
         : null,
-      status: "pending",
+      status: startStatus,
     })
     .select("id")
     .single();
@@ -424,5 +448,6 @@ export async function POST(request: NextRequest) {
     } as Record<string, unknown>,
   }).then(() => {}, () => {});
 
-  return NextResponse.json({ batchId: batch.id, queued: true });
+  // A batch waiting for fit scoring says so; otherwise the answer is as it always was.
+  return NextResponse.json(startStatus === "scoring" ? { batchId: batch.id, queued: true, waitsForScoring: true } : { batchId: batch.id, queued: true });
 }

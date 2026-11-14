@@ -45,6 +45,17 @@
 // the spend caps, how long paid answers are remembered) are read at most every
 // 30 s and handed to the actions, so a model is swapped without a deploy.
 //
+// Fit scoring (phase 3) has a loop of its own beside the AI Ark loop, so
+// scoring never holds up pulls. Each tick: a push waiting in 'scoring'
+// (fit-push.mjs), the scorer (fit-score.mjs: idle while scoring is off, the
+// rule is not set or OPENAI_API_KEY is missing), the blocked refresh after a
+// gate change, and a step of a scoring or review run over the Email Bison copy
+// (fit-backfill.mjs). Every minute, clients whose scored contacts wait are
+// promoted into leads through the web app (POST /api/companies/promote/auto,
+// the AIARK_AUTO_ADD_URL origin and AIARK_AUTO_ADD_KEY), at most one round per
+// client every 10 minutes; promotion ships off and covers no client.
+// FIT_POLL_MS (5000): the fit loop's sleep when it had nothing to do.
+//
 // Env: DATABASE_URL (required). OPENAI_API_KEY, CLEARBIT_API_KEY — optional;
 // without one, the columns that need it show "Needs key" and the row waits.
 // FINDYMAIL_API_KEY, PROSPEO_API_KEY, ANYMAIL_FINDER_API_KEY, ENRICHLEY_API_KEY:
@@ -80,6 +91,10 @@ import { advanceOneCompanyRun, companyRunDue } from "./lib/aiark/company-runs.mj
 import { advanceOnePeopleRun, peopleRunDue } from "./lib/aiark/people-runs.mjs";
 import { autoAddConfig, pullsToAdd, requestAdd } from "./lib/aiark/add.mjs";
 import { PERSON_SEARCH_KEYS } from "./lib/aiark/columns.mjs";
+import { fitLoopOnce, fitLoopStatus, refreshBlockedOnce } from "./lib/enrich/fit-score.mjs";
+import { advanceScoringBatch } from "./lib/enrich/fit-push.mjs";
+import { advanceBackfill } from "./lib/enrich/fit-backfill.mjs";
+import { promoteAutoConfig, promoteDue, requestPromote } from "./lib/enrich/promote.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname, quiet: true });
 
 const env = process.env;
@@ -377,6 +392,8 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
       company_slices: aiark.company_slices,
       people_slices: aiark.people_slices,
     },
+    // The fit loop (phase 3): what the scorer is doing and why, and the loop's counters.
+    fit: { ...fitLoopStatus(), loop: { ...fitState }, promote_auto: Boolean(promoteAuto) },
     host: os.hostname(),
     pid: process.pid,
     stopped: stopping,
@@ -455,6 +472,89 @@ async function aiarkLoop() {
   }
 }
 
+// ── Fit loop (phase 3): its own loop, so scoring never holds up pulls ───────
+// Pushes waiting in 'scoring', the scorer, the blocked refresh after a gate
+// change, and a step of a scoring or review run. OpenAI only. An error in one
+// step is logged and the others still get their turn.
+
+CAPABILITIES.push("fit_scoring");
+const FIT_POLL_MS = ONCE ? 500 : Math.max(1000, num(env.FIT_POLL_MS, 5000));
+const fitState = { ticks: 0, batches: 0, scored: 0, refreshed: 0, backfill: 0, idle: true, last_error: null };
+
+async function fitTick() {
+  const settings = await readSettings(pool);
+  let worked = false;
+  const step = async (name, fn) => {
+    try {
+      return await fn();
+    } catch (e) {
+      fitState.last_error = `${name}: ${String(e.message).slice(0, 300)}`;
+      log(`fit loop error (${name}): ${e.message}`);
+      return null;
+    }
+  };
+  if (await step("waiting pushes", () => advanceScoringBatch({ pool, log }))) {
+    fitState.batches++;
+    worked = true;
+  }
+  const scored = await step("scorer", () => fitLoopOnce({ pool, env, log, settings }));
+  if (scored) {
+    fitState.scored += scored;
+    worked = true;
+  }
+  const refreshed = await step("blocked refresh", () => refreshBlockedOnce(pool));
+  if (refreshed) {
+    fitState.refreshed += refreshed;
+    worked = true;
+  }
+  if (await step("campaign runs", () => advanceBackfill({ pool, log, settings }))) {
+    fitState.backfill++;
+    worked = true;
+  }
+  return worked;
+}
+
+async function fitLoop() {
+  while (!shuttingDown) {
+    fitState.idle = false;
+    let worked = false;
+    try {
+      worked = await fitTick();
+    } catch (e) {
+      log(`fit loop error: ${e.message}`);
+    }
+    fitState.ticks++;
+    fitState.idle = !worked;
+    await sleep(worked ? 50 : FIT_POLL_MS);
+  }
+}
+
+// Scored contacts into leads: the web app runs the import (TypeScript); the
+// worker only asks, at most one round per client every 10 minutes.
+const PROMOTE_CHECK_MS = 60_000;
+const PROMOTE_EVERY_MS = 10 * 60_000;
+const promoteAuto = promoteAutoConfig(env);
+const promotedAt = new Map();
+let promoteBusy = false;
+
+async function promoteWaiting() {
+  if (!promoteAuto || promoteBusy) return;
+  promoteBusy = true;
+  try {
+    const settings = await readSettings(pool);
+    for (const tag of await promoteDue(pool, settings)) {
+      if (Date.now() - (promotedAt.get(tag) ?? 0) < PROMOTE_EVERY_MS) continue;
+      promotedAt.set(tag, Date.now());
+      const r = await requestPromote(promoteAuto, tag);
+      log(`promotion for ${tag}: ${r.ok ? "started" : `not started, ${r.status ?? "no answer"}: ${r.why}`}`);
+    }
+  } catch (e) {
+    log(`promoting scored contacts: ${e.message}`);
+  } finally {
+    promoteBusy = false;
+  }
+}
+
 // ── Template rows waiting on a key or a cap: queued again once it cleared ───
 
 let sweepBusy = false;
@@ -515,15 +615,21 @@ async function main() {
     (env.AIARK_DEMO === "1" ? ", AI Ark demo on" : "") + (ONCE ? " (drain and exit)" : ""));
   await heartbeat({ starting: true });
   const runs = aiarkLoop();
+  const fits = fitLoop();
   let lastSweep = 0;
   let lastBeat = Date.now();
   let lastAdd = 0;
   let lastWaitingSweep = 0;
+  let lastPromote = 0;
   while (!shuttingDown) {
     try {
       if (Date.now() - lastAdd > AUTO_ADD_EVERY_MS) {
         lastAdd = Date.now();
         addFinishedPulls();
+      }
+      if (Date.now() - lastPromote > PROMOTE_CHECK_MS) {
+        lastPromote = Date.now();
+        promoteWaiting();
       }
       if (Date.now() - lastWaitingSweep > SWEEP_WAITING_MS) {
         lastWaitingSweep = Date.now();
@@ -543,7 +649,7 @@ async function main() {
         inFlight++;
         safeProcess(r).finally(() => { inFlight--; });
       }
-      if (ONCE && !claimed.length && inFlight === 0 && aiark.idle && !(await runDue(pool)) && !(await companyRunDue(pool)) && !(await peopleRunDue(pool))) break;
+      if (ONCE && !claimed.length && inFlight === 0 && aiark.idle && fitState.idle && !(await runDue(pool)) && !(await companyRunDue(pool)) && !(await peopleRunDue(pool))) break;
       await sleep(claimed.length ? 50 : inFlight ? 250 : POLL_MS);
     } catch (e) {
       log(`loop error: ${e.message}`);
@@ -559,6 +665,8 @@ async function main() {
   // stop, a slice makes no new paid call, so this is the one in flight at most
   // (an Export Single gets 90 s); the service's drain time must cover it.
   await runs;
+  // The fit loop's step in flight is waited for too: an OpenAI call already sent is written before the pool closes.
+  await fits;
   await heartbeat({ stopping: true }).catch(() => {});
   log(`stopped: ${stats.processed} rows processed, ${stats.calls} provider calls, ${stats.failed} failures`);
   await pool.end();

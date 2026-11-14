@@ -20,6 +20,7 @@
 // Run it only AFTER that client's removals are done, so a lead is never in both
 // campaigns at once.
 import { Client } from "pg";
+import { scoringStatusFor } from "./lib/enrich/fit-push.mjs";
 
 const argv = process.argv.slice(2);
 const flag = (n: string) => {
@@ -41,7 +42,11 @@ const ONLY = typeof flag("instance") === "string"
   ? new Set((flag("instance") as string).split(",").map((x) => x.trim()).filter(Boolean))
   : null;
 
-const db = new Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+// A local database (127.0.0.1, localhost) has no TLS; everything else does.
+const LOCAL_DB = (() => {
+  try { return ["127.0.0.1", "localhost", "[::1]"].includes(new URL(String(process.env.DATABASE_URL)).hostname); } catch { return false; }
+})();
+const db = new Client({ connectionString: process.env.DATABASE_URL, ssl: LOCAL_DB ? false : { rejectUnauthorized: false } });
 await db.connect();
 // Every statement in its OWN transaction with SET LOCAL. This used to issue a
 // session-level `set statement_timeout = 0` over DATABASE_URL — the 6543
@@ -195,14 +200,17 @@ for (const r of rows) {
     continue;
   }
   campaigns.splice(0, campaigns.length, ...usable);
+  // Fit gate (shipped off): while it applies to the client, its batches wait in
+  // 'scoring' until their companies are scored, like a push from the route.
+  const status: string = await scoringStatusFor(db, r.client_tag);
   for (let i = 0; i < ids.length; i += MAX_PER_BATCH) {
     const slice = ids.slice(i, i + MAX_PER_BATCH);
-    console.log(`  ${r.client_tag}/${r.side}: ${slice.length.toLocaleString()} lead(s) → ${campaigns.map((c) => `${c.id}@${c.instance_url}`).join(", ")}${DRY ? "  [dry]" : ""}`);
+    console.log(`  ${r.client_tag}/${r.side}: ${slice.length.toLocaleString()} lead(s) → ${campaigns.map((c) => `${c.id}@${c.instance_url}`).join(", ")}${status === "scoring" ? "  (waits for fit scoring)" : ""}${DRY ? "  [dry]" : ""}`);
     if (DRY) { queued += slice.length; continue; }
     await q(
       `insert into push_batches (campaigns, selected_ids, client_tag, email_side, status, filters)
-       values ($1::jsonb, $2::uuid[], $3, $4, 'pending', null)`,
-      [JSON.stringify(campaigns), slice, r.client_tag, r.side]);
+       values ($1::jsonb, $2::uuid[], $3, $4, $5, null)`,
+      [JSON.stringify(campaigns), slice, r.client_tag, r.side, status]);
     queued += slice.length;
   }
 }
