@@ -4,10 +4,10 @@ import { withTx } from "@/lib/enrich/db";
 import { logAudit } from "@/lib/api/log-audit";
 import { cleanFitSettings, fitSettingsView, readFitSettings, saveFitSettings } from "@/lib/companies/fit";
 
-// GET /api/fit/settings: the scoring settings (admin): OutboundHero's rule and
+// GET /api/fit/settings: the scoring settings (admin): the fit rule and
 //     its version, scoring on or off, companies a call, calls at once, the model.
 // PUT /api/fit/settings {rule?, scoring?, model?}: saves the parts given.
-//     The rule is OutboundHero's (D16): an admin pastes it here; nothing else
+//     The rule is the agency's own (D16): an admin pastes it here; nothing else
 //     ever writes it. Its version must change whenever its text does, so every
 //     score keeps the version it was made under, and a scoring run after a
 //     change re-scores (after its estimate is confirmed). Read fresh by the

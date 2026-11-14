@@ -100,7 +100,7 @@ export function FitPanel({ tag }: { tag: string | null }) {
         <div className="min-w-0 flex-1">
           <h2 className="text-[15px] font-semibold tracking-tight">Fit scoring</h2>
           <p className="text-[12px] text-muted-foreground">
-            One 1 to 5 score per company, shared by every client, by OutboundHero&apos;s rule. Nothing under the threshold can be sent for a client the gate covers.
+            One 1 to 5 score per company, shared by every client, by the fit rule. Nothing under the threshold can be sent for a client the gate covers.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -136,9 +136,9 @@ export function FitPanel({ tag }: { tag: string | null }) {
         <div className="divide-y divide-border/60">
           <Line label="Rule">
             {state.rule.set ? (
-              <span>OutboundHero&apos;s rule, version {state.rule.version ?? "(none)"}</span>
+              <span>The fit rule, version {state.rule.version ?? "(none)"}</span>
             ) : (
-              <Pill tone="warn">Waiting for OutboundHero&apos;s rule</Pill>
+              <Pill tone="warn">Waiting for the fit rule</Pill>
             )}
           </Line>
           <Line label="Scorer">
@@ -288,7 +288,7 @@ function SettingsForm({ onSaved }: { onSaved: () => void }) {
     };
     const ruleChanged = (prompt.trim() || null) !== view.rule.prompt || (version.trim() || null) !== view.rule.version;
     if (ruleChanged) {
-      if (!window.confirm("Save this as OutboundHero's fit rule? Scores keep the rule version they were made under; a scoring run re-scores after a change.")) return;
+      if (!window.confirm("Save this as the fit rule? Scores keep the rule version they were made under; a scoring run re-scores after a change.")) return;
       body.rule = { prompt: prompt.trim() || null, version: version.trim() || null };
     }
     setSaving(true);
@@ -306,7 +306,7 @@ function SettingsForm({ onSaved }: { onSaved: () => void }) {
   return (
     <div className="mt-4 space-y-3 rounded-xl bg-muted/40 p-3">
       <p className="text-[12px] text-muted-foreground">
-        The rule is OutboundHero&apos;s, pasted here as they wrote it: it is sent to the model as it is, with a fixed format part that says nothing about what a good fit is. Give it a new
+        The rule is the agency&apos;s own, pasted here as written: it is sent to the model as it is, with a fixed format part that says nothing about what a good fit is. Give it a new
         version whenever the text changes.
       </p>
       <label className="block text-[12px] font-medium">
@@ -315,7 +315,7 @@ function SettingsForm({ onSaved }: { onSaved: () => void }) {
           className="mt-1 h-40 w-full rounded-xl bg-card p-3 text-[13px] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40"
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Waiting for OutboundHero's rule"
+          placeholder="Waiting for the fit rule"
           maxLength={20_000}
         />
       </label>

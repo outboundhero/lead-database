@@ -4,7 +4,7 @@
 -- campaigns, the review list of bad fits, the removal path for bad fits, and
 -- the columns that record pipeline emails reaching leads.
 --
--- Ships OFF: the scorer waits for OutboundHero's rule (enrich_settings.fit_rule),
+-- Ships OFF: the scorer waits for the fit rule (enrich_settings.fit_rule),
 -- promotion waits for its switch and covers no client (enrich_settings.promotion),
 -- and the gate (enrich_settings.fit_gate, wired in 127) is off and covers no client.
 --

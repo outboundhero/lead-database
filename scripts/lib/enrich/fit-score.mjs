@@ -1,5 +1,5 @@
 // The fit scorer (2B.3): companies scored 1 to 5, with a home-office flag
-// and a short reason, by OutboundHero's rule (enrich_settings.fit_rule.prompt),
+// and a short reason, by the fit rule (enrich_settings.fit_rule.prompt),
 // sent verbatim. Our only addition is a fixed format part: the companies as a
 // JSON list with ids, and the answer format. It says nothing about what a
 // good fit is (D16).

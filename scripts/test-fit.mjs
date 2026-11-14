@@ -93,7 +93,7 @@ const TAG_A = `${PREFIX}A`; // Cleaning, with targeting rules
 const TAG_B = `${PREFIX}B`; // Cleaning, no targeting rules
 const TAG_O = `${PREFIX}O`; // not a type the gate lists
 const SRC = `fttest source ${RUN}`; // leads.source of the made-up leads, for filtered exports
-const RULE = "FTTEST made-up rule, never OutboundHero's: score each company as the test says.";
+const RULE = "FTTEST made-up rule, never the real one: score each company as the test says.";
 const FAKE_OPENAI = { OPENAI_API_KEY: "fttest-made-up-openai" };
 
 let passed = 0;
@@ -941,7 +941,7 @@ try {
   const AUTO_KEY = "fttest-auto-key-0123456789abcdef0123";
   const rA0 = await call(promoteAuto, { body: { tag: TAG_A }, headers: { authorization: `Bearer ${AUTO_KEY}` } });
   process.env.AIARK_AUTO_ADD_KEY = AUTO_KEY;
-  const rA1 = await call(promoteAuto, { body: { tag: TAG_A }, headers: { authorization: "Bearer wrong-key-wrong-key-wrong-key-00" } });
+  const rA1 = await call(promoteAuto, { body: { tag: TAG_A }, headers: { authorization: "Bearer not-it" } });
   const rA2 = await call(promoteAuto, { body: { tag: TAG_A }, headers: { authorization: `Bearer ${AUTO_KEY}` } });
   await drainAfter();
   delete process.env.AIARK_AUTO_ADD_KEY;

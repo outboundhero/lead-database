@@ -14,7 +14,7 @@
 
 import { gateEnabled } from "../../../scripts/lib/enrich/fit-push.mjs";
 
-type Q = { query: (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> };
+type Db = { query: (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> };
 
 export const FIT_HEADERS = ["Fit score", "Home office"] as const;
 
@@ -37,12 +37,12 @@ export function withBadFits<T extends Record<string, unknown>>(pFilters: T, incl
 }
 
 /** Is the gate switched on (fit_gate.enabled)? False before migration 126 is applied. */
-export async function fitGateOn(db: Q): Promise<boolean> {
+export async function fitGateOn(db: Db): Promise<boolean> {
   return gateEnabled(db);
 }
 
 /** Each lead's fit, by id: its company's score, home-office flag, and whether it is blocked. */
-export async function fitForLeads(db: Q, ids: string[]): Promise<Map<string, LeadFit>> {
+export async function fitForLeads(db: Db, ids: string[]): Promise<Map<string, LeadFit>> {
   const out = new Map<string, LeadFit>();
   if (!ids.length) return out;
   const { rows } = await db.query(`SELECT lead_id, score, home_office, blocked FROM public.fn_fit_for_leads($1::uuid[])`, [ids]);

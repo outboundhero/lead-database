@@ -23,15 +23,15 @@ import type {
 //
 // Nothing here writes a rule on its own: fit_rule.prompt changes only when an
 // admin saves one in the fit settings (PUT /api/fit/settings). Until then the
-// scorer is idle, "Waiting for OutboundHero's rule" (D16).
+// scorer is idle, "Waiting for the fit rule" (D16).
 
-type Q = Pick<PoolClient, "query">;
+type Db = Pick<PoolClient, "query">;
 export type FitSettings = ReturnType<typeof settingsFrom>;
 
 export const RULE_MAX = 20_000;
 export const VERSION_MAX = 40;
 export const REASON_MAX = 300;
-export const WAITING_FOR_RULE = "Waiting for OutboundHero's rule";
+export const WAITING_FOR_RULE = "Waiting for the fit rule";
 /** company_fit is counted exactly only below this many rows; above it the planner's estimate is shown. */
 const EXACT_COUNT_BELOW = 200_000;
 
@@ -41,12 +41,12 @@ const has = (o: Record<string, unknown>, k: string) => Object.prototype.hasOwnPr
 const iso = (v: unknown): string | null => (v instanceof Date ? v.toISOString() : v == null ? null : String(v));
 
 /** Every setting, fresh, as the worker reads them (settingsFrom checks each value). */
-export async function readFitSettings(c: Q): Promise<FitSettings> {
+export async function readFitSettings(c: Db): Promise<FitSettings> {
   const { rows } = await c.query(`SELECT key, value FROM enrich_settings`);
   return settingsFrom(rows);
 }
 
-async function writeSetting(c: Q, key: string, value: unknown) {
+async function writeSetting(c: Db, key: string, value: unknown) {
   await c.query(
     `INSERT INTO enrich_settings (key, value, updated_at) VALUES ($1, $2::jsonb, now())
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
@@ -146,7 +146,7 @@ export function cleanFitSettings(body: unknown, s: FitSettings) {
 }
 
 /** Writes what cleanFitSettings kept. */
-export async function saveFitSettings(c: Q, value: ReturnType<typeof cleanFitSettings>["value"]) {
+export async function saveFitSettings(c: Db, value: ReturnType<typeof cleanFitSettings>["value"]) {
   if (value.fit_rule) await writeSetting(c, "fit_rule", value.fit_rule);
   if (value.fit_scoring) await writeSetting(c, "fit_scoring", value.fit_scoring);
   if (value.fit_score) {
@@ -160,7 +160,7 @@ export async function saveFitSettings(c: Q, value: ReturnType<typeof cleanFitSet
 
 // ── The gate (owner and admin) ──────────────────────────────────────────────
 
-export async function fitGateView(c: Q, s: FitSettings): Promise<FitGateView> {
+export async function fitGateView(c: Db, s: FitSettings): Promise<FitGateView> {
   const { rows } = await c.query(
     `SELECT DISTINCT client_type FROM client_tags WHERE client_type IS NOT NULL AND btrim(client_type) <> '' ORDER BY 1`
   );
@@ -178,7 +178,7 @@ export async function fitGateView(c: Q, s: FitSettings): Promise<FitGateView> {
  * tags, or "*" for every client of the listed types), the threshold 1 to 5,
  * the client types, require_scored. Unknown tags are refused.
  */
-export async function cleanGate(c: Q, body: unknown, s: FitSettings) {
+export async function cleanGate(c: Db, body: unknown, s: FitSettings) {
   const b = obj(body);
   const cur = s.fit_gate;
   const errors: string[] = [];
@@ -241,7 +241,7 @@ export async function cleanGate(c: Q, body: unknown, s: FitSettings) {
  * company_fit.blocked up to date in batches (fn_fit_refresh_blocked) and the
  * panel says "Refresh pending" meanwhile.
  */
-export async function saveGate(c: Q, value: Awaited<ReturnType<typeof cleanGate>>["value"]) {
+export async function saveGate(c: Db, value: Awaited<ReturnType<typeof cleanGate>>["value"]) {
   await writeSetting(c, "fit_gate", value);
   await writeSetting(c, "fit_gate_refresh", { pending: true, since: new Date().toISOString() });
 }
@@ -273,7 +273,7 @@ function fitWorker(w: WorkerState | null): FitState["worker"] {
   };
 }
 
-export async function fitState(c: Q, s: FitSettings, tag: string | null, worker: WorkerState | null): Promise<FitState> {
+export async function fitState(c: Db, s: FitSettings, tag: string | null, worker: WorkerState | null): Promise<FitState> {
   const { rows: queue } = await c.query(
     `SELECT priority::int AS priority, count(*) FILTER (WHERE claim_token IS NULL)::int AS waiting,
             count(*) FILTER (WHERE claim_token IS NOT NULL)::int AS claimed
@@ -346,7 +346,7 @@ export async function fitState(c: Q, s: FitSettings, tag: string | null, worker:
  * with: a domain (any URL or address works; free-mail, platform and
  * directory domains are refused) or "company|city|ST". Null when it can't be one.
  */
-export async function canonicalKey(c: Q, kind: FitKeyKind, key: string): Promise<string | null> {
+export async function canonicalKey(c: Db, kind: FitKeyKind, key: string): Promise<string | null> {
   if (kind === "domain") {
     const { rows: [r] } = await c.query(`SELECT public.fn_fit_domain_ok($1) AS k`, [key]);
     return r?.k ?? null;
@@ -364,7 +364,7 @@ export async function canonicalKey(c: Q, kind: FitKeyKind, key: string): Promise
  * the key show it; a queued scoring of the key is dropped.
  */
 export async function setManualScore(
-  c: Q,
+  c: Db,
   { kind, key, score, homeOffice, reason, userId }: { kind: FitKeyKind; key: string; score: number; homeOffice: boolean | null; reason: string | null; userId: string }
 ) {
   const { rows: [r] } = await c.query(
@@ -405,7 +405,7 @@ function runOut(r: Record<string, unknown>): FitRun {
   };
 }
 
-export async function fitRuns(c: Q, { kind, tag = null, limit = 10 }: { kind: "score" | "review"; tag?: string | null; limit?: number }) {
+export async function fitRuns(c: Db, { kind, tag = null, limit = 10 }: { kind: "score" | "review"; tag?: string | null; limit?: number }) {
   const { rows } = await c.query(
     `SELECT ${RUN_FIELDS} FROM fit_backfill_runs r LEFT JOIN user_profiles up ON up.id = r.created_by
       WHERE r.kind = $1 AND ($2::text IS NULL OR r.client_tag = $2)
@@ -424,7 +424,7 @@ export const REVIEW_PAGE = 100;
  * and its last dry runs.
  */
 export async function reviewPage(
-  c: Q,
+  c: Db,
   { tag, campaign = null, after = 0, limit = REVIEW_PAGE }: { tag: string; campaign?: { instance_url: string; campaign_id: string } | null; after?: number; limit?: number }
 ): Promise<ReviewPage> {
   const { rows } = await c.query(
@@ -510,7 +510,7 @@ export async function reviewPage(
  * items it changed.
  */
 export async function decideItems(
-  c: Q,
+  c: Db,
   { tag, ids, bulk, decision, userId }: { tag: string; ids: number[]; bulk: "under_2_no_replies" | null; decision: ReviewDecision; userId: string }
 ) {
   if (bulk === "under_2_no_replies") {

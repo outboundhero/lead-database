@@ -3,8 +3,8 @@
 // leads (2026-09-24 B2B/B2C incident), and bad fits a person approved for
 // removal (fit scoring, migration 126).
 //
-//   node scripts/bison-campaign-removal-worker.mjs --reason=misroute --tag=CCOC --dry-run
-//   node scripts/bison-campaign-removal-worker.mjs --reason=misroute --tag=CCOC
+//   node scripts/bison-campaign-removal-worker.mjs --reason=misroute --tag=TAG --dry-run
+//   node scripts/bison-campaign-removal-worker.mjs --reason=misroute --tag=TAG
 //   node scripts/bison-campaign-removal-worker.mjs --reason=misroute               all queued
 //   node scripts/bison-campaign-removal-worker.mjs --reason=misroute --limit=50000 --pace=400
 //
