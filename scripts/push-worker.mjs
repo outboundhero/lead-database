@@ -39,6 +39,7 @@ import { randomUUID } from "node:crypto";
 import dotenv from "dotenv";
 import { campaignsForLead } from "./lib/push-side.mjs";
 import { espBucket } from "./lib/esp-bucket.mjs";
+import { eligibilitySql, enqueueLeadCompanies, fitCheckOn, FIT_SKIP } from "./lib/enrich/fit-push.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname });
 
 const env = process.env;
@@ -759,6 +760,18 @@ async function pushCycle() {
     return where;
   }
 
+  // FIT GATE, PUSH-TIME CHECK (fit scoring, 2B.7): only while the gate applies
+  // to the tag and require_scored is on. Then the per-tag statement below also
+  // says which leads' company has no score yet, or no key to score it by;
+  // those items are skipped and their companies queued for the scorer at
+  // priority 1. Off (every client today), the statement is exactly as before.
+  const fitCheckCache = new Map();
+  async function fitCheckFor(tag) {
+    if (!fitCheckCache.has(tag)) fitCheckCache.set(tag, await fitCheckOn(pool, tag));
+    return fitCheckCache.get(tag);
+  }
+  const fitSkip = new Map(); // `${tag}|${leadId}` -> reason
+
   // ONE eligibility query per client tag per cycle, not one per lead.
   //
   // These WHERE clauses are enormous — JPCA's is 23,595 characters (a 230-title
@@ -787,12 +800,22 @@ async function pushCycle() {
     await runPool([...byTag.entries()], 4, async ([tag, leadIds]) => {
       const where = await eligibilityWhere(tag);
       if (!where) { for (const id of leadIds) eligibleIds.add(`${tag}|${id}`); return; }
-      const { rows } = await pool.query(
-        `select l.id from leads l where l.id = any($1::uuid[]) and ${where}`,
-        [[...new Set(leadIds)]]
-      );
+      const fitCheck = await fitCheckFor(tag);
+      const { rows } = await pool.query(eligibilitySql(where, fitCheck), [[...new Set(leadIds)]]);
       const ok = new Set(rows.map((r) => r.id));
       for (const id of leadIds) (ok.has(id) ? eligibleIds : ineligible).add(`${tag}|${id}`);
+      if (fitCheck) {
+        const unscored = [];
+        for (const r of rows) {
+          if (r.fit === "nokey") fitSkip.set(`${tag}|${r.id}`, FIT_SKIP.nokey);
+          else if (r.fit === "unscored") { fitSkip.set(`${tag}|${r.id}`, FIT_SKIP.unscored); unscored.push(r.id); }
+        }
+        // Queued for the scorer; a failure here must never stop the push.
+        if (unscored.length) {
+          await enqueueLeadCompanies(pool, unscored, { priority: 1, source: "push" })
+            .catch((e) => console.warn(`fit: could not queue ${unscored.length} unscored companies for ${tag}: ${e.message}`));
+        }
+      }
     });
   }
 
@@ -822,6 +845,12 @@ async function pushCycle() {
     // eligibility.
     if (batch.client_tag && ineligible.has(`${batch.client_tag}|${item.lead_id}`)) {
       await setItem(item, token, { status: "skipped", error: "ineligible per client targeting at push time", claimed_at: null });
+      return;
+    }
+    // Fit gate (only while it applies to the client): no score yet, or no key to score by.
+    const fitReason = batch.client_tag ? fitSkip.get(`${batch.client_tag}|${item.lead_id}`) : undefined;
+    if (fitReason) {
+      await setItem(item, token, { status: "skipped", error: fitReason, claimed_at: null });
       return;
     }
     // Target campaigns are decided once and persisted — a retry reuses them.
