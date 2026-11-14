@@ -161,8 +161,18 @@ export const COMPANY_COLUMNS_V2 = Object.freeze([
   { key: "person_1_name_check", from: "C#57", kind: "formula", flag: PEOPLE },
   { key: "person_1_ceo_write_to", from: "C#58", kind: "action", action: "write_to_table", flag: PEOPLE },
   { key: "company_outcome", from: null, kind: "formula" },
-  { key: "fit_score", from: null, kind: "action", action: "later", phase: 3, note: "Phase 3: becomes fit_lookup (Builder C), the shared score on the row." },
-  { key: "home_office", from: null, kind: "action", action: "later", phase: 3, note: "Phase 3: becomes fit_lookup (Builder C)." },
+  {
+    key: "fit_score", from: null, kind: "action", action: "fit_lookup", provider: "Fit score (shared)",
+    inputs: { domain: "{{use_domain}}", company: "{{company}}", city: "{{use_city}}", state: "{{use_state}}" },
+    config: { show: "score" },
+    note: "The shared fit score of this company (company_fit, one per company for every client), by its domain, else its name, city and state. Free and never cached: a score given later shows the next time the row is worked. Empty while the company is not scored.",
+  },
+  {
+    key: "home_office", from: null, kind: "action", action: "fit_lookup", provider: "Fit score (shared)",
+    inputs: { domain: "{{use_domain}}", company: "{{company}}", city: "{{use_city}}", state: "{{use_state}}" },
+    config: { show: "home_office" },
+    note: "The home-office flag beside the shared fit score (fit_lookup). Empty while the company is not scored.",
+  },
 ]);
 
 /**

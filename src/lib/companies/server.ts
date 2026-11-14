@@ -20,6 +20,7 @@ import {
   type Effort,
   type FoundBy,
   type ListHas,
+  type ListHome,
   type ListSort,
   type ModelSetting,
   type ModelStep,
@@ -595,12 +596,17 @@ export interface ListParams {
   hideHeld: boolean;
   /** Only companies with a usable person email, or with a usable general email. */
   has?: ListHas | null;
+  /** Phase 3: only companies whose shared fit score is at least this (1 to 5); unscored ones are left out. */
+  fitMin?: number | null;
+  /** Phase 3: only companies the scorer flagged as a likely home office (yes), or as not one (no). */
+  home?: ListHome | null;
 }
 
 // found_key is ISO 8601 in UTC whatever the session's DateStyle and TimeZone, so it reads back exactly.
 const PAGE_FIELDS = `e.row_id, e.table_id, e.company, e.domain, e.website, e.city, e.state, e.country, e.address, e.phone,
   e.industry, e.employees, e.general_email, e.email_status, e.held, e.found_by, e.email_kind, e.source, e.found_at,
   e.general_emails, e.general_waiting, e.people_emails, e.people_held, e.people_total,
+  e.fit_score, e.home_office, e.fit_reason,
   to_char(e.found_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS found_key, lower(e.company) AS name_key`;
 
 type PageRow = Omit<CompanyRow, "row_id" | "linkedin" | "run" | "found_at" | "contacts"> & {
@@ -629,6 +635,9 @@ export async function listCompanies(c: PoolClient, p: ListParams): Promise<Compa
   if (p.hideHeld) where.push("NOT e.held");
   if (p.has === "people") where.push("e.people_emails + e.people_held > 0");
   if (p.has === "general") where.push("e.general_emails > 0");
+  if (p.fitMin) where.push(`e.fit_score >= ${arg(p.fitMin)}::smallint`);
+  if (p.home === "yes") where.push("e.home_office IS TRUE");
+  if (p.home === "no") where.push("e.home_office IS FALSE");
   if (p.q) where.push(`e.search_text LIKE ${arg(`%${p.q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`)}`);
 
   const page = async (extra: ((a: (v: unknown) => string) => string) | null, order: string, limit: number) => {

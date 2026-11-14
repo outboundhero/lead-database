@@ -1302,15 +1302,23 @@ async function partD(routes, c) {
   const got = await call(runs.GET, { query: { tag: G } });
   const outcomes = Object.fromEntries((await all(`SELECT outcome, count(*)::int AS n FROM enrich_companies WHERE client_tag = $1 GROUP BY 1`, [G])).map((r) => [r.outcome, r.n]));
   const byStatus = Object.fromEntries((await all(`SELECT run_status, count(*)::int AS n FROM enrich_rows WHERE table_id = $1 GROUP BY 1`, [tG])).map((r) => [r.run_status, r.n]));
+  // Listed companies by what each shows (disjoint): a new general and a new person email, one of them, or only held ones.
   const listed = await one(
-    `SELECT count(*)::int AS total, count(*) FILTER (WHERE held)::int AS held,
-            count(*) FILTER (WHERE NOT held AND email_status = 'valid')::int AS valid, count(*) FILTER (WHERE NOT held AND email_status = 'catch_all')::int AS catch_all
+    `SELECT count(*)::int AS total,
+            count(*) FILTER (WHERE general_emails > 0 AND NOT held AND people_emails > 0)::int AS both,
+            count(*) FILTER (WHERE general_emails > 0 AND NOT held AND people_emails = 0)::int AS general,
+            count(*) FILTER (WHERE NOT (general_emails > 0 AND NOT held) AND people_emails > 0)::int AS people,
+            count(*) FILTER (WHERE NOT (general_emails > 0 AND NOT held) AND people_emails = 0)::int AS held
        FROM enrich_companies WHERE client_tag = $1 AND listed`,
     [G]
   );
   const k = got.body?.counts;
   check("the counts by outcome match the rows", got.status === 200 && sorted(k?.outcomes) === sorted(outcomes), `${sorted(k?.outcomes)} vs ${sorted(outcomes)}`);
-  check("... and the listed ones by verdict, and the rows by status", k?.listed.total === listed.total && k.listed.valid === listed.valid && k.listed.catchAll === listed.catch_all && k.listed.held === listed.held && sorted(k.rows) === sorted(byStatus) && k.tableId === tG);
+  check("... and the listed ones by what they show, and the rows by status",
+    k?.listed.total === listed.total && k.listed.both === listed.both && k.listed.general === listed.general && k.listed.people === listed.people &&
+      k.listed.held === listed.held && k.listed.both + k.listed.general + k.listed.people + k.listed.held === k.listed.total &&
+      sorted(k.rows) === sorted(byStatus) && k.tableId === tG,
+    JSON.stringify({ got: k?.listed, want: listed }));
 
   section("D4. Deletes");
   const victim = rows.s14.rowId;
@@ -1383,24 +1391,22 @@ async function partE(routes, c) {
   check("managers can't read the settings (403)", (await call(settings.GET)).status === 403);
   T.role = "admin";
   const now = await call(settings.GET);
-  const edit = (over = {}) => ({
-    version: now.body.version,
-    company_pipeline: { enabled: true, max_pull_size: 500, email_checks_per_company: 2 },
-    models: {
-      website_search: { model: "gpt-4o-mini", reasoning_effort: null, max_searches: 2 },
-      email_search_first: { model: "gpt-5.6-luna", reasoning_effort: "low", max_searches: 3 },
-      email_search_second: { model: "gpt-4o-mini", reasoning_effort: null, max_searches: 2 },
-    },
-    ...over,
-  });
-  check("a bad model id is refused (400)", (await call(settings.PUT, { body: edit({ models: { ...edit().models, website_search: { model: "GPT 4!", reasoning_effort: null, max_searches: 2 } } }) })).status === 400);
-  const saved = await call(settings.PUT, { body: edit() });
+  // The sheet's own body: what the settings route answered, in the shape the sheet sends back (phases 2 and 3).
+  const { settingsInputOf } = await srcModule("lib/companies/server.ts");
+  const input = settingsInputOf(now.body.value);
+  const edit = (f = () => {}) => {
+    const x = structuredClone(input);
+    f(x);
+    return { version: now.body.version, ...x };
+  };
+  check("a bad model id is refused (400)", (await call(settings.PUT, { body: edit((x) => { x.models.companys_website = { model: "GPT 4!", reasoning_effort: null, max_searches: 2 }; }) })).status === 400);
+  const saved = await call(settings.PUT, { body: edit((x) => { x.company_pipeline.enabled = true; x.company_pipeline.max_pull_size = 500; }) });
   const stored = await all(`SELECT key, value FROM enrich_settings ORDER BY key`);
   const read = settingsFrom(stored);
   const cp = stored.find((r) => r.key === "company_pipeline")?.value;
   const models = stored.find((r) => r.key === "models")?.value;
   check("a save keeps what the sheet doesn't edit (memory_days, fit_score)", saved.status === 200 && cp?.memory_days?.website === 365 && "fit_score" in models && T.audits.some((x) => x.action === "enrich_settings"), JSON.stringify({ status: saved.status, cp }));
-  check("... and the worker reads what was saved (the sheet's v2 model settings come with its move to the new shape)", read.company_pipeline.max_pull_size === 500 && read.company_pipeline.enabled === true);
+  check("... and the worker reads what was saved", read.company_pipeline.max_pull_size === 500 && read.company_pipeline.enabled === true);
   check("a save over a newer version is refused (409)", (await call(settings.PUT, { body: edit() })).status === 409);
   T.role = "manager";
 }
@@ -1455,7 +1461,7 @@ const t0 = Date.now();
 let enrichDb = null;
 try {
   await cleanup(); // anything an interrupted run left behind
-  originalSettings = await all(`SELECT key, value FROM enrich_settings WHERE key IN ('company_pipeline', 'models')`);
+  originalSettings = await all(`SELECT key, value FROM enrich_settings WHERE key IN ('company_pipeline', 'models', 'people_pipeline', 'personalisation', 'spend_caps') ORDER BY key`);
   spendBefore = await all(`SELECT day::text AS day, kind, used::text AS used FROM enrich_spend_daily`);
   Object.assign(baseline, {
     leads: (await one(`SELECT count(*)::int AS n FROM leads`)).n,
@@ -1504,7 +1510,7 @@ try {
     [PREFIX, `%.${TEST_HOST}`, baseline.registry, TEST_HOST, WORKER_ID]
   );
   const settingsBack = originalSettings
-    ? JSON.stringify(await all(`SELECT key, value FROM enrich_settings WHERE key IN ('company_pipeline', 'models')`)) === JSON.stringify(originalSettings)
+    ? JSON.stringify(await all(`SELECT key, value FROM enrich_settings WHERE key IN ('company_pipeline', 'models', 'people_pipeline', 'personalisation', 'spend_caps') ORDER BY key`)) === JSON.stringify(originalSettings)
     : true;
   const clean = Object.values(leftover).every((n) => n === 0) && settingsBack;
   console.log(`\ncleaned up: ${clean ? "yes" : `NO ${JSON.stringify({ ...leftover, settingsBack })}`}`);

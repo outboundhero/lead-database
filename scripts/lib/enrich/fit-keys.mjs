@@ -18,7 +18,7 @@
 //
 // fit_lookup is the Clay section's view of a score (the companies_v2 hooks
 // fit_score and home_office): free, never cached, it shows the shared score
-// on the row. Registered in ACTIONS at integration (actions.mjs).
+// on the row. Registered in ACTIONS (actions.mjs).
 
 import { bareDomain } from "./domain.mjs";
 
@@ -256,23 +256,31 @@ const text = (v) => (v == null ? "" : String(v).trim());
 
 /**
  * fit_lookup: the company's shared score, by its domain key, else its name key.
- * Inputs (compiled at integration): domain ({{use_domain}}), company, city
- * ({{use_city}}), state ({{use_state}}, a code). config.show: "score" (the
- * fit_score column) or "home_office". Free, never cached: a score given later
- * shows the next time the row is worked.
+ * Inputs (the companies_v2 columns fit_score and home_office): domain
+ * ({{use_domain}}), company, city ({{use_city}}), state ({{use_state}}, a
+ * code). config.show: "score" (the fit_score column) or "home_office".
+ * Free, never cached: a score given later shows the next time the row is
+ * worked. Before migration 126 it answers empty.
  */
 async function fitLookup({ inputs, config, db }) {
-  const { rows } = await db.query(
-    `WITH q AS (SELECT public.fn_fit_domain_ok($1) AS d, public.fn_fit_name_key($2, $3, $4) AS n)
-     SELECT f.score, f.home_office, f.reason, f.status, k.blocked, f.model, f.rule_version, f.scored_at,
-            f.key_kind, f.key
-       FROM q
-       JOIN company_fit_keys k ON (k.key_kind = 'domain' AND k.key = q.d) OR (k.key_kind = 'name' AND k.key = q.n)
-       JOIN company_fit f ON f.key_kind = k.fit_kind AND f.key = k.fit_key
-      ORDER BY (k.key_kind = 'domain') DESC
-      LIMIT 1`,
-    [text(inputs?.domain) || null, text(inputs?.company) || null, text(inputs?.city) || null, text(inputs?.state) || null]
-  );
+  let rows;
+  try {
+    ({ rows } = await db.query(
+      `WITH q AS (SELECT public.fn_fit_domain_ok($1) AS d, public.fn_fit_name_key($2, $3, $4) AS n)
+       SELECT f.score, f.home_office, f.reason, f.status, k.blocked, f.model, f.rule_version, f.scored_at,
+              f.key_kind, f.key
+         FROM q
+         JOIN company_fit_keys k ON (k.key_kind = 'domain' AND k.key = q.d) OR (k.key_kind = 'name' AND k.key = q.n)
+         JOIN company_fit f ON f.key_kind = k.fit_kind AND f.key = k.fit_key
+        ORDER BY (k.key_kind = 'domain') DESC
+        LIMIT 1`,
+      [text(inputs?.domain) || null, text(inputs?.company) || null, text(inputs?.city) || null, text(inputs?.state) || null]
+    ));
+  } catch (e) {
+    // undefined_function or undefined_table: migration 126 is not applied, so nothing is scored yet.
+    if (e?.code === "42883" || e?.code === "42P01") return { status: "empty", note: "Fit scoring is not set up on this database yet (migration 126)" };
+    throw e;
+  }
   const f = rows[0];
   if (!f) return { status: "empty", note: "Not scored yet: the score appears once the fit scorer has scored this company" };
   /** @type {FitLookupValue} */
@@ -296,7 +304,7 @@ async function fitLookup({ inputs, config, db }) {
   return { status: "done", value, display, note: `${value.reason ?? "No reason given"} (${by}${value.blocked ? "; blocked by the gate" : ""})` };
 }
 
-/** The fit actions, registered beside the others in ACTIONS (actions.mjs) at integration. */
+/** The fit actions, registered beside the others in ACTIONS (actions.mjs). */
 export const FIT_ACTIONS = Object.freeze({
   fit_lookup: Object.freeze({ run: fitLookup, cache: false }),
 });

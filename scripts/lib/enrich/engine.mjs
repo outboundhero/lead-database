@@ -44,8 +44,9 @@
 // hourly sweep resumes the row once the reason has cleared.
 //
 // Phases: a column of a later phase is shown and never run. Every pipeline
-// column that may run is phase 1, its switches and keys deciding; the fit
-// hooks and add_to_database stay later phases until their builders make them.
+// column that may run is phase 1, its switches and keys deciding (the fit
+// hooks too, as fit_lookup); add_to_database stays a later phase: only
+// promotion writes it.
 
 import { createHash } from "node:crypto";
 import { emptyAsText, evaluate, isEmpty, makeContext, refs } from "./formula.mjs";

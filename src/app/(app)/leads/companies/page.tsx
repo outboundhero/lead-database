@@ -1,8 +1,9 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangle, Info, KeyRound, Loader2, MailCheck, RefreshCw, Settings2, Store } from "lucide-react";
+import { AlertTriangle, Gauge, Info, KeyRound, Loader2, MailCheck, RefreshCw, Settings2, Store } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -13,6 +14,7 @@ import { cr, FiltersCard, fmt, isActive, PlanCard, PullCard, PullsCard } from "@
 import { CompaniesTable, CountsStrip } from "@/components/companies/companies-table";
 import { isPeopleActive, KeysList, PeoplePanel, PipelinePills } from "@/components/companies/people-panel";
 import { SettingsSheet } from "@/components/companies/settings-sheet";
+import { FitPanel } from "@/components/companies/fit-panel";
 import type { CompaniesSetup, CompanyCounts, CompanyRun, CompanyWorker, PeopleRun, PeopleSetup } from "@/lib/companies/types";
 
 // The Companies tab: pick a client, see what AI Ark will be asked for its
@@ -246,6 +248,11 @@ function CompaniesTab() {
           {setup && <BalancePill setup={setup} />}
           {setup && <WorkerPills worker={setup.worker} />}
           {setup && tag && <PipelinePills people={people} />}
+          <Button size="sm" variant="outline" asChild>
+            <Link href={tag ? `/leads/companies/review?client=${encodeURIComponent(tag)}` : "/leads/companies/review"}>
+              <Gauge /> Fit review
+            </Link>
+          </Button>
           {isAdmin && (
             <Button size="sm" variant="outline" onClick={() => setSettingsOpen(true)}>
               <Settings2 /> Settings
@@ -348,6 +355,8 @@ function CompaniesTab() {
               <PullsCard tag={tag} runs={runs} onCancel={cancel} />
             </div>
           </div>
+          {/* keyed: the fit panel shows one client's promotion and gate */}
+          <FitPanel key={`fit-${tag}`} tag={tag} />
           <CompaniesTable key={tag} tag={tag} live={busy || peopleActive} listedTotal={counts?.listed.total ?? 0} />
         </>
       )}

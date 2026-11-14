@@ -12,7 +12,7 @@ import { IosSegmentedControl } from "@/components/ui/ios/ios-segmented-control";
 import { IosToggle } from "@/components/ui/ios/ios-toggle";
 import { Card, fmt } from "./pull-panel";
 import { ContactLine, ContactsList } from "./contacts-list";
-import { PAGE_SIZES, type CompaniesPage, type CompanyCounts, type CompanyRow, type FoundBy, type ListHas, type ListSort } from "@/lib/companies/types";
+import { PAGE_SIZES, type CompaniesPage, type CompanyCounts, type CompanyRow, type FoundBy, type ListHas, type ListHome, type ListSort } from "@/lib/companies/types";
 
 // The Companies tab's list side: the counts strip (listed companies by what
 // lists them, the people and inboxes by verdict, and every other outcome as a
@@ -63,6 +63,24 @@ const PILL = {
   muted: "bg-muted text-muted-foreground",
   bad: "bg-destructive/12 text-destructive",
 };
+
+/** Phase 3: the shared fit score and the home-office flag, with the scorer's reason on hover. */
+function FitLine({ row }: { row: CompanyRow }) {
+  if (row.fit_score == null && row.home_office == null) {
+    return <p className="mt-0.5 text-[12px] text-muted-foreground">Fit: not scored yet</p>;
+  }
+  const low = row.fit_score != null && row.fit_score < 2;
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1" title={row.fit_reason ?? undefined}>
+      {row.fit_score != null && (
+        <span className={cn("rounded-full px-2 py-0.5 text-[12px] font-medium", low ? PILL.bad : row.fit_score >= 4 ? PILL.valid : PILL.held)}>
+          Fit {row.fit_score} of 5
+        </span>
+      )}
+      {row.home_office === true && <span className={cn("rounded-full px-2 py-0.5 text-[12px] font-medium", PILL.catch_all)}>Likely a home office</span>}
+    </div>
+  );
+}
 
 /** A column filter the Clay section's grid reads from its address: the cell holds exactly this text. */
 const cellIs = (col: string, value: string) => `${col}:is.${encodeURIComponent(value)}`;
@@ -263,6 +281,7 @@ function CompanyLine({ row, tag }: { row: CompanyRow; tag: string }) {
           </div>
           {row.domain && <p className="text-[12px] text-muted-foreground">{row.domain}</p>}
           <p className="text-[12px] text-muted-foreground">{[place || row.country, row.industry].filter(Boolean).join(" · ")}</p>
+          <FitLine row={row} />
         </td>
         <td className="px-3 py-2.5">
           {general.length ? (
@@ -349,6 +368,8 @@ export function CompaniesTable({ tag, live, listedTotal }: { tag: string; live: 
   const [dq, setDq] = useState("");
   const [state, setState] = useState("");
   const [has, setHas] = useState<"" | ListHas>("");
+  const [fitMin, setFitMin] = useState("");
+  const [home, setHome] = useState<"" | ListHome>("");
   const [found, setFound] = useState<"" | FoundBy>("");
   const [hideHeld, setHideHeld] = useState(false);
   // The cursor each page visited was read with: the last one is the page on screen.
@@ -379,10 +400,12 @@ export function CompaniesTable({ tag, live, listedTotal }: { tag: string; live: 
     if (dq) sp.set("q", dq);
     if (state) sp.set("state", state);
     if (has) sp.set("has", has);
+    if (fitMin) sp.set("fit", fitMin);
+    if (home) sp.set("home", home);
     if (found) sp.set("found", found);
     if (hideHeld) sp.set("hideHeld", "1");
     return sp.toString();
-  }, [tag, sort, size, after, dq, state, has, found, hideHeld]);
+  }, [tag, sort, size, after, dq, state, has, fitMin, home, found, hideHeld]);
 
   useEffect(() => {
     const ctl = new AbortController();
@@ -423,7 +446,7 @@ export function CompaniesTable({ tag, live, listedTotal }: { tag: string; live: 
 
   const rows = data?.rows ?? [];
   const loading = shown !== query;
-  const filtered = Boolean(dq || state || has || found || hideHeld);
+  const filtered = Boolean(dq || state || has || fitMin || home || found || hideHeld);
   const first = (cursors.length - 1) * size + 1;
   const stateOptions = state && !states.some((s) => s.state === state) ? [{ state, n: 0 }, ...states] : states;
 
@@ -477,6 +500,41 @@ export function CompaniesTable({ tag, live, listedTotal }: { tag: string; live: 
             <SelectItem value={ANY}>Any emails</SelectItem>
             <SelectItem value="people">With people emails</SelectItem>
             <SelectItem value="general">With a general email</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select
+          value={fitMin || ANY}
+          onValueChange={(v) => {
+            setFitMin(v === ANY ? "" : v);
+            toFirst();
+          }}
+        >
+          <SelectTrigger size="sm" className="h-9 w-[170px] rounded-full text-[12.5px]" aria-label="Fit score">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ANY}>Any fit score</SelectItem>
+            {["2", "3", "4", "5"].map((n) => (
+              <SelectItem key={n} value={n}>
+                Fit score at least {n}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={home || ANY}
+          onValueChange={(v) => {
+            setHome(v === ANY ? "" : (v as ListHome));
+            toFirst();
+          }}
+        >
+          <SelectTrigger size="sm" className="h-9 w-[190px] rounded-full text-[12.5px]" aria-label="Home office">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ANY}>Home office or not</SelectItem>
+            <SelectItem value="yes">Likely a home office</SelectItem>
+            <SelectItem value="no">Not a home office</SelectItem>
           </SelectContent>
         </Select>
         <Select

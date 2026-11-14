@@ -282,6 +282,8 @@ export const FOUND_BY: FoundBy[] = ["database", "aiark", "claygent_1", "claygent
 export const PAGE_SIZES = [50, 100, 200] as const;
 /** The list's "has" filter: companies with a usable person email, or with a usable general email. */
 export type ListHas = "people" | "general";
+/** Phase 3: the home-office filter (the scorer's flag beside the shared fit score). */
+export type ListHome = "yes" | "no";
 
 export interface CompanyRow {
   row_id: number;
@@ -312,6 +314,10 @@ export interface CompanyRow {
   people_emails: number;
   people_held: number;
   people_total: number;
+  /** Phase 3: the company's shared fit score (1 to 5), the home-office flag and the scorer's reason; null until scored. */
+  fit_score: number | null;
+  home_office: boolean | null;
+  fit_reason: string | null;
   /** Up to 3 general emails and up to 3 people, best first; the rest open in the contacts list. */
   contacts: { general: Contact[]; people: Contact[] };
 }

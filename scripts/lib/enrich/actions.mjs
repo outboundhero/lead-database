@@ -18,6 +18,7 @@ import { CLIENT_ACTIONS } from "./client-checks.mjs";
 import { COMPANY_ACTIONS } from "./company-actions.mjs";
 import { bareDomain } from "./domain.mjs";
 import { capped, httpJson, lostSendGuard, retryableStatus } from "./http.mjs";
+import { FIT_ACTIONS } from "./fit-keys.mjs";
 import { PIPELINE_ACTIONS } from "./pipeline-actions.mjs";
 import { addOpenAiSpend, spendAllowed } from "./spend.mjs";
 
@@ -376,4 +377,5 @@ export const ACTIONS = {
   ...CLIENT_ACTIONS, // AI Ark run tables: lead_lookup, client_area, client_exclusions
   ...COMPANY_ACTIONS, // the Companies template's phase 1 checks: client_office, held_general_email
   ...PIPELINE_ACTIONS, // the pipeline templates (pipeline-actions.mjs): write-tos, Reoon, the finders, Enrichley, people
+  ...FIT_ACTIONS, // fit_lookup (fit-keys.mjs): the shared fit score on a Companies (pipeline) row, free
 };

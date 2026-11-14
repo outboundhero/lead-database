@@ -2,13 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireRole } from "@/lib/enrich/auth";
 import { withTx } from "@/lib/enrich/db";
 import { cleanTag, decodeCursor, listCompanies, TAG_RE } from "@/lib/companies/server";
-import { FOUND_BY, PAGE_SIZES, type CompaniesPage, type FoundBy, type ListHas, type ListSort } from "@/lib/companies/types";
+import { FOUND_BY, PAGE_SIZES, type CompaniesPage, type FoundBy, type ListHas, type ListHome, type ListSort } from "@/lib/companies/types";
 
-// GET /api/companies/list?tag=&sort=newest|name&size=50|100|200&after=&q=&state=&status=valid|catch_all&found=&hideHeld=1&has=people|general
+// GET /api/companies/list?tag=&sort=newest|name&size=50|100|200&after=&q=&state=&status=valid|catch_all&found=&hideHeld=1&has=people|general&fit=1..5&home=yes|no
 // One page of a client's listed companies (enrich_companies.listed): those
 // passing the client's rules with a usable general email or a usable person
 // email, held ones included. `has` keeps only those with people emails, or
-// only those with a general email. Each row carries its first general emails
+// only those with a general email. `fit` keeps companies whose shared fit
+// score is at least that (unscored ones are left out), `home` those the
+// scorer flagged as a likely home office (yes) or not (no). Each row carries
+// its fit score, home-office flag and reason, and its first general emails
 // and people (enrich_contacts).
 // Keyset paging, no OFFSET: `after` is the `next` cursor of the page before,
 // a base64url [found_at, row_id] (newest first) or [lower(company), row_id]
@@ -39,10 +42,14 @@ export async function GET(req: NextRequest) {
   const hideHeld = sp.get("hideHeld") === "1" || sp.get("hideHeld") === "true";
   const hasIn = sp.get("has");
   const has: ListHas | null = hasIn === "people" || hasIn === "general" ? hasIn : null;
+  const fitIn = Number(sp.get("fit"));
+  const fitMin = Number.isInteger(fitIn) && fitIn >= 1 && fitIn <= 5 ? fitIn : null;
+  const homeIn = sp.get("home");
+  const home: ListHome | null = homeIn === "yes" || homeIn === "no" ? homeIn : null;
 
   try {
     const page = await withTx<CompaniesPage>(
-      (c) => listCompanies(c, { tag, sort, size, after, q, state, status, foundBy, hideHeld, has }),
+      (c) => listCompanies(c, { tag, sort, size, after, q, state, status, foundBy, hideHeld, has, fitMin, home }),
       { readOnly: true, timeoutMs: 10_000 }
     );
     return NextResponse.json(page, { headers: { "Cache-Control": "no-store" } });
