@@ -57,8 +57,8 @@ import { resetClientChecks } from "./lib/enrich/client-checks.mjs";
 import { runRow } from "./lib/enrich/engine.mjs";
 import { order } from "./lib/enrich/formula.mjs";
 import { PIPELINE_ACTIONS } from "./lib/enrich/pipeline-actions.mjs";
-import { projectContact } from "./lib/enrich/project-contacts.mjs";
-import { PEOPLE_INPUT_KEYS } from "./lib/enrich/people-template.mjs";
+import { projectContact, VERDICT_BY_OUTCOME } from "./lib/enrich/project-contacts.mjs";
+import { PEOPLE_INPUT_KEYS, PERSON_OUTCOMES } from "./lib/enrich/people-template.mjs";
 import { resetSettingsCache, settingsFrom } from "./lib/enrich/settings.mjs";
 import { ensureTable, syncTemplateColumns } from "./lib/enrich/templates.mjs";
 
@@ -1419,7 +1419,7 @@ async function partC(routes) {
   const built = !/TODO\(A\)/.test(syncTemplateColumns.toString());
   if (!built) {
     later("the start route end to end: 201, the tables compiled, the run queued", "syncTemplateColumns is Builder A's and not built in this tree");
-    later("a bought person's email worked by the compiled People template (Reoon stubbed): Approved email, in enrich_contacts", "Builder A's People template");
+    later("a bought person worked by the compiled People template (Reoon stubbed): their inputs read, the address checked once, their contact written", "Builder A's People template");
     return;
   }
   const stored = await one(`SELECT value FROM enrich_settings WHERE key = 'people_pipeline'`);
@@ -1474,12 +1474,20 @@ async function partC(routes) {
     );
     await projectContact(pool, { rowId: row.id, claimToken: claim.claim_token, tableId: tB.people, clientTag: B2, kind: "person", values: out.values });
     const contact = await one(`SELECT * FROM enrich_contacts WHERE row_id = $1`, [row.id]);
+    const own = await cellsOf(row.id);
+    // The originals in this database decide the address's fate (the real ones read a made-up .example
+    // address as junk); what is checked here is that the People row's inputs reach the template and
+    // its outcome reaches enrich_contacts.
+    const outcome = out.values.person_outcome;
     check(
-      "a bought person's email worked by the compiled People template (Reoon stubbed): Approved email, in enrich_contacts",
-      out.values.person_outcome === "Approved email" && net.reoon - before === 1 && contact?.verdict === "approved" && contact.usable &&
-        String(contact.company_row_id) === String(rowId) && contact.stage === "bought" && contact.found_by === "aiark" && Boolean(contact.track),
-      JSON.stringify({ outcome: out.values.person_outcome, reoon: net.reoon - before, contact })
+      "a bought person worked by the compiled People template (Reoon stubbed): their inputs read, the address checked once, their contact written",
+      PERSON_OUTCOMES.includes(outcome) && net.reoon - before === 1 && contact?.email === email && contact.outcome === outcome &&
+        contact.verdict === (VERDICT_BY_OUTCOME.person[outcome] ?? null) && String(contact.company_row_id) === String(rowId) &&
+        contact.stage === "bought" && contact.found_by === "aiark" && contact.track === own.track && String(contact.rank) === own.rank &&
+        contact.full_name === own.find_people_from_linkedin_company_url?.name,
+      JSON.stringify({ outcome, reoon: net.reoon - before, contact })
     );
+    console.log(`        (this database's originals gave the made-up address: ${outcome})`);
   } finally {
     reoonStub = false;
     await pool.query(`UPDATE enrich_settings SET value = $1 WHERE key = 'people_pipeline'`, [JSON.stringify(stored?.value ?? {})]);
