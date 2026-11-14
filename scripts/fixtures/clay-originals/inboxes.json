@@ -1,0 +1,1510 @@
+{
+  "workspace": {
+    "id": 0,
+    "name": "Made-up workspace for the tests"
+  },
+  "data": [
+    {
+      "type": "basic",
+      "id": "f_fxG01",
+      "name": "Created At",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "date"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG02",
+      "name": "Updated At",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "date"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG03",
+      "name": "Delete",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG04",
+      "name": "Dupe Check",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "lookup-row-in-other-table",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_inboxes\"",
+            "optional": false
+          },
+          {
+            "name": "fields|rowValue",
+            "formulaText": "{{f_fxG13}}",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxG01}} || {{f_fxG13}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG05",
+      "name": "Safe To Run",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "true || !{{f_fxG04}}?.record?.[\"General Email\"]"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG06",
+      "name": "Duplicate Status",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "select"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxG05}} ? \"New\" : \"Duplicate\""
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG07",
+      "name": "Check",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "waterfall",
+        "formulaWaterfall": [
+          {
+            "formula": "{{f_fxG13}}"
+          }
+        ]
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG08",
+      "name": "Category",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG09",
+      "name": "Sub Category",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG10",
+      "name": "Additional Category",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG11",
+      "name": "First Name",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxG20}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG12",
+      "name": "Company",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG13",
+      "name": "General Email",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG14",
+      "name": "Normalize Company Name",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "normalize-company-name",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "companyName",
+            "formulaText": "{{f_fxG12}}",
+            "optional": false
+          },
+          {
+            "name": "titleCase",
+            "formulaText": "true",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxG12}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG15",
+      "name": "Normalized Company Name",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxG14}}?.normalized_name"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG16",
+      "name": "Identify Email Type And Extract Company Domain From Email",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "extract-email-components",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "email",
+            "formulaText": "{{f_fxG13}}",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxG13}} && {{f_fxG44}} === true"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG17",
+      "name": "Username",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxG16}}?.username"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG18",
+      "name": "Guessed Name",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxG16}}?.guessedName"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG19",
+      "name": "First Name Ai",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "use-ai",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "useCase",
+            "formulaText": "\"use-ai\"",
+            "optional": false
+          },
+          {
+            "name": "prompt",
+            "formulaText": "\"zqx-fixture-only-g19 [fx:G19] name=\" + {{f_fxG18}} + \"; email=\" + {{f_fxG13}} + \"; Is this a first name?\"",
+            "optional": false
+          },
+          {
+            "name": "model",
+            "formulaText": "\"gpt-6-luna\"",
+            "optional": false
+          },
+          {
+            "name": "maxCostInCents",
+            "optional": true
+          },
+          {
+            "name": "answerSchemaType",
+            "formulaMap": {
+              "type": "\"json\"",
+              "fields": "{\"response\":{\"type\":\"string\",\"description\":\"\"}}",
+              "jsonType": "\"Fields\""
+            },
+            "optional": true
+          },
+          {
+            "name": "tableExamples",
+            "formulaText": "[{\"inputs\":{\"{{f_fxG18}}\":\"Made Upname\",\"{{f_fxG13}}\":\"madeup@zqx-fixture-only.example\"},\"output\":\"zqx-fixture-only example answer\",\"recordId\":\"fx-example-1\"}]",
+            "optional": false
+          },
+          {
+            "name": "runBudget",
+            "formulaText": "0.1",
+            "optional": false
+          },
+          {
+            "name": "_metadata",
+            "formulaMap": {
+              "modelSource": "user"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxG13}} && {{f_fxG44}} === true && !!{{f_fxG18}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG20",
+      "name": "Use First Name",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "waterfall",
+        "formulaWaterfall": [
+          {
+            "formula": "{{f_fxG19}}?.response && !{{f_fxG19}}?.response?.includes(\"not a name\") ? {{f_fxG19}}?.response : \"\""
+          },
+          {
+            "formula": "{{f_fxG15}}?.replace(/\\b(LLC|Inc\\.)\\b/gi, \"\").trim() + \" Team\""
+          }
+        ]
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG21",
+      "name": "Use Last Name",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "\"(General Email)\""
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG22",
+      "name": "City",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG23",
+      "name": "Use City",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxG22}} ? String({{f_fxG22}}).toLowerCase().replace(/\\b\\w/g, (c) => c.toUpperCase()) : \"local\""
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG24",
+      "name": "State",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG25",
+      "name": "Use State",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "waterfall",
+        "formulaWaterfall": [
+          {
+            "formula": "{{f_fxG24}}"
+          },
+          {
+            "formula": "{{f_fxG26}}?.split(\",\")?.[2]?.trim()"
+          },
+          {
+            "formula": "\"your area\""
+          }
+        ]
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG26",
+      "name": "Company Address",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG27",
+      "name": "Use Address",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "waterfall",
+        "formulaWaterfall": [
+          {
+            "formula": "{{f_fxG26}}"
+          },
+          {
+            "formula": "\"(No Address Available)\""
+          }
+        ]
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG28",
+      "name": "Client Tag",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG29",
+      "name": "Google Maps Url",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "url"
+        },
+        "formulaType": "formula",
+        "formulaText": "\"https://maps.example/?q=\" + encodeURIComponent(String({{f_fxG12}} ?? \"\"))"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG30",
+      "name": "Use Google Maps Url",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "waterfall",
+        "formulaWaterfall": [
+          {
+            "formula": "{{f_fxG29}}"
+          },
+          {
+            "formula": "\"(No map link)\""
+          }
+        ]
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG31",
+      "name": "Domain",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG32",
+      "name": "Use Domain",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "waterfall",
+        "formulaWaterfall": [
+          {
+            "formula": "{{f_fxG31}}"
+          }
+        ]
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG33",
+      "name": "Website",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG34",
+      "name": "Phone",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG35",
+      "name": "Normalize Phone Number",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "normalize-phone-number",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "phoneNumber",
+            "formulaText": "{{f_fxG34}}",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxG34}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG36",
+      "name": "Use Phone Number",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "waterfall",
+        "formulaWaterfall": [
+          {
+            "formula": "{{f_fxG35}}?.number?.national"
+          },
+          {
+            "formula": "\"there\""
+          }
+        ]
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG37",
+      "name": "Exclusion Large Company Check",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "![\"zqx-fixture-only-g37\", \"megamart.example\", \"bigbox.example\"].some((w) => [{{f_fxG12}}, {{f_fxG33}}, {{f_fxG08}}, {{f_fxG09}}].join(\" \").toLowerCase().includes(w))"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG38",
+      "name": "Qualified General Email",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "!!{{f_fxG13}} && ![\"zqx-fixture-only-g38\", \"noreply\", \"@example.com\", \"invoice\", \"careers\"].some((x) => {{f_fxG13}}?.toLowerCase()?.includes(x))"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG39",
+      "name": "Reoon Validation",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "method",
+            "formulaText": "\"GET\"",
+            "optional": false
+          },
+          {
+            "name": "url",
+            "formulaText": "\"https://reoon.example/api/fixture-verify\"",
+            "optional": false
+          },
+          {
+            "name": "queryString",
+            "formulaMap": {
+              "key": "[redacted]",
+              "mode": "\"power\"",
+              "email": "{{f_fxG13}}"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxG13}} && !!{{f_fxG05}} && !/zqxfixture@|no-?reply@|unsubscribe@|\\.edu/i.test({{f_fxG13}}) && {{f_fxG38}} && {{f_fxG37}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG40",
+      "name": "Reoon Stamp Of Approval",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxG39}}?.is_valid_syntax === true && {{f_fxG39}}?.is_deliverable === true && {{f_fxG39}}?.is_safe_to_send === true && String({{f_fxG39}}?.status ?? \"\").includes(\"safe\")"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG41",
+      "name": "Enrichly Validation",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "enrichley-verify-email",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "email",
+            "formulaText": "{{f_fxG13}}",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "(!{{f_fxG40}} && {{f_fxG39}} && [\"catch_all\", \"unknown\", \"role_account\"].some((s) => String({{f_fxG39}}?.status ?? \"\").includes(s))) && !!{{f_fxG05}} && {{f_fxG38}} && {{f_fxG37}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG42",
+      "name": "Enrichly Stamp Of Approval",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxG41}}?.valid"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG43",
+      "name": "Result",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxG41}}?.result"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG44",
+      "name": "Email Valid",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxG40}} || {{f_fxG42}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG45",
+      "name": "Email Domain",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "url"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxG44}} ? String({{f_fxG13}}).split(\"@\")[1] : \"\""
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG46",
+      "name": "Email Host Lookup Google Dns",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "method",
+            "formulaText": "\"GET\"",
+            "optional": false
+          },
+          {
+            "name": "url",
+            "formulaText": "\"https://dns.google.com/resolve?type=MX&name=\" + {{f_fxG45}}",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxG45}} && {{f_fxG38}} && {{f_fxG37}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG47",
+      "name": "Esp Check",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "true"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG48",
+      "name": "Claygent",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "use-ai",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "useCase",
+            "formulaText": "\"claygent\"",
+            "optional": false
+          },
+          {
+            "name": "prompt",
+            "formulaText": "\"zqx-fixture-only-g48 [fx:G48] business=\" + {{f_fxG12}} + \"; domain=\" + {{f_fxG32}} + \"; place=\" + {{f_fxG23}} + \", \" + {{f_fxG25}} + \"; kind=\" + {{f_fxG08}} + \"; Summarise what this business does.\"",
+            "optional": false
+          },
+          {
+            "name": "model",
+            "formulaText": "\"gpt-6-luna\"",
+            "optional": false
+          },
+          {
+            "name": "maxCostInCents",
+            "formulaText": "\"10\"",
+            "optional": false
+          },
+          {
+            "name": "answerSchemaType",
+            "formulaMap": {
+              "type": "\"json\"",
+              "fields": "{\"company_summary\":{\"type\":\"string\",\"description\":\"zqx-fixture-only: a short summary\"},\"spaces\":{\"type\":\"string\",\"description\":\"\"},\"reasoning\":{\"type\":\"string\",\"description\":\"\"}}",
+              "jsonType": "\"Fields\""
+            },
+            "optional": true
+          },
+          {
+            "name": "_metadata",
+            "formulaMap": {
+              "modelSource": "user"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxG44}} === true && !!{{f_fxG46}} && {{f_fxG38}} && {{f_fxG37}}"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG49",
+      "name": "Question Ai",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "use-ai",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "useCase",
+            "formulaText": "\"use-ai\"",
+            "optional": false
+          },
+          {
+            "name": "prompt",
+            "formulaText": "\"zqx-fixture-only-g49 [fx:G49] business=\" + {{f_fxG12}} + \"; summary=\" + {{f_fxG48}}?.company_summary + \"; Write one question.\"",
+            "optional": false
+          },
+          {
+            "name": "model",
+            "formulaText": "\"gpt-6-luna\"",
+            "optional": false
+          },
+          {
+            "name": "maxCostInCents",
+            "optional": true
+          },
+          {
+            "name": "answerSchemaType",
+            "formulaMap": {
+              "type": "\"json\"",
+              "fields": "{\"response\":{\"type\":\"string\",\"description\":\"zqx-fixture-only: the question\"}}",
+              "jsonType": "\"Fields\""
+            },
+            "optional": true
+          },
+          {
+            "name": "tableExamples",
+            "formulaText": "[{\"inputs\":{\"{{f_fxG12}}\":\"Made-up Widget Shop\"},\"output\":\"zqx-fixture-only example question?\",\"recordId\":\"fx-example-2\"}]",
+            "optional": false
+          },
+          {
+            "name": "runBudget",
+            "formulaText": "0.1",
+            "optional": false
+          },
+          {
+            "name": "_metadata",
+            "formulaMap": {
+              "modelSource": "user"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxG44}} === true && !!{{f_fxG48}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG50",
+      "name": "Question",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "({{f_fxG49}}?.response ?? \"\").slice(0, 1).toLowerCase() + ({{f_fxG49}}?.response ?? \"\").slice(1)"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxG51",
+      "name": "Email Type",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "select"
+        },
+        "formulaType": "formula",
+        "formulaText": "\"B2B\""
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG52",
+      "name": "Email Host Lookup Emailguard",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG53",
+      "name": "Email Host",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG54",
+      "name": "Create Or Update Lead B2b 2",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG55",
+      "name": "Create Or Update Lead B2b 2 Retry",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG56",
+      "name": "Lead Id B2b 2",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG57",
+      "name": "Get Tags",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG58",
+      "name": "Matching Tag Id",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG59",
+      "name": "Client Tag Id",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG60",
+      "name": "Attach Tag To Lead",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG61",
+      "name": "Stop Lead",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG62",
+      "name": "Eb Campaign Id Google Others",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG63",
+      "name": "Add Eb Lead To Campaign Google Others",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG64",
+      "name": "Eb Campaign Id Outlook",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG65",
+      "name": "Add Eb Lead To Campaign Outlook",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG66",
+      "name": "Eb Campaign Id Segs",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG67",
+      "name": "Add Eb Lead To Campaign Segs",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG68",
+      "name": "Create Or Update Lead B2c 2",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG69",
+      "name": "Create Or Update Lead B2c 2 Retry",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG70",
+      "name": "Lead Id B2c 2",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG71",
+      "name": "Eb Campaign Id Easy B2c 2",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG72",
+      "name": "Add Eb Lead To Campaign Easy B2c 2",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG73",
+      "name": "Eb Campaign Id Medium B2c 2",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG74",
+      "name": "Add Eb Lead To Campaign Medium B2c 2",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG75",
+      "name": "Eb Campaign Id Hard B2c 2",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxG76",
+      "name": "Add Eb Lead To Campaign Hard B2c 2",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://sender.example/fixture\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "false"
+      }
+    }
+  ]
+}
