@@ -351,15 +351,19 @@ export async function claimQueue(db, n) {
     [CLAIM_STALE_MIN]
   );
   const token = randomUUID();
+  // MATERIALIZED: the locked page is read once. As a plain IN (...) sub-select
+  // the planner may run it again, and with SKIP LOCKED a second run can hand
+  // back other rows, so one claim could take more than n.
   const { rows } = await db.query(
-    `UPDATE company_fit_queue q SET claim_token = $1, claimed_at = now()
-      WHERE (q.key_kind, q.key) IN (
-        SELECT key_kind, key FROM company_fit_queue
-         WHERE claim_token IS NULL
-         ORDER BY priority, enqueued_at, key_kind, key
-         LIMIT $2
-           FOR UPDATE SKIP LOCKED)
-      RETURNING q.*`,
+    `WITH c AS MATERIALIZED (
+       SELECT key_kind, key FROM company_fit_queue
+        WHERE claim_token IS NULL
+        ORDER BY priority, enqueued_at, key_kind, key
+        LIMIT $2
+          FOR UPDATE SKIP LOCKED)
+     UPDATE company_fit_queue q SET claim_token = $1, claimed_at = now()
+       FROM c WHERE q.key_kind = c.key_kind AND q.key = c.key
+     RETURNING q.*`,
     [token, Math.max(1, Math.trunc(n))]
   );
   rows.sort((a, b) => a.priority - b.priority || new Date(a.enqueued_at).getTime() - new Date(b.enqueued_at).getTime());

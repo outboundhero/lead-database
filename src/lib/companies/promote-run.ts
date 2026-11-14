@@ -11,7 +11,7 @@ import {
   PROMOTE_STALE_HOURS,
   promotionAllowed,
 } from "../../../scripts/lib/enrich/promote.mjs";
-import { readFitSettings } from "./fit";
+import { readFitSettings } from "@/lib/companies/fit";
 import type { PromoteKind } from "./fit-types";
 
 // Pipeline emails into leads (2B.5; switch promotion.promote_to_leads, shipped
@@ -139,12 +139,14 @@ export async function startPromote({
     });
   }
   const adding = started.reduce((n, b) => n + b.contacts.length, 0);
-  await logAudit({
+  const heldCount = Object.values(held).reduce((a, b) => a + b, 0);
+  // A worker's round that found nothing to do leaves no audit row.
+  if (!automatic || adding + settled + refused + heldCount > 0) await logAudit({
     action: "company_promote",
     performedBy: userId,
     details:
       `${tag}: ${automatic ? "automatic " : ""}promotion round, ${adding} to add, ${settled} already in the database, ` +
-      `${refused} refused, ${Object.values(held).reduce((a, b) => a + b, 0)} held back` +
+      `${refused} refused, ${heldCount} held back` +
       (started.length ? `, upload ${started.map((b) => b.batchId).join(", ")}` : ""),
   });
   return {

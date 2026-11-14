@@ -26,9 +26,12 @@
 //     waits for Akeesh;
 //   - while promotion.require_question is on (it ships on), its question is
 //     filled (D19), as Clay's push required.
-// Held back means not taken, and taken again on a later round once the
-// reason has cleared. Refused (promote_state 'refused') is only for a company
-// on the brand list, which does not clear.
+// Held back means not added this round: its add_to_database cell says why, and
+// promoted_at marks when. The worker's rounds take it again only once its row
+// has been worked again (enrich_contacts.updated_at after promoted_at), since
+// only that can clear a row check; the button always takes it again. Refused
+// (promote_state 'refused') is only for a company on the brand list, which
+// does not clear.
 //
 // Each contact's result is kept in enrich_contacts (promote_state, lead_id,
 // batch_id, promoted_at) and shown in its row's add_to_database cell, which
@@ -271,8 +274,9 @@ const LIVE_BATCH = `b.status = 'processing' AND b.created_at > now() - make_inte
 
 /**
  * The SQL that takes a client's contacts that may be promoted ($1 tag, $2
- * kind, $3 min score, $4 limit, $5 also not_added ones (the button), $6
- * require a question). The gate is checked in the same statement.
+ * kind, $3 min score, $4 limit, $5 the button: also not_added ones, and
+ * those held back since their row was last worked, $6 require a question).
+ * The gate is checked in the same statement.
  */
 const PROMOTABLE_SQL = `
   SELECT c.row_id, c.company_row_id, c.table_id, c.kind, c.email, c.has_question, c.promote_state,
@@ -286,7 +290,7 @@ const PROMOTABLE_SQL = `
      AND c.client_tag = $1 AND c.kind = $2
      AND c.usable AND c.verdict = 'approved' AND NOT c.held AND c.email IS NOT NULL
      AND ($2 <> 'person' OR c.outcome = 'Approved email')
-     AND (c.promote_state IS NULL
+     AND ((c.promote_state IS NULL AND ($5 OR c.promoted_at IS NULL OR c.updated_at > c.promoted_at))
           OR (c.promote_state = 'running' AND NOT coalesce(${LIVE_BATCH}, false))
           OR ($5 AND c.promote_state = 'not_added'))
      AND e.listed
@@ -434,13 +438,15 @@ export async function beginPromote(db, { tag, kind, userId, limit, settings, but
   const fallbacks = await fallbacksFor(db, taken.map((t) => t.table_id));
   /** @type {Record<string, number>} */
   const held = {};
+  /** @type {Array<{ row_id: number, table_id: string, email: string | null, why: string }>} */
+  const heldBack = [];
   const refused = [];
   const ready = [];
   for (const t of taken) {
     const ctx = { fallbacks: fallbacks.get(String(t.table_id)) ?? {}, industry: t.industry, label };
     const built = kind === "general" ? inboxLeadRow(t.cells, ctx) : personLeadRow(t.cells, ctx);
     if (built.refuse) refused.push({ ...t, why: built.refuse });
-    else if (built.hold) held[built.hold] = (held[built.hold] ?? 0) + 1;
+    else if (built.hold) heldBack.push({ row_id: t.row_id, table_id: t.table_id, email: t.email, why: built.hold });
     else ready.push({ ...t, ...built });
   }
 
@@ -456,10 +462,23 @@ export async function beginPromote(db, { tag, kind, userId, limit, settings, but
       [JSON.stringify(ready.map((r, i) => ({ i, ...r.lead })))]
     );
     const out = new Set(blocked.map((b) => b.i));
-    if (out.size) held[HOLD.blocked] = (held[HOLD.blocked] ?? 0) + out.size;
+    ready.forEach((r, i) => {
+      if (out.has(i)) heldBack.push({ row_id: r.row_id, table_id: r.table_id, email: r.email, why: HOLD.blocked });
+    });
     open = ready.filter((_, i) => !out.has(i));
   }
 
+  if (heldBack.length) {
+    for (const h of heldBack) held[h.why] = (held[h.why] ?? 0) + 1;
+    await db.query(
+      `UPDATE enrich_contacts SET promoted_at = now() WHERE row_id = ANY($1::bigint[]) AND kind = $2 AND promote_state IS NULL`,
+      [heldBack.map((h) => h.row_id), kind]
+    );
+    await writeCells(db, heldBack.map((h) => ({
+      row_id: h.row_id, table_id: h.table_id, status: "skipped", value: { added: false, reason: "held_back", why: h.why, email: h.email },
+      display: "Held back", note: `Not added: ${h.why}. Taken again once the row is worked again, or with the button.`,
+    })));
+  }
   if (refused.length) {
     await db.query(
       `UPDATE enrich_contacts SET promote_state = 'refused', promoted_at = now() WHERE row_id = ANY($1::bigint[]) AND kind = $2`,
