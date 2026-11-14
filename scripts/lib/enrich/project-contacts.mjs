@@ -159,9 +159,20 @@ export async function projectContact(db, { rowId, claimToken, tableId, clientTag
   return { written: true, listed };
 }
 
+/** What a listed company shows, by what it has (LISTED_OUTCOMES_V2), and a wanted company another row already lists. */
+export const LISTED_WORDS = Object.freeze({
+  both: "General and people emails",
+  general: "Has a general email",
+  people: "Has people emails",
+  held: "Already in the database",
+  taken: "Listed under another row",
+});
+const DERIVED = Object.values(LISTED_WORDS);
+
 const RELIST = `
   WITH n AS (
     SELECT count(*) FILTER (WHERE kind = 'general' AND usable)::int                AS general_emails,
+           count(*) FILTER (WHERE kind = 'general' AND usable AND NOT held)::int   AS general_new,
            count(*) FILTER (WHERE kind = 'general' AND verdict = 'enrichley')::int AS general_waiting,
            count(*) FILTER (WHERE kind = 'person' AND usable AND NOT held)::int    AS people_emails,
            count(*) FILTER (WHERE kind = 'person' AND usable AND held)::int        AS people_held,
@@ -171,12 +182,29 @@ const RELIST = `
            coalesce(bool_and(held) FILTER (WHERE kind = 'general' AND usable), false)                AS general_held
       FROM enrich_contacts WHERE company_row_id = $1
   ),
-  e AS (SELECT * FROM enrich_companies WHERE row_id = $1 FOR UPDATE),
+  e AS (
+    SELECT x.*, r.run_status,
+           (SELECT c.value #>> '{}' FROM enrich_cells c
+             WHERE c.row_id = x.row_id AND c.column_key = 'company_outcome' AND c.status = 'done') AS own_outcome
+      FROM enrich_companies x JOIN enrich_rows r ON r.id = x.row_id
+     WHERE x.row_id = $1
+       FOR UPDATE OF x
+  ),
+  b AS (
+    -- The company's own outcome: as the worker last wrote it, or, where a
+    -- listing word replaced it, read again from its row.
+    SELECT e.*, coalesce($2::text,
+             CASE WHEN NOT (e.outcome = ANY($3::text[])) THEN e.outcome
+                  WHEN e.run_status = 'waiting' THEN 'Waiting for a key'
+                  WHEN e.run_status = 'error' THEN 'Error'
+                  ELSE coalesce(e.own_outcome, e.outcome) END) AS base
+      FROM e
+  ),
   w AS (
-    SELECT e.row_id, e.client_tag, e.company_key, n.*,
-           coalesce(e.passes, false) AND NOT e.never_contact AND e.outcome <> 'Error'
+    SELECT b.row_id, b.client_tag, b.company_key, b.base, n.*,
+           coalesce(b.passes, false) AND NOT b.never_contact AND b.base <> 'Error'
              AND n.general_emails + n.people_emails + n.people_held > 0 AS wanted
-      FROM e, n
+      FROM b, n
   ),
   taken AS (
     SELECT 1 FROM enrich_companies c, w
@@ -190,26 +218,40 @@ const RELIST = `
          general_email = w.first_general, held = w.general_held, found_by = w.first_found_by,
          listed = w.wanted AND NOT EXISTS (SELECT 1 FROM taken),
          found_at = CASE WHEN w.wanted AND NOT EXISTS (SELECT 1 FROM taken) THEN coalesce(x.found_at, now()) ELSE x.found_at END,
+         outcome = CASE
+           WHEN w.wanted AND NOT EXISTS (SELECT 1 FROM taken) THEN
+             CASE WHEN w.general_new > 0 AND w.people_emails > 0 THEN $4
+                  WHEN w.general_new > 0 THEN $5
+                  WHEN w.people_emails > 0 THEN $6
+                  ELSE $7 END
+           WHEN w.wanted THEN $8
+           ELSE w.base END,
          updated_at = now()
     FROM w
    WHERE x.row_id = w.row_id
-  RETURNING x.listed`;
+  RETURNING x.listed, x.outcome`;
 
 /**
- * Recomputes a company's counts and listing from its contacts, in one
- * statement. Retried twice when two rows race for the same company and office
- * (the unique partial index on client_tag, company_key where listed).
- * { listed: null } when the company row has no enrich_companies row yet.
+ * Recomputes a company's counts, listing and shown outcome from its contacts,
+ * in one statement. A listed company shows what it has (LISTED_WORDS); an
+ * unlisted one its own outcome (`base` when the worker gives it, else the one
+ * it last wrote); a wanted company whose company and office another row
+ * already lists shows "Listed under another row". Retried twice when two rows
+ * race for the same company and office (the unique partial index on
+ * client_tag, company_key where listed). { listed: null } when the company row
+ * has no enrich_companies row yet.
  *
  * @param {Db} db
  * @param {number | string} companyRowId
- * @returns {Promise<{ listed: boolean | null }>}
+ * @param {{ base?: string | null }} [opts]  base: the company row's own outcome, as projectCompanyV2 just wrote it
+ * @returns {Promise<{ listed: boolean | null, outcome: string | null }>}
  */
-export async function relist(db, companyRowId) {
+export async function relist(db, companyRowId, { base = null } = {}) {
+  const words = [LISTED_WORDS.both, LISTED_WORDS.general, LISTED_WORDS.people, LISTED_WORDS.held, LISTED_WORDS.taken];
   for (let tries = 0; ; tries++) {
     try {
-      const { rows } = await db.query(RELIST, [companyRowId]);
-      return { listed: rows[0] ? rows[0].listed === true : null };
+      const { rows } = await db.query(RELIST, [companyRowId, base, DERIVED, ...words]);
+      return rows[0] ? { listed: rows[0].listed === true, outcome: rows[0].outcome } : { listed: null, outcome: null };
     } catch (e) {
       if (e?.code === "23505" && tries < 2) continue;
       throw e;

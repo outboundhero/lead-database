@@ -25,18 +25,28 @@
 // Company pulls (the Companies tab, scripts/lib/aiark/company-runs.mjs) share
 // that loop: people slices and company slices take turns, through one AI Ark
 // client, so one throttle holds both at AIARK_RPS. A pull's companies land in
-// the client's template Companies table, and when one of those rows finishes
-// the worker writes its summary into enrich_companies (fenced on the row's
-// claim), which the Companies tab lists. Once an hour, with both paid keys set
-// and Reoon daily credits left, template rows waiting on a key are queued
-// again; answers already held are reused, so only the waiting cells pay.
+// the client's Companies (pipeline) table, whose columns are the original Clay
+// columns (companies_v2); its general emails become rows of the client's
+// General inboxes (pipeline) table, and its people rows of People (pipeline).
+// When a row finishes the worker writes its summary for the Companies tab,
+// fenced on the row's claim: a company row into enrich_companies, an inbox or
+// People row into enrich_contacts, then its company's listing. Rows of a
+// retired companies_v1 table are never claimed (D24).
 //
-// Settings (enrich_settings: the models, the email check cap, how long paid
-// answers are remembered) are read at most every 30 s and handed to the
-// actions, so a model is swapped without a deploy.
+// Once an hour, template rows waiting on a key or a day's cap are queued again
+// when what kept each one waiting has cleared, and rows whose email finder or
+// Enrichley step was skipped for a key the worker now holds are queued again;
+// answers already held are reused, so only those cells pay.
+//
+// Settings (enrich_settings: the switches and their client lists, the models,
+// the spend caps, how long paid answers are remembered) are read at most every
+// 30 s and handed to the actions, so a model is swapped without a deploy.
 //
 // Env: DATABASE_URL (required). OPENAI_API_KEY, CLEARBIT_API_KEY — optional;
 // without one, the columns that need it show "Needs key" and the row waits.
+// FINDYMAIL_API_KEY, PROSPEO_API_KEY, ANYMAIL_FINDER_API_KEY, ENRICHLEY_API_KEY:
+// optional; without one, its steps show "Needs <KEY> (not held)" and the row
+// never waits for them.
 // ENRICH_REOON_API_KEY: the company pipeline's Reoon key (in production the
 // validation worker's account, sharing its daily credits), spent on daily credits only;
 // ENRICH_REOON_THREADS (4, at most 5) Reoon checks at once.
@@ -55,8 +65,13 @@ import dotenv from "dotenv";
 import { order } from "./lib/enrich/formula.mjs";
 import { runRow } from "./lib/enrich/engine.mjs";
 import { readSettings } from "./lib/enrich/settings.mjs";
-import { projectCompany } from "./lib/enrich/project-company.mjs";
-import { reoonBalanceInfo, requeueWaitingTemplateRows } from "./lib/enrich/company-actions.mjs";
+import { projectCompanyV2 } from "./lib/enrich/project-company.mjs";
+import { projectContact } from "./lib/enrich/project-contacts.mjs";
+import { reoonBalanceInfo, requeueRowsForHeldKeys, requeueWaitingTemplateRows } from "./lib/enrich/company-actions.mjs";
+import { absentKeyNote, OPTIONAL_KEYS } from "./lib/enrich/pipeline-actions.mjs";
+import { originalsSummary } from "./lib/enrich/compile-original.mjs";
+import { spentToday } from "./lib/enrich/spend.mjs";
+import { PIPELINE_TEMPLATES, RETIRED_TEMPLATES, variantOfNote } from "./lib/enrich/templates.mjs";
 import { advanceOneRun, runDue } from "./lib/aiark/runs.mjs";
 import { advanceOneCompanyRun, companyRunDue } from "./lib/aiark/company-runs.mjs";
 import { autoAddConfig, pullsToAdd, requestAdd } from "./lib/aiark/add.mjs";
@@ -82,7 +97,8 @@ const SEARCH_KEYS = [
   ]),
 ];
 // What this worker can run: the Companies tab starts a pull only when the worker says it can.
-const CAPABILITIES = ["company_runs"];
+// pipeline_v2: the Clay originals' templates (companies_v2, inboxes_v1, people_v1).
+const CAPABILITIES = ["company_runs", "pipeline_v2"];
 const SWEEP_WAITING_MS = 3600_000;
 
 if (!env.DATABASE_URL) {
@@ -118,8 +134,10 @@ async function tableDef(id) {
   const hit = defs.get(id);
   if (hit && Date.now() - hit.at < 30_000) return hit;
   const { rows: [table] } = await pool.query(
-    `SELECT id, client_tag, kind, name, template FROM enrich_tables WHERE id = $1`, [id]);
+    `SELECT id, client_tag, kind, name, template, source_note FROM enrich_tables WHERE id = $1`, [id]);
   if (!table) throw new Error(`table ${id} no longer exists`);
+  // The originals variant the columns were compiled from: the personalisation switch reads it.
+  table.variant = table.template ? variantOfNote(table.source_note) : undefined;
   const { rows: columns } = await pool.query(
     `SELECT key, name, position, kind, action, formula, waterfall, inputs, config, run_if, provider, needs_env, phase
        FROM enrich_columns WHERE table_id = $1 ORDER BY position`, [id]);
@@ -149,11 +167,12 @@ async function claim(n) {
         SELECT q.id FROM enrich_rows q
           JOIN enrich_tables t ON t.id = q.table_id AND NOT t.is_paused
          WHERE q.run_status = 'queued' AND q.next_run_at <= now()
+           AND (t.template IS NULL OR NOT (t.template = ANY($3::text[])))
          ORDER BY q.next_run_at, q.id
          LIMIT $2
            FOR UPDATE OF q SKIP LOCKED)
       RETURNING r.id, r.table_id, r.run_force, r.attempts, r.created_at, r.claim_token, r.next_run_at`,
-    [randomUUID(), n]
+    [randomUUID(), n, [...RETIRED_TEMPLATES]]
   );
   return rows;
 }
@@ -267,15 +286,25 @@ async function processRow(r) {
     .join(" ")
     .toLowerCase()
     .slice(0, 2000);
-  // A template Companies row's summary goes to the Companies tab when the row
-  // finishes (not when it is queued again), while this worker still holds it.
-  const project = (status) =>
-    def.table.template
-      ? projectCompany(pool, {
-          rowId: r.id, claimToken: r.claim_token, tableId: r.table_id, clientTag: def.table.client_tag, values: result.values,
-          waiting: status === "waiting", failed: status === "error",
-        })
-      : null;
+  // A pipeline row's summary goes to the Companies tab when the row finishes
+  // (not when it is queued again), while this worker still holds it: a company
+  // row as a company, an inbox or People row as one of its company's contacts.
+  const project = (status) => {
+    const opts = {
+      rowId: r.id, claimToken: r.claim_token, tableId: r.table_id, clientTag: def.table.client_tag, values: result.values,
+      waiting: status === "waiting", failed: status === "error",
+    };
+    switch (def.table.template) {
+      case PIPELINE_TEMPLATES.companies.template:
+        return projectCompanyV2(pool, opts);
+      case PIPELINE_TEMPLATES.inboxes.template:
+        return projectContact(pool, { ...opts, kind: "general" });
+      case PIPELINE_TEMPLATES.people.template:
+        return projectContact(pool, { ...opts, kind: "person" });
+      default:
+        return null;
+    }
+  };
   if (result.retryable && r.attempts < MAX_ATTEMPTS) {
     const delay = 30_000 * 2 ** (r.attempts - 1);
     await finish(r, { status: "queued", nextRunAt: new Date(Date.now() + delay).toISOString(), lastError: result.retryable, search });
@@ -308,13 +337,30 @@ async function safeProcess(r) {
 
 // ── Heartbeat (the Clay tab's "worker running" pill) ────────────────────────
 
+/** The originals loaded and today's spend, for the heartbeat; null when they can't be read (before migration 125). */
+async function pipelineInfo() {
+  try {
+    const [originals, spend] = await Promise.all([originalsSummary(pool), spentToday(pool)]);
+    return { originals, spend };
+  } catch {
+    return { originals: null, spend: null };
+  }
+}
+
 async function heartbeat({ starting = false, stopping = false } = {}) {
+  const { originals, spend } = await pipelineInfo();
   const info = {
     concurrency: CONCURRENCY,
     in_flight: inFlight,
     ...stats,
-    keys: Object.fromEntries(PROVIDER_KEYS.map((k) => [k, Boolean(env[k])])),
+    keys: Object.fromEntries([...PROVIDER_KEYS, ...OPTIONAL_KEYS].map((k) => [k, Boolean(env[k])])),
+    // The email finders' and Enrichley's keys: a step whose key is not held is skipped, never waited for.
+    optional_keys: Object.fromEntries(OPTIONAL_KEYS.map((k) => [k, Boolean(env[k])])),
     capabilities: CAPABILITIES,
+    // The Clay originals loaded (default variant), for the tab's "originals loaded" pill.
+    originals,
+    // What the pipeline spent today (UTC): Reoon checks and OpenAI dollars, against enrich_settings.spend_caps.
+    spend_today: spend,
     // The pipeline's Reoon account as last read (daily credits, instant credits, when): the Companies tab shows the checks left today.
     reoon: reoonBalanceInfo(),
     aiark: {
@@ -391,19 +437,32 @@ async function aiarkLoop() {
   }
 }
 
-// ── Template rows waiting on a key: queued again once the keys can pay ──────
+// ── Template rows waiting on a key or a cap: queued again once it cleared ───
 
 let sweepBusy = false;
+let retiredLogged = false;
 
 async function sweepWaitingTemplateRows() {
-  if (sweepBusy || !env.OPENAI_API_KEY || !env.ENRICH_REOON_API_KEY) return;
+  if (sweepBusy) return;
   sweepBusy = true;
   try {
-    const { queued, why } = await requeueWaitingTemplateRows(pool, env);
-    if (queued) log(`queued ${queued} waiting Companies row(s) again: both keys are set and Reoon has daily credits`);
-    else if (why) log(`waiting Companies rows left waiting: ${why}`);
+    const settings = await readSettings(pool);
+    const { queued, waiting, why } = await requeueWaitingTemplateRows(pool, env, { settings });
+    if (queued) log(`queued ${queued} waiting pipeline row(s) again: what kept them waiting has cleared`);
+    if (waiting && why) log(`${waiting} pipeline row(s) left waiting: ${why}`);
+    const held = await requeueRowsForHeldKeys(pool, env, { keys: OPTIONAL_KEYS, noteOf: absentKeyNote });
+    if (held.queued) log(`queued ${held.queued} pipeline row(s) again: their steps for ${held.keys.join(", ")} can run now`);
+    if (!retiredLogged) {
+      const { rows: [v1] } = await pool.query(
+        `SELECT count(*)::int AS n FROM enrich_rows r JOIN enrich_tables t ON t.id = r.table_id
+          WHERE t.template = ANY($1::text[]) AND r.run_status IN ('queued', 'running')`,
+        [[...RETIRED_TEMPLATES]]
+      );
+      if (v1.n) log(`${v1.n} row(s) of a retired companies_v1 table are left as they are: they are never worked (D24)`);
+      retiredLogged = true;
+    }
   } catch (e) {
-    log(`sweeping waiting Companies rows: ${e.message}`);
+    log(`sweeping waiting pipeline rows: ${e.message}`);
   } finally {
     sweepBusy = false;
   }
