@@ -596,19 +596,25 @@ async function finishReview(db, run) {
  */
 export async function advanceBackfill({ pool, log = () => {}, settings, pageSize = BACKFILL_PAGE }) {
   const token = randomUUID();
-  const { rows: [run] } = await pool.query(
-    `UPDATE fit_backfill_runs r SET claim_token = $1, claimed_at = now()
-      WHERE r.id = (
-        SELECT g.id FROM fit_backfill_runs g
-         WHERE g.status = ANY($2::text[])
-           AND (g.claim_token IS NULL OR g.claimed_at < now() - make_interval(mins => $3))
-           AND (g.progress->>'next_at' IS NULL OR (g.progress->>'next_at')::timestamptz <= now())
-         ORDER BY g.created_at
-         LIMIT 1
-           FOR UPDATE SKIP LOCKED)
-      RETURNING r.*`,
-    [token, RUN_GOING, CLAIM_STALE_MIN]
-  );
+  let run;
+  try {
+    ({ rows: [run] } = await pool.query(
+      `UPDATE fit_backfill_runs r SET claim_token = $1, claimed_at = now()
+        WHERE r.id = (
+          SELECT g.id FROM fit_backfill_runs g
+           WHERE g.status = ANY($2::text[])
+             AND (g.claim_token IS NULL OR g.claimed_at < now() - make_interval(mins => $3))
+             AND (g.progress->>'next_at' IS NULL OR (g.progress->>'next_at')::timestamptz <= now())
+           ORDER BY g.created_at
+           LIMIT 1
+             FOR UPDATE SKIP LOCKED)
+        RETURNING r.*`,
+      [token, RUN_GOING, CLAIM_STALE_MIN]
+    ));
+  } catch (e) {
+    if (e?.code === "42P01") return null; // migration 126 not applied yet: there is no run to work
+    throw e;
+  }
   if (!run) return null;
   const save = (c, fields) => {
     const keys = Object.keys(fields);
