@@ -1272,7 +1272,11 @@ async function partB12(routes) {
   check("the setup: plan, runs, originals, spend, keyed steps", s.status === 200 && s.body.plan && Array.isArray(s.body.runs) && s.body.originals?.default && s.body.spend?.reoon && Array.isArray(s.body.keys) && s.body.keys.some((k) => k.key === "ENRICHLEY_API_KEY") && s.body.worker?.peopleRuns === true, JSON.stringify(s.body).slice(0, 300));
   check("... a bad tag: 400", (await call(setup.GET, { query: { tag: "not a tag!" } })).status === 400);
   const list = await call(runs.GET, { query: { tag: A } });
-  check("the runs list, newest first, with candidates by verdict", list.status === 200 && list.body.runs[0]?.client_tag === A && typeof list.body.runs[0].verdicts === "object" && list.body.counts);
+  const mainRun = list.body.runs.find((x) => x.id === world.run.id);
+  const mainCands = await candidatesOf(world.run.id);
+  check("the runs list, newest first, with candidates by verdict and by track", list.status === 200 && list.body.runs[0]?.client_tag === A && Boolean(list.body.counts) &&
+    mainRun && Object.values(mainRun.verdicts).reduce((a2, n) => a2 + n, 0) === mainCands.length &&
+    Object.values(mainRun.tracks).reduce((a2, n) => a2 + n, 0) === mainCands.filter((c) => c.track).length && mainRun.capped_batches === 0 && mainRun.ceiling === peopleSpendCeiling(world.run));
 
   const post = (body) => call(runs.POST, { body: { tag: A, mode: "demo", ...body } });
   const stored = await one(`SELECT value FROM enrich_settings WHERE key = 'people_pipeline'`);

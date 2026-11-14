@@ -11,6 +11,8 @@ import { IosSegmentedControl } from "@/components/ui/ios/ios-segmented-control";
 import type { RunMode } from "@/lib/aiark/types";
 import {
   ACTIVE_PEOPLE_RUN_STATUSES,
+  TRACK_LABELS,
+  TRACKS,
   type CompaniesSetup,
   type PeopleRun,
   type PeopleRunStatus,
@@ -49,6 +51,16 @@ export function lookSummary(r: PeopleRun) {
   const v = r.verdicts;
   const held = (v.held ?? 0) + (v.never_contact ?? 0) + (v.bounced ?? 0);
   return `${fmt(r.looked)} looked at, ${fmt(held)} held, ${fmt(v.outside ?? 0)} outside, ${fmt(r.picked)} picked`;
+}
+
+/** What else a run's Look found: titles per track, batches past the page cap, companies left for the next run. */
+function lookNotes(r: PeopleRun): string[] {
+  const out: string[] = [];
+  if (r.looked) out.push(`Titles per track: ${TRACKS.map((t) => `${TRACK_LABELS[t].toLowerCase()} ${fmt(r.tracks?.[t] ?? 0)}`).join(", ")}.`);
+  if (r.capped_batches) out.push(`More people than a search may look at in ${fmt(r.capped_batches)} batch${r.capped_batches === 1 ? "" : "es"}: the rest were not looked at.`);
+  if (r.more_companies) out.push("More companies were ready than one run takes: the next run takes the rest.");
+  if (r.lost_answers) out.push(`${fmt(r.lost_answers)} AI Ark answer${r.lost_answers === 1 ? " was" : "s were"} lost, each counted at 1 credit.`);
+  return out;
 }
 
 function Phrases({ phrases }: { phrases: string[] }) {
@@ -280,6 +292,11 @@ export function PeoplePanel({
               <span className="text-[12.5px]">{lookSummary(current)}</span>
               {current.mode === "demo" && <span className="text-[12px] text-muted-foreground">demo</span>}
             </div>
+            {lookNotes(current).map((n) => (
+              <p key={n} className="text-[12px] text-muted-foreground">
+                {n}
+              </p>
+            ))}
             {current.status === "looked" && (
               <p className="text-[12.5px]">
                 Buying the picks costs at most <b>{fmt(Math.min(current.picked, current.max_people))}</b> credits, plus {MISS} a miss if a miss is charged (not yet seen live).

@@ -157,9 +157,10 @@ export const PEOPLE_RUN_FIELDS = `r.id, r.client_tag, r.mode, r.source, r.status
   r.picked, r.bought, r.with_email, r.skipped_held, r.lost_answers, r.credits_used::float8 AS credits_used,
   r.credits_before::float8 AS credits_before, r.credits_after::float8 AS credits_after, r.attempts, r.next_run_at, r.last_error,
   r.stop_reason, r.created_at, r.started_at, r.finished_at, r.updated_at, r.buy_approved_at, r.filters,
+  CASE WHEN jsonb_typeof(r.progress->'capped') = 'array' THEN jsonb_array_length(r.progress->'capped') ELSE 0 END AS capped_batches,
   up.full_name AS created_by_name, ub.full_name AS buy_approved_by_name`;
 
-type RunRow = Omit<PeopleRun, "verdicts" | "settled" | "ceiling" | "more_companies"> & { filters: Record<string, unknown> };
+type RunRow = Omit<PeopleRun, "verdicts" | "tracks" | "settled" | "ceiling" | "more_companies"> & { filters: Record<string, unknown> };
 
 /** A client's newest people runs (10), with their candidates by verdict and companies settled. */
 export async function peopleRunsFor(c: PoolClient, tag: string, limit = 10): Promise<PeopleRun[]> {
@@ -191,6 +192,7 @@ export async function peopleRunById(c: PoolClient, id: string): Promise<PeopleRu
 async function attachRunStats(c: PoolClient, rows: RunRow[]): Promise<PeopleRun[]> {
   const ids = rows.map((r) => r.id);
   const verdicts = new Map<string, Record<string, number>>();
+  const tracks = new Map<string, Record<string, number>>();
   const settled = new Map<string, number>();
   if (ids.length) {
     const { rows: v } = await c.query<{ run_id: string; verdict: string; n: number }>(
@@ -198,6 +200,12 @@ async function attachRunStats(c: PoolClient, rows: RunRow[]): Promise<PeopleRun[
       [ids]
     );
     for (const x of v) verdicts.set(x.run_id, { ...(verdicts.get(x.run_id) ?? {}), [x.verdict]: x.n });
+    // Titles found per track (R13): what the first Looks show about the phrases.
+    const { rows: t } = await c.query<{ run_id: string; track: string; n: number }>(
+      `SELECT run_id, track, count(*)::int AS n FROM aiark_people_candidates WHERE run_id = ANY($1::uuid[]) AND track IS NOT NULL GROUP BY 1, 2`,
+      [ids]
+    );
+    for (const x of t) tracks.set(x.run_id, { ...(tracks.get(x.run_id) ?? {}), [x.track]: x.n });
     const { rows: st } = await c.query<{ run_id: string; n: number }>(
       `SELECT run_id, count(*)::int AS n FROM aiark_people_run_companies WHERE run_id = ANY($1::uuid[]) AND state IN ('settled', 'skipped_held') GROUP BY 1`,
       [ids]
@@ -207,6 +215,7 @@ async function attachRunStats(c: PoolClient, rows: RunRow[]): Promise<PeopleRun[
   return rows.map(({ filters, ...r }) => ({
     ...r,
     verdicts: verdicts.get(r.id) ?? {},
+    tracks: tracks.get(r.id) ?? {},
     settled: settled.get(r.id) ?? 0,
     ceiling: peopleSpendCeiling({ batches: r.batches, max_people: r.max_people, filters }),
     more_companies: filters?.more_companies === true,

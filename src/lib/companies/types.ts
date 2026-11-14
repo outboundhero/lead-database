@@ -405,6 +405,10 @@ export interface PeopleRun {
   buy_approved_by_name: string | null;
   /** The candidates by screen verdict. */
   verdicts: Partial<Record<CandidateVerdict, number>>;
+  /** The candidates by track: the people whose titles held each track's phrases. */
+  tracks: Partial<Record<Track, number>>;
+  /** Batches with more people than a search may look at (pages_per_search): the rest were not looked at. */
+  capped_batches: number;
   /** Companies settled so far. */
   settled: number;
   /** Where the run stops itself, in credits. */
