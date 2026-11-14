@@ -942,18 +942,21 @@ async function pickBatch(ctx, batch) {
   const { run } = ctx;
   const f = run.filters;
   const c = await ctx.pool.connect();
+  let skippedRows = [];
   try {
     await c.query("BEGIN");
     const { rows: [held] } = await c.query(`SELECT 1 FROM aiark_people_runs WHERE id = $1 AND claim_token = $2 FOR UPDATE`, [run.id, run.claim_token]);
     if (!held) throw new LostClaim();
-    const { rowCount: skipped } = await c.query(
+    ({ rows: skippedRows } = await c.query(
       `UPDATE aiark_people_run_companies rc
           SET state = 'skipped_held', looked_at = coalesce(rc.looked_at, now()), settled_at = now(), tracks = $3::jsonb
         WHERE rc.run_id = $1 AND rc.batch = $2 AND rc.state = 'waiting' AND $4::boolean
           AND EXISTS (SELECT 1 FROM aiark_people_candidates h
-                       WHERE h.run_id = rc.run_id AND h.company_row_id = rc.company_row_id AND h.verdict = 'held')`,
+                       WHERE h.run_id = rc.run_id AND h.company_row_id = rc.company_row_id AND h.verdict = 'held')
+       RETURNING rc.company_row_id::bigint AS company_row_id`,
       [run.id, batch, HELD_TRACKS, f.skip_company_when_held !== false]
-    );
+    ));
+    const skipped = skippedRows.length;
     const { rows: picks } = await c.query(
       `WITH ranked AS (
          SELECT c.person_id,
@@ -991,6 +994,12 @@ async function pickBatch(ctx, batch) {
     throw e;
   } finally {
     c.release();
+  }
+  // A company skipped because someone is held is settled now: its row is worked again, so people_at_company says so.
+  if (skippedRows.length) {
+    await ctx.pool.query(`UPDATE enrich_companies SET people_settled_at = now() WHERE row_id = ANY($1::bigint[])`, [skippedRows.map((x) => Number(x.company_row_id))]);
+    ctx.progress = { ...ctx.progress, requeue: [...new Set([...(ctx.progress.requeue ?? []), ...skippedRows.map((x) => Number(x.company_row_id))])] };
+    await requeueCompanies(ctx);
   }
 }
 
