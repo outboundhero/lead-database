@@ -628,6 +628,11 @@ async function partB(routes) {
   T.role = "manager";
   await setPipeline(false);
   check("pulls switched off: the count and the pull are refused (409)", (await call(count.POST, { body: { tag: A, mode: "demo", ...v } })).status === 409 && (await call(runs.POST, { body: pullBody() })).status === 409);
+  await pool.query(`UPDATE enrich_settings SET value = value || '{"enabled": true, "tags": []}'::jsonb WHERE key = 'company_pipeline'`);
+  const notListedCount = await call(count.POST, { body: { tag: A, mode: "demo", ...v } });
+  const notListedPull = await call(runs.POST, { body: pullBody() });
+  check("pulls on, but the client not on their client list: the count and the pull are refused (409)",
+    notListedCount.status === 409 && /client list/.test(notListedCount.body?.error ?? "") && notListedPull.status === 409 && /client list/.test(notListedPull.body?.error ?? ""));
   await setPipeline(true);
   const first = await call(runs.POST, { body: pullBody() });
   const run1 = first.body?.run;
