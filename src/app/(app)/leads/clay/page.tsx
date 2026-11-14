@@ -87,13 +87,32 @@ const STATUS_PILLS: { value: RowStatus | ""; label: string }[] = [
   { value: "error", label: "Errors" },
 ];
 
+// Keys whose steps make a row wait until the key is on the worker.
 const KEY_LABELS: Record<string, string> = { OPENAI_API_KEY: "OpenAI", CLEARBIT_API_KEY: "Clearbit", ENRICH_REOON_API_KEY: "Reoon" };
+// Keys of the pipeline's keyed steps (the email finders and Enrichley): without one its steps are
+// skipped ("Needs <KEY> (not held)") and read as empty, and no row waits for them.
+const SKIPPED_KEY_LABELS: Record<string, string> = {
+  FINDYMAIL_API_KEY: "Findymail",
+  PROSPEO_API_KEY: "Prospeo",
+  ANYMAIL_FINDER_API_KEY: "Anymail Finder",
+  ENRICHLEY_API_KEY: "Enrichley",
+};
 
-// A client's Companies table made by the Companies tab's pulls (enrich_tables.template).
-const TEMPLATE_NOTE = "Companies arrive from pulls on the Companies tab.";
+// A client's pipeline table (enrich_tables.template), by kind: where its rows come from.
+const TEMPLATE_NOTE: Partial<Record<EnrichTableSummary["kind"], string>> = {
+  companies: "Companies arrive from pulls on the Companies tab.",
+  people:
+    "People arrive from people runs on the Companies tab: one person a track at each company, bought from AI Ark after a manager's click, or copied free when another run bought them. With the AI searches switched on, the Companies table writes the people its searches find here too.",
+  inboxes:
+    "General inboxes arrive from the Companies table: each general email its steps find becomes a row here, up to the settings' number of inboxes per company, and is checked as the originals check it.",
+};
+const templateNote = (t: EnrichTableSummary) => TEMPLATE_NOTE[t.kind] ?? TEMPLATE_NOTE.companies!;
 
-/** One of a client's Companies tables, as the table picker shows it. */
-const companyTableLabel = (t: EnrichTableSummary) => `${t.name} · ${fmt(t.row_count)} rows${t.template ? " · from pulls" : ""}`;
+// Where a template table's rows come from, as its picker label says.
+const FROM_LABEL: Partial<Record<EnrichTableSummary["kind"], string>> = { companies: "from pulls", people: "from people runs", inboxes: "from the Companies table" };
+
+/** One of a client's tables of a kind (its pipeline table, or a hand-seeded copy), as the table picker shows it. */
+const kindTableLabel = (t: EnrichTableSummary) => `${t.name} · ${fmt(t.row_count)} rows${t.template ? ` · ${FROM_LABEL[t.kind] ?? "pipeline"}` : ""}`;
 
 // Filters a link can open the grid with (the Companies tab's counts and rows):
 // ?q= fills the search box, ?status= picks a row status, ?f= holds column
@@ -128,9 +147,9 @@ const EMPTY_NOTE: Record<EnrichTableSummary["kind"], (tag: string) => string> = 
   companies: (tag) =>
     `Rows arrive from the GMaps Scraper once ${tag} is switched to "Database" or "Both" there, or from a CSV — for example the client's Clay table exported as CSV, which also lets every cell be compared with Clay's own result.`,
   people: () =>
-    "In Clay, the Companies table writes up to four decision-makers per company into this table. Those steps are built in Phase 2; until then the columns are here so the whole table can be seen.",
+    "A copy of the client's own Clay People table, for reading its columns. The pipeline writes people into the client's People (pipeline) table, made by its first pull or people run on the Companies tab.",
   inboxes: () =>
-    "In Clay, the Companies table writes each company's general inboxes (info@, office@ …) into this table. Those steps are built in Phase 2; until then the columns are here so the whole table can be seen.",
+    "A copy of the client's own Clay General inboxes table, for reading its columns. The pipeline writes general inboxes into the client's General inboxes (pipeline) table, made by its first pull on the Companies tab.",
   ai_ark: () =>
     "People appear here as the run pulls them from AI Ark, and each one's outcome is worked out as they land. A queued run starts as soon as the enrichment worker picks it up.",
 };
@@ -202,17 +221,21 @@ function ClayTab() {
     () => (tables ?? []).filter((t) => t.kind === "ai_ark" && t.client_tag === table?.client_tag),
     [tables, table?.client_tag]
   );
-  // The client's Companies tables: the one its pulls fill first, then a hand-seeded one (the route's order).
-  const companyTables = useMemo(
-    () => (tables ?? []).filter((t) => t.kind === "companies" && t.client_tag === table?.client_tag),
-    [tables, table?.client_tag]
+  // The client's tables of the open kind (Companies, People or General inboxes): its pipeline table
+  // first, then a hand-seeded copy (the route's order).
+  const kindTables = useMemo(
+    () => (tables ?? []).filter((t) => t.kind !== "ai_ark" && t.kind === table?.kind && t.client_tag === table?.client_tag),
+    [tables, table?.kind, table?.client_tag]
   );
 
   if (!canView) return <AccessDenied />;
 
   const missingKeys = Object.entries(worker?.info.keys ?? {})
-    .filter(([, set]) => !set)
+    .filter(([k, set]) => !set && !(k in SKIPPED_KEY_LABELS))
     .map(([k]) => KEY_LABELS[k] ?? k);
+  const skippedKeys = Object.entries(worker?.info.keys ?? {})
+    .filter(([k, set]) => !set && k in SKIPPED_KEY_LABELS)
+    .map(([k]) => ({ key: k, label: SKIPPED_KEY_LABELS[k] }));
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
@@ -259,6 +282,14 @@ function ClayTab() {
                 <KeyRound className="size-3" /> No {k} key
               </span>
             ))}
+          {worker?.online && skippedKeys.length > 0 && (
+            <span
+              title={`The worker holds no ${skippedKeys.map((k) => k.key).join(", ")}, so those steps (the email finders, Enrichley) show "Needs <KEY> (not held)", are read as empty, and no row waits for them. Once a key is on the worker, the rows those steps skipped are queued again.`}
+              className="flex items-center gap-1 rounded-full bg-muted px-2.5 py-1 text-[11.5px] font-medium text-muted-foreground"
+            >
+              <KeyRound className="size-3" /> Skipped without a key: {skippedKeys.map((k) => k.label).join(", ")}
+            </span>
+          )}
         </div>
       </div>
 
@@ -333,17 +364,17 @@ function ClayTab() {
                 </Button>
               </div>
             )}
-            {table.kind === "companies" && (companyTables.length > 1 || table.template) && (
+            {table.kind !== "ai_ark" && (kindTables.length > 1 || table.template) && (
               <div className="mb-1 ml-auto flex items-center gap-2">
-                {companyTables.length > 1 && (
+                {kindTables.length > 1 && (
                   <Select value={table.id} onValueChange={(id) => router.replace(`/leads/clay?t=${id}`)}>
-                    <SelectTrigger className="h-8 w-[320px] rounded-full text-[12.5px]" aria-label="Companies table">
+                    <SelectTrigger className="h-8 w-[340px] rounded-full text-[12.5px]" aria-label={`${KIND_TABS.find((k) => k.kind === table.kind)?.label ?? "Companies"} table`}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {companyTables.map((t) => (
+                      {kindTables.map((t) => (
                         <SelectItem key={t.id} value={t.id}>
-                          {companyTableLabel(t)}
+                          {kindTableLabel(t)}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -650,7 +681,13 @@ function TableView({
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder={
-              isRun ? "Search name, title, company, email…" : table.template ? "Search company, website, email, city…" : "Search name, address, website…"
+              isRun || (table.template && table.kind === "people")
+                ? "Search name, title, company, email…"
+                : table.template && table.kind === "inboxes"
+                  ? "Search email, company, domain, city…"
+                  : table.template
+                    ? "Search company, website, email, city…"
+                    : "Search name, address, website…"
             }
             className="h-9 rounded-full pl-8 text-[13px]"
           />
@@ -812,7 +849,7 @@ function TableView({
               <div className="sticky left-0 flex max-w-[calc(100vw-22rem)] flex-col items-center gap-3 p-10 text-center">
                 <p className="text-[15px] font-semibold">No rows yet</p>
                 <p className="max-w-lg text-[13px] leading-relaxed text-muted-foreground">
-                  {table.template ? TEMPLATE_NOTE : EMPTY_NOTE[table.kind](table.client_tag)}
+                  {table.template ? templateNote(table) : EMPTY_NOTE[table.kind](table.client_tag)}
                 </p>
                 {takesCsv && (
                   <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
