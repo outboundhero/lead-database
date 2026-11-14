@@ -59,7 +59,10 @@ import { normalizeCompanyName, normalizePhoneNumber, TOOL_STANDIN_ACTIONS } from
 import { CANNOT_CONFIRM, confirmDryRun, finishRows, heldRows, liveCheck, recordDryRun, rowsSha } from "./lib/bison/fit-removal.mjs";
 import { openAiCost, spentToday } from "./lib/enrich/spend.mjs";
 import { settingsFrom } from "./lib/enrich/settings.mjs";
-import { ensureTable } from "./lib/enrich/templates.mjs";
+import { compileTemplates, ensureTable } from "./lib/enrich/templates.mjs";
+import { originalRows, originalsMap } from "./lib/enrich/seed-originals.mjs";
+import { fixtureSeedExports } from "./fixtures/clay-originals/fixtures.mjs";
+import { ACTIONS } from "./lib/enrich/actions.mjs";
 import { contactSummary } from "./lib/enrich/project-contacts.mjs";
 import { PIPELINE_ACTIONS } from "./lib/enrich/pipeline-actions.mjs";
 import { pullsToAdd } from "./lib/aiark/add.mjs";
@@ -98,16 +101,10 @@ const FAKE_OPENAI = { OPENAI_API_KEY: "fttest-made-up-openai" };
 
 let passed = 0;
 let failed = 0;
-let waiting = 0;
 function check(name, ok, detail = "") {
   if (ok) passed++;
   else failed++;
   console.log(`${ok ? "  ok  " : "  FAIL"} ${name}${!ok && detail ? ` : ${detail}` : ""}`);
-}
-/** A check that needs another builder's code first: shown, never counted as passed or failed. */
-function pending(name, why) {
-  waiting++;
-  console.log(`  wait ${name} (${why})`);
 }
 const section = (s) => console.log(`\n${s}`);
 const source = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
@@ -1508,14 +1505,29 @@ try {
       !P({ enabled: true, tags: [TAG_B], shared_text_ok: true }).flagOn("personalisation", TAG_A, { variant: "default" }));
   check("has_question is written from the question cell", contactSummary("general", { question: "Made-up?" }, {}).has_question === true &&
     contactSummary("general", { question: "" }, {}).has_question === false);
-  const dns = await PIPELINE_ACTIONS.dns_mx.run({ inputs: { domain: dom("acme") }, config: {}, db: pool, env: {} });
-  if (/TODO\(A\)/.test(dns.note ?? "")) {
-    pending("P#58 calls only dns.google.com", "dns_mx is Builder A's, not built in this branch");
-    pending("P#61 and G#49 do not run while 0.4 item 4 waits", "the compiled columns are Builder A's");
-  } else {
-    check("P#58 calls only Google's public DNS", net.dns.length > 0 && net.dns.every((h) => h === "dns.google.com") && net.refused === 0, JSON.stringify({ dns: net.dns, refused: net.refused }));
-    pending("P#61 and G#49 do not run while 0.4 item 4 waits", "checked at integration with the compiled columns");
+  // The compiled columns, from the made-up exports (scripts/fixtures/clay-originals): P#58, P#61 and G#49 as the templates build them.
+  const fx = compileTemplates(originalsMap(originalRows(fixtureSeedExports())), { settings: null });
+  const p58 = fx.people.find((c) => c.key === "email_provider_check_api");
+  const p61 = fx.people.find((c) => c.key === "question_ai");
+  const g49 = fx.inboxes.find((c) => c.key === "question_ai");
+  const dnsBefore = net.dns.length;
+  const refusedBefore = net.refused;
+  // dns_mx sends the compiled column's own URL (P#58: "https://dns.google.com/resolve?type=MX&name=" + the email domain).
+  const mx = await PIPELINE_ACTIONS.dns_mx.run({ inputs: { url: `https://dns.google.com/resolve?type=MX&name=${dom("acme")}` }, config: {}, db: pool, env: {} });
+  const elsewhere = await PIPELINE_ACTIONS.dns_mx.run({ inputs: { url: `https://dns.${HOST}/resolve?type=MX&name=${dom("acme")}` }, config: {}, db: pool, env: {} });
+  check("P#58 calls only Google's public DNS", p58?.action === "dns_mx" && /^"https:\/\/dns\.google\.com\//.test(p58?.inputs?.url ?? "") &&
+    (p58?.config?.flag ?? []).includes("personalisation") && mx.status === "done" && elsewhere.status === "error" &&
+    net.dns.length === dnsBefore + 1 && net.dns.every((h) => h === "dns.google.com") && net.refused === refusedBefore,
+    JSON.stringify({ action: p58?.action, mx: mx.status, elsewhere: elsewhere.status, dns: net.dns.slice(dnsBefore), refused: net.refused - refusedBefore }));
+  const openaiBefore = net.openai.length;
+  const asked = [];
+  for (const c of [p61, g49]) {
+    asked.push(await ACTIONS.ai_web.run({ inputs: { prompt: "\"[made-up] one question\"" }, config: c?.config ?? {}, env: {}, settings: settingsFrom([]), db: pool, row: { id: 0 }, column: c }));
   }
+  check("P#61 and G#49 do not run while 0.4 item 4 waits: their table examples are kept, and nothing is sent",
+    [p61, g49].every((c) => c?.action === "ai_web" && typeof c.config?.table_examples === "string" && !c.config?.examples_supported && (c.config?.flag ?? []).includes("personalisation")) &&
+      asked.every((r) => r.status === "skipped" && /table examples/.test(r.note ?? "")) && net.openai.length === openaiBefore,
+    JSON.stringify(asked.map((r) => [r.status, r.note])));
   check("the stand-ins: a tidy company name in title case, a North American number, and nothing else",
     normalizeCompanyName({ companyName: "  acme FTTEST cleaning, ", titleCase: true }) === "Acme Fttest Cleaning" &&
       normalizeCompanyName({ companyName: "acme 24/7 & sons", titleCase: true }) === "Acme 24/7 & Sons" &&
@@ -1638,5 +1650,5 @@ try {
 }
 for (const p of T.pools) await p.end().catch(() => {});
 await pool.end();
-console.log(`\n${passed} passed, ${failed} failed${waiting ? `, ${waiting} waiting for another builder's code` : ""}`);
+console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed || exitCode ? 1 : 0);

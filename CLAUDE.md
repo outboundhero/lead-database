@@ -2321,9 +2321,10 @@ fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`,
   an hour the worker queues waiting template rows again, in pages, each only when what
   made it wait has cleared (`requeueWaitingTemplateRows()`), and the rows whose finder
   or Enrichley steps were skipped for a key it now holds (`requeueRowsForHeldKeys()`).
-  The heartbeat carries `capabilities: ["company_runs", "pipeline_v2"]` (the pull route
-  refuses a worker without them), the last Reoon balance read, the originals loaded,
-  today's spend and which optional keys are held.
+  The heartbeat carries `capabilities: ["company_runs", "pipeline_v2", "people_runs",
+  "fit_scoring"]` (each route refuses a worker without the one it needs), the last Reoon
+  balance read, the originals loaded, today's spend, which optional keys are held, and
+  the fit loop's state.
 - **The Companies tab** (`/leads/companies`, manager and up; the settings sheet is
   admin): pick a client, see what AI Ark will be asked, its company filters (read
   only: size and industries are saved on the AI Ark tab), count (one Company Search
@@ -2409,11 +2410,13 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   (written by people runs and the AI searches' write-tos, input cells only): P#4 to P#62.
 - **Switches** (`flagOn()`; a switched-off column is skipped "Switched off: <switch>"
   and read as empty): `company_pipeline` (pulls and counts refuse a client not on
-  `company_pipeline.tags`), `people_pipeline` (`people_at_company`, C#41 to C#58),
-  `people_pipeline.ai_searches` (C#41, C#48, C#50, C#56), `company_pipeline.linkedin_profile_reads`
-  (C#50, P#27) and `personalisation` (P#57 to P#62, G#45 to G#50; also needs the
-  client's own originals unless `shared_text_ok`). The question steps P#61 and G#49
-  wait for how Clay sends their table examples, so no question is written yet.
+  `company_pipeline.tags`), `people_pipeline` (`people_at_company`, C#41 to C#58, people
+  runs), `people_pipeline.ai_searches` (C#41, C#48, C#50, C#56), `people_pipeline.auto_buy`
+  (Buy without a manager's click), `company_pipeline.linkedin_profile_reads` (C#50, P#27)
+  and `personalisation` (P#57 to P#62, G#45 to G#50; also needs the client's own
+  originals unless `shared_text_ok`). A sub-switch needs its parent on for the client.
+  The question steps P#61 and G#49 wait for how Clay sends their table examples, so no
+  question is written yet. Every switch ships off with an empty client list.
 - **AI steps:** one setting per column in `enrich_settings.models`, every one
   `gpt-6-luna` (2026-11-13), with the web search tool for the columns whose prompts
   visit pages, `max_tool_calls` from the setting, no reasoning effort, no user
@@ -2442,6 +2445,71 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   or already held), once per company and office. A listed company shows "General and
   people emails", "Has a general email", "Has people emails" or "Already in the
   database". The worker projects each row by its table's template.
+- **People runs** (`scripts/lib/aiark/people-runs.mjs`, `people-requests.mjs`; tables
+  `aiark_people_runs`, `aiark_people_run_companies`, `aiark_people_candidates`, all from
+  125), the third kind of slice in the worker's AI Ark loop, taking turns with the AI
+  Ark tab's runs and the company pulls on the one client and throttle:
+  1. **Look:** People Preview by company id (1 credit a page; `ids_per_search` 50
+     companies a search, `pages_per_search` 5), with the tracks' title phrases
+     (`enrich_settings.people_tracks`, written by the seed script; a run refuses while it
+     is missing) and the client's excluded titles. Everyone seen becomes a candidate,
+     screened free in the same slice: the database (by name and company), the person's
+     own place, the client's exclusions, the track, and the registry (`aiark_people`). A
+     person another run bought with an email is copied free as a People row.
+  2. **Pick:** one candidate per track (operations, facility and office, CEO or owner, in
+     that order), with reserves up to `tries_per_track` (1); a company where anyone
+     usable is already held is skipped (`skip_company_when_held`).
+  3. **Buy:** with `auto_buy` off (the default) the run waits in `looked` until a manager
+     clicks Buy. Export Single per pick (1 credit with an email; whether a miss is free is
+     not yet seen live), the picks checked against the registry again just before, so a
+     person bought since the Look is copied, never bought twice.
+  4. **Settle:** a track settles on a usable email (or one waiting for Enrichley), its
+     tries used, or no candidate left, with none of its People rows still being worked;
+     a settled company's row is queued again (the second pass of its row).
+  Brakes: `searches x pages_per_search + ceil(max_people x 1.25) + 10` credits, lost
+  answers counted at full price; AI Ark's balance must stay at or above
+  `people_pipeline.min_balance` (500); 3 lost Preview answers in a row stop the run, 5
+  lost Export Single answers back it off; switched off for the client mid-run, it stops
+  before its next paid call; one run per client. A run never touches `leads` and never
+  shows on the AI Ark tab (`pullsToAdd()` reads `aiark_runs` only).
+- ⚠ **The AI Ark tab and people the pipeline bought** (D43, `runs.mjs`): the tab's
+  exclusion lists leave out people only a people run bought, a tab single run copies
+  such a person free with the registry's email, and an export run pays for them.
+  `test-aiark.mjs` has a check for it.
+- **People settings** (`people_pipeline`): `enabled` and `tags` (off, []), `auto_buy` and
+  `ai_searches` (off), `ids_per_search` 50, `pages_per_search` 5, `tries_per_track` 1,
+  `max_people_per_run` 300, `recheck_days` 90 (a company looked at since is not eligible),
+  `skip_company_when_held` true, `min_balance` 500.
+- **The Companies tab, phases 2 and 3:** pills for the originals loaded, the people
+  switch and today's spend against the caps; "Steps waiting for keys" (from the
+  worker's heartbeat); counts by what each listed company shows, people (looked at,
+  held, bought, approved, waiting for Enrichley, no email) and inboxes; the people
+  panel (eligible companies, the tracks read only, the estimate, Look, the candidates,
+  Buy or Cancel, the 10 newest runs); the fit panel (see "Fit scoring") with a "Fit
+  review" link; the list with general emails and up to 3 people inline, the fit score
+  and home-office flag (the scorer's reason on hover), and the filters "with people
+  emails", "with a general email", "fit score at least" and "home office"; "All N"
+  opens one company's inboxes and people (`GET /api/companies/contacts`, keyset).
+  Routes (manager and up): `GET /api/companies/people/setup?tag=`, `GET` and `POST
+  /api/companies/people/runs` (409 while people runs are off or the client is not on
+  their list, without a `people_runs` worker, with a run going, the originals or tracks
+  missing, a v1 table, the balance under `min_balance`, or no eligible company),
+  `POST /api/companies/people/runs/buy` and `/cancel` `{ id }`, `GET
+  /api/companies/people/runs/candidates?id=&after=` (keyset, pages of 100). The
+  settings sheet (admin) edits every switch with its client list, the people and
+  personalisation blocks, the twelve model settings with their most searches,
+  `inboxes_per_company`, `min_balance` and the spend caps; what it doesn't show
+  (memory days, prices, `fit_score`) is kept as stored.
+- **Keys and environment (the enrich-worker):** `DATABASE_URL`; `OPENAI_API_KEY` (every AI
+  step and the fit scorer; best from the worker's own OpenAI project with a monthly
+  budget, since other services use the same variable name); `ENRICH_REOON_API_KEY` and
+  `ENRICH_REOON_THREADS`; `AIARK_API_KEY`, `AIARK_RPS`; `AIARK_AUTO_ADD_URL` and
+  `AIARK_AUTO_ADD_KEY` (the AI Ark tab's auto-add, and promotion's automatic rounds);
+  `FIT_POLL_MS` (5000). Optional, set by the owner on the worker only (never print or
+  copy their values): `FINDYMAIL_API_KEY`, `PROSPEO_API_KEY`, `ANYMAIL_FINDER_API_KEY`,
+  `ENRICHLEY_API_KEY`. When one is set (the worker restarts with it), its first sweep
+  queues again the rows that key's steps skipped. The web service needs
+  `AIARK_AUTO_ADD_KEY` too (the Bearer of `POST /api/companies/promote/auto`).
 - ⚠ **Clay's quirks are kept verbatim** (D2): `.ca` in C#26's blocklist drops every
   Canadian website, C#32 has no URL check, C#24 has no SAFE TO RUN clause, C#58 checks
   Person_2 fields, the write-tos' "||" clause skips their title filters. Each has a
@@ -2456,7 +2524,151 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   logic, never the real files; rebuild with
   `node scripts/fixtures/clay-originals/fixtures.mjs --write`), loaded as each made-up
   client's own variant, so the `default` originals are never changed. Local database
-  only; about 3 s together.
+  only; about 3 s together. `node --env-file=.env.local scripts/test-people.mjs` checks
+  people runs on the demo transport (by company id, with and without emails, its test
+  faults), the routes, the settings route's shape and the compiled People template
+  (about 10 s).
+- **Before a push:** stop the worker; on the local database with 125 to 127 applied run
+  `test-originals.mjs`, `test-pipeline-v2.mjs`, `test-companies.mjs`, `test-people.mjs`,
+  `test-fit.mjs` and `AIARK_TEST_TAG=<a local cleaning client> test-aiark.mjs`; then
+  `npx tsc --noEmit`, `npx eslint`, `npx next build`; then the scans of the added lines,
+  from a scratch folder outside the repo: client names (any case) and tags of 3 or more
+  characters (exact case) from `client_tags`, the shorter tags checked by hand, anything
+  shaped like a key, and every 40-character run of the exports' prompts, lists and
+  examples. The repo is public.
+
+### Fit scoring (migrations 126 and 127)
+
+Phase 3: one fit score (1 to 5) per company, shared by every client, a home-office flag
+and a short reason; promotion of approved pipeline emails into `leads`; a gate that
+keeps companies under the threshold out of every push and export for the clients it
+covers; and, for companies already in campaigns, a review list and removal by a person.
+**Everything ships off:** `fit_scoring.enabled` false, `fit_rule.prompt` null (the scorer
+waits for the agency's rule; no code, migration, seed or test writes one),
+`promotion.promote_to_leads` false and `fit_gate.enabled` false, each with an empty client
+list (scoring has no list: it scores companies, not clients). With the gate off, every
+push, count and export is exactly as before (127 proves
+it for every client when it is applied; `test-fit.mjs` counts before and after).
+
+- **Tables (126):** `company_fit` (one score per company under its key: `domain`, its bare
+  domain, never a free-mail, platform or directory domain, `fit_domain_exclusions`; else
+  `name`, `lower(company)|lower(city)|STATE`), with its status (`scored`, `unscorable`,
+  `manual`), model, rule version and inputs hash; `company_fit_keys` (every key the gate
+  reads for a score: its own, its contacts' email domains, the name key promotion writes,
+  a campaign lead's other key, each with `blocked` kept in step by triggers);
+  `company_fit_queue` (priority 1: pushes waiting and the push-time check; 2: pipeline
+  companies that pass; 3: companies in campaigns); `fit_backfill_runs`,
+  `fit_review_items`, `fit_review_leads`, `fit_removal_dry_runs`. `enrich_contacts` gains
+  `promote_state`, `lead_id`, `batch_id`, `promoted_at`; `enrich_companies` gains
+  `fit_reason`, `fit_key_kind`, `fit_key`, `fit_scored_at` (beside 124's `fit_score` and
+  `home_office`); `bison_campaign_removals` gains `reason` (`misroute` or `fit`),
+  `review_item_id`, `dry_run_id` and the status `fit_held`. **127:** `push_batches` gains
+  the status `scoring` and `fit_total`, `fit_scored`, `fit_cursor`, `fit_claim_token`,
+  `fit_claimed_at`, `fit_released_by`.
+- **Functions:** `fn_bare_domain`, `fn_fit_domain_ok`, `fn_fit_domain_key(email, website)`,
+  `fn_fit_name_key(company, city, state)`, `fn_fit_gate_settings()` (security definer),
+  `fn_fit_gate_applies(tag)` (the gate on, the client's type in `fit_gate.client_types`,
+  its tag or `*` on `fit_gate.tags`), `fn_fit_refresh_blocked()`, `fn_queue_fit_removals`
+  (126); `fn_fit_condition()`, `fn_fit_for_leads(ids)` and new bodies of
+  `fn_client_eligibility_conditions` and `fn_export_leads`, which append the fit condition
+  only while the gate is on (127). ⚠ 127 refuses to run when either live body differs
+  from 093's or 050's (a hash of the body; its own body passes, for a re-run), and
+  refuses to commit when any client's eligibility would change with the gate off.
+- **The scorer** (`scripts/lib/enrich/fit-score.mjs`, the enrich-worker's fit loop, its
+  own loop beside the AI Ark loop): `fit_scoring.batch_size` companies a call (25),
+  `calls_in_flight` at once (2), on `models.fit_score` (gpt-6-luna, reasoning effort low),
+  no tools, one send per attempt; the rule is sent verbatim with a fixed format part (the
+  companies as JSON with ids, and the answer format) that says nothing about fit. The
+  facts sent are fields we hold (name, domain, place, industry, AI Ark's description, size
+  and type, up to 5 titles of people held). A company missing from an answer is tried
+  again alone, `unscorable` after 3 tries; an unchanged inputs hash skips the call; a
+  manual score is never replaced. Before each call it checks the day's fit cap
+  (`spend_caps.openai_usd_per_day.fit`, $25) and after it adds the cost. Idle while scoring
+  is off, the rule or the model is unset, or `OPENAI_API_KEY` is missing; a billing
+  refusal stops it until scoring is switched off and on again or the worker restarts.
+  Scores are copied onto the pipeline's rows (`enrich_companies`), and the Companies
+  template's `fit_score` and `home_office` columns (`fit_lookup`, free, never cached) show
+  the shared score in the Clay section ("N of 5", "Could not be scored", "Likely a home
+  office"); before 126 is applied they stay empty.
+- **Promotion** (`scripts/lib/enrich/promote.mjs`, `src/lib/companies/promote-run.ts`;
+  switch `promotion.promote_to_leads` with `promotion.tags`): approved, usable, unheld
+  contacts of listed companies scored at least `promotion.min_fit_score` (2) and blocked
+  under no key, for a client the gate covers, with the rule and model set. A person needs
+  the outcome "Approved email" and no "*" in the name (a Preview's masked last name); an
+  inbox's first name must not hold "undefined". Only addresses Reoon itself approved are
+  promoted (`validation_status = 'valid'`): one approved only by Enrichley, or found by a
+  finder, is held back, its `add_to_database` cell says why (how such addresses are marked
+  in `leads` is still to be decided). While `promotion.require_question` is on (it ships
+  on), only contacts with a question. The Uploads page's engine imports them (strategy
+  skip, never merged, `ON CONFLICT (email) DO NOTHING`), source "Companies (AI Ark)", in
+  rounds of two batches (inboxes, then people, at most `batch_max`, 1,000, each), one
+  round per client at a time. Started by a manager (`POST /api/companies/promote`) or by
+  the worker (`POST /api/companies/promote/auto` with Bearer `AIARK_AUTO_ADD_KEY`; checked
+  every minute, at most one round per client every 10 minutes; the path skips the session
+  middleware).
+- **The gate** (switch `fit_gate.enabled` with `fit_gate.tags`; `threshold` 2,
+  `client_types` Cleaning and Canada Cleaning, `require_scored` true). While it applies to
+  a client: its eligibility gains the fit condition (counts, availability, the wizard's
+  preview, the push-worker's final gate, retries, re-pushes and the validation worker);
+  its pushes start in `scoring` (the push-batch route and `scripts/queue-repush.mts`) and
+  the fit loop sets them `pending` once their companies are scored or unscorable; at push
+  time, leads whose company has no score or no key are skipped ("company not scored yet",
+  "no company key to score") and queued for scoring. While the gate is on at all: a push
+  with no client tag is refused (409), the legacy `POST /api/bison/push` answers 410, and
+  filtered and selected-row exports leave out bad fits (selected rows gain Fit score and
+  Home office columns) unless an owner or admin asks for `includeBadFits`. A threshold or
+  `require_scored` change marks `fit_gate_refresh.pending`, and the fit loop brings
+  `blocked` up to date in batches of 20,000 ("Refresh pending" on the panel). An owner or
+  admin can release a waiting push unscored (`POST /api/bison/push-batches/release`,
+  logged); the push-time check still skips its unscored companies.
+- **Companies already in campaigns:** a scoring run over every company in the Email Bison
+  copy (`bison_leads`), started by an owner or admin after the estimate (companies, calls,
+  dollars, days at the cap; `GET` and `POST /api/fit/scoring-run`), paged by key, 2 seconds
+  between pages and no page while a push is gathering; it is also the "Re-score" after
+  a rule or model change. The review list per client (`POST /api/fit/review/build`,
+  `GET /api/fit/review`, `POST /api/fit/review/decide`; manager) groups the blocked
+  companies by campaign (from push history and live campaign names; nurture campaigns
+  never listed), with leads, sent, replied, interested and the oldest sync date; the copy
+  is not re-synced first. `POST /api/fit/review/queue` (owner and admin, refused unless
+  the gate covers the client) puts approved items in `bison_campaign_removals` as
+  `fit_held` (never `pending`: a CHECK forbids it), leaving out repliers, interested and
+  nurture leads.
+- ⚠ **Removal is only by a person**, after a dry run:
+  `node scripts/bison-campaign-removal-worker.mjs --reason=fit --tag=TAG --lanes=1 --dry-run`
+  (reads each lead live, writes a `fit_removal_dry_runs` record, marks nothing), then
+  `... --reason=fit --tag=TAG --lanes=1 --confirm=<dry run id>` (under 24 hours old,
+  unused, the same client and install, its rows unchanged; each lead read live again
+  before its DELETE). The live check fails closed: anything Bison's answer doesn't show
+  is "cannot confirm" and skipped. `--reason` is required (the worker exits 1 without it);
+  a misroute run needs `--reason=misroute` and never reads `fit_held` rows. The worker
+  uses TLS only for a database that is not local.
+- **Routes:** `GET /api/fit/state` (manager: the panel's status, never the rule's text);
+  `GET`, `PUT /api/fit/settings` (admin: the rule and its version, the scoring switch,
+  batch size, model; the only writer of `fit_rule`); `GET`, `PUT /api/fit/gate` (admin:
+  logged, marks the refresh pending); `POST /api/fit/score` (admin: a manual score); the
+  scoring run, review, promote and release routes above. The fit panel sits on the
+  Companies tab and on `/leads/companies/review?client=TAG`; the push batches panel shows
+  "N of M companies scored" and Release for a push waiting in `scoring`.
+- **Settings (126):** `fit_rule` `{ prompt, version }` (null), `fit_scoring` `{ enabled,
+  batch_size, calls_in_flight }`, `models.fit_score` `{ model: "gpt-6-luna",
+  reasoning_effort: "low" }`, `promotion` `{ promote_to_leads, tags, min_fit_score,
+  batch_max, require_question, source_label }`, `fit_gate` `{ enabled, tags, threshold,
+  client_types, require_scored }`, `fit_gate_refresh` `{ pending, since }`, and the fit cap
+  in `spend_caps`. The tool stand-ins in `tool-standins.mjs` (company name and phone
+  number, for Clay's built-in tools in G#14, G#35, P#18 and P#29) are not used by any
+  column until the owner says so.
+- **Tests:** stop the worker, then `node --env-file=.env.local scripts/test-fit.mjs`
+  (local database only, migrations 125 to 127 applied; made-up `FTTEST_` clients and
+  `.fttest.example` domains, removed at the end; about 30 s). No network: OpenAI, Email
+  Bison and Google's DNS answer from stubs, the removal worker and the re-push script run
+  as child processes with a Bison stub. The rule exists only in memory; the suite checks
+  that with every switch off the counts, eligibility (against 093's body), exports
+  (against 050's), pushes and the AI Ark tab's auto-add list do not move.
+- ⚠ **Rollout order:** 125, then 126, then 127 (run 127's read-only body check first),
+  then the web push and the worker upload (its heartbeat must list `fit_scoring`). Put a
+  client on `fit_gate.tags` only once the rule is set and scoring is on: until its
+  companies are scored, its pushes wait in `scoring`. The gate covers a client before any
+  removal or promotion for it, so a removed bad fit can't be pushed straight back.
 
 ## Known issues / TODO
 

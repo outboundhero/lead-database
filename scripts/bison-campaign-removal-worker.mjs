@@ -348,7 +348,7 @@ try {
     `INSERT INTO worker_locks (key, owner, locked_until) VALUES ($1, $2, now() + interval '1 hour')
      ON CONFLICT (key) DO UPDATE SET owner = EXCLUDED.owner, locked_until = EXCLUDED.locked_until
        WHERE worker_locks.locked_until < now() RETURNING owner`, [LOCK_KEY, LOCK_OWNER]);
-  if (!lock.length) { log("another run holds the lease — exiting"); process.exit(0); }
+  if (!lock.length) { log("another run holds the lease, so this run exits"); process.exit(0); }
 
   if (REASON === "fit") await (DRY ? fitDryRun() : fitRealRun());
   else await misrouteRun();
