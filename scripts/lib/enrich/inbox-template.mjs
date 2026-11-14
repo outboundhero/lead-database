@@ -15,6 +15,8 @@
 // the key the step is skipped with "Needs ENRICHLEY_API_KEY (not held)", the
 // outcome says "Waiting for Enrichley", and the row itself finishes (D6).
 
+import { compileColumn, refMap } from "./compile-original.mjs";
+
 export const INBOX_TEMPLATE = "inboxes_v1";
 export const INBOX_TABLE_NAME = "General inboxes (pipeline)";
 
@@ -58,7 +60,11 @@ export const INBOX_INPUT_KEYS = Object.freeze(INBOX_INPUTS.map((c) => c.key));
  * @type {ReadonlyArray<import("./compile-original.mjs").ColumnSpec & { formula?: string, note?: string }>}
  */
 export const INBOX_COLUMNS = Object.freeze([
-  { key: "in_database", from: "G#4", change: true, kind: "action", action: "lead_lookup", note: "Inputs { email: \"{{general_email}}\", verdict: \"\\\"Valid\\\"\" }: the address alone, in leads, the Email Bison copy and the never-contact list." },
+  {
+    key: "in_database", from: "G#4", change: true, kind: "action", action: "lead_lookup", provider: "Lead database",
+    inputs: { email: "{{general_email}}", verdict: "\"Valid\"" }, run_if: null,
+    note: "The database check in DUPE CHECK's place: the address alone, in leads, the Email Bison copy and the never-contact list.",
+  },
   { key: "safe_to_run", from: "G#5", change: true, kind: "formula", formula: "!{{in_database}}?.lead_id && !{{in_database}}?.in_bison && !{{in_database}}?.never_contact && !{{in_database}}?.bounced" },
   { key: "normalize_company_name", from: "G#14", kind: "action", action: "waiting", note: "Clay's normalize-company-name: waiting for the original (D38). G#15 and G#20's second step read it." },
   { key: "normalized_company_name", from: "G#15", kind: "formula" },
@@ -125,17 +131,44 @@ export const INBOX_OUTCOME_FORMULA = [
   `: "Not checked: a role or junk address"`,
 ].join("\n");
 
+/** Waiting columns: why each waits (D38). */
+const WAITS = {
+  normalize_company_name: "Clay's normalize-company-name tool: its rules are not in the export (D38). A named stand-in comes only with the owner's OK.",
+  identify_email_type_and_extract_company_domain_from_email: "Clay's extract-email-components tool: how it splits an address and guesses a name is not in the export (D38). No stand-in.",
+  first_name_ai: "It reads the guessed name (waiting above), and how Clay sends its table examples is not known (D38). No model setting until then.",
+  normalize_phone_number: "Clay's normalize-phone-number tool: its rules are not in the export (D38). A named stand-in comes only with the owner's OK.",
+};
+
+/** Names of our own columns (from: null). */
+const OURS = {
+  inbox_outcome: { name: "Outcome", formula: INBOX_OUTCOME_FORMULA, description: "The address's result. Approved and Already in the database count toward listing its company." },
+  add_to_database: { name: "Added to the database", provider: "Promotion", description: "Written only by promotion (phase 3); the engine never works it." },
+};
+
 /**
  * The General inboxes template's enrich_columns rows, compiled from a
  * variant's originals: INBOX_INPUTS as input columns, then INBOX_COLUMNS
  * through compileColumn() with INBOX_REFS, and inbox_outcome from
  * INBOX_OUTCOME_FORMULA.
  *
- * TODO(A): build it (2A.3, 2B.4).
- *
  * @param {import("./compile-original.mjs").Originals} originals
  * @returns {Array<Record<string, any>>}
  */
 export function inboxColumns(originals) {
-  throw new Error(`TODO(A): inboxColumns is not built yet (${originals?.size ?? 0} originals)`);
+  const own = refMap(originals, "inboxes", INBOX_REFS);
+  const rows = [];
+  for (const c of INBOX_INPUTS) {
+    const spec = { key: c.key, kind: "input", description: c.description, hidden: c.key === "company_row", provider: c.from ? "Write to table" : "Pipeline" };
+    rows.push(compileColumn(c.from ? { ...spec, from: c.from } : { ...spec, name: c.key === "company_row" ? "Company row" : "Found in" }, originals, { own }));
+  }
+  for (const spec of INBOX_COLUMNS) {
+    if (!spec.from) {
+      const o = OURS[spec.key] ?? {};
+      rows.push(compileColumn({ ...spec, name: o.name ?? spec.key, formula: o.formula ?? spec.formula, provider: o.provider, description: o.description }, originals, { own }));
+      continue;
+    }
+    const extra = spec.action === "waiting" ? { why: WAITS[spec.key] } : {};
+    rows.push(compileColumn({ ...spec, ...extra, description: spec.note }, originals, { own }));
+  }
+  return rows.map((r, i) => ({ ...r, position: i + 1 }));
 }

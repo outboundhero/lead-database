@@ -11,54 +11,23 @@
 //   emptyAs: ''  — empty cells read as "" while the inputs are bound (prompts).
 //
 // Every run() also gets `settings` (scripts/lib/enrich/settings.mjs): ai_web
-// takes its model from there when its column names a setting.
+// takes its model from there when its column names a setting. HTTP lives in
+// http.mjs, shared with the pipeline's own actions.
 
 import { CLIENT_ACTIONS } from "./client-checks.mjs";
 import { COMPANY_ACTIONS } from "./company-actions.mjs";
 import { bareDomain } from "./domain.mjs";
+import { capped, httpJson, lostSendGuard, retryableStatus } from "./http.mjs";
 import { PIPELINE_ACTIONS } from "./pipeline-actions.mjs";
+import { addOpenAiSpend, spendAllowed } from "./spend.mjs";
 
-export { bareDomain };
+export { bareDomain, capped };
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 const SITE_TIMEOUT_MS = 8_000;
-const RESPONSE_CAP = 32_000;
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const text = (v) => (v == null ? "" : String(v).trim());
-
-/** A provider answer cut down to what enrich_cell_runs keeps. */
-export function capped(value) {
-  if (value == null) return null;
-  const s = JSON.stringify(value);
-  return s.length <= RESPONSE_CAP ? value : { truncated: true, head: s.slice(0, RESPONSE_CAP) };
-}
-
-/**
- * JSON over HTTP with retries on 429/5xx and network errors. Never throws for
- * an HTTP status: the caller decides what a status means.
- */
-async function httpJson(url, { method = "GET", headers = {}, body, timeoutMs = 30_000, tries = 3 } = {}) {
-  let last = { ok: false, status: 0, json: null, error: "no attempt" };
-  for (let attempt = 1; attempt <= tries; attempt++) {
-    try {
-      const res = await fetch(url, { method, headers, body, signal: AbortSignal.timeout(timeoutMs) });
-      const raw = await res.text();
-      let json = null;
-      try { json = JSON.parse(raw); } catch { /* not JSON */ }
-      last = { ok: res.ok, status: res.status, json, error: res.ok ? null : `HTTP ${res.status}: ${raw.slice(0, 200)}` };
-      if (res.status !== 429 && res.status < 500) return last;
-    } catch (e) {
-      const timeout = e?.name === "TimeoutError" || e?.name === "AbortError";
-      last = { ok: false, status: 0, json: null, error: timeout ? `timed out after ${timeoutMs / 1000}s` : (e?.cause?.code || e?.message || "request failed") };
-    }
-    if (attempt < tries) await sleep(2_000 * attempt);
-  }
-  return last;
-}
-
-const retryableStatus = (s) => s === 0 || s === 429 || s >= 500;
 
 // ── normalize-url (Clay "Normalize a Domain", type "bare"; bareDomain is in domain.mjs) ──
 
@@ -202,17 +171,26 @@ async function domainFromName({ inputs, env }) {
 }
 
 // ── use-ai (Clay "Claygent": an AI agent with web search) ───────────────────
-// OpenAI Responses API with web search and a strict JSON answer, as Corofy's
-// production enrichment does (gpt-4o-mini, the model Clay's column uses).
+// OpenAI Responses API with a strict JSON answer. A column names its model
+// setting (config.model_setting, a key of enrich_settings.models): the model,
+// the most tool calls (max_tool_calls) and the reasoning effort come from that
+// setting at run time, and a setting that is missing is an error, never some
+// other model.
 //
-// A column can name a model setting (config.model_setting, a key of
-// enrich_settings.models): the model, the most searches (max_tool_calls) and
-// the reasoning effort then come from that setting at run time, and a setting
-// that is missing is an error, never some other model. config.tool picks the
-// search tool: "web_search" ($10 per 1,000 calls), else the old default
-// "web_search_preview" ($25 per 1,000 on non-reasoning models), which a column
-// with no tool keeps, so its requests are unchanged. Inputs city, region and
-// country, when given, tell the search where the office is (user_location).
+// The compiled originals (2A.1, 2A.5) also set:
+//   answer         Clay's answer fields, { field: { type, description, options } }:
+//                  url and string are strings with the field's description, a
+//                  select an enum of its option texts. Phase 1's { field: "text" }
+//                  form still works.
+//   tool           "web_search" (claygent; $10 per 1,000 calls) or "none" (use-ai).
+//   user_location  false: no location is sent (the originals send none).
+//   keep_na        an "N/A" answer stays the answer, as in Clay.
+//   table_examples Clay's table examples, kept as exported and never sent: the
+//                  column does not run until Clay's way of sending them is known (D38).
+// One send per attempt: the row's own retry handles a lost answer, and a cell
+// sent twice with no answer is not sent again (http.mjs). OpenAI's billing
+// refusals are never retried. Each call checks the day's OpenAI cap for its
+// loop first and adds what it cost after (spend.mjs).
 
 /** OpenAI's approximate user location, from the inputs, or null. country is a 2-letter code. */
 function userLocation(inputs) {
@@ -228,7 +206,54 @@ function userLocation(inputs) {
   };
 }
 
-async function aiWeb({ inputs, config, env, settings }) {
+/** OpenAI's billing and spend refusals: never worth sending again. */
+const BILLING_CODES = new Set(["insufficient_quota", "organization_usage_limit_exceeded", "credit_balance_exhausted", "billing_hard_limit_reached"]);
+export function billingCode(json) {
+  const err = json?.error ?? {};
+  for (const c of [err.code, err.type]) {
+    const code = text(c);
+    if (code && (BILLING_CODES.has(code) || /_spend_limit_exceeded$/.test(code))) return code;
+  }
+  return null;
+}
+
+/**
+ * The JSON schema of the answer: Clay's fields in Clay's order. A compiled
+ * column keeps that order in config.answer_order, since enrich_columns.config
+ * is jsonb, which keeps no key order; the first field is the cell's display.
+ */
+export function answerSchema(config) {
+  const answer = config.answer && typeof config.answer === "object" ? config.answer : { response: "text" };
+  const keys = Object.keys(answer);
+  const listed = Array.isArray(config.answer_order) ? config.answer_order.filter((f) => typeof f === "string" && Object.hasOwn(answer, f)) : [];
+  const fields = listed.length === keys.length && new Set(listed).size === keys.length ? listed : keys;
+  /** @type {Record<string, any>} */
+  const properties = {};
+  for (const f of fields) {
+    const spec = answer[f];
+    if (spec && typeof spec === "object") {
+      const p = { type: spec.type === "number" ? "number" : spec.type === "boolean" ? "boolean" : "string" };
+      if (spec.description) p.description = String(spec.description);
+      if (spec.type === "select" && Array.isArray(spec.options) && spec.options.length) p.enum = spec.options.map(String);
+      properties[f] = p;
+    } else {
+      properties[f] = { type: "string", description: config.answer_description || "" };
+    }
+  }
+  return { fields, schema: { type: "object", additionalProperties: false, required: fields, properties } };
+}
+
+/** The web searches a response made: a web_search_call is a search unless its action says it opened or read a page. */
+export const searchesIn = (out) =>
+  (out?.output ?? []).filter((o) => o?.type === "web_search_call" && (o.action?.type ?? "search") === "search").length;
+
+async function aiWeb({ inputs, config, env, settings, db, row, column }) {
+  if (config.table_examples != null && !config.examples_supported) {
+    return {
+      status: "skipped",
+      note: "Waiting for the original: how Clay sends this column's table examples to the model is not known yet (D38), so it is not run",
+    };
+  }
   const prompt = text(inputs.prompt);
   if (!prompt) return { status: "empty", note: "Empty prompt" };
   let model = config.model || "gpt-4o-mini";
@@ -244,43 +269,52 @@ async function aiWeb({ inputs, config, env, settings }) {
     }
     model = setting.model;
   }
+  const loop = config.spend_loop === "fit" ? "fit" : "pipeline";
+  if (db && settings) {
+    const gate = await spendAllowed(db, `openai_usd_${loop}`, settings);
+    if (!gate.ok) return { status: "needs_key", note: gate.why };
+  }
+  const stop = await lostSendGuard({ db, row, column });
+  if (stop) return stop;
+
   const toolType = config.tool || "web_search_preview";
-  const location = userLocation(inputs);
-  const tool = { type: toolType, ...(location ? { user_location: location } : {}) };
-  const fields = Object.keys(config.answer ?? { response: "text" });
-  const schema = {
-    type: "object",
-    additionalProperties: false,
-    required: fields,
-    properties: Object.fromEntries(fields.map((f) => [f, { type: "string", description: config.answer_description || "" }])),
-  };
+  const noTool = toolType === "none";
+  const location = config.user_location === false ? null : userLocation(inputs);
+  const tool = noTool ? null : { type: toolType, ...(location ? { user_location: location } : {}) };
+  const { fields, schema } = answerSchema(config);
   const r = await httpJson("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify({
       model,
-      tools: [tool],
+      ...(tool ? { tools: [tool] } : {}),
       input: prompt,
-      ...(setting?.max_searches ? { max_tool_calls: setting.max_searches } : {}),
+      ...(tool && setting?.max_searches ? { max_tool_calls: setting.max_searches } : {}),
       ...(setting?.reasoning_effort ? { reasoning: { effort: setting.reasoning_effort } } : {}),
       text: { format: { type: "json_schema", name: "answer", schema, strict: true } },
     }),
     timeoutMs: 120_000,
+    tries: 1,
   });
   const request = {
     model,
-    ...(config.model_setting ? { model_setting: config.model_setting, tool: toolType } : {}),
-    ...(setting?.max_searches ? { max_tool_calls: setting.max_searches } : {}),
+    ...(config.model_setting ? { model_setting: config.model_setting, tool: noTool ? "none" : toolType } : {}),
+    ...(tool && setting?.max_searches ? { max_tool_calls: setting.max_searches } : {}),
     ...(setting?.reasoning_effort ? { reasoning_effort: setting.reasoning_effort } : {}),
     ...(location ? { user_location: location } : {}),
     prompt: prompt.slice(0, 8_000),
   };
   if (!r.ok) {
     const keyProblem = r.status === 401 || r.status === 403;
+    const billing = r.status === 429 || r.status === 402 ? billingCode(r.json) : null;
     return {
       status: "error",
-      note: keyProblem ? "OpenAI refused the key (401/403)" : `OpenAI: ${r.error}`,
-      retryable: retryableStatus(r.status),
+      note: keyProblem
+        ? "OpenAI refused the key (401/403)"
+        : billing
+          ? `OpenAI refused for billing (${billing}), so it is not sent again`
+          : `OpenAI: ${r.error}`,
+      retryable: !billing && !keyProblem && retryableStatus(r.status),
       run: { request, response: capped(r.json), http_status: r.status || null, error: r.error },
     };
   }
@@ -288,19 +322,38 @@ async function aiWeb({ inputs, config, env, settings }) {
   const textOut =
     out.output_text ?? out.output?.flatMap((o) => o?.content ?? []).find((c) => c?.type === "output_text")?.text;
   let answer = null;
-  try { answer = JSON.parse(textOut); } catch { /* left null */ }
+  try {
+    answer = JSON.parse(textOut);
+  } catch {
+    /* left null */
+  }
   const sources = (out.output ?? [])
     .flatMap((o) => o?.content ?? [])
     .flatMap((c) => c?.annotations ?? [])
     .filter((a) => a?.type === "url_citation")
     .map((a) => a.url);
   // Each search the model made is billed on its own: kept beside the tokens for the cost query.
-  const webSearches = (out.output ?? []).filter((o) => o?.type === "web_search_call").length;
-  const run = { request, response: capped({ answer, sources, usage: out.usage ?? null, web_searches: webSearches }), http_status: r.status };
-  if (!answer) return { status: "error", note: "The agent's answer was not valid JSON", retryable: true, run, model };
+  const webSearches = searchesIn(out);
+  let cost = null;
+  if (db) {
+    try {
+      cost = await addOpenAiSpend(db, loop, { model, usage: out.usage ?? null, searches: webSearches }, settings?.spend_caps?.openai_prices);
+    } catch {
+      cost = null; // the answer stands; the cap reads what was counted
+    }
+  }
+  const run = {
+    request,
+    response: capped({ answer, sources, usage: out.usage ?? null, web_searches: webSearches, ...(cost ? { cost_usd: cost.usd } : {}) }),
+    http_status: r.status,
+  };
+  if (!answer || typeof answer !== "object") return { status: "error", note: "The agent's answer was not valid JSON", retryable: true, run, model };
   const main = text(answer[fields[0]]);
-  // The prompt tells the agent to answer "N/A" when it cannot confirm a site.
-  // That is kept as an empty cell rather than passed on as if it were a URL.
+  if (config.keep_na) {
+    // As in Clay: the answer is kept as returned, an "N/A" included.
+    return { status: "done", value: answer, display: main || "(no answer)", run, model };
+  }
+  // Phase 1's rule: an "N/A" is kept as an empty cell rather than passed on as if it were a URL.
   if (!main || /^n\/?a\.?$/i.test(main)) {
     return { status: "empty", note: `The agent answered "${main || "(nothing)"}"`, run, model };
   }
@@ -321,6 +374,6 @@ export const ACTIONS = {
   ai_web: { run: aiWeb, cache: true, emptyAs: "" },
   later: { run: later, cache: false },
   ...CLIENT_ACTIONS, // AI Ark run tables: lead_lookup, client_area, client_exclusions
-  ...COMPANY_ACTIONS, // the Companies template: client_office, held_general_email, pick_emails, verify_emails
+  ...COMPANY_ACTIONS, // the Companies template's phase 1 checks: client_office, held_general_email
   ...PIPELINE_ACTIONS, // the pipeline templates (pipeline-actions.mjs): write-tos, Reoon, the finders, Enrichley, people
 };

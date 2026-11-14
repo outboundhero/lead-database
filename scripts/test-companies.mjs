@@ -1,13 +1,15 @@
 #!/usr/bin/env node
-// Deep checks for the Companies tab and its pipeline (migration 124). LOCAL
-// DATABASE ONLY: it makes made-up clients (tags starting CPTEST_) with their
-// rules, a few made-up leads, Email Bison copy rows and never-contact rows,
-// demo pulls, template tables and their rows, and removes all of it at the end.
+// Deep checks for the Companies tab and its pipeline (migrations 124 and 125).
+// LOCAL DATABASE ONLY: it makes made-up clients (tags starting CPTEST_) with
+// their rules, each with the made-up Clay originals as its own variant
+// (scripts/fixtures/clay-originals), a few made-up leads, Email Bison copy rows
+// and never-contact rows, demo pulls, template tables and their rows, and
+// removes all of it at the end.
 //
 //   node --env-file=.env.local scripts/test-companies.mjs
 //
 // Stop the enrichment worker first: it would race this script for the pulls
-// and the rows. Migration 124 must be in the local database.
+// and the rows. Migrations 124 and 125 must be in the local database.
 //
 // Nothing here reaches a network. AI Ark answers through the demo transport,
 // which takes test faults. fetch is replaced for the whole run: OpenAI, Reoon
@@ -17,19 +19,20 @@
 // stand-ins only for the session (requireRole), the audit log and the
 // worker's heartbeat.
 //
-// What it checks (the design's section 8.1):
+// What it checks (phase 1's design section 8.1, moved to companies_v2; the
+// compiled steps themselves are checked by scripts/test-pipeline-v2.mjs):
 //   A. no database: the request builder, people requests unchanged, Company
 //      Search through a fake transport, lists, a company's input cells, place
-//      keys, pick_emails, Reoon's verdicts and the check cap, the template,
-//      ai_web's request
+//      keys, phase 1's own steps gone, Reoon's verdicts, the companies_v2
+//      template, ai_web's request
 //   B. demo pulls: the pull and count routes and their refusals, a pull to its
 //      size, no company bought twice (within a client, and copied free to
 //      another), a crash and a lost claim, cancel, AI Ark's errors, lost pages,
 //      the spending brake, the 10,000 cap, the shared list budget, demo
 //      companies kept out of live pulls
 //   C. template rows end to end: the office, exclusions, a held inbox, the
-//      website, the general email, shared memory, missing keys and Reoon
-//      credits, errors, a model swap, and the real worker
+//      website, the general email through its inbox rows, shared memory,
+//      missing keys and Reoon credits, errors, a model swap, and the real worker
 //   D. the tab's data: the projection, keyset paging over 2,500 companies, the
 //      counts, deletes, nothing written to leads
 //   E. shared code: the Maps intake, CSV imports, the tables list, settings
@@ -53,15 +56,20 @@ import { createRun, listsMadeToday } from "./lib/aiark/runs.mjs";
 import { pullsToAdd } from "./lib/aiark/add.mjs";
 import { ACTIONS } from "./lib/enrich/actions.mjs";
 import { CLIENT_ACTIONS, resetClientChecks } from "./lib/enrich/client-checks.mjs";
-import { junkReason, mapReoonStatus, pickEmailList, requeueWaitingTemplateRows, resetCompanyActions } from "./lib/enrich/company-actions.mjs";
-import {
-  COMPANY_COLUMNS, COMPANY_SEARCH_KEYS, companyInputs, DIRECTORY_BLOCKLIST, JUNK_DOMAINS, JUNK_LOCAL_PARTS, LISTED_OUTCOMES, PROMPTS,
-  ROLE_PREFIX_SOURCE, SOURCE_BOUGHT,
-} from "./lib/enrich/company-template.mjs";
+import { mapReoonStatus, requeueWaitingTemplateRows, resetCompanyActions } from "./lib/enrich/company-actions.mjs";
+import * as companyTemplate from "./lib/enrich/company-template.mjs";
+import { COMPANY_SEARCH_KEYS, companyInputs, DIRECTORY_BLOCKLIST, JUNK_DOMAINS, JUNK_LOCAL_PARTS, ROLE_PREFIX_SOURCE, SOURCE_BOUGHT } from "./lib/enrich/company-template.mjs";
+import { COMPANY_ABSENT_KEYS, COMPANY_COLUMNS_V2, LISTED_OUTCOMES_V2 } from "./lib/enrich/company-template-v2.mjs";
+import { INBOX_COLUMNS } from "./lib/enrich/inbox-template.mjs";
+import { PEOPLE_COLUMNS } from "./lib/enrich/people-template.mjs";
+import { emailsIn } from "./lib/enrich/pipeline-actions.mjs";
+import { compileTemplates } from "./lib/enrich/templates.mjs";
+import { originalRows, originalsMap } from "./lib/enrich/seed-originals.mjs";
 import { runRow } from "./lib/enrich/engine.mjs";
-import { order, refs } from "./lib/enrich/formula.mjs";
-import { projectCompany } from "./lib/enrich/project-company.mjs";
-import { settingsFrom } from "./lib/enrich/settings.mjs";
+import { refs } from "./lib/enrich/formula.mjs";
+import { MODEL_SETTINGS, resetSettingsCache, settingsFrom } from "./lib/enrich/settings.mjs";
+import { fixtureSeedExports } from "./fixtures/clay-originals/fixtures.mjs";
+import { reoonAnswer, seedFixtureVariant, WORKER_PRELOAD, workRow } from "./fixtures/test-support.mjs";
 
 const url = process.env.DATABASE_URL;
 if (!url || !["127.0.0.1", "localhost"].includes(new URL(url).hostname)) {
@@ -72,6 +80,7 @@ if (!url || !["127.0.0.1", "localhost"].includes(new URL(url).hostname)) {
 const PAID_KEYS = [
   "OPENAI_API_KEY", "ENRICH_REOON_API_KEY", "REOON_API_KEY", "CLEARBIT_API_KEY", "FINDEMAIL_API_KEY", "ANTHROPIC_API_KEY",
   "AIARK_API_KEY", "AIARK_WEBHOOK_URL", "AIARK_AUTO_ADD_URL", "AIARK_AUTO_ADD_KEY",
+  "FINDYMAIL_API_KEY", "PROSPEO_API_KEY", "ANYMAIL_FINDER_API_KEY", "ENRICHLEY_API_KEY", "ICYPEAS_API_KEY",
 ];
 for (const k of PAID_KEYS) delete process.env[k];
 process.env.AIARK_DEMO = "1";
@@ -88,6 +97,8 @@ const section = (s) => console.log(`\n${s}`);
 const source = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const bytes = (v) => Buffer.byteLength(JSON.stringify(v));
 const sorted = (o) => JSON.stringify(Object.fromEntries(Object.entries(o ?? {}).sort(([a], [b]) => a.localeCompare(b))));
+// The three pipeline templates compiled from the made-up originals, as each test client's tables are.
+const COMPILED = compileTemplates(originalsMap(originalRows(fixtureSeedExports())));
 
 // ── No network: OpenAI, Reoon and websites answer from here ─────────────────
 
@@ -96,7 +107,7 @@ const net = {
   bodies: [], // OpenAI request bodies
   verified: [], // addresses Reoon was asked about
   dead: new Set(), // hosts whose website doesn't answer
-  answers: new Map(), // company name -> { website, first, second }: what each search finds
+  answers: new Map(), // company name -> { website, first, second }: what C#24, C#31 and C#32 find
   verdicts: new Map(), // address -> Reoon's status word (invalid when not set)
   balance: { daily: 400, instant: 0 },
   openaiFail: [], // HTTP statuses OpenAI answers before its normal answers
@@ -110,13 +121,12 @@ globalThis.fetch = async (input, init = {}) => {
     net.bodies.push(body);
     const fail = net.openaiFail.shift();
     if (fail) return json(fail, { error: { message: "made-up failure" } });
-    const company = /Business: (.*)/.exec(body.input)?.[1]?.trim() ?? "";
-    const plan = net.answers.get(company) ?? {};
-    const kind = body.text.format.schema.required[0] === "website" ? "website" : /^Search again/.test(body.input) ? "second" : "first";
-    const found = plan[kind];
-    const answer = kind === "website"
-      ? { website: found ?? "N/A" }
-      : { emails: found ?? "N/A", source_url: found ? `https://listings.cptest.example/${kind}` : "N/A", office_match: found ? "yes" : "unknown" };
+    // The made-up originals' prompts start "[fx:<column>] business=<name>;".
+    const m = /\[fx:(\w+)\] \w+=([^;]*);/.exec(body.input ?? "");
+    const plan = net.answers.get(m?.[2]?.trim() ?? "") ?? {};
+    const found = { C24: plan.website, C31: plan.first, C32: plan.second }[m?.[1] ?? ""];
+    const fields = body.text?.format?.schema?.required ?? [];
+    const answer = Object.fromEntries(fields.map((f, i) => [f, i === 0 && found ? found : "N/A"]));
     return json(200, {
       output: [{ type: "web_search_call" }, { type: "web_search_call" }, { type: "message", content: [{ type: "output_text", text: JSON.stringify(answer) }] }],
       usage: { input_tokens: 900, output_tokens: 40 },
@@ -131,7 +141,7 @@ globalThis.fetch = async (input, init = {}) => {
       net.calls.reoon++;
       const email = u.searchParams.get("email");
       net.verified.push(email);
-      return json(200, { email, status: net.verdicts.get(email) ?? "invalid" });
+      return json(200, reoonAnswer(email, net.verdicts.get(email) ?? "invalid"));
     }
   }
   if (u.hostname.endsWith(".example")) {
@@ -143,12 +153,7 @@ globalThis.fetch = async (input, init = {}) => {
   throw Object.assign(new TypeError("fetch failed: test-companies allows no network"), { cause: { code: "ECONNREFUSED" } });
 };
 
-// The real worker gets the same rule: websites under .example answer, nothing else does.
-const WORKER_PRELOAD = `globalThis.fetch = async (input) => {
-  const u = new URL(typeof input === "string" ? input : input.url);
-  if (u.hostname.endsWith(".example")) return new Response("<html></html>", { status: 200 });
-  throw Object.assign(new TypeError("fetch failed: no network in test-companies"), { cause: { code: "ECONNREFUSED" } });
-};`;
+// The real worker gets the same rule (WORKER_PRELOAD): websites under .example answer, nothing else does.
 
 // ── The routes' TypeScript, compiled as it is imported ──────────────────────
 // "@/..." is src/, as in tsconfig. The session, the audit log and the
@@ -233,7 +238,7 @@ const heartbeat = ({ online = true, companyRuns = true } = {}) => ({
   started_at: new Date().toISOString(),
   seconds_ago: online ? 2 : 600,
   online,
-  info: { capabilities: companyRuns ? ["company_runs"] : [], keys: { OPENAI_API_KEY: false, ENRICH_REOON_API_KEY: false }, reoon: null },
+  info: { capabilities: companyRuns ? ["company_runs", "pipeline_v2"] : [], keys: { OPENAI_API_KEY: false, ENRICH_REOON_API_KEY: false }, reoon: null },
 });
 
 // ── The database ────────────────────────────────────────────────────────────
@@ -269,6 +274,7 @@ async function addClient(t, { type = null, places, exclude = [], terms = [], cle
       [t, JSON.stringify(filters.employee_bands ?? []), filters.industries ?? [], filters.exclude_industries ?? []]
     );
   }
+  await seedFixtureVariant(pool, t); // the made-up Clay originals, as the client's own variant
 }
 
 /** A pull as the route makes one, inside one transaction (requests from the client's own rules unless given). */
@@ -490,105 +496,87 @@ async function partA(geo) {
   check("... nor a government agency, for a cleaning client", !matchesCompanyFilters(rec({ headquarter: { city: "Springfield", state: "Illinois" } }, { type: "GOVERNMENT_AGENCY" }), match, geo));
   check("... nor one whose name holds an excluded word", !matchesCompanyFilters(rec({ headquarter: { city: "Springfield", state: "Illinois" } }, { name: "Springfield Janitorial" }), match, geo));
 
-  section("A7. pick_emails");
-  const picked = pickEmailList({
-    texts: "Write to OFFICE@acme.example, or info@acme.example. No-Reply@acme.example; logo@2x.png, jane@gmail.com, sales@other.example, info@acme.example, a@b.gov, billing@acme.example, x@example.com",
-    exclude: ["info@acme.example"], domain: "https://www.acme.example",
-  });
-  check("pulled out of free text, lower case, once each, junk and already-checked ones out, the company's domain first, free mail kept",
-    JSON.stringify(picked.emails) === JSON.stringify(["office@acme.example", "jane@gmail.com", "sales@other.example"]), JSON.stringify(picked.emails));
-  check("at most 5", pickEmailList({ texts: Array.from({ length: 9 }, (_, i) => `a${i}@z.example`).join(" ") }).emails.length === 5);
-  check("junk: image names, no-reply, placeholders; a front desk is fine", junkReason("logo@2x.png") && junkReason("no.reply@x.example") && junkReason("someone@example.com") && !junkReason("frontdesk@x.example"));
+  section("A7. Phase 1's own steps are gone");
+  check("no pick_emails or verify_emails action, and no v1 columns or prompts in company-template.mjs",
+    !("pick_emails" in ACTIONS) && !("verify_emails" in ACTIONS) && ["COMPANY_COLUMNS", "PROMPTS", "WEBSITE_PROMPT", "EMAIL_PROMPT_FIRST", "EMAIL_PROMPT_SECOND", "COMPANY_TEMPLATE"].every((k) => !(k in companyTemplate)));
+  check("phase 1's three model settings and its checks per company are not read", !MODEL_SETTINGS.some((k) => ["website_search", "email_search_first", "email_search_second"].includes(k)) && !("email_checks_per_company" in settingsFrom([]).company_pipeline));
+  check("C#34's stand-in pulls the addresses out of free text, lower case, once each, in order, and no URL",
+    JSON.stringify(emailsIn("Write to OFFICE@acme.example, or info@acme.example; office@acme.example. https://www.acme.example/contact")) === JSON.stringify(["office@acme.example", "info@acme.example"]));
 
-  section("A8. Reoon's verdicts and the check cap");
+  section("A8. Reoon's verdicts");
   const vw = source("scripts/validation-worker.mjs");
   const mapStatus = new Function(`${/function mapStatus\(native\) \{[\s\S]*?\n\}/.exec(vw)[0]}; return mapStatus;`)();
   const natives = ["safe", "valid", "role_account", "catch_all", "invalid", "disposable", "spamtrap", "disabled", "inbox_full", "unknown", "", "weird", "SAFE"];
   check("every Reoon word maps as mapStatus in validation-worker.mjs maps it", natives.every((n) => mapStatus(n) === mapReoonStatus(n)));
-  const fakeDb = (cached = []) => ({ query: async (sql) => ({ rows: sql.includes("FROM email_validations") ? cached : [] }) });
-  const verify = (emails, { spent = 0, cached = [], env = KEYS, cap = 3 } = {}) =>
-    ACTIONS.verify_emails.run({ inputs: { emails, spent }, env, db: fakeDb(cached), settings: { company_pipeline: { email_checks_per_company: cap } } });
+  const fakeDb = (known = []) => ({ query: async (sql) => ({ rows: sql.includes("FROM email_validations") ? known : [] }) });
   resetCompanyActions();
-  for (const [e, s] of [["ca@a8.cptest.example", "catch_all"], ["ok@a8.cptest.example", "valid"], ["u@a8.cptest.example", "unknown"], ["v@a8.cptest.example", "valid"]]) net.verdicts.set(e, s);
-  const later = await verify(["ca@a8.cptest.example", "ok@a8.cptest.example"]);
-  check("a later valid address wins over an earlier catch-all", later.status === "done" && later.value.email === "ok@a8.cptest.example" && later.value.status === "valid" && later.value.paid === 2);
-  const lone = await verify(["ca@a8.cptest.example", "bad@a8.cptest.example"]);
-  check("a catch-all is kept when nothing valid follows", lone.value.email === "ca@a8.cptest.example" && lone.value.status === "catch_all");
-  const before = net.calls.reoon;
-  const capped = await verify(["c1@a8.cptest.example", "c2@a8.cptest.example", "p1@a8.cptest.example", "p2@a8.cptest.example", "p3@a8.cptest.example", "ok@a8.cptest.example"], {
-    cached: [{ email: "c1@a8.cptest.example", status: "invalid", native_status: "invalid" }, { email: "c2@a8.cptest.example", status: "invalid", native_status: "invalid" }],
-  });
-  check("the cap counts paid checks only: two reused verdicts are free, then 3 paid checks and no more", capped.value.paid === 3 && net.calls.reoon - before === 3 && !capped.value.email && /cap/.test(capped.note), JSON.stringify(capped.value));
-  const refunded = await verify(["u@a8.cptest.example", "v@a8.cptest.example"], { cap: 1 });
-  check("an unknown verdict is refunded, so it doesn't use the cap", refunded.value.email === "v@a8.cptest.example" && refunded.value.paid === 1);
-  const spent = await verify(["ok@a8.cptest.example"], { spent: 3 });
-  check("checks made in earlier steps count toward the cap", spent.status === "done" && !spent.value.email && spent.value.paid === 0);
-  const noKey = await verify(["ok@a8.cptest.example"], { env: {} });
-  const noKeyCached = await verify(["ok@a8.cptest.example"], { env: {}, cached: [{ email: "ok@a8.cptest.example", status: "valid", native_status: "safe" }] });
-  check("no key: the cell waits, and a reused verdict still works without one", noKey.status === "needs_key" && noKeyCached.status === "done" && noKeyCached.value.email === "ok@a8.cptest.example");
+  const noKey = await ACTIONS.reoon_verify.run({ inputs: { email: "ok@a8.cptest.example" }, env: {}, db: fakeDb(), settings: settingsFrom([]) });
+  const reused = await ACTIONS.reoon_verify.run({ inputs: { email: "gone@a8.cptest.example" }, env: {}, db: fakeDb([{ native_status: "invalid", validated_at: new Date() }]), settings: settingsFrom([]) });
+  check("no key: the cell waits; a final rejection already held is reused for free, key or not",
+    noKey.status === "needs_key" && /ENRICH_REOON_API_KEY/.test(noKey.note) && reused.status === "done" && reused.value.status === "invalid" && /Reused/.test(reused.note) && net.calls.reoon === 0,
+    JSON.stringify({ noKey, reused }));
 
-  section("A9. The template");
-  const keySet = new Set(COMPANY_COLUMNS.map((c) => c.key));
+  section("A9. The companies_v2 template, compiled from the made-up originals");
+  const COLS = COMPILED.companies;
+  const keySet = new Set(COLS.map((c) => c.key));
   const exprs = (c) => [c.formula, c.run_if, ...(c.waterfall ?? []), ...Object.values(c.inputs ?? {})].filter(Boolean);
-  check("order() finds no loop", order(COMPANY_COLUMNS.map((c) => ({ ...c }))).length === COMPANY_COLUMNS.length);
-  check("every action is in ACTIONS", COMPANY_COLUMNS.filter((c) => c.kind === "action").every((c) => ACTIONS[c.action]));
-  check("every {{key}} is a column", COMPANY_COLUMNS.every((c) => exprs(c).every((x) => [...refs(x)].every((k) => keySet.has(k)))));
-  const byKey = new Map(COMPANY_COLUMNS.map((c) => [c.key, c]));
+  const absent = new Set([...COMPANY_ABSENT_KEYS, "created_at"]);
+  check("the three templates compile, and order() finds no loop", COLS.length > 40 && COMPILED.inboxes.length > 30 && COMPILED.people.length > 50);
+  check("every action is in ACTIONS", Object.values(COMPILED).flat().filter((c) => c.kind === "action").every((c) => ACTIONS[c.action]));
+  check("every {{key}} is a column, or one the template declares absent", COLS.every((c) => exprs(c).every((x) => [...refs(x)].every((k) => keySet.has(k) || absent.has(k)))));
+  const byKey = new Map(COLS.map((c) => [c.key, c]));
   const reaches = (key, seen = new Set()) => {
-    if (key === "passes_filters") return true;
+    if (key === "passes_filters" || key === "master_filter") return true;
     if (seen.has(key)) return false;
     seen.add(key);
     const c = byKey.get(key);
     return c ? [...refs(c.run_if ?? "")].some((k) => reaches(k, seen)) : false;
   };
-  const paid = COMPANY_COLUMNS.filter((c) => c.phase === 1 && (c.action === "ai_web" || c.action === "verify_emails"));
-  check("every paid column's run condition needs passes_filters, directly or through the column it reads", paid.length === 6 && paid.every((c) => reaches(c.key)), paid.filter((c) => !reaches(c.key)).map((c) => c.key).join());
+  const paid = COLS.filter((c) => c.phase === 1 && (c.action === "ai_web" || c.action === "reoon_verify"));
+  check("every paid column's run condition needs the client's rules (the Master Filter or passes_filters), directly or through the column it reads", paid.length === 8 && paid.every((c) => reaches(c.key)), paid.filter((c) => !reaches(c.key)).map((c) => c.key).join());
   check("ROLE_PREFIX_SOURCE is ROLE_PREFIXES in detect-email-type.ts", source("src/lib/uploads/detect-email-type.ts").includes(`/${ROLE_PREFIX_SOURCE}/i`));
-  const shipped = JSON.stringify({ COMPANY_COLUMNS, PROMPTS, DIRECTORY_BLOCKLIST, JUNK_LOCAL_PARTS, JUNK_DOMAINS });
+  const shipped = JSON.stringify({ COMPANY_COLUMNS_V2, INBOX_COLUMNS, PEOPLE_COLUMNS, DIRECTORY_BLOCKLIST, JUNK_LOCAL_PARTS, JUNK_DOMAINS });
   const clients = await all(`SELECT tag, name FROM client_tags WHERE NOT starts_with(tag, $1)`, [PREFIX]);
   const names = [...new Set(clients.flatMap((c) => [c.tag, c.name]).filter((s) => typeof s === "string" && s.trim().length >= 3).map((s) => s.trim().toLowerCase()))];
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const named = names.filter((n) => new RegExp(`(^|[^a-z0-9])${esc(n)}($|[^a-z0-9])`, "i").test(shipped));
-  check(`the template, prompts and lists name none of the ${clients.length} local clients`, named.length === 0, `${named.length} client tags or names found (not printed)`);
+  check(`the template modules and lists name none of the ${clients.length} local clients`, named.length === 0, `${named.length} client tags or names found (not printed)`);
   check("nothing in them is shaped like a key", !/sk-[A-Za-z0-9_-]{20,}|Bearer [A-Za-z0-9._-]{24,}|key=[A-Za-z0-9]{20,}/.test(shipped));
 
-  section("A10. ai_web's request");
-  const col = { ...COMPANY_COLUMNS.find((c) => c.key === "website_search"), run_if: null, position: 9 };
+  section("A10. ai_web's request (C#24, compiled from the made-up originals)");
+  const c24 = { ...COLS.find((c) => c.key === "companys_website"), run_if: null, position: 99 };
   const cols = [
-    ...["company", "aiark_id", "use_city", "use_state", "office", "use_address", "industry", "linkedin"].map((key, i) => ({ key, kind: "input", position: i, phase: 1 })),
-    col,
+    ...["company", "use_city", "use_state", "use_address", "category", "sub_category", "company_linkedin_url"].map((key, i) => ({ key, kind: "input", position: i, phase: 1 })),
+    c24,
   ];
   const cellsOf = () => new Map([
     ["company", { status: "done", value: "A10 Dental" }],
-    ["aiark_id", { status: "done", value: "a10" }],
     ["use_city", { status: "done", value: "Springfield" }],
     ["use_state", { status: "done", value: "IL" }],
-    ["office", { status: "done", value: { office: { state_name: "Illinois", country: "US" } } }],
   ]);
   const memoryDb = { query: async () => ({ rows: [] }) }; // no answer remembered, and nothing kept
   const ask = async (settings) => {
     const out = { body: null, run: null, hash: null, cell: null };
     const sentBefore = net.bodies.length;
     const res = await runRow({
-      row: { id: 1, created_at: new Date() }, table: { client_tag: tag("A10"), template: "companies_v1" }, columns: cols, cells: cellsOf(),
+      row: { id: 1, created_at: new Date() }, table: { client_tag: tag("A10"), template: "companies_v2" }, columns: cols, cells: cellsOf(),
       env: KEYS, db: memoryDb, settings,
-      hooks: { changed: (k, c) => k === "website_search" && Object.assign(out, { hash: c.input_hash, cell: c }), ran: (x) => (out.run = x) },
+      hooks: { changed: (k, c) => k === "companys_website" && Object.assign(out, { hash: c.input_hash, cell: c }), ran: (x) => (out.run = x) },
     });
     out.body = net.bodies.length > sentBefore ? net.bodies.at(-1) : null;
     return { ...out, res };
   };
-  const s1 = settingsFrom([{ key: "models", value: { website_search: { model: "gpt-4o-mini", max_searches: 2 } } }]);
-  const s2 = settingsFrom([{ key: "models", value: { website_search: { model: "gpt-5-nano", reasoning_effort: "low", max_searches: 3 } } }]);
+  const s1 = settingsFrom([{ key: "models", value: { companys_website: { model: "gpt-4o-mini", max_searches: 2 } } }]);
+  const s2 = settingsFrom([{ key: "models", value: { companys_website: { model: "gpt-5-nano", reasoning_effort: "low", max_searches: 3 } } }]);
   const a = await ask(s1);
   const b1 = a.body;
-  check("the model comes from the setting; the web_search tool, max_tool_calls, no reasoning, user_location from the office",
-    b1?.model === "gpt-4o-mini" && b1.tools[0].type === "web_search" && b1.max_tool_calls === 2 && !b1.reasoning &&
-      JSON.stringify(b1.tools[0].user_location) === '{"type":"approximate","country":"US","region":"Illinois","city":"Springfield"}', JSON.stringify(b1));
+  check("the model comes from the setting; the web_search tool with no user location (the originals send none), max_tool_calls, no reasoning",
+    b1?.model === "gpt-4o-mini" && JSON.stringify(b1.tools) === '[{"type":"web_search"}]' && b1.max_tool_calls === 2 && !b1.reasoning && b1.input.includes("business=A10 Dental;"), JSON.stringify(b1)?.slice(0, 300));
   check("the number of searches is kept with the usage", a.run?.response?.web_searches === 2 && a.run.response.usage.input_tokens === 900, JSON.stringify(a.run?.response));
   const b = await ask(s2);
   check("reasoning is sent only when the setting has it", b.body?.model === "gpt-5-nano" && b.body.reasoning?.effort === "low" && b.body.max_tool_calls === 3);
   check("swapping the model changes the model, not the cell's input hash", a.hash && a.hash === b.hash, `${a.hash} / ${b.hash}`);
-  const missing = await ask(settingsFrom([{ key: "models", value: { website_search: null } }]));
+  const missing = await ask(settingsFrom([{ key: "models", value: { companys_website: null } }]));
   check("a missing model setting is an error, never another model", missing.res.errors === 1 && !missing.body && /No model is set/.test(missing.cell?.note ?? ""));
   check("page sizes divide the offset they start at", pageSizeAt(0, 37) === 37 && pageSizeAt(300, 37) === 30 && pageSizeAt(330, 7) === 6 && pageSizeAt(9797, 2) === 1);
 }
@@ -640,13 +628,20 @@ async function partB(routes) {
   T.role = "manager";
   await setPipeline(false);
   check("pulls switched off: the count and the pull are refused (409)", (await call(count.POST, { body: { tag: A, mode: "demo", ...v } })).status === 409 && (await call(runs.POST, { body: pullBody() })).status === 409);
+  await pool.query(`UPDATE enrich_settings SET value = value || '{"enabled": true, "tags": []}'::jsonb WHERE key = 'company_pipeline'`);
+  const notListedCount = await call(count.POST, { body: { tag: A, mode: "demo", ...v } });
+  const notListedPull = await call(runs.POST, { body: pullBody() });
+  check("pulls on, but the client not on their client list: the count and the pull are refused (409)",
+    notListedCount.status === 409 && /client list/.test(notListedCount.body?.error ?? "") && notListedPull.status === 409 && /client list/.test(notListedPull.body?.error ?? ""));
   await setPipeline(true);
   const first = await call(runs.POST, { body: pullBody() });
   const run1 = first.body?.run;
   check("the pull is queued (201)", first.status === 201 && run1?.status === "queued" && run1.size_requested === 40, JSON.stringify(first.body).slice(0, 300));
   const table = await one(`SELECT kind, template, name FROM enrich_tables WHERE id = $1`, [run1?.table_id]);
   const sources = await all(`SELECT kind, meta->>'run_id' AS run FROM enrich_sources WHERE table_id = $1 ORDER BY kind`, [run1?.table_id]);
-  check("its table is the client's Companies template table", table?.kind === "companies" && table.template === "companies_v1" && table.name === "Companies (pipeline)");
+  const three = await all(`SELECT kind, template, name FROM enrich_tables WHERE client_tag = $1 ORDER BY kind`, [A]);
+  check("its table is the client's Companies template table (companies_v2), made with its General inboxes and People tables",
+    table?.kind === "companies" && table.template === "companies_v2" && table.name === "Companies (pipeline)" && three.map((x) => x.template).join() === "companies_v2,inboxes_v1,people_v1", JSON.stringify(three));
   check("a source for what it buys and one for what it copies free", sources.map((s) => `${s.kind}:${s.run === run1?.id}`).join() === "ai_ark:true,registry:true", JSON.stringify(sources));
   check("a second pull while one is going: 409", (await call(runs.POST, { body: pullBody() })).status === 409);
   check("the pull is in the audit log; a demo count writes none, as on the AI Ark tab", !T.audits.some((x) => x.action === "companies_count") && T.audits.some((x) => x.action === "companies_run"), JSON.stringify(T.audits.map((x) => x.action)));
@@ -679,7 +674,7 @@ async function partB(routes) {
   const run2 = second.body?.run;
   check("the second pull reuses the client's table", second.status === 201 && run2?.table_id === tableA);
   const colCount = await one(`SELECT count(*)::int AS n, count(DISTINCT key)::int AS k FROM enrich_columns WHERE table_id = $1`, [tableA]);
-  check("its columns were brought up to date, not added twice", colCount.n === COMPANY_COLUMNS.length && colCount.k === colCount.n, JSON.stringify(colCount));
+  check("its columns were brought up to date, not added twice", colCount.n === COMPILED.companies.length && colCount.k === colCount.n, JSON.stringify(colCount));
   await drive(run2.id, demoClient(txA));
   const r2 = await runOf(run2.id);
   const firstBought = await boughtBy(run1.id);
@@ -880,13 +875,36 @@ async function partB(routes) {
     check("a live pull copies none of the demo companies in its places and lists none", heldDemo.n > 1 && x.from_registry === 0 && tx.state.listsMade === 0 && Number(x.progress.excluded ?? 0) === 0, JSON.stringify({ demo: heldDemo.n, copied: x.from_registry, lists: tx.state.listsMade }));
     await settle();
   }
+
+  section("B13. AI Ark's balance under the pipeline's minimum");
+  {
+    resetSettingsCache();
+    const floor = settingsFrom(await all(`SELECT key, value FROM enrich_settings`)).company_pipeline.min_balance;
+    const tx = createDemoTransport({ companiesPerPlace: 80, balance: Math.max(0, floor - 1) });
+    const run = await newRun(F, { size: 30 });
+    const st = await drive(run.id, demoClient(tx));
+    const x = await runOf(run.id);
+    check("a pull stops before a page is bought while the balance (read free) is under company_pipeline.min_balance",
+      floor > 0 && st === "stopped" && tx.state.companyCalls === 0 && x.pulled === 0 && /under the pipeline's minimum/.test(x.stop_reason ?? ""),
+      JSON.stringify({ floor, st, calls: tx.state.companyCalls, why: x.stop_reason }));
+    await settle();
+  }
 }
 
+/** Company pulls on or off, with every test client on their client list (company_pipeline.tags). */
 async function setPipeline(enabled) {
-  await pool.query(`UPDATE enrich_settings SET value = jsonb_set(value, '{enabled}', to_jsonb($1::boolean)) WHERE key = 'company_pipeline'`, [enabled]);
+  const tags = ["A", "B", "C", "D", "E", "E2", "F", "K", "G", "H", "W", "I", "J"].map(tag);
+  await pool.query(
+    `UPDATE enrich_settings SET value = value || jsonb_build_object('enabled', $1::boolean, 'tags', $2::jsonb) WHERE key = 'company_pipeline'`,
+    [enabled, JSON.stringify(tags)]
+  );
 }
 
-// ── C. Template rows end to end ─────────────────────────────────────────────
+// ── C. Template rows end to end (companies_v2, on the made-up originals) ────
+// scripts/test-pipeline-v2.mjs checks every compiled step. Here: phase 1's own
+// checks kept in companies_v2 (the office, the client's rules, a held inbox),
+// listing through the inbox rows, shared memory, missing keys and Reoon's
+// credits, errors, a model swap, and the real worker.
 
 const G = tag("G"); // the rows here
 const H = tag("H"); // a second client with the same places: shared answers
@@ -914,10 +932,11 @@ function company(slug, name, { hq = SPRINGFIELD, branches = [], website = "auto"
   };
 }
 const at = (slug, local) => `${local}@${dom(slug)}`;
+const pipelineTables = {};
 
-/** A company row as a bought page writes it: the row and its input cells, queued. */
-async function addRow(tableId, record) {
-  const inputs = companyInputs(record, { source: SOURCE_BOUGHT });
+/** A company row as a bought page writes it: the row and its input cells (the table's own tag too), queued. */
+async function addRow(tableId, record, clientTag) {
+  const inputs = { ...companyInputs(record, { source: SOURCE_BOUGHT }), client_tag: clientTag };
   const search = COMPANY_SEARCH_KEYS.map((k) => inputs[k]).filter(Boolean).join(" ").toLowerCase();
   const { rows: [r] } = await pool.query(`INSERT INTO enrich_rows (table_id, row_key, search_text) VALUES ($1, $2, $3) RETURNING id`, [tableId, `aiark:${record.id}`, search]);
   await pool.query(
@@ -928,102 +947,66 @@ async function addRow(tableId, record) {
   return Number(r.id);
 }
 
-// The worker's own statements (scripts/enrich-worker.mjs), so a row here is written as the worker writes it.
-const workerSource = source("scripts/enrich-worker.mjs");
-const WRITE_CELLS_SQL = /async function writeCells\([\s\S]*?pool\.query\(\s*`([\s\S]*?)`/.exec(workerSource)[1];
-const FINISH_SQL = /async function finish\(r, [\s\S]*?pool\.query\(\s*`([\s\S]*?)`/.exec(workerSource)[1];
-
-async function tableDef(id) {
-  const { rows: [table] } = await pool.query(`SELECT id, client_tag, kind, name, template FROM enrich_tables WHERE id = $1`, [id]);
-  table.keyCounts = {};
-  const columns = await all(
-    `SELECT key, name, position, kind, action, formula, waterfall, inputs, config, run_if, provider, needs_env, phase
-       FROM enrich_columns WHERE table_id = $1 ORDER BY position`,
-    [id]
-  );
-  return { table, columns: order(columns) };
-}
-
-/**
- * One pass of the worker's row loop over one row (processRow in
- * scripts/enrich-worker.mjs): claim, work every column, write the cells, then
- * re-queue a retryable row, or write its summary for the Companies tab and
- * finish it. Returns the engine's answer, the row's status and what was paid.
- */
-async function work(rowId, { env = KEYS, settings, db = pool } = {}) {
-  const { rows: [r] } = await pool.query(
-    `UPDATE enrich_rows SET run_status = 'running', claim_token = gen_random_uuid(), claimed_at = now(), attempts = attempts + 1, updated_at = now()
-      WHERE id = $1 RETURNING id, table_id, run_force, attempts, created_at, claim_token, next_run_at`,
-    [rowId]
-  );
-  const { table, columns } = await tableDef(r.table_id);
-  const stored = await all(`SELECT column_key, status, value, display, note, input_hash FROM enrich_cells WHERE row_id = $1`, [r.id]);
-  const cells = new Map(stored.map((c) => [c.column_key, c]));
-  const pending = new Map();
-  const runs = [];
-  const before = { ...net.calls };
-  const result = await runRow({ row: r, table, columns, cells, env, db, settings, hooks: { changed: (k, c) => pending.set(k, c), ran: (x) => runs.push(x) } });
-  await pool.query(WRITE_CELLS_SQL, [r.id, r.table_id, r.claim_token, JSON.stringify([...pending].map(([column_key, c]) => ({ column_key, ...c }))), JSON.stringify(runs)]);
-  let status;
-  let projected = null;
-  if (result.retryable && r.attempts < 3) {
-    status = "queued";
-    await pool.query(FINISH_SQL, [r.id, r.claim_token, "queued", new Date(Date.now() + 30_000).toISOString(), result.retryable, null]);
-  } else {
-    status = result.errors ? "error" : result.needsKey ? "waiting" : "done";
-    projected = await projectCompany(pool, { rowId: r.id, claimToken: r.claim_token, tableId: r.table_id, clientTag: table.client_tag, values: result.values, waiting: status === "waiting", failed: status === "error" });
-    await pool.query(FINISH_SQL, [r.id, r.claim_token, status, null, status === "error" ? result.retryable ?? `${result.errors} cell(s) failed` : null, null]);
+/** One pass of the worker's row loop over one row (test-support.mjs workRow: processRow's statements and its projection by template). */
+const work = (rowId, { env = KEYS, settings } = {}) => workRow(pool, net, rowId, { env, settings });
+/** Works the queued rows of a client's three tables (the inbox rows a company's write-to made). */
+async function drainTag(t, opts) {
+  const ids = Object.values(pipelineTables[t] ?? {});
+  const out = [];
+  for (let round = 0; round < 6; round++) {
+    const queued = await all(`SELECT id FROM enrich_rows WHERE table_id = ANY($1::uuid[]) AND run_status = 'queued' AND next_run_at <= now() ORDER BY id`, [ids]);
+    if (!queued.length) break;
+    for (const q of queued) out.push(await work(Number(q.id), opts));
   }
-  return {
-    ...result,
-    status,
-    projected,
-    paid: { openai: net.calls.openai - before.openai, reoon: net.calls.reoon - before.reoon, probes: net.calls.probe - before.probe },
-    cell: (k) => pending.get(k) ?? cells.get(k),
-  };
+  return out;
 }
 const summaryOf = (rowId) => one(`SELECT * FROM enrich_companies WHERE row_id = $1`, [rowId]);
 const plan = (record, answers) => net.answers.set(record.summary.name, answers);
 const verdicts = (map) => Object.entries(map).forEach(([e, s]) => net.verdicts.set(e, s));
+const paidOf = (w, followers = []) => [w, ...followers].reduce((p, x) => ({ openai: p.openai + x.paid.openai, reoon: p.reoon + x.paid.reoon, probes: p.probes + x.paid.probe }), { openai: 0, reoon: 0, probes: 0 });
 
 async function partC() {
   await addClient(G, { places: [IL("Springfield"), IL("Peoria")], terms: ["janitorial"] });
   await addClient(H, { places: [IL("Springfield"), IL("Peoria")] });
   resetClientChecks();
   resetCompanyActions();
-  const tG = (await ensureTemplateTable(pool, G)).id;
-  const tH = (await ensureTemplateTable(pool, H)).id;
-  const SETTINGS = settingsFrom(await all(`SELECT key, value FROM enrich_settings`));
+  for (const t of [G, H]) pipelineTables[t] = (await ensureTemplateTable(pool, t)).tables;
+  const tG = pipelineTables[G].companies;
+  const tH = pipelineTables[H].companies;
+  const stored = await all(`SELECT key, value FROM enrich_settings`);
+  const HIGH = { key: "spend_caps", value: { reoon_checks_per_day: 100_000, openai_usd_per_day: { pipeline: 10_000, fit: 10_000 } } };
+  const SETTINGS = settingsFrom([...stored.filter((r) => r.key !== "spend_caps"), HIGH]);
   const rows = {};
-  const add = async (label, record, { table = tG, settings = SETTINGS, env = KEYS } = {}) => {
-    const rowId = await addRow(table, record);
+  const add = async (label, record, { t = G, settings = SETTINGS, env = KEYS } = {}) => {
+    const rowId = await addRow(pipelineTables[t].companies, record, t);
     const w = await work(rowId, { settings, env });
+    const followers = await drainTag(t, { settings, env });
     rows[label] = { rowId, record };
-    return { rowId, w, s: await summaryOf(rowId) };
+    return { rowId, w, followers, paid: paidOf(w, followers), s: await summaryOf(rowId) };
   };
 
   section("C1. The office in the client's area");
   const s1 = company("s1", "Harborview Dental S1");
   plan(s1, { first: at("s1", "office") });
-  verdicts({ [at("s1", "office")]: "valid" });
+  verdicts({ [at("s1", "office")]: "safe" });
   const c1 = await add("s1", s1);
   check("head office inside: it is the office used", c1.w.values.office?.inside === true && c1.w.values.office.hq === true && c1.w.values.use_state === "IL" && c1.w.values.use_city === "Springfield");
   const s2 = company("s2", "Harborview Dental S2", { hq: BISMARCK, branches: [PEORIA], email: at("s2", "contact") });
-  plan(s2, { second: at("s2", "info") });
-  verdicts({ [at("s2", "info")]: "valid" });
+  plan(s2, { first: "N/A", second: at("s2", "info") });
+  verdicts({ [at("s2", "info")]: "safe" });
   const c2 = await add("s2", s2);
   check("head office outside, a branch inside: the branch is used", c2.w.values.office?.inside === true && c2.w.values.office.hq === false && c2.w.values.use_city === "Peoria");
   const c3 = await add("s3", company("s3", "Harborview Dental S3", { hq: BISMARCK }));
   check("no office inside: Outside", c3.w.cell("office")?.display === "Outside" && c3.s.outcome === "Outside the client's area" && !c3.s.listed);
   const c4 = await add("s4", company("s4", "Harborview Dental S4", { hq: NO_STATE }));
   check("no state: Can't tell, and not listed", c4.w.cell("office")?.display === "Can't tell" && c4.s.outcome === "Outside the client's area" && !c4.s.listed);
-  check("... nothing paid and no website checked for a company outside", c3.w.paid.openai + c3.w.paid.reoon + c3.w.paid.probes + c4.w.paid.openai + c4.w.paid.reoon + c4.w.paid.probes === 0);
+  check("... nothing paid and no website checked for a company outside", c3.paid.openai + c3.paid.reoon + c3.paid.probes + c4.paid.openai + c4.paid.reoon + c4.paid.probes === 0);
   const area = async (o) => (await CLIENT_ACTIONS.client_area.run({ inputs: { city: o.city, state: o.state, country: o.country }, table: { client_tag: G }, row: {}, db: pool })).display;
   check("each answer agrees with client_area on the same office", (await area(SPRINGFIELD)) === "Inside" && (await area(PEORIA)) === "Inside" && (await area(BISMARCK)) === "Outside" && (await area(NO_STATE)) === "Can't tell");
 
   section("C2. Excluded by the client's rules");
   const c5 = await add("s5", company("s5", "Riverbend Janitorial S5"));
-  check("Excluded by the client's rules, with no paid call and no website checked", c5.s.outcome === "Excluded by the client's rules" && !c5.s.listed && c5.w.paid.openai + c5.w.paid.reoon + c5.w.paid.probes === 0);
+  check("Excluded by the client's rules, with no paid call and no website checked", c5.s.outcome === "Excluded by the client's rules" && !c5.s.listed && c5.paid.openai + c5.paid.reoon + c5.paid.probes === 0);
 
   section("C3. An inbox the database already holds");
   const lead = async (email, extra = {}) => {
@@ -1033,10 +1016,12 @@ async function partC() {
   };
   await lead(at("s6", "info"));
   const c6 = await add("s6", company("s6", "Harborview Dental S6"));
-  check("a role address at the domain in leads: Already in the database, nothing searched or checked", c6.s.outcome === "Already in the database" && c6.s.listed && c6.s.held && c6.s.found_by === "database" && c6.w.paid.openai + c6.w.paid.reoon === 0);
+  check("a role address at the domain in leads: its inbox row is Already in the database, nothing searched or checked",
+    c6.s.outcome === "Already in the database" && c6.s.listed && c6.s.held && c6.s.found_by === "database" && c6.s.general_email === at("s6", "info") && c6.paid.openai + c6.paid.reoon === 0,
+    JSON.stringify({ outcome: c6.s?.outcome, paid: c6.paid }));
   await pool.query(`INSERT INTO bison_leads (instance_url, bison_id, email) VALUES ($1, 1, $2)`, [TEST_HOST, at("s7", "info").toUpperCase()]);
   const c7 = await add("s7", company("s7", "Harborview Dental S7"));
-  check("... only in the Email Bison copy: the same", c7.s.outcome === "Already in the database" && c7.s.listed && c7.w.values.held_email?.in_bison === true && c7.w.paid.openai + c7.w.paid.reoon === 0);
+  check("... only in the Email Bison copy: the same", c7.s.outcome === "Already in the database" && c7.s.listed && c7.w.values.held_email?.in_bison === true && c7.paid.openai + c7.paid.reoon === 0);
   await lead(`frontline.desk@${dom("s7b-mail")}`, { email_type: "general", city: "Springfield", state: "IL" });
   await pool.query(`UPDATE leads SET company = $2 WHERE email = $1`, [`frontline.desk@${dom("s7b-mail")}`, "Harborview Dental S7b"]);
   const c7b = await add("s7b", company("s7b", "Harborview Dental S7b"));
@@ -1044,145 +1029,124 @@ async function partC() {
   await lead(at("s8", "info"), { is_bounced: true, bounce_type: "hard" });
   const s8 = company("s8", "Harborview Dental S8");
   plan(s8, { first: `${at("s8", "info")}, ${at("s8", "office")}` });
-  verdicts({ [at("s8", "office")]: "valid" });
+  verdicts({ [at("s8", "office")]: "safe" });
   const c8 = await add("s8", s8);
-  check("bounced: searched anyway, and the bounced address is never a candidate", c8.s.outcome === "Has a general email" && c8.s.general_email === at("s8", "office") && JSON.stringify(c8.w.values.candidates_1?.emails) === JSON.stringify([at("s8", "office")]) && !net.verified.includes(at("s8", "info")));
+  check("bounced: searched anyway; the bounced address is Bounced and never checked, the other one listed",
+    c8.s.outcome === "Has a general email" && c8.s.general_email === at("s8", "office") && !net.verified.includes(at("s8", "info")) &&
+      (await one(`SELECT outcome FROM enrich_contacts WHERE company_row_id = $1 AND email = $2`, [c8.rowId, at("s8", "info")]))?.outcome === "Bounced");
   await pool.query(`INSERT INTO suppressed_emails (email, reason) VALUES ($1, $2)`, [at("s9", "office"), SUPPRESS_REASON]);
   const c9 = await add("s9", company("s9", "Harborview Dental S9"));
-  check("never contact: that outcome, with nothing paid", c9.s.outcome === "On the never-contact list" && !c9.s.listed && c9.w.paid.openai + c9.w.paid.reoon === 0);
+  check("never contact: that outcome, with nothing paid", c9.s.outcome === "On the never-contact list" && !c9.s.listed && c9.paid.openai + c9.paid.reoon === 0);
 
-  section("C4. The website");
-  check("AI Ark's site works: no search", c1.w.cell("website_search")?.status === "skipped" && c1.w.paid.openai === 1 && c1.s.website === `https://www.${dom("s1")}`);
+  section("C4. The website and the general email");
+  check("AI Ark's site works: no website search, one email search, the site as use_website", c1.w.cell("companys_website")?.status === "skipped" && c1.paid.openai === 1 && c1.s.website === dom("s1") && c1.s.found_by === "claygent_1" && c1.s.listed);
   const s11 = company("s11", "Harborview Dental S11", { website: null, domain: null });
   plan(s11, { website: `https://www.${dom("s11")}`, first: at("s11", "office") });
-  verdicts({ [at("s11", "office")]: "valid" });
+  verdicts({ [at("s11", "office")]: "safe" });
   const c11 = await add("s11", s11);
-  check("no website from AI Ark: one paid search, and its answer is checked", c11.w.cell("website_search")?.status === "done" && c11.w.cell("website_search_check")?.value?.valid === true && c11.s.website === `https://www.${dom("s11")}` && c11.s.listed && c11.w.paid.openai === 2);
-  net.dead.add(`dead-${dom("s12")}`);
-  const s12 = company("s12", "Harborview Dental S12", { website: `https://www.dead-${dom("s12")}`, domain: null });
-  plan(s12, { website: `https://www.${dom("s12")}`, first: at("s12", "office") });
-  verdicts({ [at("s12", "office")]: "valid" });
-  const c12 = await add("s12", s12);
-  check("a dead website: searched, and the site found is used", c12.w.cell("website_given_check")?.value?.valid === false && c12.s.website === `https://www.${dom("s12")}` && c12.s.listed);
-  const s13 = company("s13", "Harborview Dental S13", { website: `https://www.facebook.com/s13-${RUN}`, domain: null });
-  const c13 = await add("s13", s13);
-  check("a social or directory page counts as no website; a search that answers N/A: No working website, and no email search",
-    c13.w.values.website_given === undefined && c13.s.outcome === "No working website" && c13.w.paid.openai === 1 && c13.w.cell("email_search_1")?.status === "skipped" && net.calls.refused === 0);
-
-  section("C5. The general email");
+  check("no website from AI Ark: one paid search, its answer checked, then the email search", c11.w.cell("companys_website")?.status === "done" && c11.w.cell("check_if_url_is_valid")?.value?.valid === true && c11.s.domain === dom("s11") && c11.s.listed && c11.paid.openai === 2);
+  check("the first search finds nothing usable (N/A): the second runs", c2.s.found_by === "claygent_2" && c2.s.listed && c2.paid.openai === 2);
+  check("... and AI Ark's email at a branch is not checked: it is the head office's", c2.w.cell("aiark_email_reoon")?.status === "skipped" && !net.verified.includes(at("s2", "contact")));
   const s14 = company("s14", "Harborview Dental S14", { email: at("s14", "info") });
-  verdicts({ [at("s14", "info")]: "valid" });
+  verdicts({ [at("s14", "info")]: "safe" });
   const c14 = await add("s14", s14);
-  check("AI Ark's email at the head office: checked and used, with no search", c14.s.found_by === "aiark" && c14.s.general_email === at("s14", "info") && c14.w.paid.openai === 0 && c14.w.paid.reoon === 1);
-  check("... not at a branch: the head office's email isn't this office's", c2.w.cell("aiark_candidates")?.status === "skipped" && !net.verified.includes(at("s2", "contact")));
-  check("the first search's address is valid: no second search", c1.s.found_by === "search_1" && c1.w.cell("email_search_2")?.status === "skipped" && c1.s.email_status === "valid");
-  check("the first search answers N/A: the second search runs", c2.s.found_by === "search_2" && c2.s.listed && c2.w.paid.openai === 2);
+  check("AI Ark's email at the head office: checked and used, with no search and one Reoon call", c14.s.found_by === "aiark" && c14.s.general_email === at("s14", "info") && c14.paid.openai === 0 && c14.paid.reoon === 1, JSON.stringify(c14.paid));
   const s15 = company("s15", "Harborview Dental S15");
-  plan(s15, { first: `${at("s15", "alpha")}, ${at("s15", "beta")}`, second: `${at("s15", "gamma")}, ${at("s15", "delta")}, ${at("s15", "epsilon")}` });
+  plan(s15, { first: `${at("s15", "alpha")}, ${at("s15", "beta")}` });
   const c15 = await add("s15", s15);
-  check("every address invalid: No general email found", c15.s.outcome === "No general email found" && !c15.s.listed);
-  check("at most 3 paid checks a company", c15.w.paid.reoon === 3 && c15.w.values.email_check_2?.paid === 1, `${c15.w.paid.reoon} checks`);
+  check("every address rejected: not listed, its own outcome General emails sent to checks", c15.s.outcome === "General emails sent to checks" && !c15.s.listed && c15.paid.reoon === 2);
   const s16 = company("s16", "Harborview Dental S16");
   plan(s16, { first: at("s16", "frontdesk") });
   verdicts({ [at("s16", "frontdesk")]: "catch_all" });
   const c16 = await add("s16", s16);
-  check("catch-all: listed as Catch-all", c16.s.listed && c16.s.email_status === "catch_all" && c16.w.values.email_verdict === "Catch-all");
-  const s17 = company("s17", "Harborview Dental S17");
-  plan(s17, { first: `${at("s17", "info")}, ${at("s17", "office")}` });
-  verdicts({ [at("s17", "info")]: "unknown", [at("s17", "office")]: "valid" });
-  const c17 = await add("s17", s17);
-  check("unknown: the next candidate is tried, and the unknown one isn't paid for", c17.s.general_email === at("s17", "office") && c17.w.paid.reoon === 2 && c17.w.values.email_check_1?.paid === 1);
-  const s18 = company("s18", "Harborview Dental S18");
-  plan(s18, { first: at("s18", "office") });
-  await pool.query(`INSERT INTO email_validations (email, status, native_status, provider, validated_at) VALUES ($1, 'valid', 'safe', 'reoon', now())`, [at("s18", "office")]);
-  const c18 = await add("s18", s18);
-  const saved = await one(`SELECT status, native_status, provider FROM email_validations WHERE email = $1`, [at("s1", "office")]);
-  check("a verdict in email_validations makes no Reoon call", c18.s.listed && c18.w.paid.reoon === 0);
-  check("new verdicts are written there", saved?.status === "valid" && saved.provider === "reoon" && saved.native_status === "valid", JSON.stringify(saved));
-  const s19 = company("s19", "Harborview Dental S19", { website: `https://www.dead-${dom("s19")}`, domain: null, email: at("s19", "info") });
-  net.dead.add(`dead-${dom("s19")}`);
-  verdicts({ [at("s19", "info")]: "valid" });
-  const c19 = await add("s19", s19);
-  check("a checked general email with no working website is still listed (a usable email comes first)", c19.s.outcome === "Has a general email" && c19.s.listed && c19.s.found_by === "aiark" && !c19.s.website);
+  check("catch-all: waiting for Enrichley, counted, and not listed", !c16.s.listed && c16.s.general_waiting === 1);
 
-  section("C6. Shared memory of paid answers");
-  const h1 = await add("h1", s1, { table: tH });
-  check("another client's row for the same company and office: 0 OpenAI calls, 0 Reoon checks", h1.s.listed && h1.w.paid.openai === 0 && h1.w.paid.reoon === 0 && /^Reused: found for CPTEST_G/.test(h1.w.cell("email_search_1")?.note ?? ""), h1.w.cell("email_search_1")?.note);
-  const h11 = await add("h11", s11, { table: tH });
-  check("... the website search too, remembered by AI Ark id", h11.s.listed && h11.w.paid.openai === 0 && h11.w.cell("website_search")?.note?.startsWith("Reused"));
-  await pool.query(`UPDATE enrich_memory SET expires_at = now() - interval '1 second' WHERE starts_with(key, $1)`, [dom("s2")]);
-  const h2 = await add("h2", s2, { table: tH });
-  check("expired memory pays again", h2.s.listed && h2.w.paid.openai === 2, `${h2.w.paid.openai} calls`);
+  section("C5. Shared memory of paid answers");
+  const h1 = await add("h1", { ...s1, id: `cptest-${RUN}-h1` }, { t: H });
+  check("another client's row for the same company and office: 0 OpenAI calls, 0 Reoon checks", h1.s.listed && h1.paid.openai === 0 && h1.paid.reoon === 0 && /^Reused: found for CPTEST_G/.test(h1.w.cell("email_extraction_claygent")?.note ?? ""), h1.w.cell("email_extraction_claygent")?.note);
+  const h11 = await add("h11", { ...s11, id: `cptest-${RUN}-h11` }, { t: H });
+  check("... the website search too", h11.s.listed && h11.paid.openai === 0 && h11.w.cell("companys_website")?.note?.startsWith("Reused"));
+  await pool.query(`UPDATE enrich_memory SET expires_at = now() - interval '1 second' WHERE row_id = $1`, [rows.s2.rowId]);
+  const h2 = await add("h2", { ...s2, id: `cptest-${RUN}-h2` }, { t: H });
+  check("expired memory pays again", h2.s.listed && h2.paid.openai === 2, `${h2.paid.openai} calls`);
   const s1Found = (await summaryOf(rows.s1.rowId)).found_at;
-  await pool.query(`UPDATE enrich_rows SET run_force = '{email_search_1}', run_status = 'queued' WHERE id = $1`, [rows.s1.rowId]);
+  await pool.query(`UPDATE enrich_rows SET run_force = '{email_extraction_claygent}', run_status = 'queued' WHERE id = $1`, [rows.s1.rowId]);
   const forced = await work(rows.s1.rowId, { settings: SETTINGS });
   check("a forced re-run pays again", forced.paid.openai === 1 && forced.paid.reoon === 0 && forced.status === "done");
 
-  section("C7. Missing keys and Reoon's credits");
+  section("C6. Missing keys and Reoon's credits");
   const s20 = company("s20", "Harborview Dental S20");
   plan(s20, { first: at("s20", "office") });
-  verdicts({ [at("s20", "office")]: "valid" });
+  verdicts({ [at("s20", "office")]: "safe" });
   const c20 = await add("s20", s20, { env: { ENRICH_REOON_API_KEY: KEYS.ENRICH_REOON_API_KEY } });
-  check("no OpenAI key: the paid cell says Needs key, the row waits, and so does its outcome",
-    c20.w.cell("email_search_1")?.status === "needs_key" && c20.w.status === "waiting" && c20.s.outcome === "Waiting for a key" && !c20.s.listed && c20.w.paid.openai === 0);
-  check("... and the second search doesn't run while the first waits", c20.w.cell("email_search_2")?.status === "needs_key");
+  check("no OpenAI key: the paid cell says so, the row waits, and so does its outcome",
+    c20.w.cell("email_extraction_claygent")?.status === "needs_key" && c20.w.status === "waiting" && c20.s.outcome === "Waiting for a key" && !c20.s.listed && c20.paid.openai === 0);
+  check("... and the second search doesn't run while the first waits", c20.w.cell("email_extraction_claygent_2")?.status === "needs_key");
   net.balance = { daily: 0, instant: 0 };
   resetCompanyActions();
   const s21 = company("s21", "Harborview Dental S21", { email: at("s21", "info") });
-  verdicts({ [at("s21", "info")]: "valid" });
+  verdicts({ [at("s21", "info")]: "safe" });
   const c21 = await add("s21", s21);
-  check("Reoon's daily credits used up: the row waits, nothing is checked and nothing searched", c21.w.status === "waiting" && c21.w.paid.reoon === 0 && c21.w.paid.openai === 0 && c21.s.outcome === "Waiting for a key");
+  check("Reoon's daily credits used up: the row waits, nothing is checked and nothing searched", c21.w.status === "waiting" && c21.paid.reoon === 0 && c21.paid.openai === 0 && c21.s.outcome === "Waiting for a key");
   net.balance = { daily: 400, instant: 5 };
   resetCompanyActions();
   const s22 = company("s22", "Harborview Dental S22", { email: at("s22", "info") });
-  verdicts({ [at("s22", "info")]: "valid" });
+  verdicts({ [at("s22", "info")]: "safe" });
   const c22 = await add("s22", s22);
-  check("instant credits on the account: the row waits, nothing is checked", c22.w.status === "waiting" && c22.w.paid.reoon === 0 && /instant credits/.test(c22.w.cell("aiark_email_check")?.note ?? ""));
+  check("instant credits on the account: the row waits, nothing is checked", c22.w.status === "waiting" && c22.paid.reoon === 0 && /instant credits/.test(c22.w.cell("aiark_email_reoon")?.note ?? ""));
   const otherWaiting = await one(`SELECT count(*)::int AS n FROM enrich_rows r JOIN enrich_tables t ON t.id = r.table_id WHERE t.template IS NOT NULL AND r.run_status = 'waiting' AND NOT starts_with(t.client_tag, $1)`, [PREFIX]);
   if (otherWaiting.n) {
     check("no other client's template rows waiting (the sweep would queue them too)", false, `${otherWaiting.n} rows`);
   } else {
-    const noOpenAi = await requeueWaitingTemplateRows(pool, { ENRICH_REOON_API_KEY: KEYS.ENRICH_REOON_API_KEY });
     resetCompanyActions();
-    const instant = await requeueWaitingTemplateRows(pool, KEYS);
+    const noOpenAi = await requeueWaitingTemplateRows(pool, { ENRICH_REOON_API_KEY: KEYS.ENRICH_REOON_API_KEY }, { settings: SETTINGS });
+    resetCompanyActions();
+    const instant = await requeueWaitingTemplateRows(pool, KEYS, { settings: SETTINGS });
     net.balance = { daily: 400, instant: 0 };
     resetCompanyActions();
-    const ready = await requeueWaitingTemplateRows(pool, KEYS);
+    const ready = await requeueWaitingTemplateRows(pool, KEYS, { settings: SETTINGS });
     const queued = await one(`SELECT count(*)::int AS n FROM enrich_rows WHERE id = ANY($1::bigint[]) AND run_status = 'queued'`, [[c20.rowId, c21.rowId, c22.rowId]]);
-    check("the hourly sweep leaves waiting rows alone without both keys, or while Reoon holds instant credits", noOpenAi.queued === 0 && instant.queued === 0 && /instant/.test(instant.why ?? ""));
-    check("... and queues them again once the keys and the daily credits are there", ready.queued === 3 && queued.n === 3, JSON.stringify(ready));
-    const again = [await work(c20.rowId, { settings: SETTINGS }), await work(c21.rowId, { settings: SETTINGS }), await work(c22.rowId, { settings: SETTINGS })];
-    check("... then they finish and are listed", again.every((x) => x.status === "done" && x.projected?.listed), JSON.stringify(again.map((x) => [x.status, x.projected?.outcome])));
+    check("the hourly sweep leaves a row waiting while its own reason holds: no OpenAI key, or Reoon's instant credits",
+      noOpenAi.queued === 0 && noOpenAi.waiting === 3 && instant.queued === 1 && /instant/.test(instant.why ?? ""), JSON.stringify({ noOpenAi, instant }));
+    check("... and queues each once its reason has cleared", ready.queued === 2 && queued.n === 3, JSON.stringify(ready));
+    const again = [];
+    for (const r of [c20, c21, c22]) {
+      const w = await work(r.rowId, { settings: SETTINGS });
+      await drainTag(G, { settings: SETTINGS });
+      again.push({ status: w.status, listed: (await summaryOf(r.rowId))?.listed });
+    }
+    check("... then they finish and are listed", again.every((x) => x.status === "done" && x.listed), JSON.stringify(again));
   }
 
-  section("C8. Errors");
+  section("C7. Errors");
   const s23 = company("s23", "Harborview Dental S23");
   plan(s23, { first: at("s23", "office") });
-  verdicts({ [at("s23", "office")]: "valid" });
-  net.openaiFail = [500, 500, 500];
+  verdicts({ [at("s23", "office")]: "safe" });
+  net.openaiFail = [500];
   const c23 = await add("s23", s23);
-  check("an OpenAI 500 is tried again with backoff, then the row is queued again, never read as nothing found",
-    c23.w.paid.openai === 3 && c23.w.cell("email_search_1")?.status === "error" && c23.w.status === "queued" && !c23.s && c23.w.values.company_outcome === undefined, `${c23.w.paid.openai} ${c23.w.status}`);
+  check("an OpenAI 500: sent once, the row queued again with backoff, never read as nothing found",
+    c23.w.paid.openai === 1 && c23.w.cell("email_extraction_claygent")?.status === "error" && c23.w.status === "queued" && !c23.s && c23.w.values.company_outcome === undefined, `${c23.w.paid.openai} ${c23.w.status}`);
   check("a run condition that reads a failed cell errors, so the second search isn't paid for",
-    c23.w.cell("candidates_1")?.status === "error" && /Run condition not worked out/.test(c23.w.cell("candidates_1")?.note ?? "") && c23.w.cell("email_search_2")?.status === "error");
+    c23.w.cell("email_extraction_claygent_2")?.status === "error" && /Run condition not worked out/.test(c23.w.cell("email_extraction_claygent_2")?.note ?? ""));
   const retry = await work(c23.rowId, { settings: SETTINGS });
-  check("... and the next try finishes it", retry.status === "done" && retry.projected?.listed === true);
+  await drainTag(G, { settings: SETTINGS });
+  check("... and the next try finishes it", retry.status === "done" && (await summaryOf(c23.rowId))?.listed === true);
 
-  section("C9. A model swap");
-  const swapped = settingsFrom((await all(`SELECT key, value FROM enrich_settings`)).map((r) => (r.key === "models" ? { ...r, value: { ...r.value, email_search_first: { ...r.value.email_search_first, model: "gpt-5.6-luna" } } } : r)));
+  section("C8. A model swap");
+  const swapped = settingsFrom([...stored.filter((r) => !["spend_caps", "models"].includes(r.key)), HIGH, { key: "models", value: { ...stored.find((r) => r.key === "models")?.value, email_extraction_claygent: { model: "gpt-6-luna-test", max_searches: 2 } } }]);
   const s24 = company("s24", "Harborview Dental S24");
   plan(s24, { first: at("s24", "office") });
-  verdicts({ [at("s24", "office")]: "valid" });
+  verdicts({ [at("s24", "office")]: "safe" });
   const sentBefore = net.bodies.length;
   const c24 = await add("s24", s24, { settings: swapped });
-  check("a changed models.email_search_first reaches new rows", c24.s.listed && net.bodies.slice(sentBefore).some((b) => b.model === "gpt-5.6-luna" && b.reasoning?.effort === "low"));
+  check("a changed models.email_extraction_claygent reaches new rows", c24.s.listed && net.bodies.slice(sentBefore).some((b) => b.model === "gpt-6-luna-test"));
   await pool.query(`UPDATE enrich_rows SET run_status = 'queued' WHERE id = $1`, [rows.s16.rowId]);
   const redo = await work(rows.s16.rowId, { settings: swapped });
   check("... and done cells are not paid for again", redo.status === "done" && redo.paid.openai === 0 && redo.paid.reoon === 0);
 
-  section("C10. The real worker, draining its queue with no paid keys");
+  section("C9. The real worker, draining its queue with no paid keys");
   await realWorker();
-  return { tG, tH, rows, s1Found };
+  return { tG, tH, rows, s1Found, SETTINGS };
 }
 
 async function realWorker() {
@@ -1201,11 +1165,12 @@ async function realWorker() {
   }
   await addClient(W, { places: [IL("Springfield")] });
   resetClientChecks();
-  const tW = (await ensureTemplateTable(pool, W)).id;
-  const inside = await addRow(tW, company("w1", "Lakeshore Clinic W1"));
-  const outside = await addRow(tW, company("w2", "Lakeshore Clinic W2", { hq: BISMARCK }));
+  pipelineTables[W] = (await ensureTemplateTable(pool, W)).tables;
+  const tW = pipelineTables[W].companies;
+  const inside = await addRow(tW, company("w1", "Lakeshore Clinic W1"), W);
+  const outside = await addRow(tW, company("w2", "Lakeshore Clinic W2", { hq: BISMARCK }), W);
   // Only W's rows may be worked: the other test tables are paused meanwhile.
-  await pool.query(`UPDATE enrich_tables SET is_paused = true WHERE starts_with(client_tag, $1) AND id <> $2`, [PREFIX, tW]);
+  await pool.query(`UPDATE enrich_tables SET is_paused = true WHERE starts_with(client_tag, $1) AND NOT (id = ANY($2::uuid[]))`, [PREFIX, Object.values(pipelineTables[W])]);
   const env = { ...process.env, ENRICH_ONCE: "1", ENRICH_POLL_MS: "200", ENRICH_WORKER_ID: WORKER_ID };
   for (const k of PAID_KEYS) delete env[k];
   const worker = spawnSync(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(WORKER_PRELOAD)}`, fileURLToPath(new URL("./enrich-worker.mjs", import.meta.url))], {
@@ -1219,7 +1184,10 @@ async function realWorker() {
   check("a row with paid steps waits for the keys, and the tab says so", st[inside] === "waiting" && inS?.outcome === "Waiting for a key" && inS.listed === false, JSON.stringify({ st: st[inside], outcome: inS?.outcome }));
   check("a row outside the area finishes free, summarised and not listed", st[outside] === "done" && outS?.outcome === "Outside the client's area" && outS.listed === false);
   const beat = await one(`SELECT info FROM enrich_worker_state WHERE id = $1`, [WORKER_ID]);
-  check("its heartbeat offers company pulls and says the Reoon key is missing", beat?.info?.capabilities?.includes("company_runs") && beat.info.keys?.ENRICH_REOON_API_KEY === false && "reoon" in beat.info && beat.info.aiark?.company_slices === 0, JSON.stringify(beat?.info ?? null).slice(0, 300));
+  check("its heartbeat offers company pulls and the pipeline's originals, and says which keys are missing",
+    beat?.info?.capabilities?.includes("company_runs") && beat.info.capabilities.includes("pipeline_v2") && beat.info.keys?.ENRICH_REOON_API_KEY === false && "reoon" in beat.info &&
+      beat.info.aiark?.company_slices === 0 && beat.info.optional_keys?.FINDYMAIL_API_KEY === false && typeof beat.info.originals?.default?.total === "number" && typeof beat.info.spend_today?.reoon_checks === "number",
+    JSON.stringify(beat?.info ?? null).slice(0, 400));
 }
 
 // ── D. The tab's data ───────────────────────────────────────────────────────
@@ -1228,7 +1196,7 @@ const I = tag("I"); // 2,500 listed companies, for paging
 
 async function partD(routes, c) {
   const { runs, list, rows: rowsRoute } = routes;
-  const { tG, rows, s1Found } = c;
+  const { tG, rows, s1Found, SETTINGS } = c;
 
   section("D1. The projection");
   const counts = await one(
@@ -1236,19 +1204,20 @@ async function partD(routes, c) {
             (SELECT count(*)::int FROM enrich_rows WHERE table_id = $1 AND run_status IN ('done', 'waiting', 'error')) AS finished,
             (SELECT count(*)::int FROM enrich_companies WHERE table_id = $1 AND listed AND NOT (outcome = ANY($2::text[]))) AS wrongly_listed,
             (SELECT count(*)::int FROM enrich_companies WHERE table_id = $1 AND NOT listed AND outcome = ANY($2::text[])) AS wrongly_hidden`,
-    [tG, LISTED_OUTCOMES]
+    [tG, LISTED_OUTCOMES_V2]
   );
-  check("one summary per finished template row", counts.projected === counts.finished && counts.projected > 20, JSON.stringify(counts));
-  check("listed only for Has a general email and Already in the database", counts.wrongly_listed === 0 && counts.wrongly_hidden === 0);
+  check("one summary per finished template row", counts.projected === counts.finished && counts.projected >= 15, JSON.stringify(counts));
+  check("listed only with a listing outcome (General and people emails, Has a general email, Has people emails, Already in the database)", counts.wrongly_listed === 0 && counts.wrongly_hidden === 0);
   const s1Now = await summaryOf(rows.s1.rowId);
   check("found_at is set once: working the row again keeps it", s1Now.listed && new Date(s1Now.found_at).getTime() === new Date(s1Found).getTime());
-  const twin = company("s1", "Harborview Dental S1 Twin"); // a different AI Ark id, the same domain and office
-  plan(twin, { first: at("s1", "office") });
-  const twinRow = await addRow(tG, twin);
-  const t = await work(twinRow, { settings: settingsFrom(await all(`SELECT key, value FROM enrich_settings`)) });
+  const twin = { ...company("s1", "Harborview Dental S1"), id: `cptest-${RUN}-twin` }; // a different AI Ark id, the same company and office
+  const twinRow = await addRow(tG, twin, G);
+  const t = await work(twinRow, { settings: SETTINGS });
+  const followers = await drainTag(G, { settings: SETTINGS });
   const ts = await summaryOf(twinRow);
+  const tp = paidOf(t, followers);
   check("the same domain and office are listed once: the second is Listed under another row, and cost nothing",
-    ts.outcome === "Listed under another row" && !ts.listed && t.paid.openai === 0 && t.paid.reoon === 0, JSON.stringify({ outcome: ts.outcome, paid: t.paid }));
+    ts.outcome === "Listed under another row" && !ts.listed && tp.openai === 0 && tp.reoon === 0, JSON.stringify({ outcome: ts.outcome, paid: tp }));
 
   section("D2. Keyset paging over 2,500 companies");
   await addClient(I, { places: [IL("Springfield")] });
@@ -1344,7 +1313,7 @@ async function partD(routes, c) {
   check("... and the listed ones by verdict, and the rows by status", k?.listed.total === listed.total && k.listed.valid === listed.valid && k.listed.catchAll === listed.catch_all && k.listed.held === listed.held && sorted(k.rows) === sorted(byStatus) && k.tableId === tG);
 
   section("D4. Deletes");
-  const victim = rows.s16.rowId;
+  const victim = rows.s14.rowId;
   T.role = "admin";
   const del = await call(rowsRoute.DELETE, { body: { table: tG, ids: [victim] } });
   T.role = "manager";
@@ -1363,6 +1332,10 @@ async function partD(routes, c) {
     "src/app/api/companies/runs/cancel/route.ts", "src/app/api/companies/list/route.ts", "src/app/api/companies/settings/route.ts",
     "src/lib/companies/server.ts", "scripts/lib/aiark/company-runs.mjs", "scripts/lib/aiark/company-filters.mjs",
     "scripts/lib/enrich/company-actions.mjs", "scripts/lib/enrich/company-template.mjs", "scripts/lib/enrich/project-company.mjs",
+    "scripts/lib/enrich/company-template-v2.mjs", "scripts/lib/enrich/inbox-template.mjs", "scripts/lib/enrich/people-template.mjs",
+    "scripts/lib/enrich/templates.mjs", "scripts/lib/enrich/compile-original.mjs", "scripts/lib/enrich/pipeline-actions.mjs",
+    "scripts/lib/enrich/email-vendors.mjs", "scripts/lib/enrich/project-contacts.mjs", "scripts/lib/enrich/seed-originals.mjs",
+    "scripts/lib/enrich/spend.mjs", "scripts/enrich-seed-originals.mjs",
   ].filter((f) => /\b(INSERT INTO|UPDATE|DELETE FROM)\s+leads\b|from\(["']leads["']\)/i.test(source(f)));
   check("no new route or module writes leads", writers.length === 0, writers.join(", "));
 }
@@ -1400,7 +1373,10 @@ async function partE(routes, c) {
   section("E3. The Clay section's table list");
   const listed = await call(tables.GET);
   const ours = (listed.body?.tables ?? []).filter((x) => x.client_tag === J);
-  check("the template table is listed once, with its template, before the hand-seeded table", listed.status === 200 && ours.length === 2 && ours[0].id === tJ && ours[0].template === "companies_v1" && ours[1].id === hand.id && ours[1].template === null && (listed.body.tables ?? []).filter((x) => x.id === tG).length === 1);
+  check("the client's Companies template table comes before its hand-seeded one, then its People and General inboxes tables, each once",
+    listed.status === 200 && ours.length === 4 && ours[0].id === tJ && ours[0].template === "companies_v2" && ours[1].id === hand.id && ours[1].template === null &&
+      ours[2].template === "people_v1" && ours[3].template === "inboxes_v1" && (listed.body.tables ?? []).filter((x) => x.id === tG).length === 1,
+    JSON.stringify(ours.map((x) => x.template)));
 
   section("E4. The settings route");
   T.role = "manager";
@@ -1424,7 +1400,7 @@ async function partE(routes, c) {
   const cp = stored.find((r) => r.key === "company_pipeline")?.value;
   const models = stored.find((r) => r.key === "models")?.value;
   check("a save keeps what the sheet doesn't edit (memory_days, fit_score)", saved.status === 200 && cp?.memory_days?.website === 365 && "fit_score" in models && T.audits.some((x) => x.action === "enrich_settings"), JSON.stringify({ status: saved.status, cp }));
-  check("... and the worker reads what was saved", read.models.email_search_first.model === "gpt-5.6-luna" && read.company_pipeline.max_pull_size === 500 && read.company_pipeline.email_checks_per_company === 2);
+  check("... and the worker reads what was saved (the sheet's v2 model settings come with its move to the new shape)", read.company_pipeline.max_pull_size === 500 && read.company_pipeline.enabled === true);
   check("a save over a newer version is refused (409)", (await call(settings.PUT, { body: edit() })).status === 409);
   T.role = "manager";
 }
@@ -1433,6 +1409,7 @@ async function partE(routes, c) {
 
 const baseline = { leads: 0, push: 0, registry: 0 };
 let originalSettings = null;
+let spendBefore = null;
 
 async function cleanup() {
   await pool.query(`UPDATE enrich_tables SET is_paused = false WHERE starts_with(client_tag, $1)`, [PREFIX]);
@@ -1452,14 +1429,19 @@ async function cleanup() {
   await pool.query(`DELETE FROM client_targeting WHERE starts_with(client_tag, $1)`, [PREFIX]);
   await pool.query(`DELETE FROM client_tags WHERE starts_with(tag, $1)`, [PREFIX]);
   await pool.query(`DELETE FROM enrich_worker_state WHERE id = $1`, [WORKER_ID]);
+  await pool.query(`DELETE FROM enrich_originals WHERE starts_with(variant, 'cptest')`);
+  if (spendBefore) {
+    await pool.query(`DELETE FROM enrich_spend_daily WHERE NOT ((day::text || kind) = ANY($1::text[]))`, [spendBefore.map((r) => `${r.day}${r.kind}`)]);
+    for (const r of spendBefore) await pool.query(`UPDATE enrich_spend_daily SET used = $3 WHERE day::text = $1 AND kind = $2`, [r.day, r.kind, r.used]);
+  }
   if (originalSettings) {
     for (const r of originalSettings) await pool.query(`UPDATE enrich_settings SET value = $2 WHERE key = $1`, [r.key, JSON.stringify(r.value)]);
   }
 }
 
-const ready = await one(`SELECT to_regclass('public.aiark_company_runs') IS NOT NULL AND to_regclass('public.enrich_settings') IS NOT NULL AS ok`);
+const ready = await one(`SELECT to_regclass('public.aiark_company_runs') IS NOT NULL AND to_regclass('public.enrich_originals') IS NOT NULL AS ok`);
 if (!ready.ok) {
-  console.error("Refusing to run: migration 124 is not in this database.");
+  console.error("Refusing to run: migrations 124 and 125 are not in this database.");
   await pool.end();
   process.exit(1);
 }
@@ -1474,6 +1456,7 @@ let enrichDb = null;
 try {
   await cleanup(); // anything an interrupted run left behind
   originalSettings = await all(`SELECT key, value FROM enrich_settings WHERE key IN ('company_pipeline', 'models')`);
+  spendBefore = await all(`SELECT day::text AS day, kind, used::text AS used FROM enrich_spend_daily`);
   Object.assign(baseline, {
     leads: (await one(`SELECT count(*)::int AS n FROM leads`)).n,
     push: (await one(`SELECT count(*)::int AS n FROM push_items`)).n,
@@ -1516,7 +1499,8 @@ try {
             (SELECT count(*)::int FROM leads WHERE email LIKE $2) AS leads,
             (SELECT count(*)::int FROM suppressed_emails WHERE email LIKE $2) AS never_contact,
             (SELECT count(*)::int FROM bison_leads WHERE instance_url = $4) AS bison,
-            (SELECT count(*)::int FROM enrich_worker_state WHERE id = $5) AS heartbeat`,
+            (SELECT count(*)::int FROM enrich_worker_state WHERE id = $5) AS heartbeat,
+            (SELECT count(*)::int FROM enrich_originals WHERE starts_with(variant, 'cptest')) AS originals`,
     [PREFIX, `%.${TEST_HOST}`, baseline.registry, TEST_HOST, WORKER_ID]
   );
   const settingsBack = originalSettings

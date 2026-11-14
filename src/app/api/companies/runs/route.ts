@@ -23,6 +23,9 @@ import {
   workerView,
 } from "@/lib/companies/server";
 import type { RunMode } from "@/lib/aiark/types";
+import { settingsFrom } from "../../../../../scripts/lib/enrich/settings.mjs";
+import { hasRetiredV1, variantFor } from "../../../../../scripts/lib/enrich/templates.mjs";
+import { originalsSummary } from "../../../../../scripts/lib/enrich/compile-original.mjs";
 
 // GET  /api/companies/runs?tag=ABC: a client's 10 newest company pulls, the
 //      worker, the counts on its list and the settings' switch. The tab polls this.
@@ -33,11 +36,13 @@ import type { RunMode } from "@/lib/aiark/types";
 //      one transaction it makes the client's Companies table on the Clay tab (or
 //      brings its columns up to date), the pull's source and its
 //      aiark_company_runs row; the enrichment worker does the buying.
-//      Refused with a 409 while company pulls are switched off, while the worker
-//      is offline or doesn't do company pulls, while the client has a pull
-//      going, without a count, or when the rules or filters changed. The size
-//      is at most the settings' largest pull. Manager and up: a live pull spends
-//      AI Ark credits.
+//      Refused with a 409 while company pulls are switched off or the client is
+//      not on their client list (company_pipeline.tags), while the worker is
+//      offline or doesn't run the pipeline's Clay originals (pipeline_v2), while
+//      the client has a pull going, while the Clay originals are not loaded, for
+//      a client that still has a phase 1 (companies_v1) table (D24), without a
+//      count, or when the rules or filters changed. The size is at most the
+//      settings' largest pull. Manager and up: a live pull spends AI Ark credits.
 
 export const dynamic = "force-dynamic";
 
@@ -100,6 +105,13 @@ export async function POST(req: NextRequest) {
         if (!settings.enabled) {
           return { status: 409, error: "Company pulls are off, so nothing was started. An admin can switch them on in the settings." };
         }
+        const { rows: settingRows } = await c.query<{ key: string; value: unknown }>(`SELECT key, value FROM enrich_settings`);
+        if (!settingsFrom(settingRows).flagOn("company_pipeline", tag)) {
+          return {
+            status: 409,
+            error: `${tag} is not on the company pipeline's client list, so nothing was started. An admin adds it in the settings.`,
+          };
+        }
         if (size > settings.max_pull_size) {
           return { status: 400, error: `A pull takes at most ${fmt(settings.max_pull_size)} companies for now (the largest pull in the settings).` };
         }
@@ -116,6 +128,27 @@ export async function POST(req: NextRequest) {
         if (!worker.companyRuns) {
           return { status: 409, error: "The worker that is running doesn't do company pulls yet, so nothing was started. Deploy the latest worker first." };
         }
+        const capabilities = (await workerState(c))?.info?.capabilities;
+        if (!Array.isArray(capabilities) || !capabilities.includes("pipeline_v2")) {
+          return {
+            status: 409,
+            error: "The worker that is running doesn't run the pipeline's Clay originals yet, so nothing was started. Deploy the latest worker first.",
+          };
+        }
+        if (await hasRetiredV1(c, tag)) {
+          return {
+            status: 409,
+            error: `${tag} still has a phase 1 (companies_v1) table, so nothing was started: its pulls wait until the owner decides what happens to it.`,
+          };
+        }
+        const variant = await variantFor(c, tag);
+        const loaded = await originalsSummary(c, variant === "default" ? null : variant);
+        if (!(variant === "default" ? loaded.default.complete : loaded.client?.complete)) {
+          return {
+            status: 409,
+            error: "The Clay originals are not loaded, so nothing was started. They are loaded with scripts/enrich-seed-originals.mjs.",
+          };
+        }
         const client = await clientInfo(c, tag);
         if (!client) return { status: 404, error: `${tag} is not a client` };
         const targeting = await targetingOf(c, tag);
@@ -129,8 +162,10 @@ export async function POST(req: NextRequest) {
         const p = companyPlan(targeting, filters.value, await geo(c), client.client_type ?? null);
         const blocked = [...p.blockers, ...p.pullBlockers];
         if (blocked.length) return { status: 400, error: blocked.join(" ") };
-        // createCompanyRun makes the client's Companies table (template companies_v1) on its first
-        // pull and brings its columns up to date on every pull, then adds the pull's sources and row.
+        // createCompanyRun makes the client's three pipeline tables (Companies companies_v2, General
+        // inboxes, People), compiled from the Clay originals, on its first pull and brings their columns
+        // up to date on every pull, then adds the pull's sources and row. The checks above make its own
+        // refusals (a v1 table, originals missing) unreachable, short of a race.
         const run = await createCompanyRun(c, {
           tag,
           mode,
@@ -167,6 +202,13 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json({ run: out.run }, { status: 201 });
   } catch (err) {
+    const name = err instanceof Error ? err.name : "";
+    if (name === "RetiredV1Table" || name === "OriginalsMissing") {
+      return NextResponse.json(
+        { error: name === "OriginalsMissing" ? "The Clay originals are not loaded, so nothing was started." : (err as Error).message },
+        { status: 409 }
+      );
+    }
     console.error("companies/runs POST:", err);
     return NextResponse.json({ error: "Could not start the pull" }, { status: 500 });
   }

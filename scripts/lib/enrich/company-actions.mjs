@@ -1,5 +1,6 @@
-// The Companies template's own actions (company-template.mjs), registered in
-// ACTIONS beside the Clay ones (actions.mjs):
+// The Companies template's own phase 1 checks (company-template-v2.mjs keeps
+// them as T#17 to T#26), registered in ACTIONS beside the Clay ones
+// (actions.mjs), and the Reoon helpers every pipeline check goes through:
 //
 //   client_office       free   the office in the client's area: every office of
 //                              the company judged as client_area judges a person
@@ -7,11 +8,11 @@
 //   held_general_email  free   a general inbox for this company the database
 //                              already holds: role addresses at its domain, then
 //                              general-inbox leads at the same company and office
-//   pick_emails         free   addresses pulled out of an answer, junk left out,
-//                              the company's own domain first, at most 5
-//   verify_emails       Reoon  the first usable address, at most
-//                              email_checks_per_company paid checks a company; a
-//                              verdict from the last 90 days is reused for free
+//
+// Reoon: reoonVerifyRaw() is the one paid check (pipeline-actions.mjs
+// reoon_verify), inside this process's one pool of slots and one balance
+// cache. The hourly sweep (requeueWaitingTemplateRows, requeueRowsForHeldKeys)
+// queues template rows again once what kept them waiting has cleared.
 //
 // Each run() resolves to { status, value, display, note, retryable, run }, as
 // in actions.mjs. No message ever carries a key or a request URL.
@@ -19,8 +20,8 @@
 import { findState } from "../aiark/geo.mjs";
 import { stateHalves } from "../aiark/company-filters.mjs";
 import { companyAsHeld, FREE_MAIL, geoFor, heldAddresses, judgePlace, targetingFor } from "./client-checks.mjs";
-import { JUNK_DOMAINS, JUNK_LOCAL_PARTS, JUNK_LOCAL_PREFIXES, JUNK_TLDS } from "./company-template.mjs";
 import { bareDomain } from "./domain.mjs";
+import { CAP_REACHED, spendAllowed } from "./spend.mjs";
 
 const text = (v) => (v == null ? "" : String(v).replace(/\s+/g, " ").trim());
 const plural = (n, one, many) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
@@ -159,77 +160,13 @@ async function heldGeneralEmail({ inputs, db }) {
   return { status: "done", value, display, note };
 }
 
-// ── pick_emails ─────────────────────────────────────────────────────────────
-
-const EMAIL_RX = /[a-z0-9._%+'-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/gi;
-const IMAGE_RX = /\.(png|jpe?g|gif|svg|webp|bmp|ico|tiff?|avif)$/i;
-const JUNK_LOCALS = new Set(JUNK_LOCAL_PARTS);
-
-/** Why an address is never an office's general inbox, or null when it may be. */
-export function junkReason(address) {
-  const a = text(address).toLowerCase();
-  const at = a.lastIndexOf("@");
-  if (at < 1) return "not an address";
-  const host = a.slice(at + 1);
-  if (IMAGE_RX.test(host)) return "an image file name";
-  const tld = host.split(".").pop();
-  if (JUNK_TLDS.includes(tld)) return "a government or military address";
-  if (JUNK_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`))) return "a placeholder or platform address";
-  const local = a.slice(0, at).replace(/\+.*$/, "").replace(/[._'-]/g, "");
-  if (JUNK_LOCALS.has(local) || JUNK_LOCAL_PREFIXES.some((p) => local.startsWith(p))) return `a ${a.slice(0, at)}@ address`;
-  return null;
-}
-
-/** Text out of anything an answer cell may hold. */
-function textOf(v) {
-  if (v == null) return "";
-  if (typeof v === "string") return v;
-  if (Array.isArray(v)) return v.map(textOf).join(" ");
-  if (typeof v === "object") return Object.values(v).map(textOf).join(" ");
-  return String(v);
-}
-
-/**
- * The candidates in some text: lower case, once each, junk left out, the
- * excluded ones left out, the company's domain first, then free mail (small
- * businesses use it), then anything else; at most 5.
- */
-export function pickEmailList({ texts, exclude = [], domain = null, max = 5 }) {
-  const skip = new Set((Array.isArray(exclude) ? exclude : [exclude]).map((e) => text(e).toLowerCase()).filter(Boolean));
-  const own = bareDomain(domain);
-  const seen = new Set();
-  const kept = [];
-  const dropped = [];
-  for (const raw of textOf(texts).match(EMAIL_RX) ?? []) {
-    const email = raw.toLowerCase().replace(/^[._'-]+/, "").replace(/\.+$/, "");
-    if (!email.includes("@") || seen.has(email)) continue;
-    seen.add(email);
-    const why = junkReason(email) ?? (skip.has(email) ? "checked or ruled out already" : null);
-    if (why) dropped.push({ email, why });
-    else kept.push(email);
-  }
-  const rank = (e) => {
-    const host = e.slice(e.lastIndexOf("@") + 1);
-    if (own && (host === own || host.endsWith(`.${own}`))) return 0;
-    return FREE_MAIL.has(host) ? 1 : 2;
-  };
-  const emails = kept.map((e, i) => ({ e, i })).sort((x, y) => rank(x.e) - rank(y.e) || x.i - y.i).map((x) => x.e).slice(0, max);
-  return { emails, dropped };
-}
-
-async function pickEmails({ inputs }) {
-  const { emails, dropped } = pickEmailList({ texts: inputs.texts, exclude: inputs.exclude, domain: inputs.domain });
-  const droppedNote = dropped.length ? ` Left out: ${dropped.slice(0, 4).map((d) => `${d.email} (${d.why})`).join(", ")}${dropped.length > 4 ? " …" : ""}` : "";
-  if (!emails.length) return { status: "empty", note: `No usable address.${droppedNote}` };
-  return { status: "done", value: { emails, dropped }, display: emails.join(", "), note: `${plural(emails.length, "address", "addresses")} to check.${droppedNote}` };
-}
-
-// ── verify_emails (Reoon) ───────────────────────────────────────────────────
+// ── Reoon ───────────────────────────────────────────────────────────────────
 
 const REOON_API = "https://emailverifier.reoon.com/api/v1";
-const BALANCE_TTL_MS = 10 * 60_000;
+// The shared account's balance is read again when the one held is over a
+// minute old (D44): the validation worker spends the same daily credits.
+const BALANCE_TTL_MS = 60_000;
 const VERIFY_TIMEOUT_MS = 60_000;
-const FRESH_DAYS = 90;
 const NATIVE = new Set(["safe", "valid", "role_account", "catch_all", "invalid", "disposable", "spamtrap", "disabled", "inbox_full", "unknown"]);
 
 /**
@@ -252,7 +189,7 @@ let active = 0;
 const waiting = [];
 
 /** ENRICH_REOON_API_KEY, if it is usable. Never logged. */
-function reoonKey(env) {
+export function reoonKey(env) {
   const k = String(env?.ENRICH_REOON_API_KEY ?? "").trim();
   return k && !/[^\x20-\x7e]/.test(k) ? k : null;
 }
@@ -293,8 +230,8 @@ async function reoonGet(path, key, timeoutMs) {
 }
 
 /**
- * The Reoon account's balance (check-account-balance, free), read at most every
- * 10 minutes. { ok: true, daily, instant } or { ok: false, why, retryable }.
+ * The Reoon account's balance (check-account-balance, free), read at most once
+ * a minute. { ok: true, daily, instant } or { ok: false, why, retryable }.
  */
 export async function reoonBalance(env, { force = false } = {}) {
   const key = reoonKey(env);
@@ -335,39 +272,166 @@ export async function reoonMayCheck(env) {
   return { ok: true };
 }
 
+/** The notes a waiting cell gets from Reoon's gate (reoonBalance, reoonMayCheck, reoonVerifyRaw). */
+const REOON_WAIT = /^(?:Reoon|The Reoon account)\b/;
+const NEEDS_ON_WORKER = /^Needs (.+) on the worker$/;
+/** Templates no longer worked (templates.mjs RETIRED_TEMPLATES; repeated here to keep this module free of the templates). */
+const RETIRED = ["companies_v1"];
+
 /**
- * The worker's hourly sweep: template rows waiting on a key are queued again
- * once both paid keys are set and Reoon may be spent (daily credits left, no
- * instant credits). Answers already held are reused, so only the waiting cells
- * call a provider. Returns { queued, why }: why says what kept them waiting.
+ * Why a waiting row may run now: every note of its waiting cells must have
+ * cleared. "Waiting for <column>" follows from another cell and is not a
+ * reason of its own. A reason this sweep doesn't know keeps the old rule:
+ * both paid keys set and Reoon may be spent.
+ */
+function clearance(env, db, settings) {
+  const memo = new Map();
+  const once = (k, f) => {
+    if (!memo.has(k)) memo.set(k, f());
+    return memo.get(k);
+  };
+  const reoonGate = () => once("reoon", () => reoonMayCheck(env));
+  const share = () => once("share", () => spendAllowed(db, "reoon_checks", settings));
+  const openai = () => once("openai", () => spendAllowed(db, "openai_usd_pipeline", settings));
+  /** @returns {Promise<string | null>} why it still waits, or null */
+  return async (notes) => {
+    const reasons = (notes ?? []).filter((n) => n && !/^Waiting for /.test(n) && !/^Not worked out|not worked out/.test(n));
+    for (const n of reasons) {
+      const needs = NEEDS_ON_WORKER.exec(n);
+      if (needs) {
+        const missing = needs[1].split(/\s+and\s+/).filter((k) => !text(env?.[k]));
+        if (missing.length) return `Needs ${missing.join(" and ")} on the worker`;
+        continue;
+      }
+      if (n === CAP_REACHED.openai_usd_pipeline) {
+        const a = await openai();
+        if (!a.ok) return a.why;
+        continue;
+      }
+      if (n === CAP_REACHED.reoon_checks) {
+        const a = await share();
+        if (!a.ok) return a.why;
+        const g = await reoonGate();
+        if (!g.ok) return g.why;
+        continue;
+      }
+      if (REOON_WAIT.test(n)) {
+        const g = await reoonGate();
+        if (!g.ok) return g.why;
+        continue;
+      }
+      if (!text(env?.OPENAI_API_KEY) || !reoonKey(env)) return "Needs OPENAI_API_KEY and ENRICH_REOON_API_KEY on the worker";
+      const g = await reoonGate();
+      if (!g.ok) return g.why;
+    }
+    return null;
+  };
+}
+
+/**
+ * The worker's hourly sweep: template rows waiting on a key or a day's cap are
+ * queued again in pages (oldest first), and only when what made each one wait
+ * has cleared: the key is set, Reoon may be spent and the day's Reoon share
+ * has room, or the day's OpenAI cap has room. Answers already held are reused,
+ * so only the waiting cells call a provider. A row whose step needs a key we
+ * do not hold never waits (it is skipped), so it never comes here.
  *
  * @param {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[], rowCount?: number | null }> }} db
  * @param {Record<string, string | undefined>} env
+ * @param {{ settings?: import("./settings.mjs").PipelineSettings | null, pageSize?: number, maxPages?: number }} [opts]
+ * @returns {Promise<{ queued: number, waiting: number, why: string | null }>}  why: what keeps the most rows waiting
  */
-export async function requeueWaitingTemplateRows(db, env) {
-  if (!text(env?.OPENAI_API_KEY) || !reoonKey(env)) {
-    return { queued: 0, why: "Needs OPENAI_API_KEY and ENRICH_REOON_API_KEY on the worker" };
+export async function requeueWaitingTemplateRows(db, env, { settings = null, pageSize = 5000, maxPages = 20 } = {}) {
+  const cleared = clearance(env, db, settings);
+  const kept = new Map();
+  let queued = 0;
+  let after = 0;
+  for (let page = 0; page < maxPages; page++) {
+    const { rows } = await db.query(
+      `SELECT r.id, coalesce(array_agg(DISTINCT c.note) FILTER (WHERE c.note IS NOT NULL), '{}') AS notes
+         FROM enrich_rows r
+         JOIN enrich_tables t ON t.id = r.table_id
+         LEFT JOIN enrich_cells c ON c.row_id = r.id AND c.status = 'needs_key'
+        WHERE t.template IS NOT NULL AND NOT (t.template = ANY($3::text[])) AND r.run_status = 'waiting' AND r.id > $1
+        GROUP BY r.id
+        ORDER BY r.id
+        LIMIT $2`,
+      [after, pageSize, RETIRED]
+    );
+    if (!rows.length) break;
+    const ready = [];
+    for (const r of rows) {
+      const why = await cleared(r.notes);
+      if (why) kept.set(why, (kept.get(why) ?? 0) + 1);
+      else ready.push(r.id);
+    }
+    if (ready.length) {
+      const { rowCount } = await db.query(
+        `UPDATE enrich_rows SET run_status = 'queued', next_run_at = now(), attempts = 0, last_error = NULL, updated_at = now()
+          WHERE id = ANY($1::bigint[]) AND run_status = 'waiting'`,
+        [ready]
+      );
+      queued += rowCount ?? 0;
+    }
+    after = Number(rows.at(-1).id);
+    if (rows.length < pageSize) break;
   }
-  const { rows: [{ any }] } = await db.query(
-    `SELECT EXISTS (SELECT 1 FROM enrich_rows r JOIN enrich_tables t ON t.id = r.table_id
-                     WHERE t.template IS NOT NULL AND r.run_status = 'waiting') AS any`
+  const top = [...kept].sort((a, b) => b[1] - a[1])[0] ?? null;
+  return { queued, waiting: [...kept.values()].reduce((a, b) => a + b, 0), why: top ? top[0] : null };
+}
+
+/**
+ * The other half of the sweep: a keyed step (an email finder or Enrichley)
+ * skipped as "Needs <KEY> (not held)" runs once its key is set. The rows whose
+ * cells say so for a key now held are queued again, in pages, table by table
+ * and column by column (the cells' own index). Their other answers are reused.
+ *
+ * @param {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[], rowCount?: number | null }> }} db
+ * @param {Record<string, string | undefined>} env
+ * @param {{ keys: readonly string[], noteOf: (key: string) => string, pageSize?: number, maxPages?: number }} opts
+ *   keys: the optional keys (pipeline-actions.mjs OPTIONAL_KEYS); noteOf: their skipped note (absentKeyNote)
+ * @returns {Promise<{ queued: number, keys: string[] }>}  keys: the ones now held
+ */
+export async function requeueRowsForHeldKeys(db, env, { keys, noteOf, pageSize = 5000, maxPages = 20 }) {
+  const held = (keys ?? []).filter((k) => text(env?.[k]));
+  if (!held.length) return { queued: 0, keys: [] };
+  const notes = held.map(noteOf);
+  const { rows: columns } = await db.query(
+    `SELECT c.table_id, array_agg(c.key) AS keys
+       FROM enrich_columns c JOIN enrich_tables t ON t.id = c.table_id
+      WHERE t.template IS NOT NULL AND c.config->>'key_env' = ANY($1::text[])
+      GROUP BY c.table_id`,
+    [held]
   );
-  if (!any) return { queued: 0, why: null };
-  const gate = await reoonMayCheck(env);
-  if (!gate.ok) return { queued: 0, why: gate.why };
-  const { rowCount } = await db.query(
-    `UPDATE enrich_rows r
-        SET run_status = 'queued', next_run_at = now(), attempts = 0, last_error = NULL, updated_at = now()
-       FROM enrich_tables t
-      WHERE t.id = r.table_id AND t.template IS NOT NULL AND r.run_status = 'waiting'`
-  );
-  return { queued: rowCount ?? 0, why: null };
+  let queued = 0;
+  let pages = 0;
+  for (const t of columns) {
+    let after = 0;
+    while (pages < maxPages) {
+      pages++;
+      const { rows } = await db.query(
+        `SELECT DISTINCT row_id FROM enrich_cells
+          WHERE table_id = $1 AND column_key = ANY($2::text[]) AND status = 'skipped' AND note = ANY($3::text[]) AND row_id > $4
+          ORDER BY row_id LIMIT $5`,
+        [t.table_id, t.keys, notes, after, pageSize]
+      );
+      if (!rows.length) break;
+      const { rowCount } = await db.query(
+        `UPDATE enrich_rows SET run_status = 'queued', next_run_at = now(), attempts = 0, last_error = NULL, updated_at = now()
+          WHERE id = ANY($1::bigint[]) AND run_status IN ('done', 'waiting')`,
+        [rows.map((r) => r.row_id)]
+      );
+      queued += rowCount ?? 0;
+      after = Number(rows.at(-1).row_id);
+      if (rows.length < pageSize) break;
+    }
+  }
+  return { queued, keys: held };
 }
 
 /**
  * One paid Reoon check (power mode, GET /api/v1/verify?email=&key=&mode=power,
- * as G#39 and P#11 ask), for the pipeline's reoon_verify step and phase 1's
- * own check. It runs inside this process's one pool of Reoon slots
+ * as G#39 and P#11 ask), for the pipeline's reoon_verify step. It runs inside this process's one pool of Reoon slots
  * (ENRICH_REOON_THREADS, at most 5) and spends from the one balance cache, so
  * the worker never has two of either. The key is cut out of Reoon's answer
  * before it is parsed, so `json` never holds it.
@@ -405,109 +469,9 @@ export async function reoonVerifyRaw(email, env) {
   });
 }
 
-/** One paid check (power mode), for phase 1's verify_emails. { ok, status, native } or { ok: false, why, retryable, keyProblem }. */
-async function reoonVerify(email, env) {
-  const r = await reoonVerifyRaw(email, env);
-  if (r.ok) return { ok: true, native: r.native, status: r.status };
-  if (r.keyProblem) return { ok: false, keyProblem: true, why: r.why, status: r.http_status };
-  return { ok: false, retryable: r.retryable, why: r.why, status: r.http_status };
-}
-
-/** Addresses out of the emails input: an array, or text separated by commas or spaces. */
-function addressesOf(v) {
-  const list = Array.isArray(v) ? v : text(v).split(/[,;\s]+/);
-  return [...new Set(list.map((e) => text(e).toLowerCase()).filter((e) => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/.test(e)))].slice(0, 10);
-}
-
-async function verifyEmails({ inputs, env, db, settings }) {
-  const emails = addressesOf(inputs.emails);
-  if (!emails.length) return { status: "empty", note: "No address to check" };
-  const cap = settings?.company_pipeline?.email_checks_per_company ?? 3;
-  const spent = Math.max(0, Number(inputs.spent) || 0);
-  const { rows } = await db.query(
-    `SELECT email, status, native_status FROM email_validations
-      WHERE email = ANY($1::text[]) AND validated_at > now() - make_interval(days => $2)
-        AND status IN ('valid', 'catch_all', 'invalid')`,
-    [emails, FRESH_DAYS]
-  );
-  const fresh = new Map(rows.map((r) => [r.email, r]));
-  const checked = [];
-  let paid = 0;
-  let valid = null;
-  let catchAll = null;
-  let stop = null; // why checking ended before a valid address: cap | wait | error
-  for (const email of emails) {
-    let status;
-    let native;
-    let cached = false;
-    const hit = fresh.get(email);
-    if (hit) {
-      status = hit.status;
-      native = hit.native_status;
-      cached = true;
-    } else {
-      if (spent + paid >= cap) {
-        stop = { kind: "cap", why: `The cap of ${plural(cap, "paid check", "paid checks")} for this company is reached` };
-        break;
-      }
-      const gate = await reoonMayCheck(env);
-      if (!gate.ok) {
-        stop = { kind: gate.retryable ? "error" : "wait", why: gate.why };
-        break;
-      }
-      const r = await reoonVerify(email, env);
-      if (!r.ok && r.keyProblem) {
-        stop = { kind: "wait", why: r.why };
-        break;
-      }
-      if (!r.ok) {
-        // Never read as "nothing usable": the row is tried again, and the verdicts saved so far are reused for free.
-        return {
-          status: "error", note: `Reoon: ${r.why}`, retryable: r.retryable,
-          run: { request: { emails, spent, cap }, response: { checked, paid }, http_status: r.status || null, error: r.why },
-        };
-      }
-      status = r.status;
-      native = r.native;
-      // The newer verdict wins, as in the validation worker's table.
-      await db.query(
-        `INSERT INTO email_validations (email, status, native_status, provider, validated_at)
-         VALUES ($1, $2, $3, 'reoon', now())
-         ON CONFLICT (email) DO UPDATE
-           SET status = EXCLUDED.status, native_status = EXCLUDED.native_status, provider = EXCLUDED.provider,
-               task_id = NULL, validated_at = EXCLUDED.validated_at
-         WHERE email_validations.validated_at <= EXCLUDED.validated_at`,
-        [email, status, native]
-      );
-      if (native !== "unknown") paid++; // Reoon refunds unknown results
-    }
-    checked.push({ email, status, native: native ?? null, cached });
-    if (status === "valid") {
-      valid = email;
-      break;
-    }
-    if (status === "catch_all" && !catchAll) catchAll = email;
-  }
-  const winner = valid ? { email: valid, status: "valid" } : catchAll ? { email: catchAll, status: "catch_all" } : null;
-  const run = { request: { emails, spent, cap }, response: { checked, paid } };
-  if (!winner && stop?.kind === "wait") return { status: "needs_key", note: stop.why, run };
-  if (!winner && stop?.kind === "error") return { status: "error", note: stop.why, retryable: true, run };
-  const summary = checked.map((c) => `${c.email} ${c.status}${c.cached ? " (reused)" : ""}`).join(", ");
-  const note = `${summary || "Nothing checked"}.${paid ? ` ${plural(paid, "paid check", "paid checks")}.` : ""}${stop ? ` ${stop.why}.` : ""}`;
-  return {
-    status: "done",
-    value: { email: winner?.email ?? null, status: winner?.status ?? null, checked, paid },
-    display: winner ? `${winner.status === "valid" ? "Valid" : "Catch-all"}: ${winner.email}` : "None usable",
-    note,
-    run,
-  };
-}
-
 export const COMPANY_ACTIONS = {
   client_office: { run: clientOffice, cache: false },
   held_general_email: { run: heldGeneralEmail, cache: false },
-  pick_emails: { run: pickEmails, cache: false },
-  verify_emails: { run: verifyEmails, cache: true },
 };
 
 /** For tests: forget the Reoon balance read and free every check slot. */

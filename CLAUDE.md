@@ -2239,9 +2239,11 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
 
 Phase 1 of the Clay section restart: for any client tag, companies come from AI Ark's
 Company Search into that client's template Companies table on the Clay tab, are
-enriched there, and the Companies tab lists only those with a usable general email.
+enriched there, and the Companies tab lists only those with a usable email. Since
+migration 125 the steps are the original Clay columns (see "Pipeline v2" below).
 Nothing in it writes `leads`, Email Bison or a campaign: phase 3 adds that, behind
-fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`).
+fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`,
+`tags: []`).
 
 - **Tables (124):** `aiark_company_runs` (one row per pull, worked a slice at a time,
   cursor in `progress`, as `aiark_runs`); `aiark_companies` (the registry: every
@@ -2277,24 +2279,17 @@ fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`)
   searches + 2` credits, checked before each page. 401/403 and 400 end in an error,
   402 stops. Past the lists (over 100,000 ids, or no budget) a company can be paid
   again: written once, marked "Bought before", counted in `bought_before`.
-- **The template** (`scripts/lib/enrich/company-template.mjs`, plain JavaScript; no
-  client lists, names or prompts with client data): the office in the client's area
-  (`client_office`, every office judged by `judgePlace()`, the head office first),
-  the client's exclusions, a general inbox already held (`held_general_email`: 14
-  role addresses at the domain, then general-inbox leads at the same company, city
-  and state, through `idx_leads_company_norm`; never contact stops the company, a
-  bounced address is searched past), AI Ark's website checked for free and a paid
-  search only when it is missing or dead, AI Ark's email (head office only), then a
-  first and a second email search, each checked by `verify_emails` (Reoon, at most
-  `email_checks_per_company` paid checks, a verdict in `email_validations` from the
-  last 90 days reused free), then the Outcome. Listed: "Has a general email" and
-  "Already in the database" (once per domain, state and city: a second row is
-  "Listed under another row"). A checked general email comes before the website in
-  the Outcome: AI Ark's head-office email is checked without one, so a company whose
-  site is dead but whose email checks out is listed, not "No working website".
-  Every paid step needs `passes_filters`. A template
-  change reaches a client's table on its next pull (`ensureTemplateTable()` upserts
-  the columns by key, never removes one); rows already worked are not re-run.
+- **The template** is `companies_v2` since migration 125 (see "Pipeline v2"): phase 1's
+  own office, rules and database checks (`client_office`, `client_exclusions`,
+  `held_general_email`: 14 role addresses at the domain, then general-inbox leads at
+  the same company, city and state, through `idx_leads_company_norm`; never contact
+  stops the company, a bounced address is searched past) are kept as they were, and
+  every other step is an original Clay column. Phase 1's own template (`companies_v1`),
+  its prompts, `pick_emails`, `verify_emails` and `email_checks_per_company` are gone; a
+  client that still has a `companies_v1` table can't pull (D24) and its rows are never
+  worked. A template change reaches a client's tables on its next pull
+  (`ensurePipelineTables()` upserts the columns by key and prunes the ones a template no
+  longer has); rows already worked are not re-run.
 - ⚠ **Template tables are strict** (`engine.mjs`): a formula, waterfall step, run
   condition or action input that reads a failed cell errors, and one that reads a
   cell waiting on a key waits, so no paid step runs on a guess (a missing Reoon key
@@ -2302,30 +2297,33 @@ fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`)
   keep the old rule (only formulas react, to errors); `test-aiark.mjs` C5 checks it.
 - **Shared memory:** an action column with `config.memory` and an input
   `memory_key` reuses any row's, table's or client's answer ("Reused: found for TAG
-  on DATE", no provider call, no run record): the website by AI Ark id
-  (`website_v1`), each email search by domain and office (`email_search_first_v1`,
-  `email_search_second_v1`). Kept 365 days (website), 90 (email), 30 (nothing
-  found). ⚠ A prompt change must bump the version in the kind's name.
-- **Settings** (`scripts/lib/enrich/settings.mjs`, read every 30 s; the defaults are
-  the seeded values): the model, reasoning effort and most searches for each AI step
-  (`config.model_setting`), so a model is swapped with no deploy and no answer
-  already held is paid for again (the cell hash holds the setting's name, not the
-  model). A missing model is an error, never a fallback. ⚠ **gpt-5-nano shuts down
-  on 11 Dec 2026** (OpenAI's deprecations page): move `email_search_first` before then.
-- **Keys:** `OPENAI_API_KEY` on the worker (the website and email searches);
-  `ENRICH_REOON_API_KEY`, the pipeline's Reoon key. In production it is the same
-  account as the validation worker's `REOON_API_KEY` (chosen 2026-11-13), so the two
-  share that account's daily credits; the validation worker leaves
-  `VALIDATION_DAILY_RESERVE` (2,000 by default) for other users of the key, and the
-  pipeline makes at most `email_checks_per_company` checks a company. Like the
-  validation worker, it spends daily credits only: nothing is
+  on DATE", no provider call, no run record). A compiled AI column remembers by its
+  model and its rendered prompt (`<setting>_v1`; a key over 200 characters is stored as
+  its sha256), so two rows share a paid answer only when the same question goes to the
+  same model; Reoon by address (`reoon_v1`). Kept 365 days (C#24, P#27), 90 (the
+  others), 30 (nothing found).
+- **Settings** (`scripts/lib/enrich/settings.mjs`, read every 30 s by the worker and
+  fresh by the routes; every value checked as it is read, the defaults the seeded
+  values): the switches and their client lists, the model, reasoning effort and most
+  searches for each AI step (`config.model_setting`), so a model is swapped with no
+  deploy and no answer already held is paid for again (the cell hash holds the
+  setting's name, not the model). A missing model is an error, never a fallback.
+- **Keys:** `OPENAI_API_KEY` on the worker (the AI columns); `ENRICH_REOON_API_KEY`,
+  the pipeline's Reoon key. In production it is the same account as the validation
+  worker's `REOON_API_KEY` (chosen 2026-11-13), so the two share that account's daily
+  credits; the validation worker leaves `VALIDATION_DAILY_RESERVE` (2,000 by default)
+  for other users of the key, and the pipeline takes at most its own share a UTC day
+  (`spend_caps.reoon_checks_per_day`, 1,500). Like the validation worker, it spends
+  daily credits only (the balance read again when over a minute old): nothing is
   checked while the account holds any instant credit or has no daily credits left,
-  and the cell waits ("Needs key", the row 'waiting'). Without the key, cached
-  verdicts still work. `ENRICH_REOON_THREADS` (4, at most 5). Once an hour, with
-  both keys set and daily credits left, the worker queues waiting template rows
-  again (`requeueWaitingTemplateRows()` in `company-actions.mjs`). The heartbeat
-  carries `capabilities: ["company_runs"]` (the pull route refuses a worker without
-  it) and the last Reoon balance read.
+  and the cell waits (the row 'waiting'). Without the key, a final rejection already
+  in `email_validations` is still reused. `ENRICH_REOON_THREADS` (4, at most 5). Once
+  an hour the worker queues waiting template rows again, in pages, each only when what
+  made it wait has cleared (`requeueWaitingTemplateRows()`), and the rows whose finder
+  or Enrichley steps were skipped for a key it now holds (`requeueRowsForHeldKeys()`).
+  The heartbeat carries `capabilities: ["company_runs", "pipeline_v2"]` (the pull route
+  refuses a worker without them), the last Reoon balance read, the originals loaded,
+  today's spend and which optional keys are held.
 - **The Companies tab** (`/leads/companies`, manager and up; the settings sheet is
   admin): pick a client, see what AI Ark will be asked, its company filters (read
   only: size and industries are saved on the AI Ark tab), count (one Company Search
@@ -2352,8 +2350,9 @@ fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`)
   `ENRICH_REOON_API_KEY` set locally, the worker spends real money on made-up
   `.example` companies; the tests stub `fetch` instead.
 - **Tests:** stop the worker, then `node --env-file=.env.local scripts/test-companies.mjs`
-  (local database only, migration 124 applied; made-up `CPTEST_` clients and
-  `.cptest.example` addresses, removed at the end; about 15 s). Nothing reaches a
+  (local database only, migrations 124 and 125 applied; made-up `CPTEST_` clients, each
+  with the made-up Clay originals as its own variant, and `.cptest.example` addresses,
+  removed at the end; about 10 s). Nothing reaches a
   network: AI Ark answers through the demo transport, and `fetch` is replaced for
   the run (OpenAI, Reoon and the website checks answer from a stub; any other address
   is refused and counted). The routes run for real through a small TypeScript loader
@@ -2369,6 +2368,95 @@ fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`)
   changed files and a production build, then a scan of the added lines for client
   tags and names (read from the local `client_tags` into a scratch file outside the
   repo) and for anything shaped like a key.
+
+### Pipeline v2 (migration 125: the original Clay columns, three tables per client)
+
+Phases 2 and 3 of the restart run the original Clay tables' columns, compiled from
+the Clay CLI's exports, instead of steps of our own. Every paid or send switch
+ships **off** and covers no client until its tag is on the switch's list (D46).
+
+- **The originals** (`enrich_originals`): the three Clay tables exactly as the Clay
+  CLI exported them (Companies 68 columns, People 88, General inboxes 76). They hold
+  client text (prompts, lists, examples), so they live in the database only and the
+  export files stay out of git. Load them with
+  `node scripts/enrich-seed-originals.mjs --companies <file> --people <file> --inboxes <file> [--variant default] [--tracks <file>] [--dry]`.
+  It refuses another layout (each position's name must fit its key in
+  `original-keys.mjs`; a client whose table differs stops here), records each file's
+  sha256, derives the people tracks (`enrich_settings.people_tracks`, written for the
+  default variant only) and refuses a phrase its cited column doesn't hold, prints
+  counts and the models that differ from the settings (never a prompt, list or name),
+  and never changes a setting. A client's own exports load as its variant (its tag in
+  lower case, `variantName()`); every other client compiles from `default`.
+- **The tables** (`ensurePipelineTables()`, `templates.mjs`, run inside the pull route's
+  transaction): "Companies (pipeline)" (`companies_v2`), "General inboxes (pipeline)"
+  (`inboxes_v1`, one row per general address the company row wrote) and "People
+  (pipeline)" (`people_v1`). `compile-original.mjs` rewrites each `{{f_<id>}}` to the
+  template's keys (`ORIGINAL_KEYS` with the template's `REFS`) and applies the
+  template's changes, each an exact replacement that must match once. The template
+  modules (`company-template-v2.mjs`, `inbox-template.mjs`, `people-template.mjs`) hold
+  keys, which original each column comes from, our own formulas and the changes:
+  never a prompt or a list. ⚠ `enrich_columns.config` is jsonb, which keeps no key
+  order, so an AI column keeps Clay's answer field order in `config.answer_order` (its
+  first field is the cell's display).
+- **A company row:** phase 1's office and rules, C#16 and C#17 verbatim, the database
+  first (`held_people`: named usable leads at the company and state; C#13 SAFE TO RUN
+  reads it, and it runs whatever the people switch says), the website chain (the paid
+  search only without an AI Ark domain), the first general email in Icypeas' place (a
+  held inbox, else AI Ark's head-office email once Reoon approves it by G#40's rule),
+  C#31 then C#32, C#34 (a named stand-in for Clay's tool: emails only) and C#36, which
+  writes each address as its own inbox row, at most `company_pipeline.inboxes_per_company`
+  (5). An inbox row: the database check, then G#37 to G#44 verbatim. A People row
+  (written by people runs and the AI searches' write-tos, input cells only): P#4 to P#62.
+- **Switches** (`flagOn()`; a switched-off column is skipped "Switched off: <switch>"
+  and read as empty): `company_pipeline` (pulls and counts refuse a client not on
+  `company_pipeline.tags`), `people_pipeline` (`people_at_company`, C#41 to C#58),
+  `people_pipeline.ai_searches` (C#41, C#48, C#50, C#56), `company_pipeline.linkedin_profile_reads`
+  (C#50, P#27) and `personalisation` (P#57 to P#62, G#45 to G#50; also needs the
+  client's own originals unless `shared_text_ok`). The question steps P#61 and G#49
+  wait for how Clay sends their table examples, so no question is written yet.
+- **AI steps:** one setting per column in `enrich_settings.models`, every one
+  `gpt-6-luna` (2026-11-13), with the web search tool for the columns whose prompts
+  visit pages, `max_tool_calls` from the setting, no reasoning effort, no user
+  location, and answers kept as returned ("N/A" included, as in Clay). One send per
+  attempt; a cell sent twice with no answer is not sent again (a timed-out request may
+  still be billed); OpenAI's billing refusals are never retried.
+- **The email finders and Enrichley** (P#46 to P#54, G#41, P#13) run only while their
+  key is on the worker: `FINDYMAIL_API_KEY`, `PROSPEO_API_KEY`, `ANYMAIL_FINDER_API_KEY`,
+  `ENRICHLEY_API_KEY`. Without one, its steps show "Needs <KEY> (not held)", read as
+  empty, and never make a row wait. Adapters: `email-vendors.mjs` (Findymail, Prospeo's
+  Enrich Person and Enrichley from the vendors' public docs, cited there; Anymail
+  Finder sends the original's own request, its Authorization header the key's whole
+  value). ⚠ None has run live: Findymail's not-found answer and Prospeo's email
+  statuses are not documented, and the first supervised run reads them. Finder emails
+  reach Use Work Email with no Reoon check, as in the original.
+- **Spend caps** (`enrich_spend_daily`, `spend.mjs`, the database's UTC day): the
+  pipeline's Reoon share (`spend_caps.reoon_checks_per_day`, 1,500), counted in one
+  statement before each check, and the OpenAI dollars per loop
+  (`spend_caps.openai_usd_per_day`: pipeline $20, fit $25), counted after each answer
+  from its usage at `spend_caps.openai_prices` (an unknown model at the dearest prices
+  held). Past a cap the cell waits ("Today's Reoon share is used up", "Today's OpenAI
+  cap for the pipeline is reached") until the next day's sweep.
+- **Listing** (`enrich_contacts`, `relist()` in `project-contacts.mjs`): one summary
+  per inbox and People row; a company is listed when it passes the client's rules, is
+  not never-contact or in error, and has a usable general or person email (approved,
+  or already held), once per company and office. A listed company shows "General and
+  people emails", "Has a general email", "Has people emails" or "Already in the
+  database". The worker projects each row by its table's template.
+- ⚠ **Clay's quirks are kept verbatim** (D2): `.ca` in C#26's blocklist drops every
+  Canadian website, C#32 has no URL check, C#24 has no SAFE TO RUN clause, C#58 checks
+  Person_2 fields, the write-tos' "||" clause skips their title filters. Each has a
+  check in `test-pipeline-v2.mjs`.
+- **Tests:** stop the worker, then `node --env-file=.env.local scripts/test-originals.mjs`
+  (the compiler, the templates, the seed script, the pull route's refusals, 125's
+  settings merges; with `CLAY_ORIGINALS_DIR=<folder>` it also compiles the real exports
+  in memory, counts only) and `node --env-file=.env.local scripts/test-pipeline-v2.mjs`
+  (company, inbox and People rows end to end; OpenAI, Reoon, Google's DNS, the finders
+  and Enrichley stubbed, every other address refused). Both use
+  `scripts/fixtures/clay-originals` (made-up exports with the originals' layout and
+  logic, never the real files; rebuild with
+  `node scripts/fixtures/clay-originals/fixtures.mjs --write`), loaded as each made-up
+  client's own variant, so the `default` originals are never changed. Local database
+  only; about 3 s together.
 
 ## Known issues / TODO
 

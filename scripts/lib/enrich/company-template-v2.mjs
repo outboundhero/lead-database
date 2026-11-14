@@ -16,8 +16,14 @@
 // row), then the people side (people_at_company; with the AI searches on, C#41,
 // C#48, C#50, C#56 and their write-tos).
 
+import { compileColumn, instanceMap, refMap } from "./compile-original.mjs";
+import { ORIGINAL_KEYS } from "./original-keys.mjs";
+import { INBOX_INPUT_KEYS } from "./inbox-template.mjs";
+import { PEOPLE_INPUT_KEYS, PEOPLE_REFS, PEOPLE_WRITERS, PEOPLE_WRITTEN_KEYS, writtenKey } from "./people-template.mjs";
+import { INBOX_REFS } from "./inbox-template.mjs";
+
 export const COMPANY_TEMPLATE_V2 = "companies_v2";
-/** The same name as phase 1's table: a client with a companies_v1 table is refused until Akeesh decides (D24). */
+/** The same name as phase 1's table: a client with a companies_v1 table is refused until the owner decides (D24). */
 export const COMPANY_TABLE_NAME_V2 = "Companies (pipeline)";
 /** Row key of a company row, as phase 1 writes it (company-runs.mjs). */
 export const companyRowKey = (aiarkId) => `aiark:${String(aiarkId).trim()}`;
@@ -160,23 +166,29 @@ export const COMPANY_COLUMNS_V2 = Object.freeze([
 ]);
 
 /**
+ * The finder clauses of C#41 and C#56's run conditions, as they read once
+ * compiled (built from our keys, so no text of the originals is held here).
+ */
+const operationsFinders = (fm, am) =>
+  `!{{${fm}}}?.contacts?.[0]?.email && {{${fm}}} && !{{${am}}}?.result?.email && ({{${am}}} || !{{${am}}})`;
+const ceoFinders = (fm, am) =>
+  `((!{{${fm}}}?.contacts?.[0]?.email && {{${fm}}}) || !{{${fm}}}) && !{{${am}}}?.result?.email && ({{${am}}} || !{{${am}}})`;
+
+/**
  * The run-condition changes of D10, as exact replacements in the compiled
- * run_if (after the ids are rewritten to keys). The `find` texts are the
- * originals' finder clauses.
- *
- * TODO(A): fill `find` from the compiled originals and check each matches once
- * (applyChange); `replace` is ours and final.
+ * run_if (after the ids are rewritten to keys). `find` is the originals'
+ * finder clauses; the compiler refuses unless it occurs exactly once.
  */
 export const COMPANY_RUN_IF_CHANGES = Object.freeze({
   company_decision_maker_facilities_1_claygent: {
     in: "run_if",
-    find: null,
+    find: operationsFinders(ORIGINAL_KEYS.companies[37], ORIGINAL_KEYS.companies[39]),
     replace: "{{people_at_company}}?.tracks?.operations?.settled === true && !{{people_at_company}}?.tracks?.operations?.found && {{use_domain}} && {{check_if_url_is_valid}}?.valid",
     why: "The role finders are not built (D9): AI Ark's people per track take their place, and C#41 stays the fallback of its own track. C#37 ran only with Use Domain and a live URL, so those two gates stay.",
   },
   company_decision_maker_ceo_claygent: {
     in: "run_if",
-    find: null,
+    find: ceoFinders(ORIGINAL_KEYS.companies[52], ORIGINAL_KEYS.companies[54]),
     replace: "{{people_at_company}}?.tracks?.ceo?.settled === true && !{{people_at_company}}?.tracks?.ceo?.found",
     why: "The role finders are not built (D9): AI Ark's people per track take their place, and C#56 stays the fallback of its own track. No website term: in Clay C#56 also ran when the CEO finder did not run.",
   },
@@ -219,6 +231,88 @@ export const LISTED_OUTCOMES_V2 = Object.freeze([
   "Already in the database",
 ]);
 
+
+// ── Phase 1's own columns, kept as they were (T#1 to T#26) ──────────────────
+// Moved here from company-template.mjs, whose v1 columns and prompts are gone.
+// The inputs a pull writes (companyInputs() in company-template.mjs fills them),
+// the office and the client's rules, and the database checks.
+
+/** @type {Record<string, Record<string, any>>} */
+const PHASE1 = {
+  company: { name: "Company", kind: "input", description: "The company's name on AI Ark." },
+  aiark_id: { name: "AI Ark id", kind: "input", description: "AI Ark's id for the company. No pull buys a company whose id is already held." },
+  website: { name: "Website (AI Ark)", kind: "input", data_type: "url" },
+  domain: { name: "Domain (AI Ark)", kind: "input", data_type: "url", description: "The bare domain of AI Ark's domain, or of its website." },
+  linkedin: { name: "LinkedIn", kind: "input", data_type: "url" },
+  phone: { name: "Phone", kind: "input" },
+  aiark_email: { name: "Email (AI Ark)", kind: "input", description: "The company email AI Ark lists. Reoon checks it by G#40's rule, only for the head office (D8)." },
+  industry: { name: "Industry", kind: "input" },
+  employees: { name: "Employees", kind: "input", description: "AI Ark's headcount figure and band." },
+  company_type: { name: "Company type", kind: "input", hidden: true },
+  description: { name: "Description", kind: "input", hidden: true },
+  offices: { name: "Offices", kind: "input", hidden: true, description: "The head office first, then the other offices AI Ark lists, at most 25, as AI Ark writes them." },
+  office_count: { name: "Offices listed", kind: "input", hidden: true },
+  aiark_updated: { name: "AI Ark updated", kind: "input", hidden: true, description: "When AI Ark last refreshed the record." },
+  pulled_before: {
+    name: "Bought before", kind: "input",
+    description: "Filled when AI Ark returned a company an earlier pull had already bought (past its exclusion lists). It was paid for again and is written once.",
+  },
+  source: { name: "Source", kind: "input", description: "AI Ark pull: bought by the pull. Copied from an earlier pull: bought for any client before, inside this client's places, and copied for free." },
+  client_tag: { name: "Client tag", kind: "input", description: "The table's own client tag, written by the pull on every row (C#9)." },
+  office: {
+    name: "Office in the client's area", kind: "action", action: "client_office", data_type: "json", provider: "Client rules",
+    inputs: { offices: "{{offices}}" },
+    description: "Checks every office against the client's places and excluded places, exactly as the send gate would place a lead there. The head office when it is inside, else the first office inside. Outside: no office is. Can't tell: AI Ark gave no state the lead database could place.",
+  },
+  use_city: { name: "City", kind: "formula", formula: "{{office}}?.office?.city", description: "The office's city (in C#7's place)." },
+  use_state: { name: "State", kind: "formula", formula: "{{office}}?.office?.state", description: "The office's state, as a code (in C#8's place)." },
+  use_address: {
+    name: "Address", kind: "formula", hidden: true,
+    formula: `[{{office}}?.office?.street, {{office}}?.office?.city, [{{office}}?.office?.state, {{office}}?.office?.postal_code].filter(Boolean).join(" ")].filter(Boolean).join(", ") || undefined`,
+    description: "The office's address (in C#59's place).",
+  },
+  in_area: { name: "Inside the client's area", kind: "formula", data_type: "boolean", formula: "{{office}}?.inside === true" },
+  rule_match: {
+    name: "Client exclusions", kind: "action", action: "client_exclusions", provider: "Client rules",
+    inputs: { company: "{{company}}", industry: "{{industry}}", description: "{{description}}" },
+    description: "The client's exclusion terms: anywhere in the company name or industry, as the send gate matches them, and as whole words in the description.",
+  },
+  passes_filters: {
+    name: "Passes the client's rules", kind: "formula", data_type: "boolean", formula: "{{master_filter}} === true",
+    description: "Phase 1's key, now reading C#17's Master Filter: the client's places, C#16's brand list and the client's exclusions.",
+  },
+  held_email: {
+    name: "General inbox in the database", kind: "action", action: "held_general_email", data_type: "json", provider: "Lead database",
+    inputs: { domain: "{{domain}}", company: "{{company}}", city: "{{use_city}}", state: "{{use_state}}", country: "{{office}}?.office?.country" },
+    run_if: "{{passes_filters}}",
+    description: "Looks for this company's general inbox in the lead database, its copy of Email Bison and the never-contact list: 14 role addresses at its domain (info@, office@ ...), then general-inbox leads at the same company in the same city and state. Never contact stops the company. A bounced address is searched past, and never used.",
+  },
+  held_usable: {
+    name: "Usable inbox held", kind: "formula", data_type: "boolean",
+    formula: "Boolean({{held_email}}?.email) && !{{held_email}}?.bounced && !{{held_email}}?.never_contact",
+  },
+  never_contact: { name: "Never contact", kind: "formula", data_type: "boolean", formula: "{{held_email}}?.never_contact === true" },
+};
+
+/** Names and descriptions of our own columns (from: null). */
+const OURS = {
+  held_people: { name: "People held in the database", data_type: "json", provider: "Lead database" },
+  people_at_company: { name: "People at the company", data_type: "json", provider: "AI Ark" },
+  company_outcome: { name: "Outcome", data_type: "text", formula: COMPANY_OUTCOME_FORMULA, description: "The company's own result. The Companies tab shows what its inboxes and people found when it is listed." },
+  fit_score: { name: "Fit score", data_type: "number", provider: "OpenAI" },
+  home_office: { name: "Home office", data_type: "boolean", provider: "OpenAI" },
+};
+
+/** The cell a write-to fills in its target template: an input as itself, a D30 People column as written_<key>. */
+export function writeToCell(kind, key) {
+  if (kind === "inboxes") return INBOX_INPUT_KEYS.includes(key) ? key : null;
+  if (kind === "people") {
+    if (PEOPLE_INPUT_KEYS.includes(key)) return key;
+    if (PEOPLE_WRITTEN_KEYS.includes(key)) return writtenKey(key);
+  }
+  return null;
+}
+
 /**
  * The Companies template's enrich_columns rows, compiled from a variant's
  * originals: COMPANY_INPUT_KEYS_V2 as inputs (phase 1's definitions plus
@@ -227,12 +321,49 @@ export const LISTED_OUTCOMES_V2 = Object.freeze([
  * the COMPANY_RUN_IF_CHANGES, the G#38 to G#40 instances with
  * AIARK_EMAIL_INSTANCE_REFS, and our own formulas as written here.
  *
- * TODO(A): build it (2A.2), moving T#1 to T#26 out of company-template.mjs
- * before its v1 columns and prompts are deleted.
- *
  * @param {import("./compile-original.mjs").Originals} originals
  * @returns {Array<Record<string, any>>}
  */
 export function companyColumnsV2(originals) {
-  throw new Error(`TODO(A): companyColumnsV2 is not built yet (${originals?.size ?? 0} originals)`);
+  const own = refMap(originals, "companies", COMPANY_REFS);
+  const targets = { inboxes: refMap(originals, "inboxes", INBOX_REFS), people: refMap(originals, "people", PEOPLE_REFS) };
+  const instance = instanceMap(originals, "inboxes", AIARK_EMAIL_INSTANCE_REFS);
+  const rows = [];
+  for (const key of COMPANY_INPUT_KEYS_V2) {
+    const p = PHASE1[key];
+    rows.push(compileColumn({ key, kind: "input", name: p.name, data_type: p.data_type ?? "text", description: p.description, hidden: p.hidden, provider: "AI Ark" }, originals, { own }));
+  }
+  for (const spec of COMPANY_COLUMNS_V2) {
+    if (String(spec.from ?? "").startsWith("T#")) {
+      const p = PHASE1[spec.key];
+      if (!p) throw new Error(`No phase 1 column ${spec.key}`);
+      const merged = { ...p, ...spec, from: null, name: p.name, change: false };
+      rows.push(compileColumn(merged, originals, { own }));
+      continue;
+    }
+    if (!spec.from) {
+      const o = OURS[spec.key] ?? {};
+      rows.push(compileColumn({ ...spec, name: o.name ?? spec.key, data_type: o.data_type, provider: o.provider, formula: spec.formula ?? o.formula, description: o.description ?? spec.note }, originals, { own }));
+      continue;
+    }
+    if (String(spec.from).startsWith("G#")) {
+      const changes = spec.key === "aiark_email_reoon"
+        ? [{ in: "run_if", append: AIARK_EMAIL_REOON_APPEND, why: "Checked on the company row only for a company that passes the client's rules, has no usable inbox held, and whose office in the area is the head office (D8)." }]
+        : [];
+      rows.push(compileColumn({ ...spec, changes, description: spec.note }, originals, { own: instance }));
+      continue;
+    }
+    /** @type {any[]} */
+    const changes = COMPANY_RUN_IF_CHANGES[spec.key] ? [COMPANY_RUN_IF_CHANGES[spec.key]] : [];
+    const extra = {};
+    if (spec.key === "companys_website") extra.memory_days = "website";
+    if (spec.key === "extract_urls_and_emails_from_text") {
+      extra.inputs = {
+        sources: "({ first: {{first_general_email}}, claygent_1: {{email_extraction_claygent}}?.company_emails_found, claygent_2: {{email_extraction_claygent_2}}?.company_emails_found })",
+      };
+    }
+    if (spec.action === "write_to_table" && PEOPLE_WRITERS[spec.key]) extra.config = { writer: { ...PEOPLE_WRITERS[spec.key] } };
+    rows.push(compileColumn({ ...spec, ...extra, changes, description: spec.note }, originals, { own, targets, cellFor: writeToCell }));
+  }
+  return rows.map((r, i) => ({ ...r, position: i + 1 }));
 }

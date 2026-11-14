@@ -18,6 +18,7 @@ import {
 } from "@/lib/companies/server";
 import type { CompanyCountResult } from "@/lib/companies/types";
 import type { RunMode } from "@/lib/aiark/types";
+import { settingsFrom } from "../../../../../scripts/lib/enrich/settings.mjs";
 
 // POST /api/companies/count {tag, mode, rulesVersion, filtersVersion}: how
 // many companies AI Ark has for a client's rules and company filters. One
@@ -30,8 +31,9 @@ import type { RunMode } from "@/lib/aiark/types";
 // rulesVersion and filtersVersion are the versions the tab loaded: when either
 // changed since, the answer is 409 with `changed` and nothing is spent. The
 // answer carries the versions it counted with, and a pull needs a count made
-// for the versions on screen. Refused while company pulls are switched off.
-// Manager and up.
+// for the versions on screen. Refused while company pulls are switched off,
+// and for a client not on their client list (company_pipeline.tags): a live
+// count spends credits. Manager and up.
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -63,12 +65,14 @@ export async function POST(req: NextRequest) {
     const p = await withTx(
       async (c) => {
         const settings = await readPipelineSettings(c);
+        const { rows: settingRows } = await c.query<{ key: string; value: unknown }>(`SELECT key, value FROM enrich_settings`);
         const client = await clientInfo(c, tag);
         const targeting = await targetingOf(c, tag);
         const saved = await savedPeople(c, tag);
         const filters = companyFiltersFor(saved, client?.client_type ?? null);
         return {
           enabled: settings.value.company_pipeline.enabled,
+          listed: settingsFrom(settingRows).flagOn("company_pipeline", tag),
           ...companyPlan(targeting, filters.value, await geo(c), client?.client_type ?? null),
           rulesVersion: (targeting?.version as string | undefined) ?? null,
           filtersVersion: (saved?.version as string | undefined) ?? null,
@@ -78,6 +82,12 @@ export async function POST(req: NextRequest) {
     );
     if (!p.enabled) {
       return NextResponse.json({ error: "Company pulls are off, so nothing was counted. An admin can switch them on in the settings." }, { status: 409 });
+    }
+    if (!p.listed) {
+      return NextResponse.json(
+        { error: `${tag} is not on the company pipeline's client list, so nothing was counted. An admin adds it in the settings.` },
+        { status: 409 }
+      );
     }
     const rulesChanged = body.rulesVersion !== undefined && p.rulesVersion !== body.rulesVersion;
     const filtersChanged = body.filtersVersion !== undefined && p.filtersVersion !== body.filtersVersion;

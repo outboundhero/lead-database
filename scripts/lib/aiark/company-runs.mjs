@@ -1,9 +1,10 @@
 // Company pulls (the Companies tab): one aiark_company_runs row per pull,
 // worked a slice at a time by the enrichment worker (scripts/enrich-worker.mjs)
-// beside the people runs (runs.mjs), into the client's template Companies table
-// on the Clay tab (enrich_tables.template = 'companies_v1'). The worker's row
-// loop then works each company: the office in the area, a held inbox, the
-// website, the general email (company-template.mjs).
+// beside the people runs (runs.mjs), into the client's Companies (pipeline)
+// table on the Clay tab (enrich_tables.template = 'companies_v2', compiled from
+// the original Clay columns: company-template-v2.mjs). The worker's row loop
+// then works each company: the office in the area and the client's rules, the
+// database checks, the website, the general emails and their inbox rows.
 //
 // A slice does one thing, in this order across the pull:
 //   1. copy  up to 1,000 companies from the registry (aiark_companies): bought
@@ -36,7 +37,9 @@
 // no new paid call: it is seen before each page.
 //
 // Spending brake: before each page, at that page's full price, the pull stops
-// rather than pass ceil(size x 0.125) + searches + 2 credits. A page whose
+// rather than pass ceil(size x 0.125) + searches + 2 credits. It also stops
+// when AI Ark's balance, read free before each page, is under
+// company_pipeline.min_balance. A page whose
 // answer was lost (a network error or a 5xx) may have been charged: it counts
 // against the brake at full price, the pull backs off, and 3 in a row stop it.
 
@@ -45,10 +48,10 @@ import { AiArkError, clip, COMPANY_PRICE, LIST_MAX, LISTS_PER_DAY, LISTS_PER_REQ
 import { companyMatch, companyPlaceKeys, companySpendCeiling, matchesCompanyFilters } from "./company-filters.mjs";
 import { aiArkFor, LEASE_MIN, LIST_BUDGET, LIST_LIFE_MS, LIST_REFRESH_MS, listsMadeToday } from "./runs.mjs";
 import { geoFor } from "../enrich/client-checks.mjs";
-import {
-  COMPANY_COLUMNS, COMPANY_INPUT_KEYS, COMPANY_SEARCH_KEYS, COMPANY_TEMPLATE, companyInputs, SOURCE_BOUGHT, SOURCE_COPIED,
-  TEMPLATE_TABLE_NAME,
-} from "../enrich/company-template.mjs";
+import { COMPANY_SEARCH_KEYS, companyInputs, SOURCE_BOUGHT, SOURCE_COPIED } from "../enrich/company-template.mjs";
+import { COMPANY_INPUT_KEYS_V2 } from "../enrich/company-template-v2.mjs";
+import { readSettings } from "../enrich/settings.mjs";
+import { ensurePipelineTables } from "../enrich/templates.mjs";
 
 const MAX_ATTEMPTS = 6;
 const BACKOFF_MAX_MS = 15 * 60_000;
@@ -74,40 +77,22 @@ const brakeReason = (run, used) =>
 // ── The client's template table ─────────────────────────────────────────────
 
 /**
- * The client's template Companies table, made on its first pull. Every call
- * brings its columns up to date with COMPANY_COLUMNS, by key, as
- * scripts/enrich-seed-table.mjs does, and never removes one: a template change
- * reaches a client's table on its next pull. Rows already worked are not re-run.
+ * The client's Companies (pipeline) table, with its General inboxes and People
+ * tables, made on its first pull and brought up to date on every pull: their
+ * columns are compiled from the client's variant of the Clay originals
+ * (ensurePipelineTables, templates.mjs). Refuses a client that still has a
+ * companies_v1 table (RetiredV1Table, D24) and raises OriginalsMissing while the
+ * originals are not loaded; the route answers 409 to both. Rows already worked
+ * are not re-run.
  *
  * @param {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> }} db  a client inside the caller's transaction
  * @param {string} tag
- * @returns {Promise<{ id: string, created: boolean }>}
+ * @param {{ settings?: import("../enrich/settings.mjs").PipelineSettings | null }} [opts]
+ * @returns {Promise<{ id: string, created: boolean, tables: { companies: string, inboxes: string, people: string }, variant: string }>}
  */
-export async function ensureTemplateTable(db, tag) {
-  const { rows: [table] } = await db.query(
-    `INSERT INTO enrich_tables (client_tag, kind, name, source_note, template)
-     VALUES ($1, 'companies', $2, $3, $4)
-     ON CONFLICT (client_tag, kind, template) WHERE template IS NOT NULL
-     DO UPDATE SET source_note = EXCLUDED.source_note
-     RETURNING id, (xmax = 0) AS created`,
-    [tag, TEMPLATE_TABLE_NAME, `Companies template ${COMPANY_TEMPLATE}: companies from AI Ark pulls on the Companies tab`, COMPANY_TEMPLATE]
-  );
-  await db.query(
-    `INSERT INTO enrich_columns AS e (table_id, key, name, position, kind, action, formula, waterfall, inputs, config, run_if,
-                                       data_type, description, provider, needs_env, phase, hidden)
-     SELECT $1, x.key, x.name, x.position, x.kind, x.action, x.formula, x.waterfall, coalesce(x.inputs, '{}'::jsonb),
-            coalesce(x.config, '{}'::jsonb), x.run_if, x.data_type, x.description, x.provider, x.needs_env, x.phase, x.hidden
-       FROM jsonb_to_recordset($2::jsonb) AS x(key text, name text, position int, kind text, action text, formula text,
-            waterfall jsonb, inputs jsonb, config jsonb, run_if text, data_type text, description text, provider text,
-            needs_env text[], phase smallint, hidden boolean)
-     ON CONFLICT (table_id, key) DO UPDATE SET
-       name = EXCLUDED.name, position = EXCLUDED.position, kind = EXCLUDED.kind, action = EXCLUDED.action,
-       formula = EXCLUDED.formula, waterfall = EXCLUDED.waterfall, inputs = EXCLUDED.inputs, config = EXCLUDED.config,
-       run_if = EXCLUDED.run_if, data_type = EXCLUDED.data_type, description = EXCLUDED.description,
-       provider = EXCLUDED.provider, needs_env = EXCLUDED.needs_env, phase = EXCLUDED.phase, hidden = EXCLUDED.hidden`,
-    [table.id, JSON.stringify(COMPANY_COLUMNS)]
-  );
-  return { id: table.id, created: table.created };
+export async function ensureTemplateTable(db, tag, { settings = null } = {}) {
+  const t = await ensurePipelineTables(db, tag, { settings });
+  return { id: t.companies, created: t.created.companies, tables: { companies: t.companies, inboxes: t.inboxes, people: t.people }, variant: t.variant };
 }
 
 // ── Creating a pull (called by POST /api/companies/runs inside its transaction) ──
@@ -270,11 +255,11 @@ function dateOf(v) {
   return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s ? null : s;
 }
 
-/** One company as the write statement takes it. */
-function companyRow(record, { source, pulledBefore = null, geo = null }, plain = false) {
-  const inputs = companyInputs(record, { source, pulledBefore });
+/** One company as the write statement takes it, with the table's own tag as its client_tag input (C#9). */
+function companyRow(record, { source, pulledBefore = null, geo = null, clientTag }, plain = false) {
+  const inputs = { ...companyInputs(record, { source, pulledBefore }), client_tag: String(clientTag ?? "") };
   const cells = {};
-  for (const k of COMPANY_INPUT_KEYS) {
+  for (const k of COMPANY_INPUT_KEYS_V2) {
     const v = inputs[k];
     if (v && (!plain || k === "aiark_id" || PLAIN.test(String(v)))) cells[k] = clip(String(v).replace(/\u0000/g, ""), 5_000);
   }
@@ -416,7 +401,7 @@ async function sliceCopy(ctx) {
   for (let i = 0; i < picked.length; i += WRITE_CHUNK) {
     const chunk = picked.slice(i, i + WRITE_CHUNK);
     await writeCompanies(ctx, { sourceId: run.registry_source_id, register: false }, (plain) =>
-      chunk.map((r) => companyRow({ ...r.record, id: r.company_id }, { source: SOURCE_COPIED }, plain))
+      chunk.map((r) => companyRow({ ...r.record, id: r.company_id }, { source: SOURCE_COPIED, clientTag: run.client_tag }, plain))
     );
   }
   const done = rows.length < ctx.copyBatch || ctx.pulled >= run.size_requested;
@@ -566,6 +551,14 @@ async function sliceBuy(ctx) {
   const spent = spentOf(ctx);
   if (spent + price > ceilingOf(run) + 1e-9) return { stop: brakeReason(run, spent) };
   if (ctx.shouldStop()) return { wait: 0 };
+  const floor = (await readSettings(pool)).company_pipeline.min_balance;
+  if (floor > 0) {
+    // Read free. A balance that can't be read stops nothing: a bad key fails the page itself.
+    const balance = await ctx.client.credits().catch(() => null);
+    if (balance != null && Number(balance) < floor) {
+      return { stop: `AI Ark's balance (${fmt(balance)} credits) is under the pipeline's minimum of ${fmt(floor)}, so nothing more was bought.` };
+    }
+  }
   await savePosition(ctx); // a cancel is seen here, before anything is bought
 
   let res;
@@ -612,7 +605,7 @@ async function sliceBuy(ctx) {
         const pulledBefore = prev
           ? `Bought ${new Date(prev.pulled_at).toISOString().slice(0, 10)}${prev.run_id ? ` (pull ${String(prev.run_id).slice(0, 6)})` : ""}`
           : null;
-        return companyRow(c, { source: SOURCE_BOUGHT, pulledBefore, geo }, plain);
+        return companyRow(c, { source: SOURCE_BOUGHT, pulledBefore, geo, clientTag: run.client_tag }, plain);
       })
   );
   if (w.status === "cancelled") throw new Cancelled();

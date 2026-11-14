@@ -1,0 +1,1617 @@
+{
+  "workspace": {
+    "id": 0,
+    "name": "Made-up workspace for the tests"
+  },
+  "data": [
+    {
+      "type": "source",
+      "id": "f_fxC01",
+      "name": "Imported Companies",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "sources": []
+    },
+    {
+      "type": "source",
+      "id": "f_fxC02",
+      "name": "Imported Jobs",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "sources": []
+    },
+    {
+      "type": "source",
+      "id": "f_fxC03",
+      "name": "Job Sources (made up)",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "sources": []
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC04",
+      "name": "Cities (made up)",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxC02}}?.cities ?? \"\""
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC05",
+      "name": "Company",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxC01}}?.name || {{f_fxC02}}?.company_name || {{f_fxC03}}?.company"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC06",
+      "name": "Place Id",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC07",
+      "name": "Use City",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "waterfall",
+        "formulaWaterfall": [
+          {
+            "formula": "{{f_fxC60}}"
+          },
+          {
+            "formula": "{{f_fxC59}}?.split(\",\")?.[0]?.trim()"
+          }
+        ]
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC08",
+      "name": "Use State",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "waterfall",
+        "formulaWaterfall": [
+          {
+            "formula": "{{f_fxC62}}"
+          },
+          {
+            "formula": "{{f_fxC59}}?.split(\",\")?.[1]?.trim()"
+          }
+        ]
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC09",
+      "name": "Client Tag",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC10",
+      "name": "Check",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "waterfall",
+        "formulaWaterfall": [
+          {
+            "formula": "{{f_fxC29}}"
+          },
+          {
+            "formula": "{{f_fxC05}}"
+          }
+        ]
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC11",
+      "name": "Dupe Check",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "lookup-row-in-other-table",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_older_a\"",
+            "optional": false
+          },
+          {
+            "name": "fields|rowValue",
+            "formulaText": "{{f_fxC10}}",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxC10}}"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC12",
+      "name": "Dupe Check 2",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "lookup-row-in-other-table",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_older_b\"",
+            "optional": false
+          },
+          {
+            "name": "fields|rowValue",
+            "formulaText": "{{f_fxC10}}",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxC10}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC13",
+      "name": "Safe To Run",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "!{{f_fxC11}}?.record?.CHECK && !{{f_fxC12}}?.record?.CHECK"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC14",
+      "name": "Exclusion Keywords Filter",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "![\"zqx-fixture-only keyword\", \"made-up excluded word\"].some((w) => [{{f_fxC05}}, {{f_fxC21}}, {{f_fxC64}}, {{f_fxC65}}].join(\" \").toLowerCase().includes(w))"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC15",
+      "name": "Service Area Check",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "[\"zqx-fixture-only town\"].some((s) => String({{f_fxC07}} ?? \"\").toLowerCase().includes(s)) || (!{{f_fxC07}} && !{{f_fxC08}})"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC16",
+      "name": "Exclusion Large Company Check",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "![\"zqx-fixture-only-c16\", \"megamart.example\", \"bigbox.example\", \"chainstore.example\"].some((w) => [{{f_fxC05}}, {{f_fxC21}}, {{f_fxC64}}, {{f_fxC65}}, {{f_fxC03}}?.company].join(\" \").toLowerCase().includes(w))"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC17",
+      "name": "Master Filter",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "({{f_fxC15}} && {{f_fxC16}} && {{f_fxC14}}) || Boolean({{f_fxC02}}?.company_name)"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC18",
+      "name": "Created At",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "date"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC19",
+      "name": "Updated At",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "date"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC20",
+      "name": "Company Linkedin Url",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "url"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxC01}}?.linkedin_url?.length > 10 && ![\"n/a\", \"none\"].includes(String({{f_fxC01}}?.linkedin_url).toLowerCase()) ? {{f_fxC01}}?.linkedin_url : \"\""
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC21",
+      "name": "Website",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxC01}}?.domain || {{f_fxC02}}?.domain"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC22",
+      "name": "Domain",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxC01}}?.domain || {{f_fxC02}}?.domain"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC23",
+      "name": "Clearbit",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "get-domain-from-company-name",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "companyName",
+            "formulaText": "{{f_fxC05}}",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!{{f_fxC21}} || [\"zqx-fixture-only-c23\"].some((v) => {{f_fxC21}}.includes(v))"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC24",
+      "name": "Companys Website",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "use-ai",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "useCase",
+            "formulaText": "\"claygent\"",
+            "optional": false
+          },
+          {
+            "name": "prompt",
+            "formulaText": "\"zqx-fixture-only-c24 [fx:C24] business=\" + {{f_fxC05}} + \"; place=\" + {{f_fxC07}} + {{f_fxC08}} + \"; address=\" + {{f_fxC59}} + \"; kind=\" + {{f_fxC64}} + \" / \" + {{f_fxC65}} + \"; profile=\" + {{f_fxC20}} + \"; Look the business up and give its own website, or N/A.\"",
+            "optional": false
+          },
+          {
+            "name": "model",
+            "formulaText": "\"gpt-4o-mini\"",
+            "optional": false
+          },
+          {
+            "name": "maxCostInCents",
+            "formulaText": "\"1\"",
+            "optional": false
+          },
+          {
+            "name": "answerSchemaType",
+            "formulaMap": {
+              "type": "\"json\"",
+              "fields": "{\"response\":{\"type\":\"url\",\"description\":\"zqx-fixture-only: the website alone\"}}",
+              "jsonType": "\"Fields\""
+            },
+            "optional": true
+          },
+          {
+            "name": "_metadata",
+            "formulaMap": {
+              "modelSource": "user"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "!{{f_fxC22}} && {{f_fxC14}} && {{f_fxC17}} && {{f_fxC05}} && (!{{f_fxC21}} || [\"directory.example\"].some((v) => {{f_fxC21}}.includes(v))) && {{f_fxC15}} && {{f_fxC16}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC25",
+      "name": "Company Website Response",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "url"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxC24}}?.response"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC26",
+      "name": "Use Website",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "url"
+        },
+        "formulaType": "waterfall",
+        "formulaWaterfall": [
+          {
+            "formula": "[\"directory.example\", \"listings.example\", \".ca\", \"zqx-fixture-only-c26\"].every((d) => !{{f_fxC25}}?.includes(d)) ? {{f_fxC25}} : \"\""
+          },
+          {
+            "formula": "{{f_fxC23}}?.domain && ![\"directory.example\"].some((d) => {{f_fxC23}}?.domain.includes(d)) ? {{f_fxC23}}?.domain : \"\""
+          },
+          {
+            "formula": "{{f_fxC21}} && ![\"directory.example\", \"listings.example\", \".ca\", \"zqx-fixture-only-c26\"].some((d) => {{f_fxC21}}.includes(d)) ? {{f_fxC21}} : \"\""
+          }
+        ]
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC27",
+      "name": "Check If Url Is Valid",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "check-url",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "{{f_fxC26}}",
+            "optional": false
+          },
+          {
+            "name": "tryVariants",
+            "formulaText": "true",
+            "optional": false
+          },
+          {
+            "name": "treatTimeoutsAsInvalid",
+            "formulaText": "false",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC26}} && {{f_fxC14}} && {{f_fxC16}} && {{f_fxC15}}"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC28",
+      "name": "Normalize A Domain",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "normalize-url",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "{{f_fxC26}}",
+            "optional": false
+          },
+          {
+            "name": "type",
+            "formulaText": "\"bare\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC26}} && {{f_fxC27}}?.valid && {{f_fxC14}} && {{f_fxC16}} && {{f_fxC15}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC29",
+      "name": "Use Domain",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "url"
+        },
+        "formulaType": "waterfall",
+        "formulaWaterfall": [
+          {
+            "formula": "{{f_fxC28}}?.normalizedUrl"
+          },
+          {
+            "formula": "[\"directory.example\", \"listings.example\", \".ca\", \"zqx-fixture-only-c26\"].every((d) => !{{f_fxC25}}?.includes(d)) ? {{f_fxC25}} : \"\""
+          },
+          {
+            "formula": "{{f_fxC23}}?.domain || \"\""
+          },
+          {
+            "formula": "{{f_fxC21}} && ![\"directory.example\", \"listings.example\", \".ca\", \"zqx-fixture-only-c26\"].some((d) => {{f_fxC21}}.includes(d)) ? {{f_fxC21}} : \"\""
+          }
+        ]
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC30",
+      "name": "Icypeas General Email Extraction",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "icypeas-find-emails-for-domain",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "domain",
+            "formulaText": "{{f_fxC29}}",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC17}} && {{f_fxC29}} && {{f_fxC13}} && {{f_fxC27}}?.valid"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC31",
+      "name": "Email Extraction Claygent",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "use-ai",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "useCase",
+            "formulaText": "\"claygent\"",
+            "optional": false
+          },
+          {
+            "name": "prompt",
+            "formulaText": "\"zqx-fixture-only-c31 [fx:C31] business=\" + {{f_fxC05}} + \"; site=\" + {{f_fxC26}} + \"; place=\" + {{f_fxC07}} + \", \" + {{f_fxC08}} + \"; address=\" + {{f_fxC59}} + \"; kind=\" + {{f_fxC64}} + \"; Read the site and list its general email addresses, comma separated, or N/A.\"",
+            "optional": false
+          },
+          {
+            "name": "model",
+            "formulaText": "\"gpt-4o-mini\"",
+            "optional": false
+          },
+          {
+            "name": "maxCostInCents",
+            "formulaText": "\"1\"",
+            "optional": false
+          },
+          {
+            "name": "answerSchemaType",
+            "formulaMap": {
+              "type": "\"json\"",
+              "fields": "{\"company_emails_found\":{\"type\":\"string\",\"description\":\"zqx-fixture-only: the addresses found\"}}",
+              "jsonType": "\"Fields\""
+            },
+            "optional": true
+          },
+          {
+            "name": "_metadata",
+            "formulaMap": {
+              "modelSource": "user"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC17}} === true && (!!{{f_fxC26}} || {{f_fxC03}}?.id) && !(!!{{f_fxC30}} && (({{f_fxC30}}?.emails?.[0]?.email || \"\")?.length)) && {{f_fxC13}} && {{f_fxC27}}?.valid && {{f_fxC14}} && {{f_fxC16}} && {{f_fxC15}}"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC32",
+      "name": "Email Extraction Claygent 2",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "use-ai",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "useCase",
+            "formulaText": "\"claygent\"",
+            "optional": false
+          },
+          {
+            "name": "prompt",
+            "formulaText": "\"zqx-fixture-only-c32 [fx:C32] business=\" + {{f_fxC05}} + \"; site=\" + {{f_fxC26}} + \"; place=\" + {{f_fxC07}} + \", \" + {{f_fxC08}} + \"; Search listings for the business's general email addresses, comma separated, or N/A.\"",
+            "optional": false
+          },
+          {
+            "name": "model",
+            "formulaText": "\"gpt-4o-mini\"",
+            "optional": false
+          },
+          {
+            "name": "maxCostInCents",
+            "formulaText": "\"1\"",
+            "optional": false
+          },
+          {
+            "name": "answerSchemaType",
+            "formulaMap": {
+              "type": "\"json\"",
+              "fields": "{\"company_emails_found\":{\"type\":\"string\",\"description\":\"zqx-fixture-only: the addresses found\"}}",
+              "jsonType": "\"Fields\""
+            },
+            "optional": true
+          },
+          {
+            "name": "_metadata",
+            "formulaMap": {
+              "modelSource": "user"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "(!{{f_fxC31}}?.company_emails_found || [\"n/a\", \"none\", \"not found\", \"zqx-fixture-only\"].some((x) => String({{f_fxC31}}?.company_emails_found ?? \"\").toLowerCase().indexOf(x) >= 0)) && {{f_fxC17}} === true && (!!{{f_fxC26}} || {{f_fxC03}}?.id) && !(!!{{f_fxC30}} && (({{f_fxC30}}?.emails?.[0]?.email || \"\")?.length)) && {{f_fxC13}} && {{f_fxC14}} && {{f_fxC16}} && {{f_fxC15}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC33",
+      "name": "General Email Variations Formula",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxC29}} ? [\"hello\", \"zqx-fixture-only\"].map((x) => x + \"@\" + {{f_fxC29}}).join(\",\") : \"\""
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC34",
+      "name": "Extract Urls And Emails From Text",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "find-urls-and-emails-in-text",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "text",
+            "formulaText": "{{f_fxC30}}?.emails?.[\"0\"]?.email + \", \" + {{f_fxC30}}?.emails?.[\"1\"]?.email + \", \" + {{f_fxC31}}?.company_emails_found + \", \" + {{f_fxC32}}?.company_emails_found",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC30}} || {{f_fxC31}} || {{f_fxC32}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC35",
+      "name": "First General Email Extracted",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxC34}}?.urlsAndEmails?.[0]?.value"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC36",
+      "name": "General Email Write To",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "write-to-other-table-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_inboxes\"",
+            "optional": false
+          },
+          {
+            "name": "objectPathsToColumnMappings",
+            "formulaMap": {
+              "f_fxG13": "\"value\""
+            },
+            "optional": true
+          },
+          {
+            "name": "columnValuesToColumnMappings",
+            "formulaMap": {
+              "f_fxG31": "{{f_fxC29}}",
+              "f_fxG33": "{{f_fxC26}}",
+              "f_fxG34": "{{f_fxC67}}",
+              "f_fxG24": "{{f_fxC08}}",
+              "f_fxG28": "{{f_fxC09}}",
+              "f_fxG09": "{{f_fxC65}}",
+              "f_fxG08": "{{f_fxC64}}",
+              "f_fxG22": "{{f_fxC07}}",
+              "f_fxG26": "{{f_fxC59}}",
+              "f_fxG12": "{{f_fxC05}}",
+              "f_fxG10": "{{f_fxC66}}"
+            },
+            "optional": true
+          },
+          {
+            "name": "value",
+            "formulaText": "{{f_fxC34}}?.urlsAndEmails",
+            "optional": false
+          },
+          {
+            "name": "mode",
+            "formulaText": "\"arrayOfObjects\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxC34}}?.urlsAndEmails?.length"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC37",
+      "name": "Findymail Domain Search Operations",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "method",
+            "formulaText": "\"POST\"",
+            "optional": false
+          },
+          {
+            "name": "url",
+            "formulaText": "\"https://findymail.example/api/fixture-domain\"",
+            "optional": false
+          },
+          {
+            "name": "body",
+            "formulaText": "\"{\\\"domain\\\": \\\"\" + Clay.formatForJSON({{f_fxC29}}) + \"\\\", \\\"roles\\\": [\\\"Chief Widget Officer\\\",\\\"Head of Gadget Operations\\\"]}\"",
+            "optional": false
+          },
+          {
+            "name": "headers",
+            "formulaMap": {
+              "Accept": "\"application/json\"",
+              "Authorization": "[redacted]"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC17}} && {{f_fxC29}} && {{f_fxC13}} && {{f_fxC27}}?.valid"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC38",
+      "name": "Findymail Domain Search Operations Write To",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "write-to-other-table-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_people\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC37}}?.contacts?.length > 0"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC39",
+      "name": "Anymail Operations",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://anymail.example/fixture-operations\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxC29}}"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC40",
+      "name": "Anymail Person Operations Write To",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "write-to-other-table-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_people\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxC39}}?.result?.email"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC41",
+      "name": "Company Decision Maker Facilities 1 Claygent",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "use-ai",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "useCase",
+            "formulaText": "\"claygent\"",
+            "optional": false
+          },
+          {
+            "name": "prompt",
+            "formulaText": "\"zqx-fixture-only-c41 [fx:C41] business=\" + {{f_fxC05}} + \"; site=\" + {{f_fxC26}} + \"; domain=\" + {{f_fxC29}} + \"; Identify the Head of Gadget Operations, Widget Floor Director, or \" + {{f_fxC07}} + \" Office Lead likely in charge at \" + {{f_fxC05}} + \". Give their name, title and profile.\"",
+            "optional": false
+          },
+          {
+            "name": "model",
+            "formulaText": "\"gpt-4o-mini\"",
+            "optional": false
+          },
+          {
+            "name": "maxCostInCents",
+            "formulaText": "\"1\"",
+            "optional": false
+          },
+          {
+            "name": "answerSchemaType",
+            "formulaMap": {
+              "type": "\"json\"",
+              "fields": "{\"Person_2_Full_Name\":{\"type\":\"string\",\"description\":\"zqx-fixture-only: the person's full name, nothing else\"},\"confidence\":{\"type\":\"string\",\"description\":\"\"},\"reasoning\":{\"type\":\"string\",\"description\":\"\"},\"Person_2_Title\":{\"type\":\"string\",\"description\":\"zqx-fixture-only: their job title\"},\"Person_2_LinkedIn_URL\":{\"type\":\"url\",\"description\":\"zqx-fixture-only: their profile link\"}}",
+              "jsonType": "\"Fields\""
+            },
+            "optional": true
+          },
+          {
+            "name": "_metadata",
+            "formulaMap": {
+              "modelSource": "user"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC17}} && !{{f_fxC37}}?.contacts?.[0]?.email && {{f_fxC37}} && !{{f_fxC39}}?.result?.email && ({{f_fxC39}} || !{{f_fxC39}}) && {{f_fxC13}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC42",
+      "name": "Person 2 Name Check",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "!!{{f_fxC41}}?.[\"Person_2_Full_Name\"] && ![\"zqx-fixture-only\", \"n/a\", \"test person\", \"unknown\"].some((s) => {{f_fxC41}}?.[\"Person_2_Full_Name\"]?.toLowerCase()?.includes(s))"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC43",
+      "name": "Person 2 Facilities 1 Write To",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "write-to-other-table-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_people\"",
+            "optional": false
+          },
+          {
+            "name": "objectPathsToColumnMappings",
+            "optional": true
+          },
+          {
+            "name": "columnValuesToColumnMappings",
+            "formulaMap": {
+              "f_fxP31": "{{f_fxC59}}",
+              "f_fxP34": "{{f_fxC65}}",
+              "f_fxP28": "{{f_fxC05}}",
+              "f_fxP22": "{{f_fxC08}}",
+              "f_fxP33": "{{f_fxC64}}",
+              "f_fxP20": "{{f_fxC07}}",
+              "f_fxP17": "{{f_fxC67}}",
+              "f_fxP44": "{{f_fxC41}}?.[\"Person_2_Title\"]",
+              "f_fxP45": "{{f_fxC41}}?.[\"Person_2_LinkedIn_URL\"]",
+              "f_fxP36": "{{f_fxC26}}",
+              "f_fxP43": "{{f_fxC41}}?.[\"Person_2_Full_Name\"]",
+              "f_fxP35": "{{f_fxC66}}",
+              "f_fxP26": "{{f_fxC09}}"
+            },
+            "optional": true
+          },
+          {
+            "name": "mode",
+            "formulaText": "\"\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC41}} && {{f_fxC42}} && ![\"intern\", \"assistant\"].some((w) => {{f_fxC41}}?.[\"Person_2_Title\"]?.toLowerCase()?.includes(w)) && ![\"bot\", \"zqx-fixture-only\"].some((w) => {{f_fxC41}}?.[\"Person_2_Full_Name\"]?.toLowerCase()?.includes(w)) || ({{f_fxC41}}?.[\"Person_2_Full_Name\"] && {{f_fxC42}})"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC44",
+      "name": "Findymail Domain Search Facility Manager Office Manager",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "method",
+            "formulaText": "\"POST\"",
+            "optional": false
+          },
+          {
+            "name": "url",
+            "formulaText": "\"https://findymail.example/api/fixture-domain\"",
+            "optional": false
+          },
+          {
+            "name": "body",
+            "formulaText": "\"{\\\"domain\\\": \\\"\" + Clay.formatForJSON({{f_fxC29}}) + \"\\\", \\\"roles\\\": [\\\"Office Wrangler\\\",\\\"Facility Keeper\\\"]}\"",
+            "optional": false
+          },
+          {
+            "name": "headers",
+            "formulaMap": {
+              "Accept": "\"application/json\"",
+              "Authorization": "[redacted]"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC17}} && {{f_fxC29}} && {{f_fxC13}} && {{f_fxC27}}?.valid"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC45",
+      "name": "Findymail Domain Search Facility Manager Office Manager Write To",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "write-to-other-table-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_people\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC44}}?.contacts?.length > 0"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC46",
+      "name": "Anymail Facility Manager Office Manager",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://anymail.example/fixture-facility\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxC29}}"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC47",
+      "name": "Anymail Person Facility Manager Office Manager Write To",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "write-to-other-table-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_people\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxC46}}?.result?.email"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC48",
+      "name": "Company Decision Maker Facilities 2 Claygent",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "use-ai",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "useCase",
+            "formulaText": "\"claygent\"",
+            "optional": false
+          },
+          {
+            "name": "prompt",
+            "formulaText": "\"zqx-fixture-only-c48 [fx:C48] business=\" + {{f_fxC05}} + \"; site=\" + {{f_fxC26}} + \"; Identify the Office Wrangler, Facility Keeper, or Workplace Steward of \" + {{f_fxC05}} + \" in \" + {{f_fxC07}} + \". Give their name, title and profile.\"",
+            "optional": false
+          },
+          {
+            "name": "model",
+            "formulaText": "\"gpt-4o-mini\"",
+            "optional": false
+          },
+          {
+            "name": "maxCostInCents",
+            "formulaText": "\"3\"",
+            "optional": false
+          },
+          {
+            "name": "answerSchemaType",
+            "formulaMap": {
+              "type": "\"json\"",
+              "fields": "{\"Person_3_Full_Name\":{\"type\":\"string\",\"description\":\"zqx-fixture-only: the person's full name, nothing else\"},\"confidence\":{\"type\":\"string\",\"description\":\"\"},\"reasoning\":{\"type\":\"string\",\"description\":\"\"},\"Person_3_Title\":{\"type\":\"string\",\"description\":\"zqx-fixture-only: their job title\"},\"Person_3_LinkedIn_URL\":{\"type\":\"url\",\"description\":\"zqx-fixture-only: their profile link\"}}",
+              "jsonType": "\"Fields\""
+            },
+            "optional": true
+          },
+          {
+            "name": "_metadata",
+            "formulaMap": {
+              "modelSource": "user"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC17}} && {{f_fxC13}} && ({{f_fxC29}} || {{f_fxC02}}?.title || {{f_fxC03}}?.id) && {{f_fxC27}}?.valid && {{f_fxC14}} && {{f_fxC16}} && {{f_fxC15}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC49",
+      "name": "Person 3 Name Check",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "!!{{f_fxC48}}?.[\"Person_3_Full_Name\"] && ![\"zqx-fixture-only\", \"n/a\", \"test person\", \"unknown\"].some((s) => {{f_fxC48}}?.[\"Person_3_Full_Name\"]?.toLowerCase()?.includes(s))"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC50",
+      "name": "Company Decision Maker Location Company Check",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "use-ai",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "useCase",
+            "formulaText": "\"claygent\"",
+            "optional": false
+          },
+          {
+            "name": "prompt",
+            "formulaText": "\"zqx-fixture-only-c50 [fx:C50] profile=\" + Clay.formatForAIPrompt({{f_fxC48}}?.[\"Person_3_LinkedIn_URL\"]) + \"; person=\" + Clay.formatForAIPrompt({{f_fxC48}}) + \"; place=\" + {{f_fxC07}} + \", \" + {{f_fxC08}} + \"; business=\" + {{f_fxC05}} + \"; Does the profile show this place and business? Yes or No.\"",
+            "optional": false
+          },
+          {
+            "name": "model",
+            "formulaText": "\"gpt-4o-mini\"",
+            "optional": false
+          },
+          {
+            "name": "maxCostInCents",
+            "formulaText": "\"1\"",
+            "optional": false
+          },
+          {
+            "name": "answerSchemaType",
+            "formulaMap": {
+              "type": "\"json\"",
+              "fields": "{\"result\":{\"type\":\"select\",\"options\":\"[{\\\"id\\\":\\\"fx-yes\\\",\\\"text\\\":\\\"Yes\\\"},{\\\"id\\\":\\\"fx-no\\\",\\\"text\\\":\\\"No\\\"}]\",\"description\":\"zqx-fixture-only: Yes or No\"}}",
+              "jsonType": "\"Fields\""
+            },
+            "optional": true
+          },
+          {
+            "name": "_metadata",
+            "formulaMap": {
+              "modelSource": "user"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC48}} && !!{{f_fxC48}}?.[\"Person_3_LinkedIn_URL\"] && {{f_fxC49}}"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC51",
+      "name": "Person 3 Facilities 2 Write To",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "write-to-other-table-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_people\"",
+            "optional": false
+          },
+          {
+            "name": "objectPathsToColumnMappings",
+            "optional": true
+          },
+          {
+            "name": "columnValuesToColumnMappings",
+            "formulaMap": {
+              "f_fxP31": "{{f_fxC59}}",
+              "f_fxP34": "{{f_fxC65}}",
+              "f_fxP28": "{{f_fxC05}}",
+              "f_fxP22": "{{f_fxC08}}",
+              "f_fxP33": "{{f_fxC64}}",
+              "f_fxP20": "{{f_fxC07}}",
+              "f_fxP17": "{{f_fxC67}}",
+              "f_fxP44": "{{f_fxC48}}?.[\"Person_3_Title\"]",
+              "f_fxP45": "{{f_fxC48}}?.[\"Person_3_LinkedIn_URL\"]",
+              "f_fxP36": "{{f_fxC26}}",
+              "f_fxP43": "{{f_fxC48}}?.[\"Person_3_Full_Name\"]",
+              "f_fxP35": "{{f_fxC66}}",
+              "f_fxP26": "{{f_fxC09}}"
+            },
+            "optional": true
+          },
+          {
+            "name": "mode",
+            "formulaText": "\"\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "({{f_fxC48}} && {{f_fxC49}} && ![\"intern\", \"assistant\"].some((w) => {{f_fxC41}}?.[\"Person_2_Title\"]?.toLowerCase()?.includes(w)) && ![\"bot\", \"zqx-fixture-only\"].some((w) => {{f_fxC48}}?.[\"Person_3_Full_Name\"]?.toLowerCase()?.includes(w)) || ({{f_fxC48}}?.[\"Person_3_Full_Name\"] && {{f_fxC49}})) && ({{f_fxC50}}?.result?.toLowerCase() === \"yes\" || (!{{f_fxC48}}?.[\"Person_3_LinkedIn_URL\"] && !!{{f_fxC48}}?.[\"Person_3_Full_Name\"]))"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC52",
+      "name": "Findymail Domain Search Ceo",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "method",
+            "formulaText": "\"POST\"",
+            "optional": false
+          },
+          {
+            "name": "url",
+            "formulaText": "\"https://findymail.example/api/fixture-domain\"",
+            "optional": false
+          },
+          {
+            "name": "body",
+            "formulaText": "\"{\\\"domain\\\": \\\"\" + Clay.formatForJSON({{f_fxC29}}) + \"\\\", \\\"roles\\\": [\\\"Widget Founder\\\",\\\"Gadget Owner\\\"]}\"",
+            "optional": false
+          },
+          {
+            "name": "headers",
+            "formulaMap": {
+              "Accept": "\"application/json\"",
+              "Authorization": "[redacted]"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC17}} && {{f_fxC29}} && {{f_fxC13}} && {{f_fxC27}}?.valid"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC53",
+      "name": "Findymail Domain Search Ceo Write To",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "write-to-other-table-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_people\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC52}}?.contacts?.length > 0"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC54",
+      "name": "Anymail Ceo",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "http-api-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "url",
+            "formulaText": "\"https://anymail.example/fixture-ceo\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxC29}}"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC55",
+      "name": "Anymail Person Ceo Write To",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "write-to-other-table-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_people\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "!!{{f_fxC54}}?.result?.email"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC56",
+      "name": "Company Decision Maker Ceo Claygent",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "use-ai",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "useCase",
+            "formulaText": "\"claygent\"",
+            "optional": false
+          },
+          {
+            "name": "prompt",
+            "formulaText": "\"zqx-fixture-only-c56 [fx:C56] business=\" + {{f_fxC05}} + \"; site=\" + {{f_fxC26}} + \"; Identify the Widget Founder, Gadget Owner, or Chief Gadget Executive at \" + {{f_fxC05}} + \". Give their name, title and profile.\"",
+            "optional": false
+          },
+          {
+            "name": "model",
+            "formulaText": "\"gpt-4o-mini\"",
+            "optional": false
+          },
+          {
+            "name": "maxCostInCents",
+            "formulaText": "\"1\"",
+            "optional": false
+          },
+          {
+            "name": "answerSchemaType",
+            "formulaMap": {
+              "type": "\"json\"",
+              "fields": "{\"Person_1_Full_Name\":{\"type\":\"string\",\"description\":\"zqx-fixture-only: the person's full name, nothing else\"},\"confidence\":{\"type\":\"string\",\"description\":\"\"},\"reasoning\":{\"type\":\"string\",\"description\":\"\"},\"Person_1_Title\":{\"type\":\"string\",\"description\":\"zqx-fixture-only: their job title\"},\"Person_1_LinkedIn_URL\":{\"type\":\"url\",\"description\":\"zqx-fixture-only: their profile link\"}}",
+              "jsonType": "\"Fields\""
+            },
+            "optional": true
+          },
+          {
+            "name": "_metadata",
+            "formulaMap": {
+              "modelSource": "user"
+            },
+            "optional": true
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC17}} && ((!{{f_fxC52}}?.contacts?.[0]?.email && {{f_fxC52}}) || !{{f_fxC52}}) && !{{f_fxC54}}?.result?.email && ({{f_fxC54}} || !{{f_fxC54}}) && {{f_fxC13}} && {{f_fxC14}} && {{f_fxC16}}"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC57",
+      "name": "Person 1 Name Check",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "boolean"
+        },
+        "formulaType": "formula",
+        "formulaText": "!!{{f_fxC56}}?.[\"Person_1_Full_Name\"] && ![\"zqx-fixture-only\", \"n/a\", \"test person\", \"unknown\"].some((s) => {{f_fxC56}}?.[\"Person_1_Full_Name\"]?.toLowerCase()?.includes(s))"
+      }
+    },
+    {
+      "type": "action",
+      "id": "f_fxC58",
+      "name": "Person 1 Ceo Write To",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "action",
+        "actionKey": "write-to-other-table-v2",
+        "actionVersion": 1,
+        "dataTypeSettings": {
+          "type": "json"
+        },
+        "inputsBinding": [
+          {
+            "name": "tableId",
+            "formulaText": "\"t_fixture_people\"",
+            "optional": false
+          },
+          {
+            "name": "objectPathsToColumnMappings",
+            "optional": true
+          },
+          {
+            "name": "columnValuesToColumnMappings",
+            "formulaMap": {
+              "f_fxP31": "{{f_fxC59}}",
+              "f_fxP34": "{{f_fxC65}}",
+              "f_fxP28": "{{f_fxC05}}",
+              "f_fxP22": "{{f_fxC08}}",
+              "f_fxP33": "{{f_fxC64}}",
+              "f_fxP20": "{{f_fxC07}}",
+              "f_fxP17": "{{f_fxC67}}",
+              "f_fxP44": "{{f_fxC56}}?.[\"Person_1_Title\"]",
+              "f_fxP45": "{{f_fxC56}}?.[\"Person_1_LinkedIn_URL\"]",
+              "f_fxP36": "{{f_fxC26}}",
+              "f_fxP43": "{{f_fxC56}}?.[\"Person_1_Full_Name\"]",
+              "f_fxP35": "{{f_fxC66}}",
+              "f_fxP26": "{{f_fxC09}}"
+            },
+            "optional": true
+          },
+          {
+            "name": "mode",
+            "formulaText": "\"\"",
+            "optional": false
+          }
+        ],
+        "conditionalRunFormulaText": "{{f_fxC56}} && {{f_fxC57}} && ![\"intern\", \"assistant\"].some((w) => {{f_fxC56}}?.[\"Person_2_Title\"]?.toLowerCase()?.includes(w)) && ![\"bot\", \"zqx-fixture-only\"].some((w) => {{f_fxC56}}?.[\"Person_2_Full_Name\"]?.toLowerCase()?.includes(w)) || ({{f_fxC56}}?.[\"Person_2_Full_Name\"] && {{f_fxC57}})"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC59",
+      "name": "Address",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxC01}}?.location"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC60",
+      "name": "Actual City",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC61",
+      "name": "Call City",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC62",
+      "name": "Actual State",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC63",
+      "name": "Call State",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC64",
+      "name": "Category",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxC01}}?.industry"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC65",
+      "name": "Sub Category",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "{{f_fxC01}}?.description"
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC66",
+      "name": "Additional Category",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC67",
+      "name": "Phone",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "basic",
+      "id": "f_fxC68",
+      "name": "Call Category",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "settings": {
+        "type": "basic",
+        "dataTypeSettings": {
+          "type": "text"
+        },
+        "formulaType": "formula",
+        "formulaText": "\"\""
+      }
+    }
+  ]
+}
