@@ -152,7 +152,7 @@ async function drain(t, { env = KEYS, settings = settingsFor(t) } = {}) {
   const ids = [tables[t].companies, tables[t].inboxes, tables[t].people];
   const done = [];
   for (let round = 0; round < 8; round++) {
-    const queued = await all(`SELECT id FROM enrich_rows WHERE table_id = ANY($1::uuid[]) AND run_status = 'queued' ORDER BY id`, [ids]);
+    const queued = await all(`SELECT id FROM enrich_rows WHERE table_id = ANY($1::uuid[]) AND run_status = 'queued' AND next_run_at <= now() ORDER BY id`, [ids]);
     if (!queued.length) break;
     for (const q of queued) done.push(await work(Number(q.id), { env, settings }));
   }
