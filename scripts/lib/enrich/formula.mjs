@@ -38,9 +38,13 @@ function compile(expr) {
   return script;
 }
 
-// The one Clay helper the copied formulas use (HTTP bodies, Phase 2).
+// The Clay helpers the copied formulas use: formatForJSON inside HTTP bodies,
+// formatForAIPrompt inside prompts (C#50, P#60, P#61, G#19, G#48, G#49). How
+// Clay renders either is not in the export: text goes in as it is, an empty
+// value as "", anything else as JSON (UNVERIFIED against Clay, design 0.4 item 6).
 const CLAY = Object.freeze({
   formatForJSON: (v) => JSON.stringify(v == null ? "" : String(v)).slice(1, -1),
+  formatForAIPrompt: (v) => (v == null ? "" : typeof v === "string" ? v : JSON.stringify(v)),
 });
 
 /** One context per row: the row's values are swapped in before each evaluation. */

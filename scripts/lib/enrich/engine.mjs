@@ -32,9 +32,20 @@
 // "Needs <KEY> (not held)", read as empty, with no call and no run record, and
 // the row never waits for it (unlike needs_env, which makes the cell wait).
 //
-// TODO(A): memory keys over 200 characters hashed, with the model added for
-// ai_web; the day's caps (spend.mjs) making a cell wait; phase handling for
-// the v2 templates (2A.5).
+// Memory keys: a compiled AI column remembers by its rendered prompt, so for
+// an ai_web column the model in force is put in front of the key (a swapped
+// model asks again), and a key over 200 characters is stored as its sha256
+// (enrich_memory's primary key is kind and key). A column's config.memory_days
+// is a number of days, or the name of one of company_pipeline.memory_days.
+//
+// Waiting: only keys we hold (needs_env: OpenAI, Reoon) and the day's caps
+// make a cell wait. The caps are the actions' own answers (ai_web and
+// reoon_verify answer needs_key with spend.mjs's CAP_REACHED words); the
+// hourly sweep resumes the row once the reason has cleared.
+//
+// Phases: a column of a later phase is shown and never run. Every pipeline
+// column that may run is phase 1, its switches and keys deciding; the fit
+// hooks and add_to_database stay later phases until their builders make them.
 
 import { createHash } from "node:crypto";
 import { emptyAsText, evaluate, isEmpty, makeContext, refs } from "./formula.mjs";
@@ -45,6 +56,12 @@ import { flagOn, SETTINGS_DEFAULTS, settingsFrom } from "./settings.mjs";
 const DISPLAY_MAX = 300;
 const msg = (e) => String(e?.message ?? e).slice(0, 300);
 const text = (v) => (v == null ? "" : String(v).trim());
+
+/** The key a remembered answer is kept under: the model in front for an AI column, a sha256 when over 200 characters. */
+export function memoryKey(raw, { model = null } = {}) {
+  const key = model ? `${model}\n${raw}` : raw;
+  return key.length > 200 ? `sha256:${createHash("sha256").update(key).digest("hex")}` : key;
+}
 
 /** A remembered answer, if one is still fresh. */
 async function recall(db, kind, key) {
@@ -329,11 +346,13 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {}, 
     }
     // Another row, table or client paid for this answer already: reuse it.
     const kind = text(col.config?.memory);
-    const memoryKey = kind ? text(inputs.memory_key) : "";
-    if (memoryKey && !forced(col.key)) {
+    const rawKey = kind ? text(inputs.memory_key) : "";
+    const model = col.action === "ai_web" && col.config?.model_setting ? config.models?.[col.config.model_setting]?.model ?? "" : null;
+    const memKey = rawKey ? memoryKey(rawKey, { model }) : "";
+    if (memKey && !forced(col.key)) {
       let hit = null;
       try {
-        hit = await recall(db, kind, memoryKey);
+        hit = await recall(db, kind, memKey);
       } catch (e) {
         put(col, { status: "error", note: `The shared answers could not be read: ${msg(e)}` });
         if (!summary.retryable) summary.retryable = `${col.name}: the shared answers could not be read`;
@@ -373,11 +392,17 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {}, 
       res = { status: "error", note: msg(e), retryable: true, run: { error: msg(e) } };
     }
     let rememberNote = "";
-    if (memoryKey && (res.status === "done" || res.status === "empty")) {
+    if (memKey && (res.status === "done" || res.status === "empty")) {
       const days = config.company_pipeline?.memory_days ?? SETTINGS_DEFAULTS.company_pipeline.memory_days;
-      const span = res.status === "done" ? days[col.config?.memory_days] ?? days.email : days.nothing_found;
+      const fixed = col.config?.memory_days;
+      const span =
+        res.status !== "done"
+          ? days.nothing_found
+          : typeof fixed === "number" && Number.isInteger(fixed) && fixed > 0
+            ? fixed
+            : days[fixed] ?? days.email;
       try {
-        await remember(db, { kind, key: memoryKey, res, provider: col.provider ?? col.action, table, row, days: span });
+        await remember(db, { kind, key: memKey, res, provider: col.provider ?? col.action, table, row, days: span });
       } catch (e) {
         rememberNote = ` (not kept for other rows: ${msg(e)})`;
       }
