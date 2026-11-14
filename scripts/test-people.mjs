@@ -1358,6 +1358,62 @@ async function partB12(routes) {
   await setPP({});
 }
 
+async function partB12b(routes) {
+  section("B12b. The settings route: every switch with its client list, the people block, the twelve models, the caps");
+  const SHEET_KEYS = ["company_pipeline", "people_pipeline", "personalisation", "spend_caps", "models"];
+  const before = await all(`SELECT key, value FROM enrich_settings WHERE key = ANY($1::text[]) ORDER BY key`, [SHEET_KEYS]);
+  const serverLib = await srcModule("lib/companies/server.ts");
+  try {
+    T.role = "manager";
+    check("managers can't read or save the settings (403)", (await call(routes.settings.GET)).status === 403 && (await call(routes.settings.PUT, { body: {} })).status === 403);
+    T.role = "admin";
+    const got = await call(routes.settings.GET);
+    const v = got.body?.value;
+    const TWELVE = ["companys_website", "email_extraction_claygent", "email_extraction_claygent_2", "company_decision_maker_facilities_1_claygent",
+      "company_decision_maker_facilities_2_claygent", "company_decision_maker_location_company_check", "company_decision_maker_ceo_claygent",
+      "current_employer", "people_claygent", "people_question_ai", "inbox_claygent", "inbox_question_ai"];
+    check("the settings as the worker reads them: the people block, personalisation, the caps and the twelve models",
+      got.status === 200 && typeof v.people_pipeline.enabled === "boolean" && Array.isArray(v.people_pipeline.tags) && Number.isInteger(v.people_pipeline.ids_per_search) &&
+        Array.isArray(v.personalisation.tags) && Number.isFinite(v.spend_caps.openai_usd_per_day.pipeline) && TWELVE.every((k) => k in v.models) &&
+        JSON.stringify(serverLib.settingsInputOf(v).models.people_question_ai) === JSON.stringify({ model: v.models.people_question_ai?.model ?? "", reasoning_effort: v.models.people_question_ai?.reasoning_effort ?? null, max_searches: null }),
+      JSON.stringify(v?.people_pipeline));
+    const input = serverLib.settingsInputOf(v);
+    const edit = (f) => {
+      const x = structuredClone(input);
+      f(x);
+      return { body: { version: got.body.version, ...x } };
+    };
+    const refused = async (label, f, re) => {
+      const r = await call(routes.settings.PUT, edit(f));
+      check(label, r.status === 400 && re.test(r.body.error ?? ""), `${r.status} ${r.body.error ?? ""}`);
+    };
+    await refused("a client list with something that is not a tag: 400", (x) => { x.people_pipeline.tags = ["not a tag!"]; }, /not a client tag/);
+    await refused("a number out of range: 400, never quietly replaced", (x) => { x.people_pipeline.ids_per_search = 0; }, /Companies per search must be a whole number from 1 to 300/);
+    await refused("a Luna model with the minimal reasoning effort: 400", (x) => { x.models.people_claygent = { model: "gpt-6-luna", reasoning_effort: "minimal", max_searches: 2 }; }, /refuses the "minimal"/);
+    await refused("a web step with no most searches: 400", (x) => { x.models.companys_website.max_searches = null; }, /most searches must be a whole number from 1 to 5/);
+    await refused("a switch that is not on or off: 400", (x) => { x.personalisation.enabled = "yes"; }, /Personalisation must be on or off/);
+    T.audits.length = 0;
+    const saved = await call(routes.settings.PUT, edit((x) => {
+      x.people_pipeline.max_people_per_run = 250;
+      x.people_pipeline.tags = [" pptest_sheet_a ", "PPTEST_SHEET_A", "PPTEST_SHEET_B"];
+      x.spend_caps.reoon_checks_per_day = 1200;
+      x.models.current_employer = { model: "gpt-4o-mini", reasoning_effort: null, max_searches: 2 };
+    }));
+    const stored = Object.fromEntries((await all(`SELECT key, value FROM enrich_settings WHERE key = ANY($1::text[])`, [SHEET_KEYS])).map((r) => [r.key, r.value]));
+    const was = Object.fromEntries(before.map((r) => [r.key, r.value]));
+    check("a save: 200, each change listed and logged", saved.status === 200 && saved.body.changes.some((c) => c.includes("most people a run")) && T.audits.some((a2) => a2.action === "enrich_settings"), JSON.stringify(saved.body.changes ?? saved.body));
+    check("... tags upper case, once each", JSON.stringify(stored.people_pipeline.tags) === JSON.stringify(["PPTEST_SHEET_A", "PPTEST_SHEET_B"]) && stored.people_pipeline.max_people_per_run === 250);
+    check("... what the sheet doesn't edit is kept: memory days, the prices, fit_score", JSON.stringify(stored.company_pipeline.memory_days ?? null) === JSON.stringify(was.company_pipeline?.memory_days ?? null) &&
+      JSON.stringify(stored.spend_caps.openai_prices ?? null) === JSON.stringify(was.spend_caps?.openai_prices ?? null) && ("fit_score" in (was.models ?? {}) ? JSON.stringify(stored.models.fit_score) === JSON.stringify(was.models.fit_score) : true));
+    const read = settingsFrom(await all(`SELECT key, value FROM enrich_settings`));
+    check("... and the worker reads what was saved", read.people_pipeline.max_people_per_run === 250 && read.spend_caps.reoon_checks_per_day === 1200 && read.models.current_employer.model === "gpt-4o-mini" && read.flagOn("people_pipeline", "PPTEST_SHEET_A") === read.people_pipeline.enabled);
+    check("a save over a newer version is refused (409)", (await call(routes.settings.PUT, edit(() => {}))).status === 409);
+  } finally {
+    T.role = "manager";
+    for (const r of before) await pool.query(`UPDATE enrich_settings SET value = $2 WHERE key = $1`, [r.key, JSON.stringify(r.value)]);
+  }
+}
+
 async function partC(routes) {
   section("C. With Builder A's templates in place");
   const built = !/TODO\(A\)/.test(syncTemplateColumns.toString());
@@ -1515,6 +1571,7 @@ try {
     candidates: await route("companies/people/runs/candidates"),
     contacts: await route("companies/contacts"),
     list: await route("companies/list"),
+    settings: await route("companies/settings"),
   };
   await partB1();
   await partB2();
@@ -1528,6 +1585,7 @@ try {
   await partB10();
   await partB11();
   await partB12(routes);
+  await partB12b(routes);
   await partC(routes);
   section("B13. Nothing reaches leads or a push");
   const leadsNow = (await one(`SELECT count(*)::int AS n FROM leads WHERE email NOT LIKE $1`, [`%.${TEST_HOST}`])).n;
