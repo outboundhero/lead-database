@@ -16,10 +16,18 @@
 // clients that share a place share companies. 0.1 credit per company returned,
 // with X-Credit, company_id exclusion lists and the 10,000-record cap.
 //
+// People Preview by company id (contact.company.latest.any.include, the
+// Companies tab's people runs) answers with made-up people at those companies
+// (makeCompanyPerson in ./demo-people.mjs): the same company id always has the
+// same people, with titles made from the request's title phrases, and Export
+// Single then answers for them, with an email or without one. A company the
+// stand-in has served from Company Search (or was given in `companies`) keeps
+// its name, domain and office; any other id gets a made-up company of its own.
+//
 // State (lists, export jobs, the credit balance) lives in this process only.
 
 import { createHash, randomUUID } from "node:crypto";
-import { demoId, hash32, makePerson } from "./demo-people.mjs";
+import { demoId, hash32, makeCompanyPerson, makePerson, peopleCountAt } from "./demo-people.mjs";
 import { excludedByAccount, makeCompany } from "./demo-companies.mjs";
 
 export const DEMO_TOKEN = "demo-key";
@@ -70,7 +78,7 @@ function previewItem(p) {
     id: p.id,
     profile: { first_name: p.first, last_name: mask(p.last), title: p.title, headline: `${p.title} at ${p.company}` },
     company: {
-      id: demoId(`co:${p.domain}`, 0),
+      id: p.companyId ?? demoId(`co:${p.domain}`, 0),
       summary: { name: p.company, industry: p.industry, description: p.description, staff: staffOf(p.staff) },
     },
     location: {
@@ -108,6 +116,57 @@ function fullPerson(p, { processing = false } = {}) {
   };
 }
 
+/** The company ids a People search is scoped to (contact.company.latest/current, include). */
+function companyIdsOf(f) {
+  const co = f?.contact?.company ?? {};
+  return [...new Set([...contentOf(co.latest?.any?.include), ...contentOf(co.current?.any?.include)].map(String))];
+}
+
+/** A company as a people search's people carry it, from a Company Search record. */
+function companyFacts(record) {
+  const s = record?.summary ?? {};
+  const hq = record?.location?.headquarter ?? {};
+  const link = record?.link ?? {};
+  // The company's own domain only: a website on a platform (a Facebook page) is not one.
+  const domain = String(link.domain ?? "")
+    .toLowerCase()
+    .replace(/^[a-z]+:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/\/.*$/, "");
+  const staff = s.staff?.range ? `${s.staff.range.start}-${s.staff.range.end}` : "11-50";
+  return {
+    id: String(record.id),
+    name: String(s.name ?? "Made-up Company"),
+    domain: domain || `${slug(String(s.name ?? "company"))}.example`,
+    industry: String(s.industry ?? "business services"),
+    description: String(s.description ?? "A made-up business generated for an AI Ark demo."),
+    staff,
+    city: String(hq.city ?? "Springfield").replace(/,.*$/, ""),
+    state: hq.state ? String(hq.state) : "Illinois",
+    country: hq.country ? String(hq.country) : "United States",
+  };
+}
+
+/** A company the stand-in has never seen: made up from its id alone. */
+function madeUpCompany(id) {
+  const r = hash32(`coid|${id}`);
+  const names = ["Northgate", "Bluestone", "Summit", "Harborview", "Cedar Ridge", "Ironwood", "Lakeshore", "Silver Oak"];
+  const kinds = [["Dental Group", "dental"], ["Property Management", "property management"], ["Law Offices", "law practice"], ["Logistics", "truck transportation"]];
+  const [kind, industry] = kinds[(r >>> 5) % kinds.length];
+  const name = `${names[r % names.length]} ${kind}`;
+  return {
+    id,
+    name,
+    domain: `${slug(name)}-${String(id).slice(0, 6)}.example`,
+    industry,
+    description: `${name} is a made-up business generated for an AI Ark demo run.`,
+    staff: "11-50",
+    city: "Springfield",
+    state: "Illinois",
+    country: "United States",
+  };
+}
+
 /** A person AI Ark would leave out under the request's exclusions (whole-word, as WORD mode does). */
 function excludedByFilters(p, ask) {
   const word = (t, s) => new RegExp(`(^|[^a-z0-9])${escapeRx(t.toLowerCase())}($|[^a-z0-9])`, "i").test(s);
@@ -140,14 +199,24 @@ function excludedByFilters(p, ask) {
  *                 noCreditHeader           no X-Credit header on a charged page
  *                 badCreditHeader          an X-Credit header that is not a number
  *                 noContent                a 200 answer with no list of companies
+ *               People Preview only:
+ *                 previewAnswers           what the next Preview calls answer, in order, before any
+ *                                          normal answer: a status (400 is AI Ark's "request size"
+ *                                          refusal, 402, 401, 403, 404, 429, 500 …), 0 for no answer
+ *                                          at all, { status, charge: true } to charge the page first,
+ *                                          or { status: 400, message } for another refusal
  *   companiesPerPlace  a fixed number of companies per place (default 30 to 119, by place)
+ *   companies   Company Search records the stand-in knows by id before any search (people runs'
+ *               tests): their people carry the company's name, domain and office
  */
-export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4_000, processingMs = 0, faults = {}, companiesPerPlace = null } = {}) {
+export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4_000, processingMs = 0, faults = {}, companiesPerPlace = null, companies = [] } = {}) {
   const lists = new Map(); // list id -> Set of person or company ids
   const jobs = new Map(); // trackId -> job
   const people = new Map(); // person id -> person, for single exports
   const cache = new Map(); // filter seed -> people[]
   const companyCache = new Map(); // place -> companies[]
+  const companyIndex = new Map(); // company id -> the facts its people carry (served or given)
+  for (const c of companies ?? []) if (c?.id) companyIndex.set(String(c.id), companyFacts(c));
   const state = { balance, calls: 0, charged: 0, listsMade: 0, companyCalls: 0, refundedOnce: false, expiredOnce: false };
   const REFUNDED = "this request was automatically refunded because the results were not delivered within the time limit. you can submit it again.";
 
@@ -171,10 +240,36 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
     state.charged = Math.round((state.charged - back) * 100) / 100;
   };
 
+  /** The people at the companies a search names, in the companies' order: those its titles and keywords let through. */
+  function companyPopulation(f, ids) {
+    const ask = askOf(f);
+    const title = f.contact?.experience?.latest?.title ?? f.contact?.experience?.current?.title;
+    const exclude = contentOf(title?.any?.exclude).map(String);
+    const keywords = contentOf(f.contact?.keyword?.any?.exclude).map(String);
+    const word = (t, s) => new RegExp(`(^|[^a-z0-9])${escapeRx(t.toLowerCase())}($|[^a-z0-9])`, "i").test(s);
+    const all = [];
+    for (const id of ids) {
+      const company = companyIndex.get(id) ?? madeUpCompany(id);
+      for (let i = 0; i < peopleCountAt(id); i++) {
+        const p = makeCompanyPerson(company, i, ask);
+        if (exclude.some((t) => word(t, p.title))) continue;
+        if (keywords.some((t) => word(t, `${p.title} at ${p.company}`))) continue;
+        all.push(p);
+        people.set(p.id, p);
+      }
+    }
+    return all;
+  }
+
   function populationOf(filters) {
     const f = { contact: filters.contact ?? {}, account: filters.account ?? {} };
     const seed = createHash("sha1").update(stable(f)).digest("hex").slice(0, 16);
     let all = cache.get(seed);
+    if (!all && companyIdsOf(f).length) {
+      all = companyPopulation(f, companyIdsOf(f));
+      cache.set(seed, all);
+      if (cache.size > PEOPLE_CACHE) cache.delete(cache.keys().next().value);
+    }
     if (!all) {
       const ask = askOf(f);
       let total = 0;
@@ -216,6 +311,7 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
         if (seen.has(c.id) || excludedByAccount(c, account)) continue;
         seen.add(c.id);
         out.push(c);
+        if (!companyIndex.has(c.id)) companyIndex.set(c.id, companyFacts(c));
       }
     }
     return out;
@@ -290,11 +386,27 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
     if (method === "GET" && path === "/v1/payments/credits") return answer(200, { total: Math.floor(state.balance) });
 
     if (method === "POST" && path === "/v1/people/preview") {
+      const previewFault = faults.previewAnswers?.length ? faults.previewAnswers.shift() : null;
       const page = Number(req.page);
       const size = Number(req.size);
       if (!Number.isInteger(page) || page < 0 || !Number.isInteger(size) || size < 0 || size > 100) return appError(400, "invalid page or size", path);
-      if (!contentOf(req.contact?.location?.any?.include).length && !req.account) return appError(400, "at least one include filter is required", path);
+      if (!contentOf(req.contact?.location?.any?.include).length && !req.account && !companyIdsOf(req).length) {
+        return appError(400, "at least one include filter is required", path);
+      }
+      if (companyIdsOf(req).length > 300) return appError(400, "company ids exceed the limit of 300", path);
       if (page * Math.max(size, 1) >= 10_000) return appError(400, "pagination limit exceeded", path);
+      if (previewFault !== null) {
+        const fault = typeof previewFault === "object" ? previewFault : { status: previewFault };
+        if (fault.charge) charge(1);
+        if (!fault.status) throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
+        if (fault.status === 400) return appError(400, fault.message ?? "request size must less or equal to {0,number} bytes", path);
+        if (fault.status === 402) return answer(402, { status: 402, error: "not enough balance" });
+        if (fault.status === 401) return answer(401, { message: "No API key found in request" });
+        if (fault.status === 403) return answer(403, { status: 403, error: "account restricted" });
+        if (fault.status === 404) return appError(404, "data not found", path);
+        if (fault.status === 429) return answer(429, { message: "API rate limit exceeded" }, { "Retry-After": "1" });
+        return answer(fault.status, { status: fault.status, error: "unexpected error" });
+      }
       if (!charge(1)) return answer(402, { status: 402, error: "not enough balance" });
       const all = matching(req);
       if (!all.length) return appError(404, "data not found");
@@ -426,5 +538,7 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
   }
 
   handle.state = state;
+  /** For tests: the facts a company id's people carry (the company as the stand-in knows it). */
+  handle.companyFacts = (id) => companyIndex.get(String(id)) ?? madeUpCompany(String(id));
   return handle;
 }

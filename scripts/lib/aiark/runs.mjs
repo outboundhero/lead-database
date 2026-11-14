@@ -34,6 +34,13 @@
 //
 // A job AI Ark has taken is never dropped over an error: the run backs off and
 // tries again until AI Ark has had time to deliver or refund it.
+//
+// People the Companies tab's people runs bought (people-runs.mjs) are in the
+// same registry, with people_run_id set and no run_id. The tab treats them as
+// it would without the pipeline (D43): its exclusion lists leave them out, a
+// single run copies such a person free with the registry's email and record,
+// an export run pays for them as for anyone it returns, and either way the
+// registry row then belongs to the tab run (run_id), as if it had bought them.
 
 import { randomUUID } from "node:crypto";
 import {
@@ -98,10 +105,11 @@ export async function aiArkFor(mode, { env = process.env, db, rps = null }) {
   if (mode === "demo") {
     if (env.AIARK_DEMO !== "1") return { client: null, why: "Demo runs are off (AIARK_DEMO=1 turns them on)" };
     const base = num(env.AIARK_DEMO_CREDITS, 25_000);
-    // People runs and company pulls spend from the one demo account.
+    // People runs, company pulls and the Companies tab's people runs spend from the one demo account.
     const { rows } = await db.query(
       `SELECT ((SELECT coalesce(sum(credits_used), 0) FROM aiark_runs WHERE mode = 'demo')
-            + (SELECT coalesce(sum(credits_used), 0) FROM aiark_company_runs WHERE mode = 'demo'))::float8 AS used`
+            + (SELECT coalesce(sum(credits_used), 0) FROM aiark_company_runs WHERE mode = 'demo')
+            + (SELECT coalesce(sum(credits_used), 0) FROM aiark_people_runs WHERE mode = 'demo'))::float8 AS used`
     );
     if (!demoTransport) demoTransport = createDemoTransport({ latencyMs: num(env.AIARK_DEMO_LATENCY_MS, 120) });
     demoTransport.state.balance = Math.max(0, base - Number(rows[0].used));
@@ -388,9 +396,12 @@ async function writePersonOnce(ctx, { inputs, credits, pulledBefore = null, plai
          FROM r CROSS JOIN LATERAL jsonb_each_text($7::jsonb) AS kv
        RETURNING 1
      ), p AS (
-       INSERT INTO aiark_people (person_id, demo, run_id, row_id, email, email_status)
+       -- A person only a people run of the Companies tab bought becomes this run's (D43),
+       -- with this run's row, so the way back from the pipeline (emailFound) finds them.
+       INSERT INTO aiark_people AS a (person_id, demo, run_id, row_id, email, email_status)
        VALUES ($8, $9, $1, (SELECT id FROM r), nullif($10, ''), nullif($11, ''))
-       ON CONFLICT (person_id) DO NOTHING
+       ON CONFLICT (person_id) DO UPDATE SET run_id = EXCLUDED.run_id, row_id = coalesce(EXCLUDED.row_id, a.row_id)
+        WHERE a.run_id IS NULL AND a.people_run_id IS NOT NULL
        RETURNING 1
      ), u AS (
        UPDATE aiark_runs
@@ -439,6 +450,9 @@ async function writePerson(ctx, person) {
 
 // ── Exclusion lists ─────────────────────────────────────────────────────────
 
+/** Registry rows the tab treats as bought: everyone but the people only a people run of the Companies tab bought (D43). */
+const TAB_HELD = `NOT (run_id IS NULL AND people_run_id IS NOT NULL)`;
+
 const listsStale = (p) => !p.lists_at || Date.now() - Date.parse(p.lists_at) > LIST_REFRESH_MS;
 const listsAlive = (p) => Boolean(p.lists_at) && Date.now() - Date.parse(p.lists_at) < LIST_LIFE_MS;
 
@@ -486,9 +500,10 @@ async function buildLists(ctx) {
   const demo = run.mode === "demo";
   const p = ctx.progress;
   const made = await listsMadeToday(pool, run.mode);
+  // People only the Companies tab's people runs bought are not left out (D43).
   const { rows: [{ held, fresh, at }] } = await pool.query(
     `SELECT count(*)::int AS held, count(*) FILTER (WHERE pulled_at >= $2::timestamptz)::int AS fresh, now()::text AS at
-       FROM aiark_people WHERE demo = $1 AND pulled_at < now()`,
+       FROM aiark_people WHERE demo = $1 AND pulled_at < now() AND ${TAB_HELD}`,
     [demo, p.lists_through ?? null]
   );
   const budget = Math.max(0, LIST_BUDGET - made);
@@ -514,7 +529,7 @@ async function buildLists(ctx) {
   for (let left = budget; plan && plan.count < plan.want && left > 0; left--) {
     const { rows } = await pool.query(
       `SELECT person_id FROM aiark_people
-        WHERE demo = $1 AND pulled_at < $2::timestamptz AND ($3::timestamptz IS NULL OR pulled_at >= $3::timestamptz)
+        WHERE demo = $1 AND pulled_at < $2::timestamptz AND ($3::timestamptz IS NULL OR pulled_at >= $3::timestamptz) AND ${TAB_HELD}
         ORDER BY pulled_at DESC, person_id OFFSET $4 LIMIT $5`,
       [demo, plan.at, plan.since ?? null, plan.count, Math.min(LIST_MAX, plan.want - plan.count)]
     );
@@ -627,11 +642,16 @@ async function sliceSingle(ctx) {
 
   const ids = res.content.map((x) => x?.id).filter(Boolean);
   const { rows } = ids.length
-    ? await ctx.pool.query(`SELECT person_id, run_id FROM aiark_people WHERE person_id = ANY($1::text[])`, [ids])
+    ? await ctx.pool.query(
+        `SELECT person_id, run_id, people_run_id, email, email_status, record FROM aiark_people WHERE person_id = ANY($1::text[])`,
+        [ids]
+      )
     : { rows: [] };
-  // Already in this run's table (a page repeated after a crash) / bought by an earlier run.
+  // Already in this run's table (a page repeated after a crash) / bought by an earlier run /
+  // bought only by a people run of the Companies tab, which this run copies free (D43).
+  const pipelineOnly = new Map(rows.filter((x) => x.run_id == null && x.people_run_id != null).map((x) => [x.person_id, x]));
   const mine = new Set(rows.filter((x) => x.run_id === run.id).map((x) => x.person_id));
-  const held = new Set(rows.filter((x) => x.run_id !== run.id).map((x) => x.person_id));
+  const held = new Set(rows.filter((x) => x.run_id !== run.id && !pipelineOnly.has(x.person_id)).map((x) => x.person_id));
   let skipped = 0;
   let lostInARow = 0;
   let stopping = false;
@@ -646,6 +666,18 @@ async function sliceSingle(ctx) {
     if (ctx.shouldStop()) {
       stopping = true;
       break;
+    }
+    const bought = pipelineOnly.get(item.id);
+    if (bought) {
+      // Free: the registry's record and email, written as this run's own (the registry row becomes this run's).
+      const inputs = {
+        ...personInputs(bought.record ?? item),
+        ...(bought.email ? { email: String(bought.email).toLowerCase() } : {}),
+        ...(bought.email_status ? { email_status: String(bought.email_status) } : {}),
+      };
+      await writePerson(ctx, { inputs, credits: 0 });
+      mine.add(item.id);
+      continue;
     }
     if (ctx.spent + 1 > ceiling) {
       braked = true;
@@ -897,7 +929,7 @@ async function sliceExport(ctx) {
   const ids = res.content.map((x) => x?.id).filter(Boolean);
   const { rows } = ids.length
     ? await ctx.pool.query(
-        `SELECT person_id, pulled_at, run_id FROM aiark_people WHERE person_id = ANY($1::text[]) AND run_id IS DISTINCT FROM $2`,
+        `SELECT person_id, pulled_at, run_id FROM aiark_people WHERE person_id = ANY($1::text[]) AND run_id IS DISTINCT FROM $2 AND ${TAB_HELD}`,
         [ids, run.id]
       )
     : { rows: [] };

@@ -111,3 +111,86 @@ export function makePerson(seed, i, ask) {
     email,
   };
 }
+
+// ── People at a company (people runs of the Companies tab) ──────────────────
+
+const PREFIXES = ["Senior", "Regional", "Assistant", "Interim"];
+const wordsOf = (s) => String(s).toLowerCase().match(/[a-z0-9]+/g) ?? [];
+const holdsWords = (inner, outer) => {
+  for (let i = 0; i + inner.length <= outer.length; i++) if (inner.every((w, j) => outer[i + j] === w)) return true;
+  return false;
+};
+
+/** How many people a made-up company has on AI Ark: 0 to 8, the same for a company id whoever asks. */
+export function peopleCountAt(companyId) {
+  return hash32(`ppl|${companyId}`) % 9;
+}
+
+/**
+ * Person `i` at a made-up company, for People Preview by company id. The same
+ * company id and index always give the same person (so the registry sees them
+ * again in a later run), with a title made from the request's own title phrases.
+ * About 1 in 5 has a word before the phrase ("Senior Office Manager"), about 1
+ * in 30 a title that holds none of the phrases (AI Ark's matching is looser
+ * than whole words in places), about 1 in 10 lives somewhere no client lists,
+ * about 1 in 4 has no email Export Single can find, and about 1 in 10 is on a
+ * catch-all domain.
+ *
+ * @param {{ id: string, name: string, domain: string, industry: string, description: string, staff: string,
+ *           city: string, state: string | null, country: string }} company
+ * @param {number} i
+ * @param {{ titles: string[] }} ask
+ */
+export function makeCompanyPerson(company, i, ask) {
+  const r = hash32(`ppl|${company.id}#${i}`);
+  const first = pick(FIRST, r);
+  const last = pick(LAST, r >>> 5);
+  const phrases = ask.titles.length ? ask.titles : DEFAULT_TITLES;
+  const phrase = cap(pick(phrases, r >>> 7));
+  const roll = (r >>> 17) % 100;
+  let title = phrase;
+  if (roll < 20) title = `${pick(PREFIXES, r >>> 11)} ${phrase}`;
+  else if (roll < 23) {
+    // Near the phrase but not holding it: its first word, then another word.
+    const near = `${cap(wordsOf(phrase)[0] ?? "Office")} Liaison`;
+    if (!phrases.some((p) => holdsWords(wordsOf(p), wordsOf(near)))) title = near;
+  }
+  let city = company.city;
+  let state = company.state;
+  const placeRoll = (r >>> 21) % 100;
+  if (placeRoll < 10) [city, state] = pick(DECOYS, r >>> 13);
+  else if (placeRoll < 13) [city, state] = [`Greater ${company.city} Area`, null];
+  const seniority = SENIORITY_FOR_TITLE.find(([re]) => re.test(title))?.[1] ?? "manager";
+  const emailRoll = (r >>> 24) % 100;
+  const email =
+    emailRoll < 25
+      ? { found: false, status: "INVALID", subStatus: "MAILBOX_NOT_FOUND", domainType: "UNKNOWN", free: false, generic: false, mx: { found: true, provider: "other" } }
+      : {
+          found: true,
+          address: `${first.toLowerCase()}.${last.toLowerCase()}@${company.domain}`,
+          status: "VALID",
+          subStatus: "EMPTY",
+          domainType: emailRoll < 35 ? "CATCH_ALL" : "SMTP",
+          free: false,
+          generic: false,
+          mx: { found: true, provider: pick(["g-suite", "microsoft", "other"], r >>> 26) },
+        };
+  return {
+    id: demoId(`pp|${company.id}`, i),
+    companyId: company.id,
+    first,
+    last,
+    title,
+    seniority,
+    department: /facilit/i.test(title) ? "facility_administration" : /office/i.test(title) ? "office_management" : "operations",
+    company: company.name,
+    domain: company.domain,
+    industry: company.industry,
+    staff: company.staff,
+    city,
+    state,
+    country: company.country || "United States",
+    description: company.description,
+    email,
+  };
+}

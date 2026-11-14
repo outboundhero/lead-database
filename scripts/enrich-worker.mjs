@@ -24,7 +24,9 @@
 //
 // Company pulls (the Companies tab, scripts/lib/aiark/company-runs.mjs) share
 // that loop: people slices and company slices take turns, through one AI Ark
-// client, so one throttle holds both at AIARK_RPS. A pull's companies land in
+// client, so one throttle holds both at AIARK_RPS. The Companies tab's people
+// runs (scripts/lib/aiark/people-runs.mjs: a Look, a Buy, the settling of each
+// company) are the third kind of slice, taking their turn the same way. A pull's companies land in
 // the client's template Companies table, and when one of those rows finishes
 // the worker writes its summary into enrich_companies (fenced on the row's
 // claim), which the Companies tab lists. Once an hour, with both paid keys set
@@ -59,6 +61,7 @@ import { projectCompany } from "./lib/enrich/project-company.mjs";
 import { reoonBalanceInfo, requeueWaitingTemplateRows } from "./lib/enrich/company-actions.mjs";
 import { advanceOneRun, runDue } from "./lib/aiark/runs.mjs";
 import { advanceOneCompanyRun, companyRunDue } from "./lib/aiark/company-runs.mjs";
+import { advanceOnePeopleRun, peopleRunDue } from "./lib/aiark/people-runs.mjs";
 import { autoAddConfig, pullsToAdd, requestAdd } from "./lib/aiark/add.mjs";
 import { PERSON_SEARCH_KEYS } from "./lib/aiark/columns.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname, quiet: true });
@@ -81,8 +84,8 @@ const SEARCH_KEYS = [
     "general_email", ...PERSON_SEARCH_KEYS,
   ]),
 ];
-// What this worker can run: the Companies tab starts a pull only when the worker says it can.
-const CAPABILITIES = ["company_runs"];
+// What this worker can run: the Companies tab starts a pull or a people run only when the worker says it can.
+const CAPABILITIES = ["company_runs", "people_runs"];
 const SWEEP_WAITING_MS = 3600_000;
 
 if (!env.DATABASE_URL) {
@@ -109,7 +112,7 @@ process.on("SIGINT", () => { shuttingDown = true; });
 
 const stats = { processed: 0, failed: 0, calls: 0 };
 let inFlight = 0;
-const aiark = { slices: 0, company_slices: 0, active: null, idle: true };
+const aiark = { slices: 0, company_slices: 0, people_slices: 0, active: null, idle: true };
 
 // ── Table definitions (columns change rarely; re-read every 30 s) ───────────
 
@@ -325,6 +328,7 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
       active_run: aiark.active,
       slices: aiark.slices,
       company_slices: aiark.company_slices,
+      people_slices: aiark.people_slices,
     },
     host: os.hostname(),
     pid: process.pid,
@@ -340,8 +344,9 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
 }
 
 // ── AI Ark runs (one at a time: the API's rate limit is per key) ────────────
-// People slices and company slices take turns going first, so neither kind of
-// pull waits behind the other; both use the same AI Ark client and throttle.
+// The AI Ark tab's people slices, company slices and the Companies tab's
+// people-run slices take turns going first, so no kind of run waits behind
+// the others; all use the same AI Ark client and throttle.
 
 async function peopleSlice() {
   const id = await advanceOneRun({ pool, env, log, shouldStop: () => shuttingDown });
@@ -355,22 +360,34 @@ async function companySlice() {
   return id;
 }
 
-let companiesFirst = false;
+/** A people run of the Companies tab: one Look page, or up to 10 Export Singles, or settling. */
+async function pipelinePeopleSlice() {
+  const id = await advanceOnePeopleRun({ pool, env, log, shouldStop: () => shuttingDown, maxBuysPerSlice: 10 });
+  if (id) aiark.people_slices++;
+  return id;
+}
+
+const SLICE_KINDS = [
+  { slice: peopleSlice, name: "people runs" },
+  { slice: companySlice, name: "company pulls" },
+  { slice: pipelinePeopleSlice, name: "pipeline people runs" },
+];
+let firstKind = 0;
 
 /**
  * One slice of whichever kind has work, the kinds taking turns to go first.
- * An error in one kind is logged and the other still gets its turn.
+ * An error in one kind is logged and the others still get their turn.
  */
 async function advanceOneRunInTurn() {
-  const turn = companiesFirst ? [companySlice, peopleSlice] : [peopleSlice, companySlice];
-  companiesFirst = !companiesFirst;
-  for (const slice of turn) {
+  const turn = SLICE_KINDS.map((_, i) => SLICE_KINDS[(firstKind + i) % SLICE_KINDS.length]);
+  firstKind = (firstKind + 1) % SLICE_KINDS.length;
+  for (const { slice, name } of turn) {
     if (shuttingDown) break;
     try {
       const id = await slice();
       if (id) return id;
     } catch (e) {
-      log(`AI Ark loop error (${slice === companySlice ? "company pulls" : "people runs"}): ${e.message}`);
+      log(`AI Ark loop error (${name}): ${e.message}`);
     }
   }
   return null;
@@ -466,7 +483,7 @@ async function main() {
         inFlight++;
         safeProcess(r).finally(() => { inFlight--; });
       }
-      if (ONCE && !claimed.length && inFlight === 0 && aiark.idle && !(await runDue(pool)) && !(await companyRunDue(pool))) break;
+      if (ONCE && !claimed.length && inFlight === 0 && aiark.idle && !(await runDue(pool)) && !(await companyRunDue(pool)) && !(await peopleRunDue(pool))) break;
       await sleep(claimed.length ? 50 : inFlight ? 250 : POLL_MS);
     } catch (e) {
       log(`loop error: ${e.message}`);
