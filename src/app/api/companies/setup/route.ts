@@ -39,7 +39,7 @@ async function setupFor(c: PoolClient, tag: string | null, admin: boolean) {
   const base = {
     modes: companyModes(),
     worker: workerView(await workerState(c)),
-    pipeline: pipelineView(settings.value),
+    pipeline: pipelineView(settings.value, tag),
     settings: admin ? settings : null,
   };
   if (!tag) {

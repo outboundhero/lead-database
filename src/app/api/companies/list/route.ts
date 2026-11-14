@@ -2,11 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireRole } from "@/lib/enrich/auth";
 import { withTx } from "@/lib/enrich/db";
 import { cleanTag, decodeCursor, listCompanies, TAG_RE } from "@/lib/companies/server";
-import { FOUND_BY, PAGE_SIZES, type CompaniesPage, type FoundBy, type ListSort } from "@/lib/companies/types";
+import { FOUND_BY, PAGE_SIZES, type CompaniesPage, type FoundBy, type ListHas, type ListSort } from "@/lib/companies/types";
 
-// GET /api/companies/list?tag=&sort=newest|name&size=50|100|200&after=&q=&state=&status=valid|catch_all&found=&hideHeld=1
-// One page of a client's listed companies: those whose outcome is "Has a
-// general email" or "Already in the database" (enrich_companies.listed).
+// GET /api/companies/list?tag=&sort=newest|name&size=50|100|200&after=&q=&state=&status=valid|catch_all&found=&hideHeld=1&has=people|general
+// One page of a client's listed companies (enrich_companies.listed): those
+// passing the client's rules with a usable general email or a usable person
+// email, held ones included. `has` keeps only those with people emails, or
+// only those with a general email. Each row carries its first general emails
+// and people (enrich_contacts).
 // Keyset paging, no OFFSET: `after` is the `next` cursor of the page before,
 // a base64url [found_at, row_id] (newest first) or [lower(company), row_id]
 // (A to Z), so a page costs the same however many companies the client has.
@@ -34,10 +37,12 @@ export async function GET(req: NextRequest) {
   const foundIn = sp.get("found");
   const foundBy = FOUND_BY.includes(foundIn as FoundBy) ? (foundIn as FoundBy) : null;
   const hideHeld = sp.get("hideHeld") === "1" || sp.get("hideHeld") === "true";
+  const hasIn = sp.get("has");
+  const has: ListHas | null = hasIn === "people" || hasIn === "general" ? hasIn : null;
 
   try {
     const page = await withTx<CompaniesPage>(
-      (c) => listCompanies(c, { tag, sort, size, after, q, state, status, foundBy, hideHeld }),
+      (c) => listCompanies(c, { tag, sort, size, after, q, state, status, foundBy, hideHeld, has }),
       { readOnly: true, timeoutMs: 10_000 }
     );
     return NextResponse.json(page, { headers: { "Cache-Control": "no-store" } });

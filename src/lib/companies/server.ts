@@ -1,8 +1,10 @@
 import type { PoolClient } from "pg";
 import { buildCompanyRequests } from "../../../scripts/lib/aiark/company-filters.mjs";
 import { bareDomain } from "../../../scripts/lib/enrich/domain.mjs";
+import { MODEL_ID, normTag, settingsFrom } from "../../../scripts/lib/enrich/settings.mjs";
 import { geo, modes, peopleOrDefaults } from "@/lib/aiark/server";
 import type { RowStatus, WorkerState } from "@/lib/enrich/types";
+import { contactsFor } from "./people";
 import {
   EFFORTS,
   MODEL_STEPS,
@@ -17,10 +19,13 @@ import {
   type CompanyWorker,
   type Effort,
   type FoundBy,
+  type ListHas,
   type ListSort,
+  type ModelSetting,
   type ModelStep,
   type PipelineSettings,
   type PipelineView,
+  type SettingsInput,
   type SettingsState,
 } from "./types";
 
@@ -49,8 +54,6 @@ type Geo = Awaited<ReturnType<typeof geo>>;
 const obj = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 const text = (v: unknown) => (v == null ? "" : String(v).trim());
-const intIn = (v: unknown, lo: number, hi: number) =>
-  typeof v === "number" && Number.isInteger(v) && v >= lo && v <= hi ? v : null;
 const fmt = (n: number) => n.toLocaleString("en-US");
 
 /** Live and demo only: company pulls have no export strategy. */
@@ -116,22 +119,21 @@ export function companyPlanView(...args: Parameters<typeof companyPlan>): Compan
 
 // ── Settings (enrich_settings) ──────────────────────────────────────────────
 
-const SETTING_KEYS = ["company_pipeline", "models"];
+/** The settings rows this tab reads and its sheet edits. */
+const SETTING_KEYS = ["company_pipeline", "people_pipeline", "personalisation", "spend_caps", "models"];
 /** aiark_company_runs.size_requested takes at most 10,000. */
 export const PULL_SIZE_LIMIT = 10_000;
-const MAX_CHECKS = 5;
 const MAX_SEARCHES = 5;
-// Used only when a stored value is missing or unusable: the values migration 124 seeds.
-const FALLBACK_MAX_PULL = 1_000;
-const FALLBACK_CHECKS = 3;
-const FALLBACK_CAPS: Record<ModelStep, number> = { website_search: 2, email_search_first: 3, email_search_second: 2 };
-const MODEL_ID = /^[a-z0-9][a-z0-9.\-]{1,60}$/;
+const TAGS_MAX = 2_000;
+/** The company row's paid web steps the pull panel prices: the website search, then the two email searches. */
+const PRICED_STEPS: ModelStep[] = ["companys_website", "email_extraction_claygent", "email_extraction_claygent_2"];
 
 /**
- * The settings as stored, read fresh inside the caller's transaction. The
- * worker reads them through scripts/lib/enrich/settings.mjs with a 30 s cache;
- * here the switch must take effect the moment it is saved. A missing row reads
- * as switched off.
+ * The settings, read fresh inside the caller's transaction and checked the way
+ * the worker checks them (scripts/lib/enrich/settings.mjs settingsFrom): an
+ * invalid value takes its default, and a model the models row holds as null or
+ * invalid is unset. The worker reads them with a 30 s cache; here a saved
+ * switch must apply at once. A missing row reads as its default (switched off).
  */
 export async function readPipelineSettings(c: PoolClient, { lock = false } = {}): Promise<SettingsState> {
   const { rows } = await c.query<{ key: string; value: unknown; version: string }>(
@@ -139,106 +141,259 @@ export async function readPipelineSettings(c: PoolClient, { lock = false } = {})
        FROM enrich_settings WHERE key = ANY($1::text[]) ORDER BY key${lock ? " FOR UPDATE" : ""}`,
     [SETTING_KEYS]
   );
-  const stored = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-  return { value: normalizeSettings(stored), version: rows.map((r) => `${r.key}@${r.version}`).join(";") };
+  return { value: normalizeSettings(rows), version: rows.map((r) => `${r.key}@${r.version}`).join(";") };
 }
 
-export function normalizeSettings(stored: Record<string, unknown>): PipelineSettings {
-  const cp = obj(stored.company_pipeline);
+/** The stored rows laid over the defaults, as the worker sees them (no functions: it goes to the page). */
+export function normalizeSettings(rows: { key: string; value: unknown }[]): PipelineSettings {
+  const s = settingsFrom(rows);
   return {
-    company_pipeline: {
-      ...cp,
-      enabled: cp.enabled === true,
-      max_pull_size: intIn(cp.max_pull_size, 1, PULL_SIZE_LIMIT) ?? FALLBACK_MAX_PULL,
-      email_checks_per_company: intIn(cp.email_checks_per_company, 1, MAX_CHECKS) ?? FALLBACK_CHECKS,
-    },
-    models: { ...obj(stored.models) } as PipelineSettings["models"],
+    company_pipeline: s.company_pipeline,
+    people_pipeline: s.people_pipeline,
+    personalisation: s.personalisation,
+    spend_caps: s.spend_caps as PipelineSettings["spend_caps"],
+    models: s.models as PipelineSettings["models"],
   };
 }
 
-export function pipelineView(s: PipelineSettings): PipelineView {
-  const searchCaps = {} as Record<ModelStep, number>;
-  for (const { key } of MODEL_STEPS) searchCaps[key] = intIn(obj(s.models[key]).max_searches, 1, MAX_SEARCHES) ?? FALLBACK_CAPS[key];
+/** What a manager's page needs from the settings: the switch, and what the pull's worst case is worked out from. */
+export function pipelineView(s: PipelineSettings, tag: string | null = null): PipelineView {
+  const t = tag ? normTag(tag) : null;
   return {
     enabled: s.company_pipeline.enabled,
+    onList: t ? s.company_pipeline.tags.includes(t) : null,
     maxPullSize: s.company_pipeline.max_pull_size,
-    checksPerCompany: s.company_pipeline.email_checks_per_company,
-    searchCaps,
+    steps: PRICED_STEPS.map((key) => ({ key, model: s.models[key]?.model ?? null, searches: s.models[key]?.max_searches ?? 1 })),
+    inboxesPerCompany: s.company_pipeline.inboxes_per_company,
+    prices: s.spend_caps.openai_prices,
   };
 }
 
+const wholeIn = (v: unknown, lo: number, hi: number) => (typeof v === "number" && Number.isInteger(v) && v >= lo && v <= hi ? v : null);
+const amountIn = (v: unknown, lo: number, hi: number) => (typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi ? v : null);
+const TAG_TEXT = /^[A-Z0-9][A-Z0-9_&-]{0,63}$/;
+
+/** A switch's client list as typed: tags upper case, once each. Errors name what was refused. */
+function cleanTags(v: unknown, label: string, errors: string[]): string[] {
+  if (!Array.isArray(v)) {
+    errors.push(`${label}: the client list must be a list of tags.`);
+    return [];
+  }
+  const out: string[] = [];
+  const bad: string[] = [];
+  for (const x of v) {
+    const t = typeof x === "string" ? normTag(x) : "";
+    if (!t) continue;
+    if (!TAG_TEXT.test(t)) bad.push(String(x).slice(0, 40));
+    else if (!out.includes(t)) out.push(t);
+  }
+  if (bad.length) errors.push(`${label}: ${bad.slice(0, 5).join(", ")} ${bad.length === 1 ? "is not a client tag" : "are not client tags"}.`);
+  if (out.length > TAGS_MAX) errors.push(`${label}: at most ${fmt(TAGS_MAX)} clients.`);
+  return out;
+}
+
+/** The sheet's model edits checked: a model id, a reasoning effort or none, and for a web step its most searches. */
+function cleanModel(
+  input: unknown,
+  step: (typeof MODEL_STEPS)[number],
+  errors: string[]
+): { model: string; reasoning_effort: Effort | null; max_searches: number | null } | null {
+  const m = obj(input);
+  const model = typeof m.model === "string" ? m.model.trim() : "";
+  const rawEffort = m.reasoning_effort;
+  const effort = rawEffort === null || rawEffort === undefined || rawEffort === "" ? null : rawEffort;
+  let ok = true;
+  if (!MODEL_ID.test(model)) {
+    errors.push(`${step.label}: the model id must be 2 to 61 characters of lower-case letters, digits, dots and dashes, starting with a letter or digit.`);
+    ok = false;
+  }
+  if (effort !== null && !(EFFORTS as readonly unknown[]).includes(effort)) {
+    errors.push(`${step.label}: the reasoning effort must be one of ${EFFORTS.join(", ")}, or not sent.`);
+    ok = false;
+  } else if (effort === "minimal" && /luna/.test(model)) {
+    errors.push(`${step.label}: a Luna model refuses the "minimal" reasoning effort.`);
+    ok = false;
+  }
+  let searches: number | null = null;
+  if (step.tool === "web") {
+    searches = wholeIn(m.max_searches, 1, MAX_SEARCHES);
+    if (searches === null) {
+      errors.push(`${step.label}: the most searches must be a whole number from 1 to ${MAX_SEARCHES}.`);
+      ok = false;
+    }
+  }
+  return ok ? { model, reasoning_effort: effort as Effort | null, max_searches: searches } : null;
+}
+
+type SettingsRows = { company_pipeline: Record<string, unknown>; people_pipeline: Record<string, unknown>; personalisation: Record<string, unknown>; spend_caps: Record<string, unknown>; models: Record<string, unknown> };
+
 /**
- * Checks the settings sheet's edits and merges them into what is stored: keys
- * the sheet doesn't edit (memory_days, fit_score …) are kept. Returns the new
- * settings, or the errors; `changes` says what changed, for the audit log.
+ * Checks the settings sheet's edits (SettingsInput) and merges them into what
+ * is stored: keys the sheet doesn't edit (memory_days, openai_prices,
+ * fit_score, anything a later phase adds) are kept as stored. Returns the rows
+ * to save, or the errors; `changes` says what changed, for the audit log.
+ * Validation as phase 1: anything out of range is refused with its reason,
+ * never quietly replaced.
  */
 export function cleanSettingsInput(
   input: unknown,
-  current: PipelineSettings
-): { value: PipelineSettings | null; errors: string[]; changes: string[] } {
+  current: PipelineSettings,
+  stored: Partial<SettingsRows> = {}
+): { value: SettingsRows | null; errors: string[]; changes: string[] } {
   const errors: string[] = [];
   const body = obj(input);
   const cp = obj(body.company_pipeline);
+  const pp = obj(body.people_pipeline);
+  const ps = obj(body.personalisation);
+  const sc = obj(body.spend_caps);
+  const usd = obj(sc.openai_usd_per_day);
   const modelsIn = obj(body.models);
+  const bool = (v: unknown, label: string) => {
+    if (typeof v !== "boolean") errors.push(`${label} must be on or off.`);
+    return v === true;
+  };
+  const whole = (v: unknown, lo: number, hi: number, label: string) => {
+    const n = wholeIn(v, lo, hi);
+    if (n === null) errors.push(`${label} must be a whole number from ${fmt(lo)} to ${fmt(hi)}.`);
+    return n ?? lo;
+  };
+  const amount = (v: unknown, lo: number, hi: number, label: string) => {
+    const n = amountIn(v, lo, hi);
+    if (n === null) errors.push(`${label} must be a number from ${fmt(lo)} to ${fmt(hi)}.`);
+    return n ?? lo;
+  };
 
-  if (typeof cp.enabled !== "boolean") errors.push("The switch must be on or off.");
-  const maxPull = intIn(cp.max_pull_size, 1, PULL_SIZE_LIMIT);
-  if (maxPull === null) errors.push(`The largest pull must be a whole number from 1 to ${fmt(PULL_SIZE_LIMIT)}.`);
-  const checks = intIn(cp.email_checks_per_company, 1, MAX_CHECKS);
-  if (checks === null) errors.push(`Email checks per company must be a whole number from 1 to ${MAX_CHECKS}.`);
-
-  const steps: { key: ModelStep; label: string; model: string; effort: Effort | null; searches: number }[] = [];
-  for (const { key, label } of MODEL_STEPS) {
-    const m = obj(modelsIn[key]);
-    const model = typeof m.model === "string" ? m.model.trim() : "";
-    const rawEffort = m.reasoning_effort;
-    const effort = rawEffort === null || rawEffort === undefined || rawEffort === "" ? null : rawEffort;
-    const searches = intIn(m.max_searches, 1, MAX_SEARCHES);
-    let ok = true;
-    if (!MODEL_ID.test(model)) {
-      errors.push(`${label}: the model id must be 2 to 61 characters of lower-case letters, digits, dots and dashes, starting with a letter or digit.`);
-      ok = false;
-    }
-    if (effort !== null && !(EFFORTS as readonly unknown[]).includes(effort)) {
-      errors.push(`${label}: the reasoning effort must be one of ${EFFORTS.join(", ")}, or not sent.`);
-      ok = false;
-    }
-    if (searches === null) {
-      errors.push(`${label}: the most searches must be a whole number from 1 to ${MAX_SEARCHES}.`);
-      ok = false;
-    }
-    if (ok) steps.push({ key, label, model, effort: effort as Effort | null, searches: searches! });
-  }
+  const company = {
+    enabled: bool(cp.enabled, "Company pulls"),
+    tags: cleanTags(cp.tags, "Company pulls", errors),
+    max_pull_size: whole(cp.max_pull_size, 1, PULL_SIZE_LIMIT, "The largest pull"),
+    linkedin_profile_reads: bool(cp.linkedin_profile_reads, "LinkedIn profile reads"),
+    inboxes_per_company: whole(cp.inboxes_per_company, 1, 30, "General inboxes per company"),
+    min_balance: whole(cp.min_balance, 0, 1_000_000, "The company pulls' lowest AI Ark balance"),
+  };
+  const people = {
+    enabled: bool(pp.enabled, "People runs"),
+    tags: cleanTags(pp.tags, "People runs", errors),
+    auto_buy: bool(pp.auto_buy, "Buy without a click"),
+    ai_searches: bool(pp.ai_searches, "AI searches"),
+    ids_per_search: whole(pp.ids_per_search, 1, 300, "Companies per search"),
+    pages_per_search: whole(pp.pages_per_search, 1, 20, "Pages per search"),
+    tries_per_track: whole(pp.tries_per_track, 1, 10, "Tries per track"),
+    max_people_per_run: whole(pp.max_people_per_run, 1, 10_000, "The most people a run buys"),
+    recheck_days: whole(pp.recheck_days, 1, 365, "Days before a company is looked at again"),
+    skip_company_when_held: bool(pp.skip_company_when_held, "Skip a company where someone is held"),
+    min_balance: whole(pp.min_balance, 0, 1_000_000, "The people runs' lowest AI Ark balance"),
+  };
+  const personal = {
+    enabled: bool(ps.enabled, "Personalisation"),
+    tags: cleanTags(ps.tags, "Personalisation", errors),
+    shared_text_ok: bool(ps.shared_text_ok, "Shared personalisation text"),
+  };
+  const caps = {
+    reoon_checks_per_day: whole(sc.reoon_checks_per_day, 0, 100_000, "Reoon checks a day"),
+    openai_usd_per_day: {
+      pipeline: amount(usd.pipeline, 0, 10_000, "OpenAI dollars a day for the pipeline"),
+      fit: amount(usd.fit, 0, 10_000, "OpenAI dollars a day for fit scoring"),
+    },
+  };
+  const steps = MODEL_STEPS.map((step) => ({ step, m: cleanModel(modelsIn[step.key], step, errors) }));
   if (errors.length) return { value: null, errors, changes: [] };
 
   const changes: string[] = [];
-  const was = current.company_pipeline;
-  if (was.enabled !== cp.enabled) changes.push(cp.enabled ? "company pulls switched on" : "company pulls switched off");
-  if (was.max_pull_size !== maxPull) changes.push(`largest pull ${fmt(was.max_pull_size)} to ${fmt(maxPull!)}`);
-  if (was.email_checks_per_company !== checks) changes.push(`email checks per company ${was.email_checks_per_company} to ${checks}`);
+  const said = (on: boolean) => (on ? "on" : "off");
+  const listText = (tags: string[]) => (tags.length ? tags.join(", ") : "no client");
+  const diff = (label: string, was: unknown, now: unknown, show: (v: never) => string = (v) => String(v)) => {
+    if (JSON.stringify(was) !== JSON.stringify(now)) changes.push(`${label} ${show(was as never)} to ${show(now as never)}`);
+  };
+  const c0 = current.company_pipeline;
+  diff("company pulls", c0.enabled, company.enabled, said);
+  diff("company pulls' clients", c0.tags, company.tags, listText);
+  diff("largest pull", c0.max_pull_size, company.max_pull_size, fmt);
+  diff("LinkedIn profile reads", c0.linkedin_profile_reads, company.linkedin_profile_reads, said);
+  diff("general inboxes per company", c0.inboxes_per_company, company.inboxes_per_company);
+  diff("company pulls' lowest balance", c0.min_balance, company.min_balance, fmt);
+  const p0 = current.people_pipeline;
+  diff("people runs", p0.enabled, people.enabled, said);
+  diff("people runs' clients", p0.tags, people.tags, listText);
+  diff("buy without a click", p0.auto_buy, people.auto_buy, said);
+  diff("AI searches", p0.ai_searches, people.ai_searches, said);
+  diff("companies per search", p0.ids_per_search, people.ids_per_search);
+  diff("pages per search", p0.pages_per_search, people.pages_per_search);
+  diff("tries per track", p0.tries_per_track, people.tries_per_track);
+  diff("most people a run", p0.max_people_per_run, people.max_people_per_run, fmt);
+  diff("days before a look again", p0.recheck_days, people.recheck_days);
+  diff("skip a company where someone is held", p0.skip_company_when_held, people.skip_company_when_held, said);
+  diff("people runs' lowest balance", p0.min_balance, people.min_balance, fmt);
+  const s0 = current.personalisation;
+  diff("personalisation", s0.enabled, personal.enabled, said);
+  diff("personalisation's clients", s0.tags, personal.tags, listText);
+  diff("shared personalisation text", s0.shared_text_ok, personal.shared_text_ok, said);
+  const k0 = current.spend_caps;
+  diff("Reoon checks a day", k0.reoon_checks_per_day, caps.reoon_checks_per_day, fmt);
+  diff("OpenAI dollars a day (pipeline)", k0.openai_usd_per_day.pipeline, caps.openai_usd_per_day.pipeline);
+  diff("OpenAI dollars a day (fit)", k0.openai_usd_per_day.fit, caps.openai_usd_per_day.fit);
 
-  const models: Record<string, unknown> = { ...current.models };
-  for (const s of steps) {
-    const before = obj(current.models[s.key]);
-    const next: Record<string, unknown> = { ...before, model: s.model, max_searches: s.searches };
-    if (s.effort) next.reasoning_effort = s.effort;
-    else delete next.reasoning_effort;
-    models[s.key] = next;
-    const name = s.label.toLowerCase();
-    if (text(before.model) !== s.model) changes.push(`${name} model ${text(before.model) || "(none)"} to ${s.model}`);
-    if ((before.reasoning_effort ?? null) !== s.effort) {
-      changes.push(`${name} reasoning effort ${text(before.reasoning_effort) || "not sent"} to ${s.effort ?? "not sent"}`);
+  const storedModels = obj(stored.models);
+  const models: Record<string, unknown> = { ...storedModels };
+  for (const { step, m } of steps) {
+    const before = (current.models[step.key] ?? null) as ModelSetting | null;
+    const next: Record<string, unknown> = { model: m!.model };
+    if (m!.reasoning_effort) next.reasoning_effort = m!.reasoning_effort;
+    if (m!.max_searches !== null) next.max_searches = m!.max_searches;
+    models[step.key] = next;
+    const name = step.label.toLowerCase();
+    if ((before?.model ?? null) !== m!.model) changes.push(`${name} model ${before?.model ?? "(unset)"} to ${m!.model}`);
+    if ((before?.reasoning_effort ?? null) !== m!.reasoning_effort) {
+      changes.push(`${name} reasoning effort ${before?.reasoning_effort ?? "not sent"} to ${m!.reasoning_effort ?? "not sent"}`);
     }
-    if (before.max_searches !== s.searches) changes.push(`${name} searches ${text(before.max_searches) || "(none)"} to ${s.searches}`);
+    if (step.tool === "web" && (before?.max_searches ?? null) !== m!.max_searches) {
+      changes.push(`${name} searches ${before?.max_searches ?? "(none)"} to ${m!.max_searches}`);
+    }
   }
 
   return {
     value: {
-      company_pipeline: { ...was, enabled: cp.enabled as boolean, max_pull_size: maxPull!, email_checks_per_company: checks! },
-      models: models as PipelineSettings["models"],
+      company_pipeline: { ...obj(stored.company_pipeline), ...company },
+      people_pipeline: { ...obj(stored.people_pipeline), ...people },
+      personalisation: { ...obj(stored.personalisation), ...personal },
+      spend_caps: { ...obj(stored.spend_caps), reoon_checks_per_day: caps.reoon_checks_per_day, openai_usd_per_day: { ...obj(obj(stored.spend_caps).openai_usd_per_day), ...caps.openai_usd_per_day } },
+      models,
     },
     errors,
     changes,
+  };
+}
+
+/** The settings rows as stored (raw), for a save that keeps what the sheet doesn't edit. */
+export async function storedSettings(c: PoolClient): Promise<Partial<SettingsRows>> {
+  const { rows } = await c.query<{ key: string; value: Record<string, unknown> }>(
+    `SELECT key, value FROM enrich_settings WHERE key = ANY($1::text[])`,
+    [SETTING_KEYS]
+  );
+  return Object.fromEntries(rows.map((r) => [r.key, obj(r.value)])) as Partial<SettingsRows>;
+}
+
+/** The edits the sheet would send for the settings as they are: what it starts from. */
+export function settingsInputOf(v: PipelineSettings): SettingsInput {
+  const models = {} as SettingsInput["models"];
+  for (const step of MODEL_STEPS) {
+    const m = v.models[step.key];
+    models[step.key] = {
+      model: m?.model ?? "",
+      reasoning_effort: m?.reasoning_effort ?? null,
+      max_searches: step.tool === "web" ? m?.max_searches ?? null : null,
+    };
+  }
+  const cp = v.company_pipeline;
+  return {
+    company_pipeline: {
+      enabled: cp.enabled, tags: cp.tags, max_pull_size: cp.max_pull_size, linkedin_profile_reads: cp.linkedin_profile_reads,
+      inboxes_per_company: cp.inboxes_per_company, min_balance: cp.min_balance,
+    },
+    people_pipeline: { ...v.people_pipeline },
+    personalisation: { ...v.personalisation },
+    spend_caps: { reoon_checks_per_day: v.spend_caps.reoon_checks_per_day, openai_usd_per_day: { ...v.spend_caps.openai_usd_per_day } },
+    models,
   };
 }
 
@@ -254,6 +409,7 @@ export function workerView(w: WorkerState | null): CompanyWorker | null {
     online: w.online,
     secondsAgo: w.seconds_ago,
     companyRuns: Array.isArray(info.capabilities) && info.capabilities.includes("company_runs"),
+    peopleRuns: Array.isArray(info.capabilities) && info.capabilities.includes("people_runs"),
     keys: info.keys ?? {},
     reoon: r && typeof r === "object"
       ? { daily: num(r.daily), instant: num(r.instant), readAt: typeof r.read_at === "string" ? r.read_at : null }
@@ -280,30 +436,64 @@ export async function companyRunsFor(c: PoolClient, tag: string, limit = 10): Pr
   return rows;
 }
 
-/** The client's Companies table on the Clay tab, made on its first pull. */
+/** The client's Companies table on the Clay tab, made on its first pull: the pipeline's (companies_v2) first. */
 export async function templateTableOf(c: PoolClient, tag: string) {
   const { rows } = await c.query<{ id: string; row_count: number }>(
     `SELECT id, row_count FROM enrich_tables
       WHERE client_tag = $1 AND kind = 'companies' AND template IS NOT NULL
-      ORDER BY created_at DESC LIMIT 1`,
+      ORDER BY template = 'companies_v2' DESC, created_at DESC LIMIT 1`,
     [tag]
   );
   return rows[0] ?? null;
 }
 
-/** The counts strip: listed companies, every outcome, and the rows still being worked. */
+/** The client's pipeline template tables by kind (made by its first pull or people run). */
+export async function pipelineTablesOf(c: PoolClient, tag: string) {
+  const { rows } = await c.query<{ kind: string; id: string }>(
+    `SELECT kind, id FROM enrich_tables
+      WHERE client_tag = $1 AND template IN ('companies_v2', 'inboxes_v1', 'people_v1')`,
+    [tag]
+  );
+  const by = new Map(rows.map((r) => [r.kind, r.id]));
+  return { companies: by.get("companies") ?? null, inboxes: by.get("inboxes") ?? null, people: by.get("people") ?? null };
+}
+
+/** The counts strip: listed companies by what lists them, people and inboxes by verdict, every outcome, and the rows still being worked. */
 export async function countsFor(c: PoolClient, tag: string): Promise<CompanyCounts> {
   const table = await templateTableOf(c, tag);
+  const tables = await pipelineTablesOf(c, tag);
   const { rows: outcomes } = await c.query<{ outcome: string; n: number }>(
     `SELECT outcome, count(*)::int AS n FROM enrich_companies WHERE client_tag = $1 GROUP BY 1`,
     [tag]
   );
-  const { rows: [listed] } = await c.query<{ total: number; held: number; valid: number; catch_all: number }>(
+  const { rows: [listed] } = await c.query<{ total: number; general: number; people: number; both: number; held: number }>(
     `SELECT count(*)::int AS total,
-            count(*) FILTER (WHERE held)::int AS held,
-            count(*) FILTER (WHERE NOT held AND email_status = 'valid')::int AS valid,
-            count(*) FILTER (WHERE NOT held AND email_status = 'catch_all')::int AS catch_all
+            count(*) FILTER (WHERE general_emails > 0 AND people_emails + people_held = 0)::int AS general,
+            count(*) FILTER (WHERE general_emails = 0 AND people_emails + people_held > 0)::int AS people,
+            count(*) FILTER (WHERE general_emails > 0 AND people_emails + people_held > 0)::int AS both,
+            count(*) FILTER (WHERE (held OR general_emails = 0) AND people_emails = 0)::int AS held
        FROM enrich_companies WHERE client_tag = $1 AND listed`,
+    [tag]
+  );
+  const { rows: [contacts] } = await c.query<{
+    p_rows: number; p_approved: number; p_waiting: number; p_no_email: number; g_rows: number; g_approved: number; g_waiting: number; g_rejected: number;
+  }>(
+    `SELECT count(*) FILTER (WHERE kind = 'person')::int AS p_rows,
+            count(*) FILTER (WHERE kind = 'person' AND verdict = 'approved')::int AS p_approved,
+            count(*) FILTER (WHERE kind = 'person' AND verdict = 'enrichley')::int AS p_waiting,
+            count(*) FILTER (WHERE kind = 'person' AND (stage = 'no_email' OR outcome LIKE 'No email%'))::int AS p_no_email,
+            count(*) FILTER (WHERE kind = 'general')::int AS g_rows,
+            count(*) FILTER (WHERE kind = 'general' AND verdict = 'approved')::int AS g_approved,
+            count(*) FILTER (WHERE kind = 'general' AND verdict = 'enrichley')::int AS g_waiting,
+            count(*) FILTER (WHERE kind = 'general' AND verdict = 'rejected')::int AS g_rejected
+       FROM enrich_contacts WHERE client_tag = $1`,
+    [tag]
+  );
+  const { rows: [runs] } = await c.query<{ looked: number; held: number; bought: number }>(
+    `SELECT coalesce(sum(r.looked), 0)::int AS looked, coalesce(sum(r.bought), 0)::int AS bought,
+            (SELECT count(*)::int FROM aiark_people_candidates k JOIN aiark_people_runs q ON q.id = k.run_id
+              WHERE q.client_tag = $1 AND k.verdict = 'held') AS held
+       FROM aiark_people_runs r WHERE r.client_tag = $1`,
     [tag]
   );
   let rows: Partial<Record<RowStatus, number>> = {};
@@ -317,7 +507,14 @@ export async function countsFor(c: PoolClient, tag: string): Promise<CompanyCoun
   return {
     tableId: table?.id ?? null,
     tableRows: table?.row_count ?? 0,
-    listed: { total: listed?.total ?? 0, valid: listed?.valid ?? 0, catchAll: listed?.catch_all ?? 0, held: listed?.held ?? 0 },
+    inboxTableId: tables.inboxes,
+    peopleTableId: tables.people,
+    listed: { total: listed?.total ?? 0, general: listed?.general ?? 0, people: listed?.people ?? 0, both: listed?.both ?? 0, held: listed?.held ?? 0 },
+    people: {
+      looked: runs?.looked ?? 0, held: runs?.held ?? 0, bought: runs?.bought ?? 0, approved: contacts?.p_approved ?? 0,
+      waiting: contacts?.p_waiting ?? 0, noEmail: contacts?.p_no_email ?? 0, rows: contacts?.p_rows ?? 0,
+    },
+    inboxes: { approved: contacts?.g_approved ?? 0, waiting: contacts?.g_waiting ?? 0, rejected: contacts?.g_rejected ?? 0, rows: contacts?.g_rows ?? 0 },
     outcomes: Object.fromEntries(outcomes.map((r) => [r.outcome, r.n])),
     rows,
   };
@@ -393,14 +590,17 @@ export interface ListParams {
   status: "valid" | "catch_all" | null;
   foundBy: FoundBy | null;
   hideHeld: boolean;
+  /** Only companies with a usable person email, or with a usable general email. */
+  has?: ListHas | null;
 }
 
 // found_key is ISO 8601 in UTC whatever the session's DateStyle and TimeZone, so it reads back exactly.
 const PAGE_FIELDS = `e.row_id, e.table_id, e.company, e.domain, e.website, e.city, e.state, e.country, e.address, e.phone,
   e.industry, e.employees, e.general_email, e.email_status, e.held, e.found_by, e.email_kind, e.source, e.found_at,
+  e.general_emails, e.general_waiting, e.people_emails, e.people_held, e.people_total,
   to_char(e.found_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS found_key, lower(e.company) AS name_key`;
 
-type PageRow = Omit<CompanyRow, "row_id" | "linkedin" | "run" | "found_at"> & {
+type PageRow = Omit<CompanyRow, "row_id" | "linkedin" | "run" | "found_at" | "contacts"> & {
   row_id: string | number;
   found_at: Date | string;
   found_key: string;
@@ -424,6 +624,8 @@ export async function listCompanies(c: PoolClient, p: ListParams): Promise<Compa
   if (p.status) where.push(`e.email_status = ${arg(p.status)}`);
   if (p.foundBy) where.push(`e.found_by = ${arg(p.foundBy)}`);
   if (p.hideHeld) where.push("NOT e.held");
+  if (p.has === "people") where.push("e.people_emails + e.people_held > 0");
+  if (p.has === "general") where.push("e.general_emails > 0");
   if (p.q) where.push(`e.search_text LIKE ${arg(`%${p.q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`)}`);
 
   const page = async (extra: ((a: (v: unknown) => string) => string) | null, order: string, limit: number) => {
@@ -488,6 +690,9 @@ export async function listCompanies(c: PoolClient, p: ListParams): Promise<Compa
     for (const x of ex) extras.set(Number(x.row_id), x);
   }
 
+  // The first general emails and people of each company on the page (enrich_contacts), best first.
+  const contacts = await contactsFor(c, { tag: p.tag, rowIds: ids });
+
   let states: CompaniesPage["states"];
   if (!after) {
     const { rows: st } = await c.query<{ state: string; n: number }>(
@@ -513,6 +718,7 @@ export async function listCompanies(c: PoolClient, p: ListParams): Promise<Compa
         run: x?.run_id
           ? { id: x.run_id, created_at: new Date(x.run_at!).toISOString(), mode: x.run_mode === "demo" ? "demo" : "live", copied: x.copied === true }
           : null,
+        contacts: contacts.get(Number(r.row_id)) ?? { general: [], people: [] },
       } satisfies CompanyRow;
     }),
     next,

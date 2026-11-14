@@ -54,7 +54,7 @@ export async function GET(req: NextRequest) {
         runs: await companyRunsFor(c, tag),
         worker: workerView(await workerState(c)),
         counts: await countsFor(c, tag),
-        pipeline: pipelineView((await readPipelineSettings(c)).value),
+        pipeline: pipelineView((await readPipelineSettings(c)).value, tag),
       }),
       { readOnly: true, timeoutMs: 8_000 }
     );
