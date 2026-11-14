@@ -212,7 +212,7 @@ const tagOf = (s) => `${PREFIX}${s}_${RUN}`;
 const A = tagOf("A"); // the main client
 const C = tagOf("C"); // a cleaning client
 const B2 = tagOf("B"); // a second client: tries per track, a lost answer, the brake
-const K = tagOf("K"); // money and concurrency
+const MONEY = tagOf("MONEY"); // money and concurrency
 const OFF = tagOf("OFF"); // not on the people runs' list
 const V1 = tagOf("V1"); // a retired companies_v1 table
 const NOTAB = tagOf("NOTAB"); // no pipeline Companies table
@@ -242,7 +242,7 @@ function settingsFor(tags, over = {}) {
     { key: "people_tracks", value: TRACKS_FIX },
   ]);
 }
-const ON_TAGS = [A, C, B2, K, V1, NOTAB];
+const ON_TAGS = [A, C, B2, MONEY, V1, NOTAB];
 let SETTINGS = settingsFor(ON_TAGS);
 
 /** The three pipeline tables with no columns (ensureTable): what the runs need from them before Builder A's compile. */
@@ -566,7 +566,7 @@ async function setUp() {
   await addClient(A, { terms: [EXCLUDE_TERM] });
   await addClient(C, { type: "Cleaning", cleaning: true });
   await addClient(B2);
-  await addClient(K);
+  await addClient(MONEY);
   await addClient(OFF);
   await addClient(V1);
   await addClient(NOTAB);
@@ -737,12 +737,12 @@ async function partB2() {
   await cancelPeopleRun(pool, { runId: cleaningRun.id });
 
   // Two clicks at once: the lock lets one through.
-  const tK = await testTables(pool, K);
+  const tK = await testTables(pool, MONEY);
   created.tables.push(tK.companies, tK.inboxes, tK.people);
   world.tK = tK;
   const kco = findCompany("k1", "Kwidget Holdings", normal(3));
-  await addCompanyRow(K, tK.companies, { record: kco.record });
-  const both = await Promise.allSettled([newPeopleRun(K), newPeopleRun(K)]);
+  await addCompanyRow(MONEY, tK.companies, { record: kco.record });
+  const both = await Promise.allSettled([newPeopleRun(MONEY), newPeopleRun(MONEY)]);
   check("two starts at once for one client: one run, the other refused", both.filter((x) => x.status === "fulfilled").length === 1 && both.filter((x) => x.status === "rejected" && x.reason instanceof PeopleRunRefused).length === 1);
   await endTestRuns();
   await pool.query(`UPDATE aiark_people_runs SET status = 'queued', finished_at = NULL WHERE id = $1`, [run.id]);
@@ -938,8 +938,8 @@ async function partB8() {
     await endTestRuns();
     await pool.query(`DELETE FROM enrich_rows WHERE table_id = $1`, [tK.companies]);
     const co = findCompany(label, `${label} Widget Co`, (ps) => normal(3)(ps) && ps.filter((p) => p.email.found).length >= 1);
-    const row = await addCompanyRow(K, tK.companies, { record: co.record });
-    const run = await newPeopleRun(K, { maxPeople: 5 });
+    const row = await addCompanyRow(MONEY, tK.companies, { record: co.record });
+    const run = await newPeopleRun(MONEY, { maxPeople: 5 });
     return { co, row, run };
   };
   // The brake: what is spent, lost answers at full price, may never pass the ceiling.
@@ -974,11 +974,11 @@ async function partB8() {
   await endTestRuns();
   const m = await fresh("lost5");
   const many = findCompany("lost5b", "Lostfive Widget Co", (ps) => normal(3)(ps) && threeTracks(ps));
-  await addCompanyRow(K, tK.companies, { record: many.record });
+  await addCompanyRow(MONEY, tK.companies, { record: many.record });
   const twin = findCompany("lost5c", "Lostfive Twin Co", (ps) => normal(3)(ps) && threeTracks(ps));
-  await addCompanyRow(K, tK.companies, { record: twin.record });
+  await addCompanyRow(MONEY, tK.companies, { record: twin.record });
   await pool.query(`DELETE FROM aiark_people_runs WHERE id = $1`, [m.run.id]);
-  const m2 = await newPeopleRun(K, { maxPeople: 20 });
+  const m2 = await newPeopleRun(MONEY, { maxPeople: 20 });
   const txM0 = createDemoTransport({ companies: [m.co.record, many.record, twin.record], balance: 5_000 });
   const txM = counted(overlay(txM0, async (req) => (isSingle(req) ? Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } })) : undefined)));
   const cfM = demoClient(txM);
@@ -1032,8 +1032,8 @@ async function partB9(routes) {
   await pool.query(`DELETE FROM enrich_rows WHERE table_id = $1`, [tK.companies]);
   const cos = [];
   for (let i = 0; i < 4; i++) cos.push(findCompany(`half${i}`, `Half${i} Widget Co`, normal(2)));
-  for (const c of cos) await addCompanyRow(K, tK.companies, { record: c.record });
-  const run = await newPeopleRun(K);
+  for (const c of cos) await addCompanyRow(MONEY, tK.companies, { record: c.record });
+  const run = await newPeopleRun(MONEY);
   const txH = counted(createDemoTransport({ companies: cos.map((c) => c.record), balance: 5_000, faults: { previewAnswers: [400] } }));
   const st = await drive(run.id, demoClient(txH));
   const r = await runOf(run.id);
@@ -1044,15 +1044,15 @@ async function partB9(routes) {
 
   await pool.query(`DELETE FROM enrich_rows WHERE table_id = $1`, [tK.companies]);
   const lone = findCompany("lone", "Lone Widget Co", normal(2));
-  await addCompanyRow(K, tK.companies, { record: lone.record });
-  const run1 = await newPeopleRun(K);
+  await addCompanyRow(MONEY, tK.companies, { record: lone.record });
+  const run1 = await newPeopleRun(MONEY);
   const tx1 = createDemoTransport({ companies: [lone.record], balance: 5_000, faults: { previewAnswers: [400] } });
   check("one company refused as too large: the run ends in error with AI Ark's message", (await drive(run1.id, demoClient(tx1), { until: TERMINAL })) === "error" && /too large even for one company/.test((await runOf(run1.id)).last_error ?? ""));
 
   await pool.query(`DELETE FROM enrich_rows WHERE table_id = $1`, [tK.companies]);
   const e = findCompany("e404", "Empty Widget Co", normal(2));
-  await addCompanyRow(K, tK.companies, { record: e.record });
-  const run2 = await newPeopleRun(K);
+  await addCompanyRow(MONEY, tK.companies, { record: e.record });
+  const run2 = await newPeopleRun(MONEY);
   const tx2 = createDemoTransport({ companies: [e.record], balance: 5_000, faults: { previewAnswers: [404] } });
   const st2 = await drive(run2.id, demoClient(tx2));
   const r2 = await runOf(run2.id);
@@ -1064,9 +1064,9 @@ async function partB9(routes) {
   await pool.query(`DELETE FROM enrich_rows WHERE table_id = $1`, [tK.companies]);
   const crowd = [];
   for (let i = 0; i < 30; i++) crowd.push(findCompany(`crowd${i}`, `Crowd${i} Widget Co`, (ps) => ps.length >= 7 && ps.every(inside)));
-  for (const c of crowd) await addCompanyRow(K, tK.companies, { record: c.record });
+  for (const c of crowd) await addCompanyRow(MONEY, tK.companies, { record: c.record });
   const capped = settingsFor(ON_TAGS, { pages_per_search: 2 });
-  const run3 = await newPeopleRun(K, { settings: capped });
+  const run3 = await newPeopleRun(MONEY, { settings: capped });
   world.crowdRun = run3.id;
   const tx3 = counted(createDemoTransport({ companies: crowd.map((c) => c.record), balance: 5_000 }));
   await drive(run3.id, demoClient(tx3), { extra: { settings: capped } });
@@ -1094,9 +1094,9 @@ async function partB10() {
   const tK = world.tK;
   await pool.query(`DELETE FROM enrich_rows WHERE table_id = $1`, [tK.companies]);
   const co = findCompany("cancel", "Cancel Widget Co", (ps) => normal(3)(ps) && ps.some((p) => p.email.found));
-  await addCompanyRow(K, tK.companies, { record: co.record });
-  const run = await newPeopleRun(K);
-  check("activePeopleRun finds it", (await activePeopleRun(pool, K))?.id === run.id);
+  await addCompanyRow(MONEY, tK.companies, { record: co.record });
+  const run = await newPeopleRun(MONEY);
+  check("activePeopleRun finds it", (await activePeopleRun(pool, MONEY))?.id === run.id);
   const tx = counted(createDemoTransport({ companies: [co.record], balance: 5_000 }));
   const cf = demoClient(tx);
   await drive(run.id, cf);
@@ -1107,7 +1107,7 @@ async function partB10() {
   check("cancel of a run that is not going: refused", (await cancelPeopleRun(pool, { runId: run.id })) === null);
 
   // Cancel seen mid-Buy, before the next Export Single.
-  const run2 = await newPeopleRun(K);
+  const run2 = await newPeopleRun(MONEY);
   await drive(run2.id, cf);
   await approveBuy(pool, { runId: run2.id, userId: null });
   let cancelled = false;
@@ -1124,8 +1124,8 @@ async function partB10() {
   // A crash after a Preview page was bought and before it was written: that page is bought again on resume, its people go in once.
   await pool.query(`DELETE FROM enrich_rows WHERE table_id = $1`, [tK.companies]);
   const co2 = findCompany("crash", "Crash Widget Co", (ps) => normal(3)(ps) && ps.some((p) => p.email.found));
-  await addCompanyRow(K, tK.companies, { record: co2.record });
-  const run3 = await newPeopleRun(K);
+  await addCompanyRow(MONEY, tK.companies, { record: co2.record });
+  const run3 = await newPeopleRun(MONEY);
   const tx3 = counted(createDemoTransport({ companies: [co2.record], balance: 5_000 }));
   const cf3 = demoClient(tx3);
   let failWrites = 8;
@@ -1185,8 +1185,8 @@ async function partB11() {
   const tK = world.tK;
   await pool.query(`DELETE FROM enrich_rows WHERE table_id = $1`, [tK.companies]);
   const co = findCompany("waitjob", "Waitjob Widget Co", normal(2));
-  await addCompanyRow(K, tK.companies, { record: co.record });
-  const run = await newPeopleRun(K);
+  await addCompanyRow(MONEY, tK.companies, { record: co.record });
+  const run = await newPeopleRun(MONEY);
   const c = await pool.connect();
   let job;
   try {
@@ -1283,7 +1283,7 @@ async function partB12(routes) {
   await setPP({ enabled: true, tags: [C] });
   r = await post({});
   check("the client not on the list: 409", r.status === 409 && /not on the people runs' client list/.test(r.body.error));
-  await setPP({ enabled: true, tags: [A, K, V1, NOTAB] });
+  await setPP({ enabled: true, tags: [A, MONEY, V1, NOTAB] });
   check("bad bodies: 400", (await post({ mode: "x" })).status === 400 && (await post({ source: "linkedin" })).status === 400 && (await post({ maxPeople: 0 })).status === 400 && (await post({ maxPeople: 999_999 })).status === 400);
   T.worker = heartbeat({ online: false });
   check("the worker offline: 409", (r = await post({})).status === 409 && /service that runs them is off/.test(r.body.error));
@@ -1293,9 +1293,9 @@ async function partB12(routes) {
   await endTestRuns();
   await pool.query(`DELETE FROM enrich_rows WHERE table_id = $1`, [world.tK.companies]);
   const kco = findCompany("going", "Going Widget Co", normal(2));
-  await addCompanyRow(K, world.tK.companies, { record: kco.record });
-  const going = await newPeopleRun(K);
-  r = await call(runs.POST, { body: { tag: K, mode: "demo" } });
+  await addCompanyRow(MONEY, world.tK.companies, { record: kco.record });
+  const going = await newPeopleRun(MONEY);
+  r = await call(runs.POST, { body: { tag: MONEY, mode: "demo" } });
   check("a run going for the client: 409", r.status === 409 && /already has a people run going/.test(r.body.error), JSON.stringify(r.body));
   await cancelPeopleRun(pool, { runId: going.id });
   const NT = { tag: NOTAB };

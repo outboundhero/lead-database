@@ -142,7 +142,7 @@ export function SettingsSheet({
   }, [open, load]);
 
   const dirty = !!form && !!state && JSON.stringify(form) !== JSON.stringify(toInput(state.value));
-  const set = <S extends "company_pipeline" | "people_pipeline" | "personalisation", K extends keyof SettingsInput[S]>(section: S, k: K, v: SettingsInput[S][K]) =>
+  const set = <S extends "company_pipeline" | "people_pipeline" | "personalisation", Key extends keyof SettingsInput[S]>(section: S, k: Key, v: SettingsInput[S][Key]) =>
     setForm((f) => (f ? { ...f, [section]: { ...f[section], [k]: v } } : f));
   const setCaps = (k: "reoon_checks_per_day" | "pipeline" | "fit", v: number) =>
     setForm((f) =>

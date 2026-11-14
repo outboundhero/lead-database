@@ -44,7 +44,7 @@ export const PEOPLE_RUN_STATUS: Record<PeopleRunStatus, { label: string; cls: st
 export const isPeopleActive = (r: PeopleRun) => ACTIVE_PEOPLE_RUN_STATUSES.includes(r.status);
 const when = (iso: string) => new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
-/** "N looked at, K held, J outside, P picked": what a Look found, before anything is bought. */
+/** How many a Look looked at, found held, found outside and picked: what it found, before anything is bought. */
 export function lookSummary(r: PeopleRun) {
   const v = r.verdicts;
   const held = (v.held ?? 0) + (v.never_contact ?? 0) + (v.bounced ?? 0);
