@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { X, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
+import { useHasPermission } from "@/lib/context/role-context";
 
 interface PushBatchCampaign {
   id: number | string;
@@ -28,6 +29,10 @@ interface PushBatch {
   completed_at: string | null;
   client_tag?: string | null;
   email_side?: string | null;
+  // Fit scoring (migration 127): a push of a client the fit gate covers waits
+  // in 'scoring' until its companies are scored.
+  fit_total?: number | null;
+  fit_scored?: number | null;
 }
 
 interface CampaignTotals {
@@ -47,7 +52,7 @@ interface BatchErrors {
   notAcceptedCount: number;
 }
 
-const ACTIVE_STATUSES = new Set(["pending", "gathering", "processing"]);
+const ACTIVE_STATUSES = new Set(["pending", "gathering", "processing", "scoring"]);
 
 // Dismissals persist per browser and are PERMANENT for finished pushes — the
 // panel must never quietly re-appear once someone has cleared it. A push that
@@ -89,6 +94,8 @@ export function PushBatchesPanel() {
   const [errorsFor, setErrorsFor] = useState<string | null>(null);
   const [errors, setErrors] = useState<BatchErrors | null>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  const [releasingId, setReleasingId] = useState<string | null>(null);
+  const canRelease = useHasPermission("admin");
 
   // Hydrate after mount so server and first client render agree.
   useEffect(() => setDismissed(readDismissed()), []);
@@ -152,6 +159,28 @@ export function PushBatchesPanel() {
       toast.error("Failed to cancel push");
     } finally {
       setCancellingId(null);
+    }
+  }
+
+  // Owners and admins only: the push goes on without waiting for fit scoring,
+  // and the push-time check still skips the companies not scored yet.
+  async function handleRelease(batchId: string) {
+    if (!window.confirm("Release this push without waiting for fit scoring? Leads whose company is not scored yet are still skipped at push time.")) return;
+    setReleasingId(batchId);
+    try {
+      const res = await fetch("/api/bison/push-batches/release", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batchId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) toast.error(data.error ?? "Failed to release the push");
+      else toast.success("Push released");
+      loadBatches();
+    } catch {
+      toast.error("Failed to release the push");
+    } finally {
+      setReleasingId(null);
     }
   }
 
@@ -261,7 +290,7 @@ export function PushBatchesPanel() {
                       : "warning"
                   }
                 >
-                  {batch.status}
+                  {batch.status === "scoring" ? "waiting for fit scoring" : batch.status}
                 </Badge>
                 {active ? (
                   <Button
@@ -291,6 +320,25 @@ export function PushBatchesPanel() {
                   style={{ width: `${pct}%` }}
                 />
               </div>
+              {batch.status === "scoring" && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] tabular-nums text-muted-foreground">
+                  <span title="The fit gate covers this client: the push starts once every company in it has a fit score">
+                    {batch.fit_total == null
+                      ? "Finding the companies to score…"
+                      : `${(batch.fit_scored ?? 0).toLocaleString()} of ${batch.fit_total.toLocaleString()} companies scored`}
+                  </span>
+                  {canRelease && (
+                    <button
+                      type="button"
+                      disabled={releasingId === batch.id}
+                      onClick={() => handleRelease(batch.id)}
+                      className="font-medium text-primary hover:underline disabled:opacity-50"
+                    >
+                      {releasingId === batch.id ? "Releasing…" : "Release without scoring"}
+                    </button>
+                  )}
+                </div>
+              )}
               <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] tabular-nums text-muted-foreground">
                 <span>
                   {batch.processed.toLocaleString()}/
