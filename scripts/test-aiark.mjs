@@ -34,6 +34,8 @@
 //   E. the standard filters for cleaning clients in the request AI Ark gets, with
 //      a client's sheet terms added, within what AI Ark is known to accept, and
 //      that they stay out of the database's rules
+//   F. a person only the Companies tab's people runs bought (D43): left off the
+//      tab's lists, met in a single run's Preview, copied free and added as today
 
 import pg from "pg";
 import ts from "typescript";
@@ -77,7 +79,7 @@ function check(name, ok, detail = "") {
 const section = (s) => console.log(`\n${s}`);
 const source = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 
-const created = { runs: [], tables: [], emails: [], batches: [] };
+const created = { runs: [], tables: [], emails: [], batches: [], peopleRuns: [] };
 // What the rule checks in section C add, all removed by dropRuleData.
 const TEST_DOMAIN = "aiark-test.example";
 const RULE_PREFIX = "ABCTEST_";
@@ -2983,6 +2985,51 @@ async function addToDatabase() {
 
 // ── E. The standard filters for cleaning clients ────────────────────────────
 
+// ── F. People the Companies tab's people runs bought (D43) ──────────────────
+
+async function pipelineBought() {
+  section("F. A person only the Companies tab's people runs bought (D43)");
+  // The first person the stand-in answers for a search of its own, registered as a people run's purchase.
+  const req = search();
+  const probe = createAiArk({ token: DEMO_TOKEN, transport: createDemoTransport(), wait: fastWait });
+  const first = (await probe.preview(req, { page: 0, size: 100 })).content[0];
+  const email = `pipeline.d43@${TEST_DOMAIN}`;
+  const { rows: [pr] } = await pool.query(
+    `INSERT INTO aiark_people_runs (client_tag, mode, status, max_people, filters, finished_at) VALUES ($1, 'demo', 'done', 1, '{}', now()) RETURNING id`,
+    [TAG]
+  );
+  created.peopleRuns.push(pr.id);
+  const record = { ...first, email: { state: "DONE", output: [{ address: email, status: "VALID", domainType: "SMTP" }] } };
+  await pool.query(
+    `INSERT INTO aiark_people (person_id, demo, run_id, email, email_status, record, people_run_id) VALUES ($1, true, NULL, $2, 'VALID', $3, $4)`,
+    [first.id, email, JSON.stringify(record), pr.id]
+  );
+  const held = (await one(`SELECT count(*)::int AS n FROM aiark_people WHERE demo AND pulled_at < now() AND NOT (run_id IS NULL AND people_run_id IS NOT NULL)`)).n;
+  const singles = [];
+  const tx = createDemoTransport();
+  const watched = async (r) => {
+    if (r.method === "POST" && r.url.endsWith("/v2/people/export/single")) singles.push(JSON.parse(r.body).id);
+    return tx(r);
+  };
+  const run = await newRun({ size: 3, requests: [req] });
+  const status = await drive(run.id, demoClient(watched));
+  const a = await runRow(run.id);
+  const row = await one(
+    `SELECT r.id, c.value #>> '{}' AS email FROM enrich_rows r JOIN enrich_cells c ON c.row_id = r.id AND c.column_key = 'email'
+      WHERE r.table_id = $1 AND r.row_key = $2`,
+    [run.table_id, `aiark:${first.id}`]
+  );
+  const reg = await one(`SELECT run_id, row_id, people_run_id FROM aiark_people WHERE person_id = $1`, [first.id]);
+  check(
+    "left off the tab's lists, met in a single run's Preview, copied free with the registry's email, the registry row now the run's",
+    status === "done" && a.pulled === 3 && (a.progress.excluded === held || a.progress.lists_short === true) && row?.email === email &&
+      !singles.includes(first.id) && Number(a.credits_used) === tx.state.charged && reg.run_id === run.id && String(reg.row_id) === String(row.id) &&
+      reg.people_run_id === pr.id,
+    JSON.stringify({ status, pulled: a.pulled, excluded: a.progress.excluded, held, email: row?.email, singles: singles.length, reg })
+  );
+  await pool.query(`DELETE FROM aiark_people WHERE person_id = $1`, [first.id]);
+}
+
 function cleaningFilters(geo) {
   section("E. The standard filters for cleaning clients");
   const rules = { include_locations: [{ city: "Armonk", state: "NY", country: "US" }], exclude_terms: ["Bar", "JANITORIAL", "cafe"], commercial_cleaning: true };
@@ -3067,6 +3114,10 @@ async function cleanup() {
   }
   await dropRuleData();
   await dropHeldPeople();
+  if (created.peopleRuns.length) {
+    await pool.query(`DELETE FROM aiark_people WHERE people_run_id = ANY($1::uuid[])`, [created.peopleRuns]);
+    await pool.query(`DELETE FROM aiark_people_runs WHERE id = ANY($1::uuid[])`, [created.peopleRuns]);
+  }
   if (created.runs.length) {
     await pool.query(`DELETE FROM aiark_people WHERE run_id = ANY($1::uuid[])`, [created.runs]);
     await pool.query(`DELETE FROM aiark_runs WHERE id = ANY($1::uuid[])`, [created.runs]);
@@ -3102,6 +3153,7 @@ try {
   await emailBisonCopy();
   await beforeThePipeline();
   await addToDatabase();
+  await pipelineBought();
   cleaningFilters(geo);
 } catch (e) {
   failed++;

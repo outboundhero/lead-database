@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { IosSegmentedControl } from "@/components/ui/ios/ios-segmented-control";
 import type { EmployeeBand, RunMode } from "@/lib/aiark/types";
-import type { CompaniesSetup, CompanyCountResult, CompanyRun, CompanyRunStatus, PipelineView } from "@/lib/companies/types";
+import type { CompaniesSetup, CompanyCountResult, CompanyRun, CompanyRunStatus, ModelPrice, PipelineView } from "@/lib/companies/types";
 
 // The Companies tab's pull side: what AI Ark will be asked for the client, its
 // company filters (read-only: they are saved on the AI Ark tab), the count and
@@ -22,19 +22,45 @@ const usd = (n: number) => n.toLocaleString("en-US", { style: "currency", curren
 const bandText = (b: EmployeeBand) => (b.end ? `${fmt(b.start ?? 1)} to ${fmt(b.end)}` : `${fmt(b.start ?? 1)}+`);
 
 const PER_COMPANY = 0.1; // AI Ark credits per company returned
-// One web search, with the search content tokens it brings (gpt-4o-mini or
-// gpt-5-nano with the web_search tool: $10 per 1,000 calls plus about $0.0015
-// of tokens), and one Reoon check at instant-credit prices, the dearest.
-const SEARCH_USD = 0.0115;
+// The worst case of a company's paid steps, from the settings: the website
+// search and the two email searches, each at its model's prices and its most
+// tool calls, and the Reoon checks (AI Ark's own email, then each general
+// inbox written). Assumptions, kept high: a call's prompt and answer at 2,000
+// and 1,000 tokens (reasoning included), 8,000 tokens of search content a
+// search where the price gives none, and a Reoon check at instant-credit
+// prices, the dearest.
+const CALL_TOKENS_IN = 2_000;
+const CALL_TOKENS_OUT = 1_000;
+const SEARCH_TOKENS = 8_000;
 const CHECK_USD = 0.0012;
 
 /** Where a pull stops itself: ceil(size × 0.125) + searches + 2 credits. */
 export const brake = (size: number, searches: number) => Math.ceil(size * 0.125) + Math.max(1, searches) + 2;
 
-/** The most website and email searches and checks could cost per company, at the settings' caps. */
+/** A model's prices, or the dearest held when it has none (as the daily caps count it). */
+function priceOf(prices: PipelineView["prices"], model: string | null): ModelPrice {
+  const known = Object.entries(prices)
+    .filter(([k, v]) => k !== "web_search_call" && v && typeof v === "object")
+    .map(([, v]) => v as ModelPrice);
+  const p = model ? prices[model] : null;
+  if (p && typeof p === "object") return p;
+  return {
+    in: Math.max(0, ...known.map((v) => v.in)),
+    out: Math.max(0, ...known.map((v) => v.out)),
+    search_tokens: Math.max(0, ...known.map((v) => v.search_tokens ?? 0)),
+  };
+}
+
+/** The most a company's website and email searches and its Reoon checks could cost, at the settings' models and caps. */
 export function worstPerCompany(p: PipelineView) {
-  const searches = p.searchCaps.website_search + p.searchCaps.email_search_first + p.searchCaps.email_search_second;
-  return searches * SEARCH_USD + p.checksPerCompany * CHECK_USD;
+  const perSearch = typeof p.prices.web_search_call === "number" ? p.prices.web_search_call : 0.01;
+  let usd = 0;
+  for (const s of p.steps) {
+    const pr = priceOf(p.prices, s.model);
+    const searchTokens = pr.search_tokens || SEARCH_TOKENS;
+    usd += s.searches * (perSearch + (searchTokens * pr.in) / 1e6) + (CALL_TOKENS_IN * pr.in + CALL_TOKENS_OUT * pr.out) / 1e6;
+  }
+  return usd + (1 + p.inboxesPerCompany) * CHECK_USD;
 }
 
 export const RUN_STATUS: Record<CompanyRunStatus, { label: string; cls: string }> = {
@@ -265,6 +291,7 @@ export function PullCard({
 
   const pullWhyNot =
     !pipeline.enabled ? "Company pulls are off" :
+    pipeline.onList === false ? `${tag} is not on the company pulls' client list (an admin can add it in the settings)` :
     !modes[mode].ready ? modes[mode].why ?? "Not available" :
     !worker?.online ? "The service that runs pulls is off. Counting works" :
     !worker.companyRuns ? "The worker that is running doesn't do company pulls yet. Counting works" :
@@ -399,8 +426,9 @@ export function PullCard({
             </p>
           )}
           <p>
-            <b>Searches and checks:</b> at most about <b>{usd(worst)}</b>, if every company took every website search, email search and Reoon check
-            the settings allow. Companies outside the client&apos;s area, excluded, or already in the database cost nothing more.
+            <b>Searches and checks:</b> at most about <b>{usd(worst)}</b>, if every company took the website search and both email searches at their
+            most tool calls, and a Reoon check for AI Ark&apos;s email and for each of up to {fmt(pipeline.inboxesPerCompany)} general inboxes. Companies
+            outside the client&apos;s area, excluded, or already in the database cost nothing more. The day&apos;s spend caps hold the rest for the next day.
           </p>
           {left?.credits != null && (
             <p className="text-muted-foreground">

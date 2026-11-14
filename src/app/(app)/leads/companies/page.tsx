@@ -11,16 +11,19 @@ import { useHasPermission } from "@/lib/context/role-context";
 import { ClientSelector } from "@/components/filters/client-selector";
 import { cr, FiltersCard, fmt, isActive, PlanCard, PullCard, PullsCard } from "@/components/companies/pull-panel";
 import { CompaniesTable, CountsStrip } from "@/components/companies/companies-table";
+import { isPeopleActive, KeysList, PeoplePanel, PipelinePills } from "@/components/companies/people-panel";
 import { SettingsSheet } from "@/components/companies/settings-sheet";
-import type { CompaniesSetup, CompanyCounts, CompanyRun, CompanyWorker } from "@/lib/companies/types";
+import type { CompaniesSetup, CompanyCounts, CompanyRun, CompanyWorker, PeopleRun, PeopleSetup } from "@/lib/companies/types";
 
 // The Companies tab: pick a client, see what AI Ark will be asked for its
 // companies (its places and exclusions from its rules, its size and industries
 // from the AI Ark tab), count, and pull. The enrichment worker buys the
 // companies into the client's Companies table on the Clay tab and works each
-// one there (area, exclusions, website, the office's general email, Reoon). A
-// company is listed here only once a usable general email is found, or when its
-// general inbox is already in the database. Nothing here writes leads.
+// one there with the original Clay steps (area, exclusions, website, the
+// office's general emails, Reoon). People runs then look for the people at
+// those companies on AI Ark, one a track, and buy them after a manager's
+// click. A company is listed here once it has a usable general email or a
+// usable person email, held ones included. Nothing here writes leads.
 
 const KEY_LABELS: Record<string, string> = { OPENAI_API_KEY: "OpenAI", ENRICH_REOON_API_KEY: "Reoon" };
 
@@ -41,6 +44,8 @@ function CompaniesTab() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [runs, setRuns] = useState<CompanyRun[]>([]);
   const [counts, setCounts] = useState<CompanyCounts | null>(null);
+  const [people, setPeople] = useState<PeopleSetup | null>(null);
+  const [peopleRuns, setPeopleRuns] = useState<PeopleRun[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // A response is used only if it still belongs to the client on screen.
   const loadSeq = useRef(0);
@@ -80,13 +85,31 @@ function CompaniesTab() {
     }
   }, [tag]);
 
+  /** The people panel: its plan, runs, the originals, today's spend and the keyed steps. */
+  const loadPeople = useCallback(async () => {
+    if (!tag) return;
+    try {
+      const res = await fetch(`/api/companies/people/setup?tag=${encodeURIComponent(tag)}`);
+      const j = await res.json();
+      if (!res.ok || tag !== tagRef.current) return;
+      const p = j as PeopleSetup;
+      setPeople(p);
+      setPeopleRuns(p.runs);
+    } catch {
+      /* the panel says it is loading; Reload tries again */
+    }
+  }, [tag]);
+
   useEffect(() => {
     if (!canView) return;
     setSetup(null);
     setRuns([]);
     setCounts(null);
+    setPeople(null);
+    setPeopleRuns([]);
     load();
-  }, [canView, load]);
+    loadPeople();
+  }, [canView, load, loadPeople]);
 
   // Pulls, counts, the worker and the switch: every 5 s while a pull or its
   // rows are being worked, else every 20 s, and at once when the page is shown
@@ -137,6 +160,51 @@ function CompaniesTab() {
     wasActive.current = anyActive;
   }, [anyActive, refreshQuietly]);
 
+  // People runs: every 5 s while one is being worked, else every 20 s, and at
+  // once when the page is shown again; the same rules as the pulls' poll.
+  const peopleWorking = peopleRuns.some((r) => r.status === "queued" || r.status === "running");
+  const peopleLoaded = people !== null;
+  useEffect(() => {
+    if (!peopleLoaded || !tag) return;
+    let ctl: AbortController | null = null;
+    const tick = async () => {
+      if (ctl || document.visibilityState !== "visible") return;
+      const mine = new AbortController();
+      ctl = mine;
+      const giveUp = setTimeout(() => mine.abort(), 30_000);
+      try {
+        const res = await fetch(`/api/companies/people/runs?tag=${encodeURIComponent(tag)}`, { signal: mine.signal });
+        const j = await res.json();
+        if (!res.ok || mine.signal.aborted || tag !== tagRef.current) return;
+        setPeopleRuns(j.runs);
+        setCounts(j.counts);
+      } catch {
+        /* aborted, or the next tick tries again */
+      } finally {
+        clearTimeout(giveUp);
+        if (ctl === mine) ctl = null;
+      }
+    };
+    const timer = setInterval(tick, peopleWorking ? 5_000 : 20_000);
+    const onShow = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    document.addEventListener("visibilitychange", onShow);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onShow);
+      ctl?.abort();
+    };
+  }, [peopleLoaded, tag, peopleWorking]);
+
+  // When a people run ends, or stops to wait for Buy, the plan is read again: its companies are no longer eligible.
+  const peopleActive = peopleRuns.some(isPeopleActive);
+  const wasPeopleActive = useRef(false);
+  useEffect(() => {
+    if (wasPeopleActive.current && !peopleWorking) loadPeople();
+    wasPeopleActive.current = peopleWorking;
+  }, [peopleWorking, loadPeople]);
+
   if (!canView) return <AccessDenied />;
 
   const cancel = async (run: CompanyRun) => {
@@ -165,7 +233,7 @@ function CompaniesTab() {
           </div>
           <div>
             <h1 className="text-[22px] font-semibold tracking-tight">Companies</h1>
-            <p className="text-[12.5px] text-muted-foreground">Companies from AI Ark for each client, listed once we find a general email</p>
+            <p className="text-[12.5px] text-muted-foreground">Companies and their people from AI Ark for each client, listed once a usable email is found</p>
           </div>
         </div>
         <div className="ml-2">
@@ -177,12 +245,21 @@ function CompaniesTab() {
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {setup && <BalancePill setup={setup} />}
           {setup && <WorkerPills worker={setup.worker} />}
+          {setup && tag && <PipelinePills people={people} />}
           {isAdmin && (
             <Button size="sm" variant="outline" onClick={() => setSettingsOpen(true)}>
               <Settings2 /> Settings
             </Button>
           )}
-          <Button size="sm" variant="outline" onClick={load} aria-label="Reload">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              load();
+              loadPeople();
+            }}
+            aria-label="Reload"
+          >
             <RefreshCw />
           </Button>
         </div>
@@ -228,7 +305,8 @@ function CompaniesTab() {
           <p className="text-[15px] font-semibold">Pick a client to start</p>
           <p className="mx-auto mt-1 max-w-lg text-[13px] text-muted-foreground">
             A pull asks AI Ark for companies in the client&apos;s places, leaving out its exclusions (both from its rules), at the company size and
-            industries saved on the AI Ark tab. Each company is then checked and its general email looked for; only companies with one are listed.
+            industries saved on the AI Ark tab. Each company is then checked and its general emails looked for; a people run then finds one
+            person a track at each company. Only companies with a usable general email or person email are listed.
           </p>
         </div>
       )}
@@ -236,10 +314,24 @@ function CompaniesTab() {
       {setup && tag && (
         <>
           <CountsStrip counts={counts} />
+          <KeysList people={people} />
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
             <div className="flex min-w-0 flex-col gap-4">
               <PlanCard tag={tag} setup={setup} />
               <FiltersCard tag={tag} setup={setup} />
+              {/* keyed: a plan and its runs belong to one client */}
+              <PeoplePanel
+                key={tag}
+                tag={tag}
+                setup={setup}
+                people={people}
+                runs={peopleRuns}
+                onStarted={(run) => {
+                  if (run.client_tag === tagRef.current) setPeopleRuns((rs) => [run, ...rs.filter((r) => r.id !== run.id)]);
+                }}
+                onChanged={loadPeople}
+                onReload={loadPeople}
+              />
             </div>
             <div className="flex min-w-0 flex-col gap-4">
               {/* keyed: a count belongs to one client */}
@@ -256,7 +348,7 @@ function CompaniesTab() {
               <PullsCard tag={tag} runs={runs} onCancel={cancel} />
             </div>
           </div>
-          <CompaniesTable key={tag} tag={tag} live={busy} listedTotal={counts?.listed.total ?? 0} />
+          <CompaniesTable key={tag} tag={tag} live={busy || peopleActive} listedTotal={counts?.listed.total ?? 0} />
         </>
       )}
 
@@ -317,6 +409,11 @@ function WorkerPills({ worker }: { worker: CompanyWorker | null }) {
       {!worker.companyRuns && (
         <span title="The worker running now is older than company pulls. Deploy the latest worker." className={warn}>
           <AlertTriangle className="size-3.5" /> Worker doesn&apos;t do company pulls yet
+        </span>
+      )}
+      {worker.companyRuns && !worker.peopleRuns && (
+        <span title="The worker running now is older than people runs. Deploy the latest worker." className={warn}>
+          <AlertTriangle className="size-3.5" /> Worker doesn&apos;t do people runs yet
         </span>
       )}
       {missing.map((k) => (
