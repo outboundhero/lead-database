@@ -8,11 +8,16 @@
 //     scripts/queue-repush.mts ask scoringStatusFor). The push-worker gathers
 //     'pending' batches only, so it never sees it.
 //   - advanceScoringBatch (the enrich-worker's fit loop) pages the batch's
-//     candidate leads with the gather's own conditions, queues every company
-//     with no score at priority 1, and sets the batch to 'pending' once they
-//     are all scored or unscorable, fenced on status = 'scoring' so a cancel
-//     wins. An owner or admin can release it unscored (releaseScoringBatch);
-//     the push-time check still skips the unscored companies then.
+//     candidate leads as the push-worker's gather will (its filters or its
+//     selected ids, the ELIGIBLE fragment, and a filtered batch's own window:
+//     range_from to range_to, or max_leads), keeps those that pass the
+//     client's conditions, queues every company with no score at priority 1,
+//     and sets the batch to 'pending' once they are all scored or unscorable,
+//     fenced on status = 'scoring' so a cancel wins. (The gather's per-client
+//     accounting, already pushed or only new, is not repeated: it can only
+//     make the set smaller, so a few companies more may be scored.) An owner
+//     or admin can release it unscored (releaseScoringBatch); the push-time
+//     check still skips the unscored companies then.
 //   - The push-time check (scripts/push-worker.mjs, its per-tag final gate):
 //     the same per-tag statement also says which leads' company has no score
 //     under any of its keys, or no key at all; those items are skipped and
@@ -174,8 +179,8 @@ export async function enqueueLeadCompanies(db, leadIds, { priority = 1, source =
   return { keys: items.map((i) => ({ key_kind: i.key_kind, key: i.key })), queued, nokey };
 }
 
-/** The WHERE of a batch's candidate leads, as the push-worker's gather builds it, plus the client's conditions. */
-async function candidateWhere(db, batch) {
+/** The WHERE the push-worker's gather pages a batch with: its selected ids or its filters, and ELIGIBLE. */
+async function gatherWhere(db, batch) {
   const parts = [];
   if (batch.selected_ids?.length) {
     parts.push(`l.id = any($SEL::uuid[])`);
@@ -184,11 +189,26 @@ async function candidateWhere(db, batch) {
     parts.push(...(c?.conds ?? []));
   }
   parts.push(ELIGIBLE);
-  if (batch.client_tag) {
-    const { rows: [e] } = await db.query(`select fn_client_eligibility_conditions($1) as conds`, [batch.client_tag]);
-    parts.push(...(e?.conds ?? []));
-  }
   return parts.join(" and ");
+}
+
+/** The client's conditions (fn_client_eligibility_conditions), joined, or null for a batch with no client. */
+async function clientWhere(db, tag) {
+  if (!tag) return null;
+  const { rows: [e] } = await db.query(`select fn_client_eligibility_conditions($1) as conds`, [tag]);
+  const conds = e?.conds ?? [];
+  return conds.length ? conds.join(" and ") : null;
+}
+
+/**
+ * A filtered batch's own window, as the gather takes it: range_from to
+ * range_to, else max_leads, else every lead. { offset, span } (span null: no end).
+ */
+function windowOf(batch) {
+  if (batch.selected_ids?.length) return { offset: 0, span: null };
+  const from = batch.range_from != null ? Number(batch.range_from) : null;
+  const span = batch.range_to != null ? Number(batch.range_to) - (from ?? 1) + 1 : batch.max_leads != null ? Number(batch.max_leads) : null;
+  return { offset: from != null && from > 1 ? from - 1 : 0, span };
 }
 
 /** How many of these keys have a score now (any key in company_fit_keys). */
@@ -239,18 +259,34 @@ export async function advanceScoringBatch({ pool, log = () => {} }) {
     pool.query(`UPDATE push_batches SET fit_claim_token = NULL WHERE id = $1 AND fit_claim_token = $2`, [batch.id, token]);
   try {
     if (cursor.done !== true) {
-      const where = await candidateWhere(pool, batch);
-      const params = [];
-      let sql = `select l.id from leads l where ${where.replace("$SEL", "$1")}`;
-      if (batch.selected_ids?.length) params.push(batch.selected_ids);
-      if (cursor.last_id) {
-        params.push(cursor.last_id);
-        sql += ` and l.id > $${params.length}`;
+      const where = await gatherWhere(pool, batch);
+      const { offset, span } = windowOf(batch);
+      const seen = Number(cursor.leads ?? 0);
+      const size = span != null ? Math.max(0, Math.min(SCORING_PAGE, span - seen)) : SCORING_PAGE;
+      let page = [];
+      if (size > 0) {
+        const params = [];
+        let sql = `select l.id from leads l where ${where.replace("$SEL", "$1")}`;
+        if (batch.selected_ids?.length) params.push(batch.selected_ids);
+        if (cursor.last_id) {
+          params.push(cursor.last_id);
+          sql += ` and l.id > $${params.length}`;
+        }
+        params.push(size);
+        sql += ` order by l.id limit $${params.length}`;
+        if (!cursor.last_id && offset > 0) {
+          params.push(offset);
+          sql += ` offset $${params.length}`;
+        }
+        ({ rows: page } = await pool.query(sql, params));
       }
-      params.push(SCORING_PAGE);
-      sql += ` order by l.id limit $${params.length}`;
-      const { rows: page } = await pool.query(sql, params);
-      const ids = page.map((r) => r.id);
+      const read = page.map((r) => r.id);
+      // Of the window's leads, those the client's conditions let through (the
+      // push-time gate skips the rest anyway).
+      const conds = read.length ? await clientWhere(pool, batch.client_tag) : null;
+      const ids = conds
+        ? (await pool.query(`select l.id from leads l where l.id = any($1::uuid[]) and ${conds}`, [read])).rows.map((r) => r.id)
+        : read;
       const got = await enqueueLeadCompanies(pool, ids, { priority: 1, source: "push" });
       const known = new Set(keys.map((k) => `${k.key_kind}:${k.key}`));
       const unscored = [];
@@ -265,11 +301,12 @@ export async function advanceScoringBatch({ pool, log = () => {} }) {
       }
       const capped = cursor.capped === true || keys.length + unscored.length > SCORING_KEYS_MAX;
       const next = {
-        done: page.length < SCORING_PAGE,
-        last_id: ids.length ? ids[ids.length - 1] : cursor.last_id ?? null,
+        done: size === 0 || page.length < size || (span != null && seen + page.length >= span),
+        last_id: read.length ? read[read.length - 1] : cursor.last_id ?? null,
         capped,
         keys: capped ? [] : [...keys, ...unscored],
-        leads: Number(cursor.leads ?? 0) + ids.length,
+        leads: seen + page.length,
+        eligible: Number(cursor.eligible ?? 0) + ids.length,
         nokey: Number(cursor.nokey ?? 0) + got.nokey,
       };
       await pool.query(

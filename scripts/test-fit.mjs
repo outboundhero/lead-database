@@ -1206,6 +1206,30 @@ try {
   const rel = await one(`SELECT status, fit_released_by FROM push_batches WHERE id = $1`, [h6.body.batchId]);
   check("an owner or admin can release a waiting push; it is logged, and a manager can't", r6m.status === 403 && r6.status === 200 && rel.status === "pending" &&
     rel.fit_released_by === USERS.admin && r6b.status === 409 && T.audits.some((a) => a.action === "bison_push_batch_released" && a.details.includes(h6.body.batchId)));
+  // A filtered push is scored over its own window only, as the gather will take it.
+  const srcFilters = buildRpcFilters(normalizeFilterState(FILTERS));
+  const windowed = async (cols) => {
+    const id = (await one(
+      `INSERT INTO push_batches (campaigns, filters, client_tag, status, max_leads, range_from, range_to)
+       VALUES ($1::jsonb, $2::jsonb, $3, 'scoring', $4, $5, $6) RETURNING id`,
+      [JSON.stringify(camp), JSON.stringify(srcFilters), TAG_B, cols.max ?? null, cols.from ?? null, cols.to ?? null]
+    )).id;
+    for (let i = 0; i < 5; i++) {
+      const c = (await one(`SELECT fit_cursor FROM push_batches WHERE id = $1`, [id])).fit_cursor;
+      if (c?.done) break;
+      await advanceScoringBatch({ pool });
+    }
+    const out = (await one(`SELECT fit_cursor FROM push_batches WHERE id = $1`, [id])).fit_cursor;
+    await pool.query(`DELETE FROM push_batches WHERE id = $1`, [id]);
+    return out;
+  };
+  const allSrc = Number((await one(`SELECT count(*)::int AS n FROM leads WHERE source = $1`, [SRC])).n);
+  const wMax = await windowed({ max: 1 });
+  const wRange = await windowed({ from: 2, to: 3 });
+  const wAll = await windowed({});
+  check("a filtered push waiting for scoring reads only its own window (max_leads, or range_from to range_to)",
+    wMax?.done === true && wMax.leads === 1 && wRange?.done === true && wRange.leads === 2 && wAll?.done === true && wAll.leads === allSrc && allSrc > 3,
+    JSON.stringify({ wMax, wRange, wAll, allSrc }));
   // The push-time check.
   const where = (await one(`SELECT fn_client_eligibility_conditions($1) AS c`, [TAG_A])).c.join(" and ");
   await pool.query(`DELETE FROM company_fit WHERE key = $1`, [dom("pt-new")]);
