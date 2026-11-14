@@ -123,7 +123,7 @@ const writePeople = (t, n, k, src, runIf) =>
     }),
     b("mode", lit("")),
   ], runIf);
-const nameCheck = (src, k) => `!!${C(src)}?.["Person_${k}_Full_Name"] && !["${M}", "test person", "unknown"].some((s) => ${C(src)}?.["Person_${k}_Full_Name"]?.toLowerCase()?.includes(s))`;
+const nameCheck = (src, k) => `!!${C(src)}?.["Person_${k}_Full_Name"] && !["${M}", "n/a", "test person", "unknown"].some((s) => ${C(src)}?.["Person_${k}_Full_Name"]?.toLowerCase()?.includes(s))`;
 const titleFilter = (src, k) => `!["intern", "assistant"].some((w) => ${C(src)}?.["Person_${k}_Title"]?.toLowerCase()?.includes(w))`;
 const nameFilter = (src, k) => `!["bot", "${M}"].some((w) => ${C(src)}?.["Person_${k}_Full_Name"]?.toLowerCase()?.includes(w))`;
 

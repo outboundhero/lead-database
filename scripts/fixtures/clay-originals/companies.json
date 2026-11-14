@@ -933,7 +933,7 @@
           "type": "boolean"
         },
         "formulaType": "formula",
-        "formulaText": "!!{{f_fxC41}}?.[\"Person_2_Full_Name\"] && ![\"zqx-fixture-only\", \"test person\", \"unknown\"].some((s) => {{f_fxC41}}?.[\"Person_2_Full_Name\"]?.toLowerCase()?.includes(s))"
+        "formulaText": "!!{{f_fxC41}}?.[\"Person_2_Full_Name\"] && ![\"zqx-fixture-only\", \"n/a\", \"test person\", \"unknown\"].some((s) => {{f_fxC41}}?.[\"Person_2_Full_Name\"]?.toLowerCase()?.includes(s))"
       }
     },
     {
@@ -1156,7 +1156,7 @@
           "type": "boolean"
         },
         "formulaType": "formula",
-        "formulaText": "!!{{f_fxC48}}?.[\"Person_3_Full_Name\"] && ![\"zqx-fixture-only\", \"test person\", \"unknown\"].some((s) => {{f_fxC48}}?.[\"Person_3_Full_Name\"]?.toLowerCase()?.includes(s))"
+        "formulaText": "!!{{f_fxC48}}?.[\"Person_3_Full_Name\"] && ![\"zqx-fixture-only\", \"n/a\", \"test person\", \"unknown\"].some((s) => {{f_fxC48}}?.[\"Person_3_Full_Name\"]?.toLowerCase()?.includes(s))"
       }
     },
     {
@@ -1432,7 +1432,7 @@
           "type": "boolean"
         },
         "formulaType": "formula",
-        "formulaText": "!!{{f_fxC56}}?.[\"Person_1_Full_Name\"] && ![\"zqx-fixture-only\", \"test person\", \"unknown\"].some((s) => {{f_fxC56}}?.[\"Person_1_Full_Name\"]?.toLowerCase()?.includes(s))"
+        "formulaText": "!!{{f_fxC56}}?.[\"Person_1_Full_Name\"] && ![\"zqx-fixture-only\", \"n/a\", \"test person\", \"unknown\"].some((s) => {{f_fxC56}}?.[\"Person_1_Full_Name\"]?.toLowerCase()?.includes(s))"
       }
     },
     {
