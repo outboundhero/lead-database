@@ -12,6 +12,9 @@
 //           rule or model re-scores them, which is how "Re-score" works). A
 //           2-second pause between pages, and none while a push is gathering:
 //           the database's disk I/O budget has run out before under bulk work.
+//           Then the pipeline's companies whose score is not current (scored
+//           under another rule version or model) are queued again too, so a
+//           scoring run is also the "Re-score" after a rule or model change.
 //           An owner or admin starts it after seeing the estimate.
 //   review  one client's campaigns (from push history and from live campaign
 //           names, read by the route that starts it), their leads in the
@@ -26,7 +29,7 @@
 // every lead live (scripts/lib/bison/fit-removal.mjs).
 
 import { randomUUID } from "node:crypto";
-import { enqueueCompanies } from "./fit-score.mjs";
+import { enqueueCompanies, enqueueStalePipelineCompanies, pipelineToScore } from "./fit-score.mjs";
 import { keysFromRow } from "./fit-keys.mjs";
 
 export const BACKFILL_PAGE = 5000;
@@ -87,8 +90,8 @@ const COPY_KEYS = {
 /**
  * The estimate an owner or admin sees before a scoring run: companies to
  * score (in the copy, less those scored under the current rule and model or
- * by hand; plus pipeline companies not scored yet), calls, dollars and days at
- * the fit cap. Exact on a small copy; on a big one, the copy's row estimate
+ * by hand; plus pipeline companies not scored yet or whose score is not
+ * current), calls, dollars and days at the fit cap. Exact on a small copy; on a big one, the copy's row estimate
  * over 2.08 leads a company, less every current score.
  *
  * @param {Db} db
@@ -128,10 +131,9 @@ export async function estimateScoreRun(db, settings) {
     );
     campaignCompanies = Math.max(0, Math.round(approxRows / LEADS_PER_COMPANY) - s.current);
   }
-  const { rows: [p] } = await db.query(
-    `SELECT count(*)::int AS n FROM enrich_companies WHERE passes IS TRUE AND fit_key IS NULL AND fit_scored_at IS NULL`
-  );
-  const companies = campaignCompanies + p.n;
+  const pipe = await pipelineToScore(db, { model, ruleVersion });
+  const pipeline = pipe.unscored + pipe.stale;
+  const companies = campaignCompanies + pipeline;
   const { calls, usd } = estimateUsd({
     companies,
     batchSize: settings.fit_scoring.batch_size,
@@ -142,7 +144,7 @@ export async function estimateScoreRun(db, settings) {
   return {
     companies,
     campaigns: campaignCompanies,
-    pipeline: p.n,
+    pipeline,
     calls,
     usd,
     days_at_cap: cap > 0 ? Math.ceil((usd / cap) * 10) / 10 : null,
@@ -193,7 +195,13 @@ export async function createReviewRun(db, { tag, userId, campaigns, nurture = {}
   return r;
 }
 
-/** Is a run of this kind going (for this client, for a review)? */
+/**
+ * Is a run of this kind going (for this client, for a review)?
+ *
+ * @param {Db} db
+ * @param {"score" | "review"} kind
+ * @param {string | null} [tag]
+ */
 export async function runGoing(db, kind, tag = null) {
   const { rows } = await db.query(
     `SELECT id, status FROM fit_backfill_runs
@@ -622,13 +630,27 @@ export async function advanceBackfill({ pool, log = () => {}, settings, pageSize
           await save(pool, { progress: { ...(run.progress ?? {}), next_at: new Date(Date.now() + 30_000).toISOString(), paused: "a push is gathering" } });
           return null;
         }
+        if (run.progress?.phase === "pipeline") {
+          // The pipeline's companies whose score is not current, a page at a time.
+          const step = await enqueueStalePipelineCompanies(pool, {
+            after: Number(run.progress?.pipeline_after ?? 0),
+            model: settings.models?.fit_score?.model ?? null,
+            ruleVersion: settings.fit_rule?.version ?? null,
+          });
+          await save(pool, {
+            status: step.done ? "scoring" : "collecting",
+            progress: { ...(run.progress ?? {}), pipeline_after: step.last, paused: null, next_at: new Date(Date.now() + PAGE_PAUSE_MS).toISOString() },
+            companies: Number(run.companies ?? 0) + step.seen,
+            queued: Number(run.queued ?? 0) + step.queued,
+          });
+          return run.id;
+        }
         const page = await scorePage(pool, run, settings);
         const progress = {
-          ...(run.progress ?? {}), cursor: page.cursor, paused: null,
+          ...(run.progress ?? {}), cursor: page.cursor, paused: null, phase: page.done ? "pipeline" : "copy",
           next_at: new Date(Date.now() + PAGE_PAUSE_MS).toISOString(),
         };
         await save(pool, {
-          status: page.done ? "scoring" : "collecting",
           progress,
           leads_seen: Number(run.leads_seen ?? 0) + page.leads,
           companies: Number(run.companies ?? 0) + page.companies,
@@ -637,7 +659,8 @@ export async function advanceBackfill({ pool, log = () => {}, settings, pageSize
         return run.id;
       }
       if (run.status === "scoring") {
-        const { rows: [q] } = await pool.query(`SELECT count(*)::int AS n FROM company_fit_queue WHERE source = 'campaigns'`);
+        // Everything a scoring run queues is priority 3 (the copy's companies and the pipeline's re-scores).
+        const { rows: [q] } = await pool.query(`SELECT count(*)::int AS n FROM company_fit_queue WHERE priority = 3`);
         if (q.n > 0) {
           await save(pool, { progress: { ...(run.progress ?? {}), waiting: q.n, next_at: new Date(Date.now() + 60_000).toISOString() } });
           return null;

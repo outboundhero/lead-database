@@ -6,6 +6,8 @@ import type { FilterState } from "@/types/filters";
 import type { Lead } from "@/types/database";
 import { buildRpcFilters } from "@/lib/filters/build-rpc-filters";
 import { findCursorForRangeStart } from "@/lib/exports/skip-cursor";
+import { getPool } from "@/lib/db/pool";
+import { FIT_HEADERS, fitCells, fitForLeads, fitGateOn, includeBadFitsFor, withBadFits } from "@/lib/exports/fit-columns";
 
 interface ExportPayload {
   filters: FilterState;
@@ -14,6 +16,7 @@ interface ExportPayload {
   limit?: number | null;
   rangeFrom?: number;
   rangeTo?: number;
+  includeBadFits?: boolean;
 }
 
 // Service role client for RPC calls (no gateway timeout)
@@ -44,7 +47,8 @@ async function processExport(
   selectedIds: string[] | undefined,
   limit: number | null,
   rangeFrom?: number,
-  rangeTo?: number
+  rangeTo?: number,
+  fit: { gate: boolean; includeBadFits: boolean } = { gate: false, includeBadFits: false }
 ) {
   const supabase = createAdminClient();
   const startTime = Date.now();
@@ -78,7 +82,10 @@ async function processExport(
 
     // Process in chunks of 50K rows to limit memory
     const CHUNK_SIZE = 50000;
-    let csvBuffer: string[] = [columnSelection.join(",")];
+    // The fit gate (migration 127; shipped OFF): a selected-row export gains
+    // "Fit score" and "Home office" only while the gate is on.
+    const fitColumns = fit.gate && !!selectedIds && selectedIds.length > 0;
+    let csvBuffer: string[] = [[...columnSelection, ...(fitColumns ? FIT_HEADERS : [])].join(",")];
     let bufferRows = 0;
 
     async function flushBuffer() {
@@ -96,9 +103,11 @@ async function processExport(
       for (let i = 0; i < ids.length; i += 1000) {
         const chunk = ids.slice(i, i + 1000);
         const { data } = await supabase.from("leads").select("*").in("id", chunk);
-        const leads = (data ?? []) as Lead[];
+        let leads = (data ?? []) as Lead[];
+        const fitBy = fitColumns ? await fitForLeads(getPool(), chunk) : null;
+        if (fitBy && !fit.includeBadFits) leads = leads.filter((l) => !fitBy.get(l.id)?.blocked);
         for (const lead of leads) {
-          csvBuffer.push(leadToCsvRow(lead, columnSelection));
+          csvBuffer.push(leadToCsvRow(lead, columnSelection) + (fitBy ? "," + fitCells(fitBy.get(lead.id)).join(",") : ""));
           bufferRows++;
         }
         totalRows += leads.length;
@@ -111,7 +120,7 @@ async function processExport(
           .eq("id", jobId);
       }
     } else {
-      const p_filters = buildRpcFilters(filters);
+      const p_filters = withBadFits(buildRpcFilters(filters), fit.includeBadFits);
       const batchSize = 10000;
       // Range exports use composite cursor (timestamp|uuid) for stable ordering;
       // non-range exports use UUID-only cursors which trigger fast PK-index scan.
@@ -259,6 +268,7 @@ export async function POST(request: NextRequest) {
   const adminSupabase = createAdminClient();
 
   // Role gate — same rule as /api/exports/stream: a `viewer` cannot extract data.
+  let role: string | null = null;
   {
     const { data: profile } = await adminSupabase
       .from("user_profiles")
@@ -271,6 +281,7 @@ export async function POST(request: NextRequest) {
         { status: 403 }
       );
     }
+    role = profile.role;
   }
 
   let body: ExportPayload;
@@ -300,6 +311,19 @@ export async function POST(request: NextRequest) {
   }
 
   const exportType = selectedIds && selectedIds.length > 0 ? "selected" : "filtered";
+
+  // FIT GATE (migration 127; shipped OFF): bad fits stay in only when an owner
+  // or admin asks; selected rows gain the fit columns only while the gate is on.
+  const includeBadFits = includeBadFitsFor(body.includeBadFits, role);
+  let gate = false;
+  if (exportType === "selected") {
+    try {
+      gate = await fitGateOn(getPool());
+    } catch (err) {
+      console.error("Export: could not read the fit gate:", err);
+      return NextResponse.json({ error: "Could not read the fit gate" }, { status: 500 });
+    }
+  }
 
   // Check concurrent exports — max 3 at a time
   const { count } = await adminSupabase
@@ -336,7 +360,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  void processExport(job.id, filters, columnSelection, selectedIds, limit ?? null, rangeFrom, rangeTo);
+  void processExport(job.id, filters, columnSelection, selectedIds, limit ?? null, rangeFrom, rangeTo, { gate, includeBadFits });
 
   return NextResponse.json({ jobId: job.id, queued: true });
 }

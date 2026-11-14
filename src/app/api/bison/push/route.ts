@@ -7,6 +7,8 @@ import { buildRpcFilters } from "@/lib/filters/build-rpc-filters";
 import { pushLeadsToCampaign, leadToPushLead, type BisonPushResult } from "@/lib/bison/push-leads";
 import { bisonAuthFor, bisonInstances, normalizeDomain } from "@/lib/bison/keys";
 import { findCursorForRangeStart } from "@/lib/exports/skip-cursor";
+import { getPool } from "@/lib/db/pool";
+import { gateEnabled } from "../../../../../scripts/lib/enrich/fit-push.mjs";
 
 // Push leads into an Email Bison campaign (two-step: create in Bison, then
 // attach to campaign — see src/lib/bison/push-leads.ts). Runs synchronously
@@ -51,6 +53,23 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { error: "Only owners, admins, and managers can push leads to Bison" },
       { status: 403 }
+    );
+  }
+
+  // FIT GATE (fit scoring, migration 127; shipped OFF): this route applies no
+  // client rules, so no fit condition either, and no screen calls it. While
+  // the gate is on it is closed; pushes go through /api/bison/push-batch.
+  try {
+    if (await gateEnabled(getPool())) {
+      return NextResponse.json(
+        { error: "This push route is closed while the fit gate is on. Push from the Leads tab (Send to Bison), which applies the client's rules and the gate." },
+        { status: 410 }
+      );
+    }
+  } catch (e) {
+    return NextResponse.json(
+      { error: `Failed to read the fit gate: ${e instanceof Error ? e.message : String(e)}` },
+      { status: 500 }
     );
   }
 

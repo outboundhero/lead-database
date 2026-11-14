@@ -449,24 +449,53 @@ export async function writeScores(db, results, { model, ruleVersion, token = nul
  * @param {{ limit?: number }} [opts]
  * @returns {Promise<{ queued: number, copied: number, keyless: number }>}
  */
+/**
+ * A pipeline company's fields as the scorer's facts read them ($1 is the
+ * limit; the caller adds the WHERE): its name, domain, place, industry and
+ * size from enrich_companies, AI Ark's description and company type from its
+ * input cells, the titles held there (held_people), and the domains of its
+ * contacts' emails (aliases).
+ */
+const pipelineSql = (where) => `
+  SELECT e.row_id, e.company, e.domain, e.city, e.state, e.industry, e.employees, e.fit_key_kind, e.fit_key,
+         public.fn_fit_domain_ok(e.domain) AS website_key,
+         public.fn_fit_name_key(e.company, e.city, e.state) AS name_key,
+         (SELECT jsonb_object_agg(c.column_key, c.value) FROM enrich_cells c
+           WHERE c.row_id = e.row_id AND c.column_key IN ('description', 'company_type', 'held_people')
+             AND c.value IS NOT NULL) AS cells,
+         (SELECT coalesce(jsonb_agg(DISTINCT d.k), '[]'::jsonb)
+            FROM (SELECT public.fn_fit_domain_ok(split_part(ct.email, '@', 2)) AS k
+                    FROM enrich_contacts ct WHERE ct.company_row_id = e.row_id AND ct.email IS NOT NULL) d
+           WHERE d.k IS NOT NULL) AS contact_domains
+    FROM enrich_companies e
+   WHERE ${where}
+   ORDER BY e.row_id
+   LIMIT $1`;
+
+/** One pipeline company as a queue item, under the given key (its own, else worked out from its fields). */
+function pipelineItem(r, k, priority) {
+  const cells = r.cells ?? {};
+  const titles = Array.isArray(cells.held_people?.titles) ? cells.held_people.titles : [];
+  const aliases = [...k.aliases, ...(r.contact_domains ?? []).map((d) => ({ key_kind: "domain", key: d }))];
+  return {
+    row_id: r.row_id,
+    key_kind: k.key_kind,
+    key: k.key,
+    aliases,
+    priority,
+    source: "pipeline",
+    facts: {
+      name: r.company, domain: r.website_key ?? r.domain, city: r.city, state: r.state, industry: r.industry,
+      employees: r.employees, description: typeof cells.description === "string" ? cells.description : "",
+      company_type: typeof cells.company_type === "string" ? cells.company_type : "", titles,
+    },
+  };
+}
+
 export async function enqueuePipelineCompanies(db, { limit = PIPELINE_PAGE } = {}) {
-  const { rows } = await db.query(
-    `SELECT e.row_id, e.company, e.domain, e.city, e.state, e.industry, e.employees,
-            public.fn_fit_domain_ok(e.domain) AS website_key,
-            public.fn_fit_name_key(e.company, e.city, e.state) AS name_key,
-            (SELECT jsonb_object_agg(c.column_key, c.value) FROM enrich_cells c
-              WHERE c.row_id = e.row_id AND c.column_key IN ('description', 'company_type', 'held_people')
-                AND c.value IS NOT NULL) AS cells,
-            (SELECT coalesce(jsonb_agg(DISTINCT d.k), '[]'::jsonb)
-               FROM (SELECT public.fn_fit_domain_ok(split_part(ct.email, '@', 2)) AS k
-                       FROM enrich_contacts ct WHERE ct.company_row_id = e.row_id AND ct.email IS NOT NULL) d
-              WHERE d.k IS NOT NULL) AS contact_domains
-       FROM enrich_companies e
-      WHERE e.passes IS TRUE AND e.fit_key IS NULL AND e.fit_scored_at IS NULL
-      ORDER BY e.row_id
-      LIMIT $1`,
-    [Math.max(1, limit)]
-  );
+  const { rows } = await db.query(pipelineSql(`e.passes IS TRUE AND e.fit_key IS NULL AND e.fit_scored_at IS NULL`), [
+    Math.max(1, limit),
+  ]);
   if (!rows.length) return { queued: 0, copied: 0, keyless: 0 };
   const keyless = [];
   const items = [];
@@ -476,22 +505,7 @@ export async function enqueuePipelineCompanies(db, { limit = PIPELINE_PAGE } = {
       keyless.push(r.row_id);
       continue;
     }
-    const cells = r.cells ?? {};
-    const titles = Array.isArray(cells.held_people?.titles) ? cells.held_people.titles : [];
-    const aliases = [...k.aliases, ...(r.contact_domains ?? []).map((d) => ({ key_kind: "domain", key: d }))];
-    items.push({
-      row_id: r.row_id,
-      key_kind: k.key_kind,
-      key: k.key,
-      aliases,
-      priority: 2,
-      source: "pipeline",
-      facts: {
-        name: r.company, domain: r.website_key ?? r.domain, city: r.city, state: r.state, industry: r.industry,
-        employees: r.employees, description: typeof cells.description === "string" ? cells.description : "",
-        company_type: typeof cells.company_type === "string" ? cells.company_type : "", titles,
-      },
-    });
+    items.push(pipelineItem(r, k, 2));
   }
   if (keyless.length) {
     await db.query(
@@ -529,6 +543,59 @@ export async function enqueuePipelineCompanies(db, { limit = PIPELINE_PAGE } = {
   }
   const { queued } = await enqueueCompanies(db, fresh);
   return { queued, copied: copied.length, keyless: keyless.length };
+}
+
+/**
+ * The SQL condition of a pipeline company whose score is not current: scored
+ * under another rule version or model, and not set by hand (the parameter
+ * numbers of the model and the rule version are given). A re-score (a scoring run after the rule or the model changed)
+ * queues these again.
+ */
+const stalePipeline = (model, rule) => `e.passes IS TRUE AND e.fit_key IS NOT NULL
+   AND EXISTS (SELECT 1 FROM company_fit_keys k JOIN company_fit f ON f.key_kind = k.fit_kind AND f.key = k.fit_key
+                WHERE k.key_kind = e.fit_key_kind AND k.key = e.fit_key AND f.status <> 'manual'
+                  AND (f.model IS DISTINCT FROM ${model}::text OR f.rule_version IS DISTINCT FROM ${rule}::text))`;
+
+/**
+ * Pipeline companies whose score is not current, after a row id, queued again
+ * at priority 3 under their own key: the pipeline's part of a scoring run (a
+ * "Re-score" after the rule or the model changed). A page at a time.
+ *
+ * @param {Db} db
+ * @param {{ after?: number, limit?: number, model: string | null, ruleVersion: string | null }} p
+ * @returns {Promise<{ queued: number, seen: number, last: number, done: boolean }>}
+ */
+export async function enqueueStalePipelineCompanies(db, { after = 0, limit = PIPELINE_PAGE, model, ruleVersion }) {
+  const { rows } = await db.query(pipelineSql(`e.row_id > $2 AND ${stalePipeline("$3", "$4")}`), [
+    Math.max(1, limit), after, model, ruleVersion,
+  ]);
+  const items = rows.map((r) => {
+    const own = keysFromRow({ website_key: r.website_key, name_key: r.name_key });
+    const aliases = (own ? [{ key_kind: own.key_kind, key: own.key }, ...own.aliases] : []).filter(
+      (a) => !(a.key_kind === r.fit_key_kind && a.key === r.fit_key)
+    );
+    return pipelineItem(r, { key_kind: r.fit_key_kind, key: r.fit_key, aliases }, 3);
+  });
+  const { queued } = await enqueueCompanies(db, items, { skip: "stale", model, ruleVersion });
+  return { queued, seen: rows.length, last: rows.length ? Number(rows[rows.length - 1].row_id) : after, done: rows.length < limit };
+}
+
+/**
+ * How many pipeline companies a scoring run would queue: those never scored
+ * (the fit loop takes them anyway, at priority 2) and those whose score is not
+ * current.
+ *
+ * @param {Db} db
+ * @param {{ model: string | null, ruleVersion: string | null }} p
+ */
+export async function pipelineToScore(db, { model, ruleVersion }) {
+  const { rows: [r] } = await db.query(
+    `SELECT count(*) FILTER (WHERE e.fit_key IS NULL AND e.fit_scored_at IS NULL)::int AS unscored,
+            count(*) FILTER (WHERE ${stalePipeline("$1", "$2")})::int AS stale
+       FROM enrich_companies e WHERE e.passes IS TRUE`,
+    [model, ruleVersion]
+  );
+  return { unscored: r.unscored, stale: r.stale };
 }
 
 // ── One tick of the loop ────────────────────────────────────────────────────
