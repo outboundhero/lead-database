@@ -217,10 +217,16 @@ export function billingCode(json) {
   return null;
 }
 
-/** The JSON schema of the answer: Clay's fields in Clay's order. */
+/**
+ * The JSON schema of the answer: Clay's fields in Clay's order. A compiled
+ * column keeps that order in config.answer_order, since enrich_columns.config
+ * is jsonb, which keeps no key order; the first field is the cell's display.
+ */
 export function answerSchema(config) {
   const answer = config.answer && typeof config.answer === "object" ? config.answer : { response: "text" };
-  const fields = Object.keys(answer);
+  const keys = Object.keys(answer);
+  const listed = Array.isArray(config.answer_order) ? config.answer_order.filter((f) => typeof f === "string" && Object.hasOwn(answer, f)) : [];
+  const fields = listed.length === keys.length && new Set(listed).size === keys.length ? listed : keys;
   /** @type {Record<string, any>} */
   const properties = {};
   for (const f of fields) {

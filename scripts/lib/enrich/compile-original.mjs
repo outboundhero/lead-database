@@ -489,11 +489,14 @@ function compileAction(spec, def, rw, row, maps, runIf) {
       const examples = bindingText(def, "tableExamples");
       const budget = literal(bindingText(def, "runBudget"));
       const cents = Number(literal(bindingText(def, "maxCostInCents")));
+      const answer = answerFields(def);
       row.inputs = { prompt, memory_key: prompt };
       row.config = {
         model_setting: spec.model_setting,
         tool: spec.tool ?? (useCase === "claygent" ? "web_search" : "none"),
-        answer: answerFields(def),
+        answer,
+        // jsonb keeps no key order, so Clay's order (the first field is the cell's display) is kept as a list.
+        answer_order: Object.keys(answer),
         user_location: false,
         keep_na: true,
         memory: `${spec.model_setting}_v1`,
