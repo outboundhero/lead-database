@@ -359,6 +359,10 @@ async function partB(routes) {
     JSON.stringify(counts));
   check("a second call duplicates nothing", again.companies === first2.companies && Object.values(again.created).every((x) => x === false) && Object.values(first2.created).every((x) => x === true) && (await one(`SELECT count(*)::int AS n FROM enrich_tables WHERE client_tag = $1`, [A])).n === 3);
   const prompt = await one(`SELECT inputs->>'prompt' AS p FROM enrich_columns WHERE table_id = $1 AND key = 'companys_website'`, [first2.companies]);
+  const stored41 = await one(`SELECT config FROM enrich_columns WHERE table_id = $1 AND key = 'company_decision_maker_facilities_1_claygent'`, [first2.companies]);
+  check("stored as jsonb, an AI column keeps Clay's field order (answer_order), so its first field stays the cell's display",
+    stored41.config.answer_order.join() === "Person_2_Full_Name,confidence,reasoning,Person_2_Title,Person_2_LinkedIn_URL" && answerSchema(stored41.config).fields.join() === stored41.config.answer_order.join(),
+    JSON.stringify({ order: stored41.config.answer_order, keys: Object.keys(stored41.config.answer) }));
   check("a client's own variant is used when loaded", prompt.p.includes(`${FIXTURE_MARKER}-c24`) && (await variantFor(pool, A)) === vA && variantName("OGTEST A&B") === "ogtest_a_b" && variantName("DEFAULT") === null);
   await pool.query(`INSERT INTO enrich_columns (table_id, key, name, position, kind) VALUES ($1, 'zz_gone', 'Gone', 999, 'input')`, [first2.companies]);
   const { rows: [row] } = await pool.query(`INSERT INTO enrich_rows (table_id, row_key, run_status) VALUES ($1, $2, 'done') RETURNING id`, [first2.companies, `aiark:ogtest-${RUN}`]);
