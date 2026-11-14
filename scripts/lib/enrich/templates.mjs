@@ -5,17 +5,18 @@
 //
 // ensurePipelineTables() runs inside the transaction of the pull route and the
 // people-run route. It refuses a client that still has a retired companies_v1
-// table (D24: its pulls wait for Akeesh's decision), raises OriginalsMissing
+// table (D24: its pulls wait for the owner's decision), raises OriginalsMissing
 // while the originals are not loaded (the routes answer 409), and otherwise
 // makes or updates the three tables. A client whose own Clay tables were
 // exported has its own variant of the originals (its tag in lower case);
 // every other client compiles from "default" (D15).
 
 import { loadOriginals } from "./compile-original.mjs";
-import { ORIGINAL_COUNTS } from "./original-keys.mjs";
-import { COMPANY_TABLE_NAME_V2, COMPANY_TEMPLATE_V2 } from "./company-template-v2.mjs";
-import { INBOX_TABLE_NAME, INBOX_TEMPLATE } from "./inbox-template.mjs";
-import { PEOPLE_TABLE_NAME, PEOPLE_TEMPLATE } from "./people-template.mjs";
+import { ORIGINAL_COUNTS, ORIGINAL_KEYS } from "./original-keys.mjs";
+import { COMPANY_REFS, COMPANY_TABLE_NAME_V2, COMPANY_TEMPLATE_V2, companyColumnsV2 } from "./company-template-v2.mjs";
+import { INBOX_TABLE_NAME, INBOX_TEMPLATE, inboxColumns } from "./inbox-template.mjs";
+import { PEOPLE_TABLE_NAME, PEOPLE_TEMPLATE, peopleColumns } from "./people-template.mjs";
+import { order } from "./formula.mjs";
 import { normTag } from "./settings.mjs";
 
 /** The three pipeline templates, by enrich_tables.kind. */
@@ -28,11 +29,11 @@ export const PIPELINE_TEMPLATES = Object.freeze({
 /** Templates no longer worked or made (D24). */
 export const RETIRED_TEMPLATES = Object.freeze(["companies_v1"]);
 
-/** A client that still has a companies_v1 table: its pulls are refused until Akeesh decides (D24). */
+/** A client that still has a companies_v1 table: its pulls are refused until the owner decides (D24). */
 export class RetiredV1Table extends Error {
   /** @param {string} tag */
   constructor(tag) {
-    super(`${tag} still has a companies_v1 table: its pulls wait until Akeesh decides what happens to it (delete it, or keep it read-only under another name)`);
+    super(`${tag} still has a companies_v1 table: its pulls wait until the owner decides what happens to it (delete it, or keep it read-only under another name)`);
     this.name = "RetiredV1Table";
     this.tag = tag;
   }
@@ -128,25 +129,96 @@ export async function ensureTable(db, tag, kind, { variant = "default" } = {}) {
   return { id: table.id, created: table.created };
 }
 
+/** The variant a table's columns were compiled from, as ensureTable notes it on the table. */
+export function variantOfNote(note) {
+  const m = /\(variant ([a-z0-9][a-z0-9_]*)\)/.exec(String(note ?? ""));
+  return m ? m[1] : "default";
+}
+
+/**
+ * The three templates' columns, compiled from one variant's originals. Each
+ * list is checked as the worker would read it: no two columns share a key and
+ * order() finds no loop. Pure: the tests and the seed's dry run use it.
+ *
+ * @param {import("./compile-original.mjs").Originals} originals
+ * @param {{ settings?: import("./settings.mjs").PipelineSettings | null }} [opts]
+ * @returns {{ companies: Array<Record<string, any>>, inboxes: Array<Record<string, any>>, people: Array<Record<string, any>> }}
+ */
+export function compileTemplates(originals, { settings = null } = {}) {
+  const out = {
+    companies: companyColumnsV2(originals),
+    inboxes: inboxColumns(originals),
+    people: peopleColumns(originals, settings?.people_tracks ?? null, { companyKeys: { ...ORIGINAL_KEYS.companies, ...COMPANY_REFS } }),
+  };
+  for (const [kind, cols] of Object.entries(out)) {
+    const keys = new Set();
+    for (const c of cols) {
+      if (keys.has(c.key)) throw new Error(`The ${kind} template has the column ${c.key} twice`);
+      keys.add(c.key);
+    }
+    order(cols.map((c) => ({ ...c })));
+  }
+  return out;
+}
+
+const UPSERT_COLUMNS = `
+  INSERT INTO enrich_columns AS e (table_id, key, name, position, kind, action, formula, waterfall, inputs, config, run_if,
+                                   data_type, description, provider, needs_env, phase, hidden, clay_field_id)
+  SELECT $1, x.key, x.name, x.position, x.kind, x.action, x.formula, x.waterfall, coalesce(x.inputs, '{}'::jsonb),
+         coalesce(x.config, '{}'::jsonb), x.run_if, x.data_type, x.description, x.provider, coalesce(x.needs_env, '{}'), x.phase,
+         coalesce(x.hidden, false), x.clay_field_id
+    FROM jsonb_to_recordset($2::jsonb) AS x(key text, name text, position int, kind text, action text, formula text,
+         waterfall jsonb, inputs jsonb, config jsonb, run_if text, data_type text, description text, provider text,
+         needs_env text[], phase smallint, hidden boolean, clay_field_id text)
+  ON CONFLICT (table_id, key) DO UPDATE SET
+    name = EXCLUDED.name, position = EXCLUDED.position, kind = EXCLUDED.kind, action = EXCLUDED.action,
+    formula = EXCLUDED.formula, waterfall = EXCLUDED.waterfall, inputs = EXCLUDED.inputs, config = EXCLUDED.config,
+    run_if = EXCLUDED.run_if, data_type = EXCLUDED.data_type, description = EXCLUDED.description,
+    provider = EXCLUDED.provider, needs_env = EXCLUDED.needs_env, phase = EXCLUDED.phase, hidden = EXCLUDED.hidden,
+    clay_field_id = EXCLUDED.clay_field_id, updated_at = now()
+  WHERE (e.name, e.position, e.kind, e.action, e.formula, e.waterfall, e.inputs, e.config, e.run_if, e.data_type,
+         e.description, e.provider, e.needs_env, e.phase, e.hidden, e.clay_field_id)
+        IS DISTINCT FROM
+        (EXCLUDED.name, EXCLUDED.position, EXCLUDED.kind, EXCLUDED.action, EXCLUDED.formula, EXCLUDED.waterfall,
+         EXCLUDED.inputs, EXCLUDED.config, EXCLUDED.run_if, EXCLUDED.data_type, EXCLUDED.description, EXCLUDED.provider,
+         EXCLUDED.needs_env, EXCLUDED.phase, EXCLUDED.hidden, EXCLUDED.clay_field_id)`;
+
 /**
  * Brings each template table's columns up to date with its template, compiled
  * from the variant's originals: upserts the columns by key (as
- * ensureTemplateTable did in phase 1) and prunes the columns a template no
- * longer has, with their cells.
- *
- * TODO(A): build it with companyColumnsV2(), inboxColumns() and peopleColumns()
- * (2A.1 to 2A.4); clay_field_id set on every compiled column.
+ * ensureTemplateTable did in phase 1), with clay_field_id on every compiled
+ * column, and prunes the columns a template no longer has, with their cells.
+ * A column whose definition is unchanged is not written. Rows already worked
+ * are not re-run.
  *
  * @param {Db} db
  * @param {{ companies: string, inboxes: string, people: string }} ids  the three table ids
  * @param {import("./compile-original.mjs").Originals} originals
  * @param {{ settings?: import("./settings.mjs").PipelineSettings | null, variant: string }} opts
- * @returns {Promise<void>}
+ * @returns {Promise<{ written: Record<string, number>, pruned: Record<string, string[]> }>}
  */
 export async function syncTemplateColumns(db, ids, originals, { settings = null, variant }) {
-  throw new Error(
-    `TODO(A): syncTemplateColumns is not built yet (variant ${variant}, ${originals.size} originals, tables ${Object.keys(ids).join(", ")}, settings ${settings ? "given" : "not given"})`
-  );
+  const compiled = compileTemplates(originals, { settings });
+  /** @type {Record<string, number>} */
+  const written = {};
+  /** @type {Record<string, string[]>} */
+  const pruned = {};
+  for (const kind of /** @type {TemplateKind[]} */ (["companies", "inboxes", "people"])) {
+    const tableId = ids[kind];
+    const cols = compiled[kind];
+    const r = await db.query(`${UPSERT_COLUMNS} RETURNING e.key`, [tableId, JSON.stringify(cols)]);
+    written[kind] = r.rows.length;
+    const { rows: gone } = await db.query(
+      `DELETE FROM enrich_columns WHERE table_id = $1 AND NOT (key = ANY($2::text[])) RETURNING key`,
+      [tableId, cols.map((c) => c.key)]
+    );
+    pruned[kind] = gone.map((g) => g.key);
+    if (pruned[kind].length) {
+      await db.query(`DELETE FROM enrich_cells WHERE table_id = $1 AND column_key = ANY($2::text[])`, [tableId, pruned[kind]]);
+    }
+  }
+  void variant;
+  return { written, pruned };
 }
 
 /**
@@ -158,7 +230,8 @@ export async function syncTemplateColumns(db, ids, originals, { settings = null,
  * @param {Db} db  a client inside the caller's transaction
  * @param {string} tag
  * @param {{ settings?: import("./settings.mjs").PipelineSettings | null }} [opts]
- * @returns {Promise<{ companies: string, inboxes: string, people: string, variant: string }>}  table ids
+ * @returns {Promise<{ companies: string, inboxes: string, people: string, variant: string,
+ *   created: { companies: boolean, inboxes: boolean, people: boolean } }>}  table ids, and which were made now
  */
 export async function ensurePipelineTables(db, tag, { settings = null } = {}) {
   const t = normTag(tag);
@@ -166,9 +239,10 @@ export async function ensurePipelineTables(db, tag, { settings = null } = {}) {
   if (await hasRetiredV1(db, t)) throw new RetiredV1Table(t);
   const variant = await variantFor(db, t);
   const originals = await loadOriginals(db, variant);
-  const companies = (await ensureTable(db, t, "companies", { variant })).id;
-  const inboxes = (await ensureTable(db, t, "inboxes", { variant })).id;
-  const people = (await ensureTable(db, t, "people", { variant })).id;
-  await syncTemplateColumns(db, { companies, inboxes, people }, originals, { settings, variant });
-  return { companies, inboxes, people, variant };
+  const c = await ensureTable(db, t, "companies", { variant });
+  const i = await ensureTable(db, t, "inboxes", { variant });
+  const p = await ensureTable(db, t, "people", { variant });
+  const ids = { companies: c.id, inboxes: i.id, people: p.id };
+  await syncTemplateColumns(db, ids, originals, { settings, variant });
+  return { ...ids, variant, created: { companies: c.created, inboxes: i.created, people: p.created } };
 }

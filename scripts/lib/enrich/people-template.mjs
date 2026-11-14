@@ -23,6 +23,8 @@
 
 import { TRACKS } from "./settings.mjs";
 import { bareDomain } from "./domain.mjs";
+import { compileColumn, parseFrom, refMap } from "./compile-original.mjs";
+import { ORIGINAL_KEYS } from "./original-keys.mjs";
 
 export { TRACKS };
 export const PEOPLE_TEMPLATE = "people_v1";
@@ -107,12 +109,35 @@ export const PEOPLE_INPUT_KEYS = Object.freeze(PEOPLE_INPUTS.map((c) => c.key));
  * @type {ReadonlyArray<import("./compile-original.mjs").ColumnSpec & { formula?: string, note?: string }>}
  */
 export const PEOPLE_COLUMNS = Object.freeze([
-  { key: "in_database", from: "P#4", change: true, kind: "action", action: "lead_lookup", note: "The AI Ark tab's check with explicit inputs (2A.4): email, verdict, first_name ({{first_name}}, P#39), last_name ({{person_last_name}}), full_name, company, domain ({{lookup_company_data}}?.row?.use_domain)." },
-  { key: "in_area", from: null, kind: "action", action: "client_area", note: "On {{city}}, {{state}} (P#20, P#22) and {{person_country}} (D13)." },
-  { key: "rule_match", from: null, kind: "action", action: "client_exclusions", note: "The company, its industry and description, and the title (cleaning clients)." },
+  {
+    key: "in_database", from: "P#4", change: true, kind: "action", action: "lead_lookup", provider: "Lead database", run_if: null,
+    inputs: {
+      email: "{{email}}",
+      verdict: "{{email}} ? \"Valid\" : \"Not found\"",
+      first_name: "{{first_name}}",
+      last_name: "{{person_last_name}} || {{use_last_name}}",
+      full_name: "{{full_name}}",
+      company: "{{company}}",
+      domain: "{{lookup_company_data}}?.row?.use_domain",
+    },
+    note: "The AI Ark tab's check with explicit inputs (2A.4), in DUPE CHECK's place: the address in leads, the Email Bison copy and the never-contact list; with no address, the person's likely addresses at the company's domain, then the same name and company. A Preview's masked last name fits by its letters.",
+  },
+  {
+    key: "in_area", from: null, kind: "action", action: "client_area", provider: "Client rules", data_type: "boolean",
+    inputs: { city: "{{city}}", state: "{{state}}", country: "{{person_country}}" },
+    note: "The person's place against the client's places, as the send gate would place the lead: City and State (P#20, P#22, the written value first) and the person's own country (D13).",
+  },
+  {
+    key: "rule_match", from: null, kind: "action", action: "client_exclusions", provider: "Client rules",
+    inputs: { company: "{{company}}", industry: "{{category}}", description: "{{sub_category}}", title: "{{title}}" },
+    note: "The client's exclusion terms on the company, its category and sub-category, and for cleaning clients the title.",
+  },
   { key: "safe_to_run", from: "P#5", change: true, kind: "formula", formula: "!{{in_database}}?.lead_id && !{{in_database}}?.in_bison && !{{in_database}}?.never_contact && !{{in_database}}?.bounced" },
   { key: "check", from: "P#7", kind: "waterfall" },
-  { key: "lookup_company_data", from: "P#8", change: true, kind: "action", action: "lookup_company_data", note: "The company row by {{company_row}}, run condition verbatim (pipeline-actions.mjs)." },
+  {
+    key: "lookup_company_data", from: "P#8", change: true, kind: "action", action: "lookup_company_data", inputs: { company_row: "{{company_row}}" },
+    note: "The company row by its id ({{company_row}}), not by website text; run condition verbatim.",
+  },
   { key: "exclusion_large_company_check", from: "P#10", kind: "formula" },
   { key: "reoon_validation", from: "P#11", kind: "action", action: "reoon_verify" },
   { key: "reoon_stamp_of_approval", from: "P#12", kind: "formula" },
@@ -121,7 +146,7 @@ export const PEOPLE_COLUMNS = Object.freeze([
   { key: "final_validated_email", from: "P#15", kind: "waterfall" },
   { key: "push_to_email_waterfall", from: "P#16", kind: "formula" },
   { key: "company_phone_number", from: "P#17", kind: "waterfall", written: true },
-  { key: "normalize_phone_number", from: "P#18", kind: "action", action: "waiting", note: "Clay's normalize-phone-number: waiting for the original (D38); a stand-in only with Akeesh's OK." },
+  { key: "normalize_phone_number", from: "P#18", kind: "action", action: "waiting", note: "Clay's normalize-phone-number: waiting for the original (D38); a stand-in only with the owner's OK." },
   { key: "use_phone_number", from: "P#19", kind: "waterfall" },
   { key: "city", from: "P#20", kind: "waterfall", written: true },
   { key: "use_city", from: "P#21", kind: "formula" },
@@ -238,19 +263,109 @@ export function sourceObject(p) {
   };
 }
 
+/** Waiting columns: why each waits (D38). */
+const WAITS = {
+  normalize_phone_number: "Clay's normalize-phone-number tool: its rules are not in the export (D38). A named stand-in comes only with the owner's OK.",
+  normalize_company_name: "Clay's normalize-company-name tool: its rules are not in the export (D38). A named stand-in comes only with the owner's OK.",
+};
+
+/** Names of our own columns and inputs (from: null). */
+const NAMES = {
+  in_area: "Inside the client's area",
+  rule_match: "Client exclusions",
+  person_outcome: "Outcome",
+  add_to_database: "Added to the database",
+  company_row: "Company row",
+  company_aiark_id: "AI Ark company id",
+  person_aiark_id: "AI Ark person id",
+  found_by: "Found by",
+  stage: "Stage",
+  track: "Track",
+  rank: "Rank in the track",
+  person_first_name: "First name (AI Ark)",
+  person_last_name: "Last name (AI Ark)",
+  seniority: "Seniority",
+  department: "Department",
+  person_city: "Person's city",
+  person_state: "Person's state",
+  person_country: "Person's country",
+  aiark_email_status: "AI Ark email status",
+  aiark_email_domain_type: "AI Ark mailbox type",
+  pulled_before: "Bought before",
+  source: "Source",
+};
+const HIDDEN_INPUTS = new Set(["company_row", "company_aiark_id", "person_aiark_id", "rank", "person_first_name", "person_last_name", "aiark_email_domain_type"]);
+
+const RECORD_READ = /\{\{lookup_company_data\}\}\?\.record\?\.(?:\["((?:[^"\\]|\\.)*)"\]|([A-Za-z_$][\w$]*))/g;
+
+/**
+ * What lookup_company_data answers under each Clay name the compiled People
+ * columns read from it ({{lookup_company_data}}?.record?.Phone, ?.["Use State"]
+ * ...): the name of a Companies original, mapped to that column's key in the
+ * Companies template. The names come from the database, never from this repo.
+ *
+ * @param {import("./compile-original.mjs").Originals} originals
+ * @param {Array<Record<string, any>>} rows  the compiled People columns
+ * @param {Record<number, string>} companyKeys  the Companies template's keys by position (ORIGINAL_KEYS with its REFS)
+ * @returns {Record<string, string>}
+ */
+export function companyRecordMap(originals, rows, companyKeys) {
+  const byName = new Map();
+  for (const o of originals.values()) if (o.template_kind === "companies") byName.set(o.name, companyKeys[o.position] ?? o.key);
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const r of rows) {
+    for (const t of [r.formula, r.run_if, ...(r.waterfall ?? []), ...Object.values(r.inputs ?? {})]) {
+      for (const m of String(t ?? "").matchAll(RECORD_READ)) {
+        const name = m[1] != null ? JSON.parse(`"${m[1]}"`) : m[2];
+        const key = byName.get(name);
+        if (!key) throw new Error(`A People column reads "${name}" from the company row, and no Companies original has that name`);
+        out[name] = key;
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * The People template's enrich_columns rows, compiled from a variant's
  * originals: PEOPLE_INPUTS as input columns, then PEOPLE_COLUMNS through
  * compileColumn() with PEOPLE_REFS, the D30 waterfalls for PEOPLE_WRITTEN_KEYS
- * and person_outcome from PERSON_OUTCOME_FORMULA.
- *
- * TODO(A): build it (2A.4, 2B.4). `tracks` is settings.people_tracks, for the
- * column descriptions only.
+ * and person_outcome from PERSON_OUTCOME_FORMULA. lookup_company_data's record
+ * names are worked out from the columns that read it (companyRecordMap).
  *
  * @param {import("./compile-original.mjs").Originals} originals
- * @param {import("./settings.mjs").PeopleTracks | null} [tracks]
+ * @param {import("./settings.mjs").PeopleTracks | null} [tracks]  settings.people_tracks, for the descriptions
+ * @param {{ companyKeys?: Record<number, string> }} [opts]  the Companies template's keys by position
  * @returns {Array<Record<string, any>>}
  */
-export function peopleColumns(originals, tracks = null) {
-  throw new Error(`TODO(A): peopleColumns is not built yet (${originals?.size ?? 0} originals, tracks ${tracks ? "set" : "not set"})`);
+export function peopleColumns(originals, tracks = null, { companyKeys = ORIGINAL_KEYS.companies } = {}) {
+  const own = refMap(originals, "people", PEOPLE_REFS);
+  const rows = [];
+  for (const c of PEOPLE_INPUTS) {
+    const written = c.key.startsWith("written_");
+    const spec = {
+      key: c.key, kind: "input", description: c.description, data_type: c.from === "P#1" ? "json" : undefined,
+      hidden: written || HIDDEN_INPUTS.has(c.key), provider: c.from ? "Pipeline" : written ? "Write to table" : "Pipeline",
+    };
+    rows.push(compileColumn(c.from ? { ...spec, from: c.from } : { ...spec, name: NAMES[c.key] ?? c.key.replace(/_/g, " ") }, originals, { own }));
+  }
+  const trackNote = tracks
+    ? ` Tracks: ${TRACKS.map((t) => `${t} (${tracks[t]?.phrases?.length ?? 0} titles)`).join(", ")}.`
+    : "";
+  for (const spec of PEOPLE_COLUMNS) {
+    if (!spec.from) {
+      const formula = spec.key === "person_outcome" ? PERSON_OUTCOME_FORMULA : spec.formula;
+      rows.push(compileColumn({ ...spec, name: NAMES[spec.key] ?? spec.key, formula, description: spec.note ?? (spec.key === "person_outcome" ? `The person's result.${trackNote}` : null), provider: spec.key === "add_to_database" ? "Promotion" : spec.provider }, originals, { own }));
+      continue;
+    }
+    const extra = spec.action === "waiting" ? { why: WAITS[spec.key] } : spec.key === "current_employer" ? { memory_days: "website" } : {};
+    rows.push(compileColumn({ ...spec, ...extra, description: spec.note }, originals, { own }));
+  }
+  const record = companyRecordMap(originals, rows, companyKeys);
+  for (const r of rows) if (r.action === "lookup_company_data") r.config = { ...r.config, record };
+  return rows.map((r, i) => ({ ...r, position: i + 1 }));
 }
+
+/** For checks: the original a People column is compiled from, as { kind, position }, or null. */
+export const peopleOriginalOf = (key) => parseFrom(PEOPLE_COLUMNS.find((c) => c.key === key)?.from ?? null);
