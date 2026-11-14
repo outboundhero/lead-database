@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { excludedTitlesFor } from "../../../scripts/lib/aiark/people-requests.mjs";
-import { eligibilityCounts, MISS_ESTIMATE, peopleSpendCeiling } from "../../../scripts/lib/aiark/people-runs.mjs";
+import { COMPANIES_MAX, eligibilityCounts, MISS_ESTIMATE, peopleSpendCeiling } from "../../../scripts/lib/aiark/people-runs.mjs";
 import { originalsSummary } from "../../../scripts/lib/enrich/compile-original.mjs";
 import { KEYED_STEPS, OPTIONAL_KEYS } from "../../../scripts/lib/enrich/pipeline-actions.mjs";
 import { normTag, settingsFrom } from "../../../scripts/lib/enrich/settings.mjs";
@@ -79,7 +79,9 @@ export async function peoplePlan(c: PoolClient, tag: string, settings?: Settings
         from: [...(s.people_tracks?.[k]?.from ?? [])],
       }))
     : null;
-  const searches = Math.ceil(companies.eligible / pp.ids_per_search);
+  // One run takes at most COMPANIES_MAX companies; the next run takes the rest.
+  const taken = Math.min(companies.eligible, COMPANIES_MAX);
+  const searches = Math.ceil(taken / pp.ids_per_search);
   const on = s.flagOn("people_pipeline", t);
   const blockers: string[] = [];
   if (!pp.enabled) blockers.push("People runs are off. An admin can switch them on in the settings.");
@@ -102,8 +104,8 @@ export async function peoplePlan(c: PoolClient, tag: string, settings?: Settings
       searches,
       lookMin: searches,
       lookMax: searches * pp.pages_per_search,
-      buyMax: Math.min(companies.eligible * TRACKS.length, pp.max_people_per_run),
-      aiSearchUsd: Math.round(companies.eligible * AI_SEARCH_USD * 100) / 100,
+      buyMax: Math.min(taken * TRACKS.length, pp.max_people_per_run),
+      aiSearchUsd: Math.round(taken * AI_SEARCH_USD * 100) / 100,
     },
     blockers,
   };

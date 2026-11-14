@@ -54,6 +54,8 @@ import {
 import { advanceOneRun, createRun } from "./lib/aiark/runs.mjs";
 import { pullsToAdd } from "./lib/aiark/add.mjs";
 import { resetClientChecks } from "./lib/enrich/client-checks.mjs";
+import { runRow } from "./lib/enrich/engine.mjs";
+import { order } from "./lib/enrich/formula.mjs";
 import { PIPELINE_ACTIONS } from "./lib/enrich/pipeline-actions.mjs";
 import { projectContact } from "./lib/enrich/project-contacts.mjs";
 import { PEOPLE_INPUT_KEYS } from "./lib/enrich/people-template.mjs";
@@ -1357,25 +1359,73 @@ async function partC(routes) {
   const built = !/TODO\(A\)/.test(syncTemplateColumns.toString());
   if (!built) {
     later("the start route end to end: 201, the tables compiled, the run queued", "syncTemplateColumns is Builder A's and not built in this tree");
-    later("a bought person's email worked by the compiled People template (Reoon stubbed): Approved email, listed", "Builder A's People template");
+    later("a bought person's email worked by the compiled People template (Reoon stubbed): Approved email, in enrich_contacts", "Builder A's People template");
     return;
   }
   const stored = await one(`SELECT value FROM enrich_settings WHERE key = 'people_pipeline'`);
+  const tB = world.tB;
   try {
-    await pool.query(`UPDATE enrich_settings SET value = $1 WHERE key = 'people_pipeline'`, [JSON.stringify({ ...(stored?.value ?? {}), enabled: true, tags: [C] })]);
+    await pool.query(`UPDATE enrich_settings SET value = $1 WHERE key = 'people_pipeline'`, [JSON.stringify({ ...(stored?.value ?? {}), enabled: true, tags: [B2] })]);
     if (!originalTracks) await pool.query(`INSERT INTO enrich_settings (key, value) VALUES ('people_tracks', $1) ON CONFLICT (key) DO NOTHING`, [JSON.stringify(TRACKS_FIX)]);
     resetSettingsCache();
     T.worker = heartbeat();
     await endTestRuns();
-    const r = await call(routes.runs.POST, { body: { tag: C, mode: "demo", maxPeople: 5 } });
-    check("the start route: 201 with the run, the client's three tables compiled", r.status === 201 && r.body.run?.status === "queued" && (await one(`SELECT count(*)::int AS n FROM enrich_columns c JOIN enrich_tables t ON t.id = c.table_id WHERE t.client_tag = $1 AND t.template = 'people_v1'`, [C])).n > 0, JSON.stringify(r.body).slice(0, 300));
-    if (r.body.run) created.runs.push(r.body.run.id);
+    await pool.query(`DELETE FROM enrich_rows WHERE table_id = $1`, [tB.companies]);
+    const co = findCompany("partc", "Partc Widget Co", (ps) => ps.length >= 2 && ps.every(inside));
+    const rowId = await addCompanyRow(B2, tB.companies, { record: co.record });
+    const r = await call(routes.runs.POST, { body: { tag: B2, mode: "demo", maxPeople: 5 } });
+    const compiled = (await one(`SELECT count(*)::int AS n FROM enrich_columns WHERE table_id = $1`, [tB.people])).n;
+    check("the start route: 201 with the run, the client's tables compiled from the originals", r.status === 201 && r.body.run?.status === "queued" && compiled > 0, JSON.stringify(r.body).slice(0, 300));
+    if (!r.body.run) return;
+    created.runs.push(r.body.run.id);
+
+    // Look and Buy through the demo transport, then work one bought person with the compiled template.
+    const tx = createDemoTransport({ companies: [co.record], balance: 5_000 });
+    await drive(r.body.run.id, demoClient(tx));
+    await approveBuy(pool, { runId: r.body.run.id, userId: null });
+    await drive(r.body.run.id, demoClient(tx), { until: TERMINAL, limit: 6 }).catch(() => null);
+    const people = await all(
+      `SELECT r.id, r.created_at, r.run_force, r.next_run_at FROM enrich_rows r JOIN enrich_cells c ON c.row_id = r.id AND c.column_key = 'email'
+        WHERE r.table_id = $1 AND r.run_status = 'queued' ORDER BY r.id LIMIT 1`,
+      [tB.people]
+    );
+    if (!people.length) {
+      check("a bought person with an email to work", false, "nobody with an email was bought");
+      return;
+    }
+    const row = people[0];
+    const email = (await cellsOf(row.id)).email;
+    net.verdicts.set(email, "safe");
+    reoonStub = true;
+    const { rows: [table] } = await pool.query(`SELECT id, client_tag, kind, name, template FROM enrich_tables WHERE id = $1`, [tB.people]);
+    table.keyCounts = {};
+    const columns = order(await all(
+      `SELECT key, name, position, kind, action, formula, waterfall, inputs, config, run_if, provider, needs_env, phase
+         FROM enrich_columns WHERE table_id = $1 ORDER BY position`,
+      [tB.people]
+    ));
+    const cells = new Map((await all(`SELECT column_key, status, value, display, note, input_hash FROM enrich_cells WHERE row_id = $1`, [row.id])).map((c) => [c.column_key, c]));
+    const settings = settingsFrom(await all(`SELECT key, value FROM enrich_settings`));
+    const before = net.reoon;
+    const out = await runRow({ row, table, columns, cells, env: { ENRICH_REOON_API_KEY: "made-up-reoon" }, db: pool, settings });
+    const { rows: [claim] } = await pool.query(
+      `UPDATE enrich_rows SET run_status = 'running', claim_token = gen_random_uuid() WHERE id = $1 RETURNING claim_token`,
+      [row.id]
+    );
+    await projectContact(pool, { rowId: row.id, claimToken: claim.claim_token, tableId: tB.people, clientTag: B2, kind: "person", values: out.values });
+    const contact = await one(`SELECT * FROM enrich_contacts WHERE row_id = $1`, [row.id]);
+    check(
+      "a bought person's email worked by the compiled People template (Reoon stubbed): Approved email, in enrich_contacts",
+      out.values.person_outcome === "Approved email" && net.reoon - before === 1 && contact?.verdict === "approved" && contact.usable &&
+        String(contact.company_row_id) === String(rowId) && contact.stage === "bought" && contact.found_by === "aiark" && Boolean(contact.track),
+      JSON.stringify({ outcome: out.values.person_outcome, reoon: net.reoon - before, contact })
+    );
   } finally {
+    reoonStub = false;
     await pool.query(`UPDATE enrich_settings SET value = $1 WHERE key = 'people_pipeline'`, [JSON.stringify(stored?.value ?? {})]);
     await restoreTracks();
     resetSettingsCache();
   }
-  later("a bought person's email worked by the compiled People template", "run in the integrated tree with test-pipeline-v2's engine helpers");
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────

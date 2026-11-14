@@ -467,11 +467,14 @@ export async function countsFor(c: PoolClient, tag: string): Promise<CompanyCoun
     [tag]
   );
   const { rows: [listed] } = await c.query<{ total: number; general: number; people: number; both: number; held: number }>(
+    // By what a listed company shows (the projection's words): a new general email and a new person
+    // email, only one of them, or every usable email already in the database. held: every usable
+    // general email is already a lead, so a new one is general_emails > 0 AND NOT held.
     `SELECT count(*)::int AS total,
-            count(*) FILTER (WHERE general_emails > 0 AND people_emails + people_held = 0)::int AS general,
-            count(*) FILTER (WHERE general_emails = 0 AND people_emails + people_held > 0)::int AS people,
-            count(*) FILTER (WHERE general_emails > 0 AND people_emails + people_held > 0)::int AS both,
-            count(*) FILTER (WHERE (held OR general_emails = 0) AND people_emails = 0)::int AS held
+            count(*) FILTER (WHERE general_emails > 0 AND NOT held AND people_emails > 0)::int AS both,
+            count(*) FILTER (WHERE general_emails > 0 AND NOT held AND people_emails = 0)::int AS general,
+            count(*) FILTER (WHERE NOT (general_emails > 0 AND NOT held) AND people_emails > 0)::int AS people,
+            count(*) FILTER (WHERE NOT (general_emails > 0 AND NOT held) AND people_emails = 0)::int AS held
        FROM enrich_companies WHERE client_tag = $1 AND listed`,
     [tag]
   );

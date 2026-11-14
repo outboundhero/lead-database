@@ -230,8 +230,9 @@ export interface CompanyCounts {
   inboxTableId: string | null;
   peopleTableId: string | null;
   /**
-   * Shown on the tab: companies with a usable general or person email. general / people / both: by what
-   * makes them listed; held: every usable email is already in the database.
+   * Shown on the tab: companies with a usable general or person email, by what each shows (disjoint):
+   * both a new general and a new person email, a new general email only, new person emails only, or
+   * every usable email already in the database (held).
    */
   listed: { total: number; general: number; people: number; both: number; held: number };
   /** The people runs' people: looked at (candidates), held in the database, bought, and the People rows by verdict. */

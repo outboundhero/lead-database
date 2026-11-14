@@ -134,9 +134,9 @@ export function CountsStrip({ counts }: { counts: CompanyCounts | null }) {
         <p className="text-[12px] font-medium text-muted-foreground">Listed</p>
         <p className="text-[26px] font-semibold leading-tight tabular-nums">{fmt(listed.total)}</p>
         <div className="mt-1.5 flex flex-wrap gap-1.5">
-          <CountChip n={listed.both} label="General and people emails" cls={PILL.valid} href={null} title="A usable general email and at least one usable person email" />
-          <CountChip n={listed.general} label="General email only" cls={PILL.valid} href={null} />
-          <CountChip n={listed.people} label="People only" cls={PILL.valid} href={null} />
+          <CountChip n={listed.both} label="General and people emails" cls={PILL.valid} href={null} title="A new usable general email and at least one new usable person email" />
+          <CountChip n={listed.general} label="Has a general email" cls={PILL.valid} href={null} title="A new usable general email, and no new person email" />
+          <CountChip n={listed.people} label="Has people emails" cls={PILL.valid} href={null} title="New usable person emails, and no new general email" />
           <CountChip n={listed.held} label="Already in the database" cls={PILL.held} href={null} title="Every usable email of these companies is already a lead or in the Email Bison copy" />
         </div>
       </div>
