@@ -20,12 +20,14 @@
 // file: the repo is public.
 //
 // A people source is registered by name (registerPeopleSource). This file
-// registers "ai_ark"; a later source registers its own.
+// registers "ai_ark", which looks by company id; the LinkedIn source
+// (linkedin-requests.mjs) registers "linkedin", which looks by area.
 //
 // Plain JavaScript: the worker, the routes and the tests share it.
 
 import { bytes, condensePhrases, pack } from "./filters.mjs";
 import { CLEANING_EXCLUDE_KEYWORDS, CLEANING_EXCLUDE_TITLES } from "./cleaning-filters.mjs";
+import { filtersFor } from "./standard-filters.mjs";
 
 /** Company ids per search to start with (AI Ark's own cap is 300 per array; the request size binds first). */
 export const IDS_PER_SEARCH = 50;
@@ -92,18 +94,22 @@ export function trackPhrases(tracks) {
 
 /**
  * The excluded titles a client's people searches use: its saved ones (the AI
- * Ark tab's people filters), else a cleaning client's standard ones, else none.
+ * Ark tab's people filters), else the standard ones when the scope gives them
+ * to the client (scope "ai_ark": a cleaning client; "linkedin": every client),
+ * else none. The rule is filtersFor()'s (standard-filters.mjs).
  *
  * @param {{ exclude_titles?: string[] } | null | undefined} saved  client_people_filters' row, or null
  * @param {string | null | undefined} clientType  client_tags.client_type
+ * @param {{ scope?: import("./standard-filters.mjs").FilterScope }} [opts]
  * @returns {{ titles: string[], from: "saved" | "cleaning" | "none" }}
  */
-export function excludedTitlesFor(saved, clientType) {
-  if (saved) {
+export function excludedTitlesFor(saved, clientType, { scope = "ai_ark" } = {}) {
+  const r = filtersFor(saved ?? null, { clientType, scope });
+  if (saved && r.from === "saved") {
     const titles = (Array.isArray(saved.exclude_titles) ? saved.exclude_titles : []).map(text).filter(Boolean);
     return { titles, from: "saved" };
   }
-  if (clientType === "Cleaning") return { titles: [...CLEANING_EXCLUDE_TITLES], from: "cleaning" };
+  if (r.from === "cleaning") return { titles: [...CLEANING_EXCLUDE_TITLES], from: "cleaning" };
   return { titles: [], from: "none" };
 }
 
@@ -168,24 +174,51 @@ export function buildPeopleAtCompanies({ companyIds, tracks, excludeTitles = [],
 
 // ── People sources ──────────────────────────────────────────────────────────
 
-/** @type {Map<string, { requests: (ctx: any) => ReturnType<typeof buildPeopleAtCompanies>, label?: string }>} */
+/**
+ * How a source looks for people:
+ *   by_company  People Preview by the AI Ark ids of the client's own companies,
+ *               one batch at a time: requests(ctx) answers what
+ *               buildPeopleAtCompanies answers for the batch (ctx: companyIds,
+ *               tracks, excludeTitles, cleaning, idsPerSearch).
+ *   by_area     People Preview over an area, whatever the company: requests(ctx)
+ *               answers the run's search bodies once (ctx: the source's own,
+ *               for "linkedin" { effective, geo }: linkedinPeopleRequests).
+ * @typedef {"by_company" | "by_area"} PeopleLook
+ * @typedef {{ requests: (ctx: any) => any, label?: string, look?: PeopleLook }} PeopleSource
+ */
+
+/** @type {Map<string, PeopleSource>} */
 const SOURCES = new Map();
+const LOOKS = ["by_company", "by_area"];
 
 /**
- * Registers a people source: `impl.requests(ctx)` answers what buildPeopleAtCompanies
- * answers, for the run's batch of companies. A name registered again is replaced.
+ * Registers a people source by name. `impl.look` says how it looks (by_company
+ * when left out); `impl.requests(ctx)` builds its requests. A name registered
+ * again is replaced.
  *
  * @param {string} source
- * @param {{ requests: (ctx: any) => ReturnType<typeof buildPeopleAtCompanies>, label?: string }} impl
+ * @param {PeopleSource} impl
  */
 export function registerPeopleSource(source, impl) {
   if (!/^[a-z][a-z0-9_]*$/.test(String(source ?? ""))) throw new Error(`A people source needs a plain name, not "${source}"`);
   if (typeof impl?.requests !== "function") throw new Error(`People source "${source}" has no requests()`);
+  if (impl.look !== undefined && !LOOKS.includes(impl.look)) throw new Error(`People source "${source}" looks ${impl.look}, not ${LOOKS.join(" or ")}`);
   SOURCES.set(source, impl);
 }
 
 /** The people sources registered, by name. */
 export const peopleSources = () => [...SOURCES.keys()];
+
+/**
+ * A registered source's name, label and how it looks, or null.
+ *
+ * @param {string} source
+ * @returns {{ source: string, label: string, look: PeopleLook } | null}
+ */
+export function peopleSourceInfo(source) {
+  const impl = SOURCES.get(source);
+  return impl ? { source, label: impl.label ?? source, look: impl.look ?? "by_company" } : null;
+}
 
 /**
  * The requests a people source makes for one batch of companies.
@@ -199,4 +232,4 @@ export function peopleRequestsFor(source, ctx) {
   return impl.requests(ctx);
 }
 
-registerPeopleSource("ai_ark", { label: "AI Ark", requests: (ctx) => buildPeopleAtCompanies(ctx) });
+registerPeopleSource("ai_ark", { label: "AI Ark", look: "by_company", requests: (ctx) => buildPeopleAtCompanies(ctx) });

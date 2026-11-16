@@ -33,6 +33,7 @@ import {
   VALUE_MAX,
 } from "./filters.mjs";
 import { cityKey, findState, placeString } from "./geo.mjs";
+import { filtersFor } from "./standard-filters.mjs";
 
 export const OFFICES_MAX = 25; // offices kept on a row, head office first
 const KEY_OFFICES_MAX = 200; // offices whose place keys the registry keeps
@@ -73,11 +74,13 @@ export function pickCompanyFilters(filters) {
 
 /**
  * A client's company filters: its saved client_people_filters row, else a
- * cleaning client's defaults, else none. `saved` is the row or null.
+ * cleaning client's defaults, else none (filtersFor's rule, scope "ai_ark").
+ * `saved` is the row or null.
  */
 export function companyFiltersFor(saved, clientType) {
-  if (saved) return { saved: true, defaultsFrom: null, value: pickCompanyFilters(saved) };
-  const cleaning = clientType === "Cleaning";
+  const r = filtersFor(saved ?? null, { clientType, scope: "ai_ark" });
+  if (r.from === "saved") return { saved: true, defaultsFrom: null, value: pickCompanyFilters(saved) };
+  const cleaning = r.from === "cleaning";
   return { saved: false, defaultsFrom: cleaning ? "cleaning" : null, value: cleaning ? { ...CLEANING_COMPANY_DEFAULTS } : { ...EMPTY_COMPANY_FILTERS } };
 }
 
@@ -289,6 +292,16 @@ export function companyPlaceKeys(record, geo) {
   const keys = new Set();
   for (const o of officesOf(record).slice(0, KEY_OFFICES_MAX)) for (const k of officeKeys(resolveOffice(o, geo))) keys.add(k);
   return [...keys];
+}
+
+/**
+ * The place keys of a company's head office alone, for aiark_companies.hq_keys
+ * (migration 128): a LinkedIn pull copies from the registry only companies
+ * headquartered in the client's places. None when AI Ark gives no head office.
+ */
+export function companyHqKeys(record, geo) {
+  const hq = officesOf(record).find((o) => o.hq);
+  return hq ? officeKeys(resolveOffice(hq, geo)) : [];
 }
 
 // ── The registry copy ───────────────────────────────────────────────────────

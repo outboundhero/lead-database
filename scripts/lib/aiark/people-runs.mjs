@@ -56,7 +56,10 @@
 import { randomUUID } from "node:crypto";
 import { AiArkError, clip, PAGE_MAX, personInputs, SEARCH_CAP } from "./client.mjs";
 import { aiArkFor, LEASE_MIN } from "./runs.mjs";
-import { excludedTitlesFor, IDS_PER_SEARCH, peopleRequestsFor, trackOf } from "./people-requests.mjs";
+import { excludedTitlesFor, IDS_PER_SEARCH, peopleRequestsFor, peopleSourceInfo, trackOf } from "./people-requests.mjs";
+import { scopeOf, standardFor } from "./standard-filters.mjs";
+// Registers the "linkedin" people source (by area) wherever people runs are worked.
+import "./linkedin-requests.mjs";
 import { CLIENT_ACTIONS } from "../enrich/client-checks.mjs";
 import { normTag, readSettings, settingsFrom, TRACKS } from "../enrich/settings.mjs";
 import { ensurePipelineTables } from "../enrich/templates.mjs";
@@ -214,6 +217,12 @@ export async function createPeopleRun(db, { tag, mode, source = "ai_ark", maxPeo
   const t = normTag(tag);
   if (!t) throw new PeopleRunRefused("No client tag");
   if (mode !== "live" && mode !== "demo") throw new PeopleRunRefused("mode must be live or demo");
+  // TODO(L1): the by-area path (LinkedIn people runs: Look by area, pick up to
+  // linkedin_sources.people_per_company a company, bring each bought person's
+  // company in). Until it is built such a run is refused, so nothing spends.
+  const sourceInfo = peopleSourceInfo(source);
+  if (!sourceInfo) throw new PeopleRunRefused(`No people source "${source}"`);
+  if (sourceInfo.look !== "by_company") throw new PeopleRunRefused(`${sourceInfo.label} people runs are not built yet, so nothing was started.`);
   const s = settings ?? settingsFrom((await db.query(`SELECT key, value FROM enrich_settings`)).rows);
   const pp = s.people_pipeline;
   if (!pp.enabled) throw new PeopleRunRefused("People runs are off, so nothing was started.");
@@ -235,8 +244,9 @@ export async function createPeopleRun(db, { tag, mode, source = "ai_ark", maxPeo
   const companies = found.slice(0, COMPANIES_MAX);
   const { rows: [client] } = await db.query(`SELECT client_type FROM client_tags WHERE tag = $1`, [t]);
   const { rows: [saved] } = await db.query(`SELECT exclude_titles FROM client_people_filters WHERE client_tag = $1`, [t]);
-  const excluded = excludedTitlesFor(saved ?? null, client?.client_type ?? null);
-  const cleaning = client?.client_type === "Cleaning";
+  const scope = scopeOf(source);
+  const excluded = excludedTitlesFor(saved ?? null, client?.client_type ?? null, { scope });
+  const cleaning = standardFor(client?.client_type ?? null, scope);
   const ids = pp.ids_per_search;
   const probe = peopleRequestsFor(source, {
     companyIds: companies.slice(0, ids).map((c) => c.company_id), tracks: s.people_tracks, excludeTitles: excluded.titles, cleaning, idsPerSearch: ids,

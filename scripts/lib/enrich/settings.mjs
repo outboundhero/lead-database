@@ -1,8 +1,9 @@
 // Run-time settings for the Clay tab's pipeline (enrich_settings, migrations
-// 124, 125 and 126): the switches and their client lists, the caps, how long
+// 124 to 126 and 128): the switches and their client lists, the caps, how long
 // paid answers are remembered, the people runs, the spend caps, the fit
-// scorer, promotion and the gate, and the model for each AI step, so a model
-// is swapped without a deploy. The worker reads them through readSettings(),
+// scorer, promotion and the gate, the LinkedIn sources and their starter
+// keywords, and the model for each AI step, so a model is swapped without a
+// deploy. The worker reads them through readSettings(),
 // at most 30 seconds old; the routes read them fresh and pass the rows to
 // settingsFrom().
 //
@@ -15,7 +16,9 @@
 // list (tags), which ships empty, so turning a switch on covers no client until
 // a tag is added. flagOn(name, tag) says whether a switch is on for a client:
 // on, and the client on its list. A sub-switch (ai_searches, auto_buy,
-// linkedin_profile_reads) is on only when its parent switch is on for the client.
+// linkedin_profile_reads) is on only when its parent switch is on for the client,
+// and so are the LinkedIn sources (linkedin_companies needs company_pipeline,
+// linkedin_people needs people_pipeline, migration 128).
 
 const TTL_MS = 30_000;
 
@@ -53,7 +56,14 @@ export const TRACKS = ["operations", "facility_office", "ceo"];
 export const FLAGS = [
   "people_pipeline", "ai_searches", "linkedin_profile_reads", "personalisation",
   "company_pipeline", "auto_buy", "promotion", "fit_gate", "fit_scoring",
+  "linkedin_sources", "linkedin_companies", "linkedin_people",
 ];
+
+/** LinkedIn people runs buy at most this many people a company (D-P4-6): the newest Clay template's limit. */
+export const PEOPLE_PER_COMPANY = 13;
+/** The starter list's limits (enrich_settings.linkedin_starter_keywords, written by scripts/linkedin-seed.mjs). */
+const STARTER_MAX = 2000;
+const KEYWORD_MAX = 120;
 
 const LUNA = "gpt-6-luna";
 
@@ -68,8 +78,8 @@ function frozen(v) {
 
 /**
  * What applies until the table says otherwise: the values migrations 124 to
- * 126 seed (126's fit settings included, so the shape is the same before 126
- * is applied).
+ * 126 and 128 seed (126's fit settings and 128's LinkedIn ones included, so the
+ * shape is the same before they are applied).
  */
 export const SETTINGS_DEFAULTS = frozen({
   company_pipeline: {
@@ -133,6 +143,10 @@ export const SETTINGS_DEFAULTS = frozen({
   },
   fit_gate: { enabled: false, tags: [], threshold: 2, client_types: ["Cleaning", "Canada Cleaning"], require_scored: true },
   fit_gate_refresh: { pending: false, since: null },
+  /** One switch for both LinkedIn sources, with its client list (D-P4-7), and the people a company (D-P4-6). */
+  linkedin_sources: { enabled: false, tags: [], people_per_company: PEOPLE_PER_COMPANY },
+  /** The excluded keywords of a client with no LinkedIn row (D-P4-5): empty until the seed writes them. */
+  linkedin_starter_keywords: { items: [], version: null, source: null, sha256: null, seeded_at: null },
 });
 
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -205,6 +219,37 @@ function pricesOf(v) {
   return out;
 }
 
+/**
+ * The starter list of excluded keywords (enrich_settings.linkedin_starter_keywords)
+ * as the LinkedIn seed wrote it: the items trimmed, once each (case aside), at
+ * most 120 characters each and 2,000 in all; anything malformed reads as not
+ * loaded (no items). The resolver (scripts/lib/aiark/linkedin-settings.mjs)
+ * and settingsFrom() share this reading.
+ *
+ * @param {unknown} v
+ * @returns {{ items: string[], version: number | null, source: string | null, sha256: string | null, seeded_at: string | null }}
+ */
+export function starterFrom(v) {
+  const s = objectOr(v);
+  const items = [];
+  const seen = new Set();
+  for (const x of Array.isArray(s.items) ? s.items : []) {
+    if (typeof x !== "string") continue;
+    const t = x.replace(/\s+/g, " ").trim();
+    if (!t || t.length > KEYWORD_MAX || seen.has(t.toLowerCase())) continue;
+    seen.add(t.toLowerCase());
+    items.push(t);
+    if (items.length >= STARTER_MAX) break;
+  }
+  return {
+    items,
+    version: wholeIn(s.version, 1, 1_000_000) ? s.version : null,
+    source: textOrNull(s.source, 300),
+    sha256: typeof s.sha256 === "string" && /^[0-9a-f]{64}$/.test(s.sha256) ? s.sha256 : null,
+    seeded_at: textOrNull(s.seeded_at, 64),
+  };
+}
+
 /** people_tracks as the seed wrote it, or null when it is missing or malformed (people runs then refuse). */
 function tracksOf(v) {
   if (!isObject(v) || !Array.isArray(v.order)) return null;
@@ -247,6 +292,8 @@ function tracksOf(v) {
  *                require_question: boolean, source_label: string },
  *   fit_gate: { enabled: boolean, tags: string[], threshold: number, client_types: string[], require_scored: boolean },
  *   fit_gate_refresh: { pending: boolean, since: string | null },
+ *   linkedin_sources: { enabled: boolean, tags: string[], people_per_company: number },
+ *   linkedin_starter_keywords: { items: string[], version: number | null, source: string | null, sha256: string | null, seeded_at: string | null },
  *   flagOn: (name: string, tag: string, ctx?: FlagContext) => boolean,
  * }} PipelineSettings
  *   spend_caps.openai_prices: { web_search_call: number, [model]: ModelPrice }
@@ -356,6 +403,13 @@ export function settingsFrom(rows) {
   const rf = objectOr(byKey.get("fit_gate_refresh"));
   const fit_gate_refresh = { pending: bool(rf.pending, false), since: textOrNull(rf.since, 64) };
 
+  const ls = objectOr(byKey.get("linkedin_sources"));
+  const linkedin_sources = {
+    enabled: bool(ls.enabled, D.linkedin_sources.enabled),
+    tags: tagsOf(ls.tags),
+    people_per_company: whole(ls.people_per_company, 1, 100, D.linkedin_sources.people_per_company),
+  };
+
   const settings = {
     company_pipeline,
     people_pipeline,
@@ -368,6 +422,8 @@ export function settingsFrom(rows) {
     promotion,
     fit_gate,
     fit_gate_refresh,
+    linkedin_sources,
+    linkedin_starter_keywords: starterFrom(byKey.get("linkedin_starter_keywords")),
     /** @type {(name: string, tag: string, ctx?: FlagContext) => boolean} */
     flagOn: (name, tag, ctx) => flagOn(settings, name, tag, ctx),
   };
@@ -389,6 +445,9 @@ export function settingsFrom(rows) {
  *                           fit_gate.client_types; false without ctx.clientType. The SQL
  *                           fn_fit_gate_applies(tag) (migration 126) is what the gate itself reads.
  *   fit_scoring             enabled (no client list: scores are shared by every client)
+ *   linkedin_sources        enabled, tag on linkedin_sources.tags (the one LinkedIn switch, D-P4-7)
+ *   linkedin_companies      company_pipeline and linkedin_sources both on for the client (LinkedIn company pulls)
+ *   linkedin_people         people_pipeline and linkedin_sources both on for the client (LinkedIn people runs)
  * An unknown name throws, so a typo can't read as "off" silently.
  *
  * @param {Omit<PipelineSettings, "flagOn"> | PipelineSettings} settings  settingsFrom()'s value
@@ -429,6 +488,13 @@ export function flagOn(settings, name, tag, ctx = {}) {
       );
     case "fit_scoring":
       return s.fit_scoring.enabled === true;
+    case "linkedin_sources":
+      // Fail closed on a settings object made before 128 (no linkedin_sources key).
+      return Boolean(t) && s.linkedin_sources?.enabled === true && listed(s.linkedin_sources?.tags);
+    case "linkedin_companies":
+      return flagOn(s, "company_pipeline", t) && flagOn(s, "linkedin_sources", t);
+    case "linkedin_people":
+      return flagOn(s, "people_pipeline", t) && flagOn(s, "linkedin_sources", t);
     default:
       throw new Error(`Unknown switch "${name}"`);
   }

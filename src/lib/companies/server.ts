@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import { buildCompanyRequests } from "../../../scripts/lib/aiark/company-filters.mjs";
+import { standardFor } from "../../../scripts/lib/aiark/standard-filters.mjs";
 import { bareDomain } from "../../../scripts/lib/enrich/domain.mjs";
 import { MODEL_ID, normTag, settingsFrom } from "../../../scripts/lib/enrich/settings.mjs";
 import { geo, modes, peopleOrDefaults } from "@/lib/aiark/server";
@@ -93,7 +94,7 @@ export function companyPlan(
   g: Geo,
   clientType: string | null
 ): CompanyPlan & { requests: object[] } {
-  const built = buildCompanyRequests({ targeting, filters, geo: g, cleaning: clientType === "Cleaning" }) as {
+  const built = buildCompanyRequests({ targeting, filters, geo: g, cleaning: standardFor(clientType, "ai_ark") }) as {
     requests?: object[];
     report?: CompanyPlanReport;
     notes?: string[];

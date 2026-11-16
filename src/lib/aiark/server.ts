@@ -1,13 +1,8 @@
 import type { PoolClient } from "pg";
 import { enrichPool } from "@/lib/enrich/db";
-import {
-  buildRequests,
-  cleanPeopleFilters,
-  CLEANING_DEFAULTS,
-  EMPTY_PEOPLE_FILTERS,
-  loadGeo,
-} from "../../../scripts/lib/aiark/filters.mjs";
+import { buildRequests, cleanPeopleFilters, loadGeo } from "../../../scripts/lib/aiark/filters.mjs";
 import { aiArkFor as aiArkClient, webhookFor } from "../../../scripts/lib/aiark/runs.mjs";
+import { filtersFor, standardFor } from "../../../scripts/lib/aiark/standard-filters.mjs";
 import type { AiArkModes, AiArkPlan, AiArkRun, PeopleFilters, PlanReport, RunMode } from "./types";
 
 export { cleanPeopleFilters, DEPARTMENT_SUGGESTIONS, INDUSTRY_SUGGESTIONS, SENIORITY } from "../../../scripts/lib/aiark/filters.mjs";
@@ -83,30 +78,34 @@ export async function savedPeople(c: PoolClient, tag: string, { lock = false } =
   return rows[0] ?? null;
 }
 
-/** The saved filters, or what applies until someone saves: the standard filters for a cleaning client, nothing otherwise. */
+/**
+ * The saved filters, or what applies until someone saves: the standard filters
+ * for a cleaning client, nothing otherwise. The rule is filtersFor()'s (scope
+ * "ai_ark"), the one the LinkedIn sources read too (D-P4-1).
+ */
 export function peopleOrDefaults(saved: Record<string, unknown> | null, clientType: string | null) {
-  if (saved) {
-    const { updated_at, version, ...value } = saved;
+  const { updated_at, version, ...stored } = saved ?? {};
+  const r = filtersFor(saved ? stored : null, { clientType, scope: "ai_ark" });
+  if (r.from === "saved") {
     return {
       saved: true,
       updatedAt: updated_at as string,
       version: version as string,
       defaultsFrom: null,
-      value: cleanPeopleFilters(value).value as PeopleFilters,
+      value: cleanPeopleFilters(r.value).value as PeopleFilters,
     };
   }
-  const cleaning = clientType === "Cleaning";
   return {
     saved: false,
     updatedAt: null,
     version: null,
-    defaultsFrom: cleaning ? "cleaning" : null,
-    value: (cleaning ? CLEANING_DEFAULTS : EMPTY_PEOPLE_FILTERS) as PeopleFilters,
+    defaultsFrom: r.from === "cleaning" ? ("cleaning" as const) : null,
+    value: r.value as PeopleFilters,
   };
 }
 
 export function plan(targeting: Record<string, unknown> | null, people: PeopleFilters, g: Geo, clientType: string | null = null): AiArkPlan & { requests: object[] } {
-  const built = buildRequests({ targeting, people, geo: g, cleaning: clientType === "Cleaning" });
+  const built = buildRequests({ targeting, people, geo: g, cleaning: standardFor(clientType, "ai_ark") });
   return {
     requests: built.requests,
     searches: built.requests.length,
