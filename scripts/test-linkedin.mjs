@@ -1342,17 +1342,445 @@ async function partC10(g) {
 // ── R. Builder L2 ───────────────────────────────────────────────────────────
 
 async function partR() {
+  // Builder L2: the routes and what the page and the Companies tab show. Everything here is
+  // committed through the routes, so it is removed again in the finally below (clients, rows,
+  // runs, tables, the made-up cities and originals) and every setting is put back as it was.
   section("R. The routes (Builder L2)");
-  void call;
-  void route;
-  void T;
-  for (const name of [
-    "R1 GET /api/aiark/linkedin-settings: manager and up; both kinds; works with the switch off",
-    "R2 PUT /api/aiark/linkedin-settings: 409 on a stale version, 400 with each reason, the log written, an audit line with counts only",
-    "R3 POST /api/companies/count and /runs with source linkedin: 409 off, not listed, no linkedin_sources worker; versions from the resolver",
-    "R4 POST /api/companies/people/runs with source linkedin: 409 while off (was 400 before 128)",
-    "R5 the settings sheet: linkedin_sources switch, client list, people a company; a save without it keeps it",
-  ]) later(name, "Builder L2");
+  const { seedFixtureVariant } = await import("./fixtures/test-support.mjs");
+  const { LINKEDIN_FLAGS } = await import("./lib/aiark/linkedin-settings.mjs");
+  const routes = {
+    li: await route("aiark/linkedin-settings"),
+    count: await route("companies/count"),
+    runs: await route("companies/runs"),
+    setup: await route("companies/setup"),
+    settings: await route("companies/settings"),
+    peopleRuns: await route("companies/people/runs"),
+    peopleSetup: await route("companies/people/setup"),
+  };
+  const serverLib = await srcModule("lib/companies/server.ts");
+  const heartbeat = ({ online = true, linkedin = true } = {}) => ({
+    id: "litest", last_seen: new Date().toISOString(), started_at: new Date().toISOString(), seconds_ago: online ? 2 : 600, online,
+    info: { capabilities: ["company_runs", "pipeline_v2", "people_runs", "fit_scoring", ...(linkedin ? ["linkedin_sources"] : [])], keys: {}, reoon: null },
+  });
+  const inTx = async (fn) => {
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      const out = await fn(c);
+      await c.query("COMMIT");
+      return out;
+    } catch (e) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw e;
+    } finally {
+      c.release();
+    }
+  };
+  const settingsAtStart = await all(`SELECT key, value FROM enrich_settings ORDER BY key`);
+  const stored = Object.fromEntries(settingsAtStart.map((r) => [r.key, r.value]));
+  const setSetting = (key, value) => pool.query(`UPDATE enrich_settings SET value = $2 WHERE key = $1`, [key, JSON.stringify(value)]);
+  const restoreSettings = async () => {
+    for (const r of settingsAtStart) await setSetting(r.key, r.value);
+  };
+  /** The three switches as they were (the starter list written below stays). */
+  const resetSwitches = async () => {
+    for (const r of settingsAtStart) if (["company_pipeline", "people_pipeline", "linkedin_sources"].includes(r.key)) await setSetting(r.key, r.value);
+  };
+  /** Company pulls, people runs and the LinkedIn searches on or off, each with its client list. */
+  const switches = async ({ cp = true, pp = true, ls = true, tags = [], lsTags = tags } = {}) => {
+    await setSetting("company_pipeline", { ...stored.company_pipeline, enabled: cp, tags });
+    await setSetting("people_pipeline", { ...stored.people_pipeline, enabled: pp, tags });
+    await setSetting("linkedin_sources", { ...stored.linkedin_sources, enabled: ls, tags: lsTags });
+  };
+  const made = { geo: [], variants: [] };
+  const tags = { norow: tagOf("R_NOROW"), row: tagOf("R_ROW"), norules: tagOf("R_NORULES"), empty: tagOf("R_EMPTY"), save: tagOf("R_SAVE") };
+  const get = (query) => call(routes.li.GET, { query });
+  const put = (body) => call(routes.li.PUT, { body });
+  const preview = (body) => call(routes.li.POST, { body });
+  try {
+    // Made-up cities in a state that exists, so typed places resolve as they would in production.
+    const st = await one(`SELECT country_code, admin1_code, state_code, name FROM geo_admin1 WHERE country_code = 'US' ORDER BY state_code LIMIT 1`);
+    const CITY = { kept: "Quuxford", rule: "Zorbleton", out: "Vrillport" };
+    let gid = 9_990_100_000;
+    for (const [city, population] of [[CITY.kept, 500], [CITY.rule, 400], [CITY.out, 300]]) {
+      await pool.query(
+        `INSERT INTO geo_locations (geoname_id, city, city_key, country_code, admin1_code, population) VALUES ($1, $2, $3, $4, $5, $6)`,
+        [gid, city, cityKey(city), st.country_code, st.admin1_code, population]
+      );
+      made.geo.push(gid++);
+    }
+    const at = (city) => place(city, st.state_code);
+    const txt = (city) => (city ? `${city}, ${st.name}` : st.name);
+    const geo = await loadGeo(pool);
+
+    // A no-row client (its rules and the starter list), a seeded client (both kinds), a client with no
+    // rules, one whose own places all lie outside its rules, and one for the saves.
+    await makeClient(pool, tags.norow, { type: "OS", places: [at(CITY.kept), at(CITY.rule)], terms: ["quux sheet term"] });
+    await makeClient(pool, tags.row, { type: "Cleaning", places: [at(CITY.kept), at(CITY.rule)] });
+    await makeClient(pool, tags.norules, { type: "Cleaning", places: null });
+    await makeClient(pool, tags.empty, { type: "Cleaning", places: [at(CITY.kept)] });
+    await makeClient(pool, tags.save, { type: "OS", places: [at(CITY.kept)] });
+    await writeStarter(pool, { items: ["quux diner", "quux kiosk"], version: 1, source: "made up", sha256: "a".repeat(64) });
+    const seed = (tag, kind, value) =>
+      inTx((c) =>
+        seedLinkedinRow(c, {
+          tag, kind, geo, sha256: "b".repeat(64), seededBy: "litest@host",
+          value: { include_locations: [], exclude_locations: [], unplaced: [], exclude_keywords: [], notes: [], flags: [], copied_from: null, ...value },
+          provenance: { clay_source_id: "t_litest", clay_campaign: "Made-up campaign", clay_set_up_at: "2026-07-01T00:00:00.000Z", clay_fingerprint: null },
+        })
+      );
+    const rowPlaces = [at(CITY.kept), at(CITY.out), at(null)]; // a city the rules hold, one they don't, the whole state
+    const seeded = [
+      await seed(tags.row, "companies", {
+        include_locations: rowPlaces, exclude_keywords: ownWords(120), flags: ["company_list"], notes: ["A made-up note."],
+        unplaced: [{ side: "include", field: "cities", value: "Quux Heights", why: "made up: not a city of the listed state", suggestions: [at(CITY.kept)] }],
+      }),
+      await seed(tags.row, "people", { include_locations: rowPlaces, exclude_keywords: ["quuxable diner"] }),
+      await seed(tags.norules, "companies", { include_locations: [at(CITY.out)], exclude_keywords: ["quuxable diner"] }),
+      await seed(tags.empty, "companies", { include_locations: [at(CITY.out)], exclude_keywords: ["quuxable diner"] }),
+    ];
+    if (seeded.some((x) => x.status !== "written")) throw new Error(`R fixtures not seeded: ${JSON.stringify(seeded)}`);
+    // O1 and O2 are the engine's (Builder L1): the checks that need them wait until its resolver has them.
+    const probe = await linkedinSettingsFor(pool, { tag: tags.row, kind: "companies" });
+    const o1 = Array.isArray(probe.keywords.checkedAfter);
+    const o2 = Boolean(probe.area && Array.isArray(probe.area.notSearched) && Array.isArray(probe.area.sent));
+    T.worker = heartbeat();
+
+    section("R1. GET /api/aiark/linkedin-settings");
+    await resetSwitches(); // as shipped: the LinkedIn searches off
+    T.role = null;
+    const unauth = await get({ tag: tags.norow });
+    T.role = "viewer";
+    const viewer = await get({ tag: tags.norow });
+    T.role = "manager";
+    check("below manager: 401 signed out, 403 for a viewer", unauth.status === 401 && viewer.status === 403);
+    const nr = await get({ tag: tags.norow });
+    const np = nr.body.people;
+    check("a client with no row, the switch off: both kinds, its rules' places and the starter keywords",
+      nr.status === 200 && nr.body.switch?.enabled === false && np?.from === "rules_and_starter" && nr.body.companies?.from === "rules_and_starter" &&
+        JSON.stringify(np.own.include_locations.map((p) => p.text)) === JSON.stringify([txt(CITY.kept), txt(CITY.rule)]) &&
+        JSON.stringify(np.own.exclude_keywords) === JSON.stringify(["quux diner", "quux kiosk"]),
+      JSON.stringify(nr.body).slice(0, 400));
+    check("... the standard filters, read only, for a client that is not Cleaning; a plan with no blocker",
+      np.standard.from === "cleaning" && np.standard.titles > 0 && np.standard.excludeTitles > 0 && np.standard.companyTypes.length === 2 &&
+        np.standard.keywords.length > 0 && np.plan.searches >= 1 && np.plan.blockers.length === 0 && np.starter.loaded === true, JSON.stringify(np.plan));
+    check("... the version a save sends back, and the one a count or run sends back", typeof np.version === "string" && np.version.startsWith("rules:") && np.searchVersion.startsWith(np.version));
+    const onlyPeople = await get({ tag: tags.norow, kind: "people" });
+    check("kind=people: that kind only", onlyPeople.status === 200 && Boolean(onlyPeople.body.people) && !onlyPeople.body.companies);
+    check("a bad kind or tag: 400; a tag that is no client: 404",
+      (await get({ tag: tags.norow, kind: "jobs" })).status === 400 && (await get({ tag: "not a tag!" })).status === 400 && (await get({ tag: tagOf("R_NOBODY") })).status === 404);
+    const rc = (await get({ tag: tags.row })).body.companies;
+    check("a seeded row: its own lists, where they came from, the flags in plain words, the values not placed with their suggestions, the log",
+      rc?.from === "row" && rc.provenance.source === "clay" && rc.provenance.clay?.campaign === "Made-up campaign" && rc.provenance.flagWords.company_list === LINKEDIN_FLAGS.company_list &&
+        rc.provenance.notes[0] === "A made-up note." && rc.own.unplaced[0]?.suggestionTexts[0] === txt(CITY.kept) && rc.own.exclude_keywords.length === 120 &&
+        rc.log[0]?.action === "seed" && rc.log[0].seededBy === "litest@host" && rc.log[0].after.keywords === 120 && rc.log[0].before === null,
+      JSON.stringify(rc?.provenance));
+
+    section("R2. PUT and the preview POST");
+    const S = tags.save;
+    const rowsOf = async (tag) => (await one(`SELECT count(*)::int AS n FROM client_linkedin_settings WHERE client_tag = $1`, [tag])).n;
+    const logsOf = async (tag) => (await one(`SELECT count(*)::int AS n FROM client_linkedin_settings_log WHERE client_tag = $1`, [tag])).n;
+    const loaded = (await get({ tag: S, kind: "people" })).body.people;
+    const value = (o = {}) => ({ include_locations: [txt(CITY.kept), txt(CITY.rule)], exclude_locations: [], unplaced: [], exclude_keywords: ["quux diner", "Quux Kiosk", "quux zorbatorium"], ...o });
+    T.role = "viewer";
+    check("below manager: the save and the preview refused (403)",
+      (await put({ tag: S, kind: "people", value: value(), version: loaded.version })).status === 403 && (await preview({ tag: S, kind: "people", value: value() })).status === 403);
+    T.role = "manager";
+    T.audits.length = 0;
+    const pv = await preview({ tag: S, kind: "people", value: value({ include_locations: [txt(CITY.kept), `Nowhereville, ${st.name}`] }) });
+    check("the preview: the plan and keywords of lists not saved, each refusal named, nothing written",
+      pv.status === 200 && pv.body.plan.searches >= 1 && pv.body.errors.some((e) => /Nowhereville/.test(e)) && pv.body.keywords.union > 3 &&
+        (await rowsOf(S)) === 0 && (await logsOf(S)) === 0, JSON.stringify(pv.body).slice(0, 300));
+    const stale = await put({ tag: S, kind: "people", value: value(), version: "rules:old|starter:old" });
+    check("a stale version: 409 with changed, nothing saved", stale.status === 409 && stale.body.changed === true && (await rowsOf(S)) === 0, JSON.stringify(stale.body));
+    const badPlace = await put({ tag: S, kind: "people", value: value({ include_locations: [`Nowhereville, ${st.name}`] }), version: loaded.version });
+    const badWord = await put({ tag: S, kind: "people", value: value({ exclude_keywords: ["x".repeat(121)] }), version: loaded.version });
+    check("bad lists: 400 with each reason, nothing saved",
+      badPlace.status === 400 && badPlace.body.errors?.some((e) => /Nowhereville/.test(e)) && badWord.status === 400 && /over 120 characters/.test(badWord.body.error) && (await rowsOf(S)) === 0,
+      JSON.stringify([badPlace.body, badWord.body]).slice(0, 300));
+    check("a tag that is no client: 404; no version: 400; a bad kind: 400",
+      (await put({ tag: tagOf("R_NOBODY"), kind: "people", value: value(), version: "x" })).status === 404 && (await put({ tag: S, kind: "people", value: value() })).status === 400 &&
+        (await put({ tag: S, kind: "jobs", value: value(), version: loaded.version })).status === 400);
+    const first = await put({ tag: S, kind: "people", value: value(), version: loaded.version });
+    check("the first save makes the client's own row from what was shown and edited",
+      first.status === 200 && first.body.saved === true && first.body.view.from === "row" && first.body.view.provenance.source === "manual" &&
+        first.body.view.own.exclude_keywords.length === 3 && (await rowsOf(S)) === 1 && (await logsOf(S)) === 1, JSON.stringify(first.body).slice(0, 300));
+    const audit = T.audits.find((a) => a.action === "linkedin_settings");
+    check("... one audit line, with counts only (no place, no keyword)",
+      T.audits.length === 1 && Boolean(audit) && new RegExp(`^${S} people: 2 places, 0 left out, 0 unplaced, 3 keywords$`).test(audit.details) &&
+        ![CITY.kept, CITY.rule, "quux", "kiosk"].some((w) => audit.details.toLowerCase().includes(w.toLowerCase())), JSON.stringify(T.audits));
+    const same = await put({ tag: S, kind: "people", value: value(), version: first.body.view.version });
+    check("a save that changes nothing: 200, nothing written or logged, no audit line",
+      same.status === 200 && same.body.unchanged === true && same.body.saved === false && (await logsOf(S)) === 1 && T.audits.length === 1);
+    const changed = await put({ tag: S, kind: "people", value: value({ exclude_keywords: ["quux diner"] }), version: first.body.view.version });
+    const log0 = changed.body.view?.log?.[0];
+    check("a change: logged, and the page's log shows the counts before and after",
+      changed.status === 200 && changed.body.saved === true && log0?.action === "save" && log0.before.keywords === 3 && log0.after.keywords === 1 && (await logsOf(S)) === 2);
+    check("... the other kind is untouched (its own row only when it is saved)", (await get({ tag: S, kind: "companies" })).body.companies.from === "rules_and_starter");
+    const rp = (await get({ tag: tags.row, kind: "companies" })).body.companies;
+    const addedUnplaced = await put({
+      tag: tags.row, kind: "companies", version: rp.version,
+      value: { include_locations: rp.own.include_locations.map((p) => p.entry), exclude_locations: [], exclude_keywords: rp.own.exclude_keywords,
+        unplaced: [...rp.own.unplaced.map((u) => ({ side: u.side, field: u.field, value: u.value, why: u.why, suggestions: u.suggestions })), { side: "include", field: "cities", value: "Quux Made Up", why: "x", suggestions: [] }] },
+    });
+    check("a value not placed can be kept or removed, never added: 400", addedUnplaced.status === 400 && /kept or removed, not added/.test(addedUnplaced.body.error ?? ""), JSON.stringify(addedUnplaced.body));
+
+    section("R3. LinkedIn counts and pulls: POST /api/companies/count and /runs with source linkedin");
+    const R = tags.row;
+    made.variants.push(await seedFixtureVariant(pool, R));
+    const plan = async (tag = R) => (await call(routes.setup.GET, { query: { tag } })).body.linkedin;
+    const count = (body, tag = R) => call(routes.count.POST, { body: { tag, mode: "demo", source: "linkedin", ...body } });
+    const pull = (body) => call(routes.runs.POST, { body: { tag: R, mode: "demo", size: 5, matchCount: 10, source: "linkedin", ...body } });
+    let li = await plan();
+    await switches({ cp: true, pp: true, ls: false, tags: [R] });
+    let r = await count({ linkedinVersion: li.version });
+    check("LinkedIn searches off: 409, nothing counted", r.status === 409 && /LinkedIn searches are off/.test(r.body.error), JSON.stringify(r.body));
+    r = await pull({ linkedinVersion: li.version });
+    check("... and nothing pulled (409)", r.status === 409 && /LinkedIn searches are off/.test(r.body.error), JSON.stringify(r.body));
+    await switches({ cp: false, pp: true, ls: true, tags: [R] });
+    r = await count({ linkedinVersion: li.version });
+    check("company pulls off: 409 (a LinkedIn company search needs them)", r.status === 409 && /Company pulls are off/.test(r.body.error));
+    await switches({ cp: true, pp: true, ls: true, tags: [R], lsTags: [] });
+    r = await count({ linkedinVersion: li.version });
+    check("the client not on the LinkedIn searches' list: 409", r.status === 409 && /not on the LinkedIn searches' client list/.test(r.body.error));
+    r = await pull({ linkedinVersion: li.version });
+    check("... and its pull: 409", r.status === 409 && /not on the LinkedIn searches' client list/.test(r.body.error));
+    await switches({ cp: true, pp: true, ls: true, tags: [R] });
+    li = await plan();
+    r = await count({ linkedinVersion: "row:old|filters:none" });
+    check("its LinkedIn search changed since the page loaded it: 409 with changed", r.status === 409 && r.body.changed === true, JSON.stringify(r.body));
+    check("a source that is not one: 400", (await count({ source: "clay" })).status === 400 && (await pull({ source: "clay" })).status === 400);
+    r = await count({ linkedinVersion: li.version });
+    check("the count: the LinkedIn search's companies (demo), with its source and the version it counted",
+      r.status === 200 && r.body.source === "linkedin" && r.body.linkedinVersion === li.version && r.body.total > 0 && r.body.perSearch.length === li.searches, JSON.stringify(r.body).slice(0, 300));
+    const aiark = await call(routes.count.POST, { body: { tag: R, mode: "demo" } });
+    check("an AI Ark count's answer is as before 128 (no source, no LinkedIn version)", aiark.status === 200 && !("source" in aiark.body) && !("linkedinVersion" in aiark.body));
+    T.worker = heartbeat({ linkedin: false });
+    r = await pull({ linkedinVersion: li.version });
+    check("a worker that doesn't do LinkedIn searches: 409", r.status === 409 && /doesn't do LinkedIn searches/.test(r.body.error), JSON.stringify(r.body));
+    T.worker = heartbeat();
+    const going = await one(`INSERT INTO aiark_company_runs (client_tag, mode, size_requested, filters, requests, source) VALUES ($1, 'demo', 1, '{}', '[{}]', 'ai_ark') RETURNING id`, [R]);
+    r = await pull({ linkedinVersion: li.version });
+    check("one pull per client, of either source: an AI Ark pull going refuses a LinkedIn one (409)", r.status === 409 && /already has a company pull going/.test(r.body.error));
+    await pool.query(`DELETE FROM aiark_company_runs WHERE id = $1`, [going.id]);
+    r = await pull({ linkedinVersion: "row:old|filters:none" });
+    check("... a changed LinkedIn search: 409 with changed", r.status === 409 && r.body.changed === true);
+    r = await pull({ linkedinVersion: li.version });
+    if (r.status === 409 && /can't make LinkedIn company pulls yet/.test(r.body.error ?? "")) {
+      check("an engine that can't make a LinkedIn pull: refused (409), nothing written", (await one(`SELECT count(*)::int AS n FROM aiark_company_runs WHERE client_tag = $1`, [R])).n === 0);
+      later("the pull: 201, source linkedin, filters.linkedin with its version, listed with its source", "Builder L1: createCompanyRun's source and targeting");
+      later("O1: the pull keeps keywords.sent and keywords.checked_after in filters.linkedin", "Builder L1");
+    } else {
+      const row = r.body.run ? await one(`SELECT source, filters FROM aiark_company_runs WHERE id = $1`, [r.body.run.id]) : null;
+      check("the pull: 201, source linkedin, filters.linkedin with the version it was asked with",
+        r.status === 201 && r.body.run.source === "linkedin" && row?.source === "linkedin" && row.filters.linkedin?.version === li.version && row.filters.linkedin_version === li.version,
+        JSON.stringify(r.body).slice(0, 300));
+      const listed = await call(routes.runs.GET, { query: { tag: R } });
+      check("... the pulls list shows its source", listed.body.runs.some((x) => x.id === r.body.run?.id && x.source === "linkedin"));
+      if (o1) {
+        check("O1: the pull keeps keywords.sent and keywords.checked_after in filters.linkedin",
+          Array.isArray(row?.filters.linkedin?.keywords?.sent) && Array.isArray(row?.filters.linkedin?.keywords?.checked_after) && row.filters.linkedin.keywords.checked_after.length > 0);
+      } else later("O1: the pull keeps keywords.sent and keywords.checked_after in filters.linkedin", "Builder L1: O1 in linkedinRunFilters");
+      const again = await pull({ linkedinVersion: li.version });
+      check("... a second pull while it is queued: 409", again.status === 409 && /already has a company pull going/.test(again.body.error));
+      await pool.query(`UPDATE aiark_company_runs SET status = 'cancelled', finished_at = now() WHERE client_tag = $1 AND status IN ('queued', 'running')`, [R]);
+    }
+    const sc0 = (await call(routes.setup.GET, { query: { tag: R } })).body;
+    const ai = await call(routes.runs.POST, { body: { tag: R, mode: "demo", size: 5, matchCount: 10, rulesVersion: sc0.targeting.version, filtersVersion: sc0.filters.version } });
+    check("a pull with no source is an AI Ark pull, as before 128", ai.status === 201 && ai.body.run.source === "ai_ark", JSON.stringify(ai.body).slice(0, 300));
+    await pool.query(`UPDATE aiark_company_runs SET status = 'cancelled', finished_at = now() WHERE client_tag = $1 AND status IN ('queued', 'running')`, [R]);
+
+    section("R4. LinkedIn people runs: POST /api/companies/people/runs with source linkedin (409s, not the 400 of before 128)");
+    const pli = (await call(routes.peopleSetup.GET, { query: { tag: R } })).body.linkedin;
+    const prun = (body) => call(routes.peopleRuns.POST, { body: { tag: R, mode: "demo", source: "linkedin", maxPeople: 5, linkedinVersion: pli.version, ...body } });
+    await switches({ cp: true, pp: false, ls: true, tags: [R] });
+    r = await prun({});
+    check("people runs off: 409", r.status === 409 && /People runs are off/.test(r.body.error), JSON.stringify(r.body));
+    await switches({ cp: true, pp: true, ls: true, tags: [], lsTags: [R] });
+    r = await prun({});
+    check("the client not on the people runs' list: 409", r.status === 409 && /not on the people runs' client list/.test(r.body.error));
+    await switches({ cp: true, pp: true, ls: false, tags: [R] });
+    r = await prun({});
+    check("LinkedIn searches off: 409", r.status === 409 && /LinkedIn searches are off/.test(r.body.error));
+    await switches({ cp: true, pp: true, ls: true, tags: [R], lsTags: [] });
+    r = await prun({});
+    check("the client not on the LinkedIn searches' list: 409", r.status === 409 && /not on the LinkedIn searches' client list/.test(r.body.error));
+    await switches({ cp: true, pp: true, ls: true, tags: [R] });
+    T.worker = heartbeat({ linkedin: false });
+    r = await prun({});
+    check("a worker that doesn't do LinkedIn searches: 409", r.status === 409 && /doesn't do LinkedIn searches/.test(r.body.error));
+    T.worker = heartbeat();
+    r = await prun({ linkedinVersion: "row:old|filters:none" });
+    check("its LinkedIn search changed: 409 with changed", r.status === 409 && r.body.changed === true, JSON.stringify(r.body));
+    const goingRun = await one(`INSERT INTO aiark_people_runs (client_tag, mode, max_people, filters, source) VALUES ($1, 'demo', 1, '{}', 'ai_ark') RETURNING id`, [R]);
+    r = await prun({});
+    check("a people run of either source going for the client: 409", r.status === 409 && /already has a people run going/.test(r.body.error));
+    await pool.query(`DELETE FROM aiark_people_runs WHERE id = $1`, [goingRun.id]);
+    try {
+      process.env.AIARK_DEMO_CREDITS = "100";
+      r = await prun({});
+    } finally {
+      delete process.env.AIARK_DEMO_CREDITS;
+    }
+    check("AI Ark's balance under the people runs' minimum: 409, read free", r.status === 409 && /under the people runs' minimum/.test(r.body.error), JSON.stringify(r.body));
+    check("a source that is not one: still 400", (await prun({ source: "clay" })).status === 400);
+    r = await prun({});
+    if (r.status === 409 && /not built yet/.test(r.body.error ?? "")) {
+      check("the engine without its by-area path refuses (409), nothing written", (await one(`SELECT count(*)::int AS n FROM aiark_people_runs WHERE client_tag = $1`, [R])).n === 0);
+      later("a LinkedIn people run starts: 201, source linkedin, no Companies table or tracks needed first", "Builder L1: createPeopleRun's by-area path");
+    } else {
+      check("a LinkedIn people run starts: 201, source linkedin", r.status === 201 && r.body.run?.source === "linkedin", JSON.stringify(r.body).slice(0, 300));
+    }
+
+    section("R5. The settings sheet: linkedin_sources");
+    await resetSwitches();
+    T.role = "manager";
+    check("managers can't read or save the settings (403)", (await call(routes.settings.GET)).status === 403);
+    T.role = "admin";
+    const got = await call(routes.settings.GET);
+    const input = serverLib.settingsInputOf(got.body.value);
+    const lsNow = got.body.value?.linkedin_sources;
+    check("the settings carry the LinkedIn switch, its client list and the people a company",
+      got.status === 200 && typeof lsNow?.enabled === "boolean" && Array.isArray(lsNow.tags) && Number.isInteger(lsNow.people_per_company) &&
+        JSON.stringify(input.linkedin_sources) === JSON.stringify(lsNow), JSON.stringify(lsNow));
+    const edit = (body, f) => {
+      const x = structuredClone(serverLib.settingsInputOf(body.value));
+      f(x);
+      return { body: { version: body.version, ...x } };
+    };
+    for (const [label, f, re] of [
+      ["people a company out of range: 400", (x) => { x.linkedin_sources.people_per_company = 0; }, /People a company \(LinkedIn people runs\) must be a whole number from 1 to 100/],
+      ["a client list with something that is not a tag: 400", (x) => { x.linkedin_sources.tags = ["not a tag!"]; }, /LinkedIn searches: not a tag! is not a client tag/],
+      ["a switch that is not on or off: 400", (x) => { x.linkedin_sources.enabled = "yes"; }, /LinkedIn searches must be on or off/],
+      ["not the block's shape: 400", (x) => { x.linkedin_sources = [1]; }, /LinkedIn searches: must be the switch/],
+    ]) {
+      const bad = await call(routes.settings.PUT, edit(got.body, f));
+      check(label, bad.status === 400 && re.test(bad.body.error ?? ""), `${bad.status} ${bad.body.error ?? ""}`);
+    }
+    const lsRow = async () => one(`SELECT value, updated_at::text AS at FROM enrich_settings WHERE key = 'linkedin_sources'`);
+    const lsBefore = await lsRow();
+    const keep = await call(routes.settings.PUT, edit(got.body, (x) => {
+      delete x.linkedin_sources;
+      x.people_pipeline.max_people_per_run = x.people_pipeline.max_people_per_run === 299 ? 298 : 299;
+    }));
+    const lsKept = await lsRow();
+    check("a save without linkedin_sources keeps it as stored, not written",
+      keep.status === 200 && keep.body.changes?.some((c) => c.startsWith("most people a run")) && JSON.stringify(lsKept.value) === JSON.stringify(lsBefore.value) && lsKept.at === lsBefore.at,
+      JSON.stringify(keep.body.changes ?? keep.body));
+    const now2 = await call(routes.settings.GET);
+    const L = tagOf("R_SHEET");
+    const ppc = now2.body.value.linkedin_sources.people_per_company === 8 ? 9 : 8;
+    T.audits.length = 0;
+    const saved = await call(routes.settings.PUT, edit(now2.body, (x) => {
+      x.linkedin_sources = { enabled: true, tags: [` ${L.toLowerCase()} `, L], people_per_company: ppc };
+    }));
+    const lsSaved = (await lsRow()).value;
+    check("a save of the LinkedIn block: each change listed, and logged",
+      saved.status === 200 && saved.body.changes.includes("LinkedIn searches off to on") && saved.body.changes.includes(`LinkedIn searches' clients no client to ${L}`) &&
+        saved.body.changes.includes(`people a company (LinkedIn) ${now2.body.value.linkedin_sources.people_per_company} to ${ppc}`) && T.audits.some((a) => a.action === "enrich_settings"),
+      JSON.stringify(saved.body.changes ?? saved.body));
+    check("... tags upper case, once each, and the worker reads it",
+      lsSaved.enabled === true && JSON.stringify(lsSaved.tags) === JSON.stringify([L]) && lsSaved.people_per_company === ppc &&
+        settingsFrom(await all(`SELECT key, value FROM enrich_settings`)).flagOn("linkedin_sources", L));
+    T.role = "manager";
+    await resetSwitches();
+
+    section("R6. The setup routes' LinkedIn plans");
+    T.worker = heartbeat();
+    const sc = (await call(routes.setup.GET, { query: { tag: R } })).body;
+    const eff = await linkedinSettingsFor(pool, { tag: R, kind: "companies" });
+    check("GET /api/companies/setup: the LinkedIn company search, its switch (off), counts and version",
+      sc.linkedin?.kind === "companies" && sc.linkedin.version === eff.version && sc.linkedin.from === "row" && sc.linkedin.switch.enabled === false &&
+        sc.linkedin.places === 3 && sc.linkedin.unplaced === 1 && sc.linkedin.searches >= 1 && sc.linkedin.keywords.union === eff.keywords.union.length && sc.linkedin.keywords.checkedAfter > 0,
+      JSON.stringify(sc.linkedin));
+    check("... the worker's LinkedIn capability, and without it", sc.worker?.linkedin === true &&
+      await (async () => {
+        T.worker = heartbeat({ linkedin: false });
+        const w = (await call(routes.setup.GET, { query: { tag: R } })).body.worker;
+        T.worker = heartbeat();
+        return w?.linkedin === false;
+      })());
+    check("... no client picked: no LinkedIn plan", (await call(routes.setup.GET)).body.linkedin === null);
+    const ps = (await call(routes.peopleSetup.GET, { query: { tag: tags.norow } })).body;
+    check("GET /api/companies/people/setup: the LinkedIn people search (a client with no row: rules and starter)",
+      ps.linkedin?.kind === "people" && ps.linkedin.from === "rules_and_starter" && ps.linkedin.places === 2 && ps.linkedin.keywords.union >= 2 && ps.linkedin.searches >= 1,
+      JSON.stringify(ps.linkedin));
+
+    section("R7. O1 and O2 as the page and the routes show them");
+    // How the page reads the engine's answer, on a made-up one (the made-up geo of part A): the
+    // resolver's area (O2) and keywords.checkedAfter (O1), whatever Builder L1's engine has yet.
+    const view = await srcModule("lib/linkedin/server.ts");
+    const base = resolveLinkedin({
+      tag: "LITEST_SIM", kind: "companies", targeting: { include_locations: [place("Quuxville"), place("Barville")], version: "r" }, saved: null, clientType: "OS",
+      starter: { items: [], version: 1, updatedAt: "s", loaded: true }, row: { client_tag: "LITEST_SIM", kind: "companies", include_locations: [place("Quuxville"), place("Farville"), place(null)],
+        exclude_locations: [], unplaced: [], exclude_keywords: ownWords(120), version: "v" },
+    });
+    const sim = view.areaView({ ...base, area: { sent: [place("Quuxville"), place("Barville")], notSearched: [place("Farville")] } }, GEO);
+    check("the page reads O2 from the resolver's area: places sent, not searched, and the state searched as the rules' places inside it",
+      JSON.stringify(sim.placesSent.map((p) => p.text)) === JSON.stringify(["Quuxville, Zedland", "Barville, Zedland"]) &&
+        JSON.stringify(sim.notSearched.map((p) => p.text)) === JSON.stringify(["Farville, Zedland"]) &&
+        sim.narrowed.length === 1 && sim.narrowed[0].entry.text === "Zedland" && sim.narrowed[0].into.length === 2, JSON.stringify(sim));
+    const noArea = view.areaView(base, GEO);
+    check("... an engine without O2 sends the own places as they are (nothing narrowed)", noArea.placesSent.length === 3 && noArea.narrowed.length === 0);
+    check("the page reads O1's list from keywords.checkedAfter, and from notApplied before it",
+      JSON.stringify(view.checkedAfterOf({ ...base, keywords: { ...base.keywords, checkedAfter: ["quux one"] } })) === JSON.stringify(["quux one"]) &&
+        JSON.stringify(view.checkedAfterOf(base)) === JSON.stringify(base.keywords.notApplied ?? base.keywords.checkedAfter) && view.checkedAfterOf(base).length > 0);
+    const rv = (await get({ tag: R, kind: "companies" })).body.companies;
+    check("O1: the keywords AI Ark's request can't hold are listed, to be checked after the pull, none dropped",
+      rv.keywords.checkedAfter.length > 0 && rv.keywords.union === CLEANING_EXCLUDE_KEYWORDS.length + 120 && rv.keywords.checkedAfter.every((k) => rv.own.exclude_keywords.includes(k)));
+    if (o1) {
+      const texts = [...rv.plan.notes, ...(await plan()).notes, ...(await preview({ tag: R, kind: "companies", value: { include_locations: rv.own.include_locations.map((p) => p.entry), exclude_locations: [], unplaced: [], exclude_keywords: rv.own.exclude_keywords } })).body.plan.notes];
+      check("O1: nothing on the page or the Companies tab says 'not applied'", !texts.some((n) => /not applied/i.test(n)), texts.join(" | ").slice(0, 300));
+    } else later("O1: nothing on the page or the Companies tab says 'not applied'", "Builder L1: O1's list and notes in the resolver and builders");
+    if (o2) {
+      check("O2: a city the rules cover is searched; the state they don't cover is searched as the rules' cities inside it",
+        JSON.stringify(rv.placesSent.map((p) => p.text)) === JSON.stringify([txt(CITY.kept), txt(CITY.rule)]) && rv.narrowed.length === 1 && rv.narrowed[0].entry.text === txt(null) &&
+          JSON.stringify(rv.narrowed[0].into.map((p) => p.text)) === JSON.stringify([txt(CITY.kept), txt(CITY.rule)]), JSON.stringify([rv.placesSent, rv.narrowed]));
+      check("O2: a city outside the rules is not searched, and listed", JSON.stringify(rv.notSearched.map((p) => p.text)) === JSON.stringify([txt(CITY.out)]), JSON.stringify(rv.notSearched));
+      const sp = await plan();
+      check("O2: the Companies tab counts the same", sp.placesSent === 2 && sp.notSearched === 1 && sp.narrowed === 1 && sp.places === 3, JSON.stringify(sp));
+      const nrv = (await get({ tag: tags.norules, kind: "companies" })).body.companies;
+      check("O2: a client whose rules hold no places is not narrowed", nrv.rules.places === 0 && nrv.notSearched.length === 0 && nrv.placesSent.length === 1 && nrv.plan.blockers.length === 0);
+      const ev = (await get({ tag: tags.empty, kind: "companies" })).body.companies;
+      check("O2: nothing left inside the rules: blocked, with the reason, never a search without places",
+        ev.placesSent.length === 0 && ev.notSearched.length === 1 && ev.plan.searches === 0 && ev.plan.blockers.length > 0, JSON.stringify(ev.plan));
+      await switches({ cp: true, pp: true, ls: true, tags: [tags.empty] });
+      const evc = await count({ linkedinVersion: ev.searchVersion }, tags.empty);
+      check("... and its count: 400 with that reason, nothing counted", evc.status === 400 && evc.body.error === ev.plan.blockers.join(" "), JSON.stringify(evc.body));
+      await resetSwitches();
+    } else {
+      for (const name of [
+        "O2: a city the rules cover is searched; the state they don't cover is searched as the rules' cities inside it",
+        "O2: a city outside the rules is not searched, and listed",
+        "O2: the Companies tab counts the same",
+        "O2: a client whose rules hold no places is not narrowed",
+        "O2: nothing left inside the rules: blocked, with the reason (the count too)",
+      ]) later(name, "Builder L1: O2's narrowing in the resolver (effective.area)");
+    }
+    const after = await all(`SELECT client_tag, kind, include_locations FROM client_linkedin_settings WHERE client_tag = ANY($1::text[]) ORDER BY client_tag, kind`, [[tags.row, tags.norules, tags.empty]]);
+    // jsonb keeps its own key order, so entries are compared part by part, in list order.
+    const canon = (list) => JSON.stringify(list.map((e) => [e.country, e.state ?? null, e.city ?? null]));
+    check("the stored lists never change for a view, a count or a pull",
+      after.length === 4 && after.filter((x) => x.client_tag === R).every((x) => canon(x.include_locations) === canon(rowPlaces)) &&
+        after.filter((x) => x.client_tag !== R).every((x) => canon(x.include_locations) === canon([at(CITY.out)])), JSON.stringify(after));
+  } finally {
+    T.role = "manager";
+    T.worker = null;
+    delete process.env.AIARK_DEMO_CREDITS;
+    const runIds = (await all(`SELECT id FROM aiark_company_runs WHERE starts_with(client_tag, $1)`, [PREFIX])).map((x) => x.id);
+    await pool.query(`DELETE FROM aiark_companies WHERE run_id = ANY($1::uuid[])`, [runIds]);
+    await pool.query(`DELETE FROM aiark_company_runs WHERE starts_with(client_tag, $1)`, [PREFIX]);
+    const peopleRunIds = (await all(`SELECT id FROM aiark_people_runs WHERE starts_with(client_tag, $1)`, [PREFIX])).map((x) => x.id);
+    await pool.query(`DELETE FROM aiark_people WHERE people_run_id = ANY($1::uuid[])`, [peopleRunIds]);
+    await pool.query(`DELETE FROM aiark_people_runs WHERE starts_with(client_tag, $1)`, [PREFIX]);
+    const tables = (await all(`SELECT id FROM enrich_tables WHERE starts_with(client_tag, $1)`, [PREFIX])).map((x) => x.id);
+    await pool.query(`DELETE FROM enrich_memory WHERE starts_with(client_tag, $1) OR table_id = ANY($2::uuid[])`, [PREFIX, tables]);
+    await pool.query(`DELETE FROM enrich_tables WHERE id = ANY($1::uuid[])`, [tables]);
+    await pool.query(`DELETE FROM enrich_counters WHERE table_id = ANY($1::uuid[])`, [tables]).catch(() => {});
+    for (const v of made.variants) await pool.query(`DELETE FROM enrich_originals WHERE variant = $1`, [v]);
+    await pool.query(`DELETE FROM geo_locations WHERE geoname_id = ANY($1::bigint[])`, [made.geo]);
+    await restoreSettings();
+  }
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────

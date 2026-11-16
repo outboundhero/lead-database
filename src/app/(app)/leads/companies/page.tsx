@@ -74,14 +74,14 @@ function CompaniesTab() {
     }
   }, [tag]);
 
-  /** The balance, the worker and the settings only: the pulls and counts are the poll's. */
+  /** The balance, the worker, the settings and the LinkedIn search only: the pulls and counts are the poll's. */
   const refreshQuietly = useCallback(async () => {
     try {
       const res = await fetch(`/api/companies/setup${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`);
       if (!res.ok) return;
       const s = (await res.json()) as CompaniesSetup;
       if (tag !== tagRef.current) return;
-      setSetup((prev) => (prev ? { ...prev, credits: s.credits, worker: s.worker, modes: s.modes, pipeline: s.pipeline, settings: s.settings } : prev));
+      setSetup((prev) => (prev ? { ...prev, credits: s.credits, worker: s.worker, modes: s.modes, pipeline: s.pipeline, settings: s.settings, linkedin: s.linkedin } : prev));
     } catch {
       /* the next poll tries again */
     }
@@ -361,7 +361,16 @@ function CompaniesTab() {
         </>
       )}
 
-      {isAdmin && <SettingsSheet open={settingsOpen} onOpenChange={setSettingsOpen} onSaved={() => refreshQuietly()} />}
+      {isAdmin && (
+        <SettingsSheet
+          open={settingsOpen}
+          onOpenChange={setSettingsOpen}
+          onSaved={() => {
+            refreshQuietly();
+            loadPeople(); // the people panel's switches, LinkedIn's included
+          }}
+        />
+      )}
     </div>
   );
 }

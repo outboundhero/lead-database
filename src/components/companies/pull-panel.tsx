@@ -9,12 +9,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { IosSegmentedControl } from "@/components/ui/ios/ios-segmented-control";
 import type { EmployeeBand, RunMode } from "@/lib/aiark/types";
-import type { CompaniesSetup, CompanyCountResult, CompanyRun, CompanyRunStatus, ModelPrice, PipelineView } from "@/lib/companies/types";
+import type { CompaniesSetup, CompanyCountResult, CompanyRun, CompanyRunStatus, CompanyWorker, ModelPrice, PipelineView } from "@/lib/companies/types";
+import type { LinkedinPlanView, PullSource } from "@/lib/linkedin/types";
 
 // The Companies tab's pull side: what AI Ark will be asked for the client, its
 // company filters (read-only: they are saved on the AI Ark tab), the count and
 // the pull, and the client's pulls. Every figure on cost comes from the design's
 // prices (AI Ark 0.1 credit a company; web searches and Reoon checks below).
+// A pull searches either the client's rules (AI Ark) or its LinkedIn search
+// (migration 128: its own places and keywords, edited on the AI Ark tab).
 
 export const fmt = (n: number | null | undefined) => (n ?? 0).toLocaleString("en-US");
 export const cr = (n: number | null | undefined) => (n ?? 0).toLocaleString("en-US", { maximumFractionDigits: 1 });
@@ -96,6 +99,117 @@ export function Row({ label, children }: { label: string; children: React.ReactN
     <div className="flex gap-3">
       <span className="w-28 shrink-0 text-muted-foreground">{label}</span>
       <span className="min-w-0">{children}</span>
+    </div>
+  );
+}
+
+// ── The source: AI Ark or LinkedIn ──────────────────────────────────────────
+
+/**
+ * Why the client's LinkedIn search of this kind can't be used here, or null:
+ * the switch, its client list, the pipeline it needs, and the worker.
+ */
+export function linkedinWhyNot(li: LinkedinPlanView | null | undefined, tag: string, worker: CompanyWorker | null): string | null {
+  if (!li) return "The LinkedIn search could not be read";
+  if (!li.switch.enabled) return "LinkedIn searches are off (an admin can switch them on in the settings)";
+  if (!li.switch.onList) return `${tag} is not on the LinkedIn searches' client list (an admin can add it in the settings)`;
+  if (li.kind === "companies" && !li.switch.companies) return "Company pulls are off for this client, and a LinkedIn company search needs them";
+  if (li.kind === "people" && !li.switch.people) return "People runs are off for this client, and a LinkedIn people search needs them";
+  if (!worker?.linkedin) return "The worker that is running doesn't do LinkedIn searches yet";
+  return null;
+}
+
+/** AI Ark (the client's rules) or LinkedIn (its LinkedIn search); LinkedIn is disabled, with its reason, when it can't be used. */
+export function SourcePicker({ value, onChange, linkedinWhy }: { value: PullSource; onChange: (v: PullSource) => void; linkedinWhy: string | null }) {
+  const option = (v: PullSource, label: string, disabled: boolean, title?: string) => (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={value === v}
+      disabled={disabled}
+      title={title}
+      onClick={() => onChange(v)}
+      className={cn(
+        "inline-flex h-7 flex-1 items-center justify-center rounded-[10px] px-3 text-[12px] font-medium transition-all",
+        value === v ? "bg-card text-foreground shadow-[0_2px_6px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.06)]" : "text-muted-foreground hover:text-foreground",
+        disabled && "cursor-not-allowed opacity-50 hover:text-muted-foreground"
+      )}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div role="tablist" className="inline-flex h-8 w-[220px] items-center rounded-xl bg-[oklch(0.92_0.004_264)] p-0.5 dark:bg-[oklch(0.22_0.005_264)]">
+        {option("ai_ark", "AI Ark", false)}
+        {option("linkedin", "LinkedIn", Boolean(linkedinWhy) && value !== "linkedin", linkedinWhy ?? undefined)}
+      </div>
+      {linkedinWhy && <span className="text-[12px] text-muted-foreground">LinkedIn: {linkedinWhy}.</span>}
+    </div>
+  );
+}
+
+/**
+ * The client's LinkedIn search as the Companies tab shows it: its places (the
+ * ones its sending rules allow are searched), its keywords (the ones AI Ark's
+ * request can't hold are checked after the pull), the searches, and what stops
+ * it. Its places and keywords are edited on the AI Ark tab.
+ */
+export function LinkedinPlanBox({ tag, plan }: { tag: string; plan: LinkedinPlanView }) {
+  const k = plan.keywords;
+  return (
+    <div className="space-y-2 rounded-xl border border-border/70 p-3 text-[13px]">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">LinkedIn {plan.kind === "people" ? "people" : "company"} search</span>
+        <span className="text-[12px] text-muted-foreground">
+          {plan.searches} search{plan.searches === 1 ? "" : "es"}
+          {plan.from === "row" ? ", this client's own places and keywords" : ", its rules' places and the starter keywords (no LinkedIn settings of its own yet)"}
+        </span>
+        <Button size="xs" variant="outline" className="ml-auto" asChild>
+          <Link href={`/leads/ai-ark?client=${encodeURIComponent(tag)}`}>Edit on the AI Ark tab</Link>
+        </Button>
+      </div>
+      {plan.blockers.length > 0 && (
+        <ul className="space-y-1 rounded-xl bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">
+          {plan.blockers.map((b) => (
+            <li key={b}>{b}</li>
+          ))}
+        </ul>
+      )}
+      <Row label="Places">
+        {fmt(plan.placesSent)} searched
+        {plan.notSearched ? (
+          <span className="block text-[12px] text-[var(--warning)]">
+            {fmt(plan.notSearched)} not searched: outside the client&apos;s sending rules (adding them to its rules brings them in)
+          </span>
+        ) : null}
+        {plan.narrowed ? (
+          <span className="block text-[12px] text-muted-foreground">
+            {fmt(plan.narrowed)} state{plan.narrowed === 1 ? "" : "s"} or countr{plan.narrowed === 1 ? "y" : "ies"} searched as the rules&apos; places inside {plan.narrowed === 1 ? "it" : "them"}
+          </span>
+        ) : null}
+        {plan.unplaced ? <span className="block text-[12px] text-muted-foreground">{fmt(plan.unplaced)} Clay values not placed (never searched)</span> : null}
+      </Row>
+      <Row label="Places left out">{plan.excludedPlaces ? fmt(plan.excludedPlaces) : "none"}</Row>
+      <Row label="Keywords">
+        {fmt(k.union)} left out, {fmt(k.sent)} phrases sent
+        {k.checkedAfter ? <span className="block text-[12px] text-muted-foreground">{fmt(k.checkedAfter)} checked after the pull (AI Ark limit)</span> : null}
+      </Row>
+      <Row label="Filters">the standard titles, sizes, industries and company types, the same for every client</Row>
+      {(plan.notes.length > 0 || plan.pullBlockers.length > 0) && (
+        <ul className="space-y-1.5 text-[12.5px] leading-relaxed text-muted-foreground">
+          {plan.pullBlockers.map((n) => (
+            <li key={n} className="flex gap-2 text-[var(--warning)]">
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" /> {n}
+            </li>
+          ))}
+          {plan.notes.map((n) => (
+            <li key={n} className="flex gap-2">
+              <Info className="mt-0.5 size-3.5 shrink-0" /> {n}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -265,7 +379,9 @@ export function PullCard({
   onReload: () => void;
 }) {
   const { modes, pipeline, worker, plan } = setup;
+  const li = setup.linkedin;
   const [mode, setMode] = useState<RunMode>(() => (modes.demo.ready ? "demo" : "live"));
+  const [source, setSource] = useState<PullSource>("ai_ark");
   const [count, setCount] = useState<HeldCount | null>(null);
   const [counting, setCounting] = useState(false);
   const [size, setSize] = useState(() => Math.min(100, pipeline.maxPullSize));
@@ -276,40 +392,57 @@ export function PullCard({
     setMode((m) => (modes[m].ready ? m : modes.demo.ready ? "demo" : "live"));
   }, [modes]);
 
-  const versions = { rules: setup.targeting?.version ?? null, filters: setup.filters.version };
-  // A count only counts for the client, source, rules and filters it was made for.
+  // LinkedIn while it can be used for this client; back to AI Ark when it can't any more.
+  const liWhy = linkedinWhyNot(li, tag, worker);
+  useEffect(() => {
+    if (liWhy) setSource("ai_ark");
+  }, [liWhy]);
+  const linkedin = source === "linkedin" && li ? li : null;
+
+  const versions = { rules: setup.targeting?.version ?? null, filters: setup.filters.version, linkedin: li?.version ?? null };
+  // A count only counts for the client, mode, source and the versions it was made for.
   const countNow =
-    count && count.key === `${tag}|${mode}` && count.rulesVersion === versions.rules && count.filtersVersion === versions.filters ? count : null;
-  const searches = plan?.searches ?? 0;
-  const blockers = plan?.blockers ?? [];
+    count &&
+    count.key === `${tag}|${mode}|${source}` &&
+    (linkedin ? count.linkedinVersion === versions.linkedin : count.rulesVersion === versions.rules && count.filtersVersion === versions.filters)
+      ? count
+      : null;
+  const searches = (linkedin ? linkedin.searches : plan?.searches) ?? 0;
+  const blockers = (linkedin ? linkedin.blockers : plan?.blockers) ?? [];
+  const pullBlockers = (linkedin ? linkedin.pullBlockers : plan?.pullBlockers) ?? [];
   const activeHere = runs.find((r) => isActive(r) && r.client_tag === tag);
   const ceiling = brake(size, searches);
   const worst = worstPerCompany(pipeline) * (Number.isFinite(size) ? Math.max(0, size) : 0);
   // 5 example companies on the first search, 1 on each other: 0.1 credit each.
   const countCost = PER_COMPANY * 5 + PER_COMPANY * Math.max(0, searches - 1);
-  const canCount = pipeline.enabled && modes[mode].ready && !blockers.length && searches > 0;
+  const canCount = pipeline.enabled && modes[mode].ready && !blockers.length && searches > 0 && !(source === "linkedin" && liWhy);
 
   const pullWhyNot =
     !pipeline.enabled ? "Company pulls are off" :
     pipeline.onList === false ? `${tag} is not on the company pulls' client list (an admin can add it in the settings)` :
+    source === "linkedin" && liWhy ? liWhy :
     !modes[mode].ready ? modes[mode].why ?? "Not available" :
     !worker?.online ? "The service that runs pulls is off. Counting works" :
     !worker.companyRuns ? "The worker that is running doesn't do company pulls yet. Counting works" :
-    blockers.length ? "Fix what is listed under “What AI Ark will be asked”" :
-    plan?.pullBlockers.length ? plan.pullBlockers[0] :
+    blockers.length ? (linkedin ? "Fix what is listed under the LinkedIn company search" : "Fix what is listed under “What AI Ark will be asked”") :
+    pullBlockers.length ? pullBlockers[0] :
     activeHere ? "This client already has a pull going" :
     !Number.isInteger(size) || size < 1 || size > pipeline.maxPullSize ? `Pull between 1 and ${fmt(pipeline.maxPullSize)} companies` :
     !countNow ? "Count the matches first: a pull starts after a count of these rules and filters" :
     null;
 
   const runCount = async () => {
-    const key = `${tag}|${mode}`;
+    const key = `${tag}|${mode}|${source}`;
     setCounting(true);
     try {
       const res = await fetch("/api/companies/count", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tag, mode, rulesVersion: versions.rules, filtersVersion: versions.filters }),
+        body: JSON.stringify(
+          linkedin
+            ? { tag, mode, source: "linkedin", linkedinVersion: versions.linkedin }
+            : { tag, mode, rulesVersion: versions.rules, filtersVersion: versions.filters }
+        ),
       });
       const j = await res.json();
       if (!res.ok) {
@@ -326,17 +459,22 @@ export function PullCard({
 
   const start = async () => {
     if (!countNow) return;
+    const which = linkedin ? "LinkedIn " : "";
     const what =
       mode === "demo"
-        ? `a DEMO pull of ${fmt(size)} companies for ${tag}? They are made up, and nothing is bought from AI Ark.`
-        : `a LIVE pull of ${fmt(size)} companies for ${tag}? About ${cr(size * PER_COMPANY)} AI Ark credits; the pull stops itself before passing ${fmt(ceiling)}. Website and email searches and email checks add at most about ${usd(worst)}.`;
+        ? `a DEMO ${which}pull of ${fmt(size)} companies for ${tag}? They are made up, and nothing is bought from AI Ark.`
+        : `a LIVE ${which}pull of ${fmt(size)} companies for ${tag}? About ${cr(size * PER_COMPANY)} AI Ark credits; the pull stops itself before passing ${fmt(ceiling)}. Website and email searches and email checks add at most about ${usd(worst)}.`;
     if (!window.confirm(`Start ${what}`)) return;
     setStarting(true);
     try {
       const res = await fetch("/api/companies/runs", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tag, mode, size, matchCount: countNow.total, rulesVersion: versions.rules, filtersVersion: versions.filters }),
+        body: JSON.stringify(
+          linkedin
+            ? { tag, mode, size, matchCount: countNow.total, source: "linkedin", linkedinVersion: versions.linkedin }
+            : { tag, mode, size, matchCount: countNow.total, rulesVersion: versions.rules, filtersVersion: versions.filters }
+        ),
       });
       const j = await res.json();
       if (!res.ok) {
@@ -378,6 +516,18 @@ export function PullCard({
           />
           {mode === "live" && !modes.live.ready && <span className="text-[12px] text-[var(--warning)]">{modes.live.why}</span>}
         </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="w-20 text-[12.5px] text-muted-foreground">Search</span>
+          <SourcePicker
+            value={source}
+            onChange={(v) => {
+              setSource(v);
+              setCount(null);
+            }}
+            linkedinWhy={liWhy}
+          />
+        </div>
+        {linkedin && <LinkedinPlanBox tag={tag} plan={linkedin} />}
 
         <div className="flex flex-wrap items-center gap-2">
           <Button onClick={runCount} variant="outline" disabled={counting || !canCount}>
@@ -422,7 +572,7 @@ export function PullCard({
           ) : (
             <p>
               <b>AI Ark:</b> about <b>{cr(size * PER_COMPANY)}</b> credits (0.1 a company). The pull stops itself before passing {fmt(ceiling)}. Companies
-              an earlier pull bought for any client are copied in free when they are in this client&apos;s places.
+              an earlier pull bought for any client are copied in free when {linkedin ? "their head office is" : "they are"} in this client&apos;s places.
             </p>
           )}
           <p>
@@ -532,6 +682,7 @@ function RunRow({ run, onCancel }: { run: CompanyRun; onCancel: () => void }) {
         </span>
         <span className="text-[13px] font-medium">
           {fmt(run.size_requested)} companies
+          {run.source === "linkedin" && <span className="ml-1 rounded-full bg-primary/12 px-1.5 text-[12px] text-primary">LinkedIn</span>}
           {run.mode === "demo" && <span className="ml-1 rounded-full bg-muted px-1.5 text-[12px] text-muted-foreground">demo</span>}
         </span>
         <span className="text-[12px] text-muted-foreground">

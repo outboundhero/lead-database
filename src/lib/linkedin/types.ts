@@ -3,11 +3,23 @@
 // these are what the routes answer and the pages send.
 //
 // Routes (manager and up, requireRole("manager"), as PUT /api/aiark/people-filters):
-//   GET /api/aiark/linkedin-settings?tag=TAG[&kind=people|companies]
-//       -> LinkedinSettingsResponse (both kinds when kind is left out)
-//   PUT /api/aiark/linkedin-settings  body LinkedinSettingsSave
-//       -> 200 LinkedinSettingsSaved | 400 { error, errors } | 404 { error } | 409 { error, changed: true }
+//   GET  /api/aiark/linkedin-settings?tag=TAG[&kind=people|companies]
+//        -> LinkedinSettingsResponse (both kinds when kind is left out)
+//   POST /api/aiark/linkedin-settings  body LinkedinPreviewRequest
+//        -> 200 LinkedinPreview (the plan for lists not saved yet; nothing written, no AI Ark call)
+//   PUT  /api/aiark/linkedin-settings  body LinkedinSettingsSave
+//        -> 200 LinkedinSettingsSaved | 400 { error, errors } | 404 { error } | 409 { error, changed: true }
 // Viewing and editing work with the linkedin_sources switch off: they spend nothing.
+//
+// Two overrides of the phase 4 contract shape what is shown:
+//   O1  keywords AI Ark's request can't hold are "checked after the pull (AI
+//       Ark limit)": every company and person a LinkedIn search finds is
+//       checked against the client's whole keyword list before anything more
+//       is spent on it or it is listed.
+//   O2  a LinkedIn search covers only places the client's sending rules
+//       (client_targeting) allow; the client's own places outside them are
+//       "not searched: outside the client's sending rules". The stored lists
+//       never change for it.
 
 import type { EmployeeBand, PeopleFilters } from "@/lib/aiark/types";
 
@@ -46,13 +58,37 @@ export interface LinkedinOwnInput {
   exclude_keywords: string[];
 }
 
+/** O1: what AI Ark is sent of the keywords, and what is checked after the pull instead. */
+export interface LinkedinKeywordsView {
+  /** The standard keywords and the client's own, once each. */
+  union: number;
+  /** Phrases AI Ark is sent (condensed: a phrase a shorter one covers is not sent again). */
+  sent: number;
+  /** Keywords AI Ark's request can't hold: checked after the pull (AI Ark limit), never dropped. */
+  checkedAfter: string[];
+}
+
+/** O2: a state or country of the client's own places, searched as the rules' places inside it. */
+export interface NarrowedPlace {
+  entry: PlaceView;
+  into: PlaceView[];
+}
+
+/** What a LinkedIn search of this kind would send now (no AI Ark call). */
+export interface LinkedinPlan {
+  searches: number;
+  blockers: string[];
+  pullBlockers: string[];
+  notes: string[];
+}
+
 /** One kind of one client's LinkedIn settings, as the AI Ark tab shows them. */
 export interface LinkedinSettingsView {
   tag: string;
   kind: LinkedinKind;
   /** row: the client's own row; rules_and_starter: no row yet, so its database rules' places and the starter keywords. */
   from: "row" | "rules_and_starter";
-  /** The client's own lists: editable. */
+  /** The client's own lists: editable. Narrowing (O2) never changes them. */
   own: {
     include_locations: PlaceView[];
     exclude_locations: PlaceView[];
@@ -73,18 +109,24 @@ export interface LinkedinSettingsView {
     /** The full filters, for a "show all" view. */
     filters: PeopleFilters;
   };
-  /** D-P4-3: what AI Ark is sent, and what its limit leaves out. */
-  keywords: { union: number; sent: number; notApplied: string[] };
-  /** Own include places the client's database area (its rules) doesn't cover: found there is paid for, then outside. */
-  outsideRules: PlaceView[];
-  /** What a LinkedIn search would send now (no AI Ark call). */
-  plan: { searches: number; blockers: string[]; pullBlockers: string[]; notes: string[] };
+  /** D-P4-3 and O1: what AI Ark is sent, and what is checked after the pull instead. */
+  keywords: LinkedinKeywordsView;
+  /** O2: the places a search sends (the own places narrowed to the sending rules). */
+  placesSent: PlaceView[];
+  /** O2: own places outside the client's sending rules: not searched. Adding them to the rules brings them in. */
+  notSearched: PlaceView[];
+  /** O2: own states or countries searched as the rules' places inside them. */
+  narrowed: NarrowedPlace[];
+  /** The client's sending rules (client_targeting) as far as places go. No include places: nothing is narrowed. */
+  rules: { exists: boolean; places: number; excludedPlaces: number };
+  plan: LinkedinPlan;
   provenance: {
     source: "clay" | "manual" | null;
     clay: { sourceId: string | null; campaign: string | null; setUpAt: string | null; fingerprint: string | null } | null;
     copiedFrom: LinkedinKind | null;
     seededAt: string | null;
     updatedAt: string | null;
+    /** The person who saved last (full name), when a person did. */
     updatedBy: string | null;
     notes: string[];
     /** Codes, with their plain words in flagWords. */
@@ -97,6 +139,8 @@ export interface LinkedinSettingsView {
   log: LinkedinLogEntry[];
   /** Sent back with a save; a 409 answers any change since. */
   version: string;
+  /** What a count, a pull or a run compares (the lists, the rules, the saved filters): sent back with them. */
+  searchVersion: string;
 }
 
 export interface LinkedinLogEntry {
@@ -148,6 +192,23 @@ export interface LinkedinSettingsSaved {
   view: LinkedinSettingsView;
 }
 
+/** The editor's preview of lists not saved yet (POST /api/aiark/linkedin-settings). */
+export interface LinkedinPreviewRequest {
+  tag: string;
+  kind: LinkedinKind;
+  value: LinkedinOwnInput;
+}
+
+export interface LinkedinPreview {
+  plan: LinkedinPlan;
+  keywords: LinkedinKeywordsView;
+  placesSent: PlaceView[];
+  notSearched: PlaceView[];
+  narrowed: NarrowedPlace[];
+  /** Why a place, keyword or unplaced value would be refused by a save, each named. */
+  errors: string[];
+}
+
 /** The editor card on the AI Ark tab (src/components/aiark/linkedin-settings-card.tsx), mounted after "People filters". */
 export interface LinkedinSettingsCardProps {
   /** The client on the AI Ark tab (its ?client=). */
@@ -158,17 +219,21 @@ export interface LinkedinSettingsCardProps {
 
 /** The source picker on the Companies tab's pull and people panels. */
 export type PullSource = "ai_ark" | "linkedin";
+export const PULL_SOURCES: PullSource[] = ["ai_ark", "linkedin"];
 
 /** What the Companies tab's panels show for a LinkedIn source (GET /api/companies/setup and /people/setup add it as `linkedin`). */
 export interface LinkedinPlanView {
   kind: LinkedinKind;
   switch: LinkedinSwitchView;
   from: "row" | "rules_and_starter";
+  /** The client's own include places (as stored), what is sent of them (O2), and what is not searched. */
   places: number;
+  placesSent: number;
+  notSearched: number;
+  narrowed: number;
   excludedPlaces: number;
   unplaced: number;
-  outsideRules: number;
-  keywords: { union: number; sent: number; notApplied: number };
+  keywords: { union: number; sent: number; checkedAfter: number };
   searches: number;
   blockers: string[];
   pullBlockers: string[];

@@ -1288,7 +1288,8 @@ async function partB12(routes) {
   r = await post({});
   check("the client not on the list: 409", r.status === 409 && /not on the people runs' client list/.test(r.body.error));
   await setPP({ enabled: true, tags: [A, MONEY, V1, NOTAB] });
-  check("bad bodies: 400", (await post({ mode: "x" })).status === 400 && (await post({ source: "linkedin" })).status === 400 && (await post({ maxPeople: 0 })).status === 400 && (await post({ maxPeople: 999_999 })).status === 400);
+  // source "linkedin" is a source since migration 128: its refusals are 409s, checked in test-linkedin.mjs part R.
+  check("bad bodies: 400", (await post({ mode: "x" })).status === 400 && (await post({ source: "clay" })).status === 400 && (await post({ maxPeople: 0 })).status === 400 && (await post({ maxPeople: 999_999 })).status === 400);
   T.worker = heartbeat({ online: false });
   check("the worker offline: 409", (r = await post({})).status === 409 && /service that runs them is off/.test(r.body.error));
   T.worker = heartbeat({ peopleRuns: false });

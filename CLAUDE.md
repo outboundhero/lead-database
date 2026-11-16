@@ -2670,6 +2670,93 @@ it for every client when it is applied; `test-fit.mjs` counts before and after).
   companies are scored, its pushes wait in `scoring`. The gate covers a client before any
   removal or promotion for it, so a removed bad fit can't be pushed straight back.
 
+### LinkedIn sources (migration 128)
+
+Phase 4: each client's two Clay LinkedIn searches ("Find companies" and "Find people")
+rebuilt as AI Ark searches with the source `linkedin`: LinkedIn company pulls
+(`aiark_company_runs.source`) and LinkedIn people runs (`aiark_people_runs.source`), worked
+by the same engine, tables and Companies template as the AI Ark ones. **Ships off:**
+`enrich_settings.linkedin_sources` `{ enabled: false, tags: [], people_per_company: 13 }`.
+With it off, the AI Ark tab, company pulls, people runs, pushes and exports behave as
+before 128; only viewing and editing each client's LinkedIn settings works, and that
+spends nothing.
+
+- **The same for every client** (`scripts/lib/aiark/standard-filters.mjs`, `filtersFor` with
+  scope `linkedin`): the standard filters of `cleaning-filters.mjs` (titles, excluded
+  titles, sizes, excluded industries, company types and keywords) whatever the client's
+  type. A client's saved AI Ark people filters (`client_people_filters`) replace the titles,
+  sizes and industries; the standard keywords and company types always go. The AI Ark tab
+  keeps its own rule (standard filters for `Cleaning` clients only): one function, two scopes.
+- **Each client's own, per kind** (people, companies): places to search, places left out
+  and excluded keywords in `client_linkedin_settings` (server-only, RLS on, no policy),
+  in `client_targeting`'s place format. Seeded from the client's newest Clay search of each
+  kind by `scripts/linkedin-seed.mjs --file <normalized.json> [--apply]` (a dry run unless
+  `--apply`; the file is the Clay copy, version 3, read from outside the repo, which it
+  refuses); Clay values it could not place are kept as "not placed", shown, never searched.
+  The seed never writes over a person's save. Every save and seed write is logged with the
+  lists before and after in `client_linkedin_settings_log` (server-only); the audit log
+  gets one line of counts only, since every signed-in user can read it.
+- **A client with no row** (no Clay search, and every later client) searches its rules'
+  places (`client_targeting`, read live) and the shared starter keywords
+  (`enrich_settings.linkedin_starter_keywords`, written by the seed, empty until then). Its
+  first save on the AI Ark tab makes its own row from exactly what was shown. No row and no
+  starter list: its searches are blocked.
+- **Keywords sent:** the standard ones first, then the client's own, once each (case aside),
+  on a company's name, industry and description, as far as AI Ark's request holds them
+  (1,900 bytes and 300 values, `accountFilters`). The rest are **checked after the pull (AI
+  Ark limit)**, never dropped: every company a LinkedIn pull writes is judged against the
+  client's whole keyword list (the run keeps it in `filters.linkedin`; case-insensitive,
+  anywhere in the name, industry and description, as the sheet's exclusion terms are) and a
+  match is Excluded, so nothing later works it; a LinkedIn Look excludes a matching person
+  before any Buy, and a bought person's full company record is checked again before any
+  email step. The sheet's `exclude_terms` are not sent on LinkedIn searches; they are
+  checked after the pull, as for every row.
+- **Places: never outside the sending rules.** A LinkedIn search covers only places the
+  client's rules (`client_targeting.include_locations`) allow: an own place the rules cover
+  (its city, state or country key) is searched; an own state or country they don't cover
+  is searched as the rules' places inside it; an own city they don't cover is **not
+  searched** and listed so ("not searched: outside the client's sending rules", on the AI
+  Ark tab and in the run's `filters.linkedin`); places the rules leave out are left out. A
+  client whose rules hold no places is not narrowed. Nothing left: the search is blocked,
+  never sent without places. The stored lists never change for it: adding the places to
+  the client's rules (Clients page or the onboarding sheet) brings them in. Rows are still
+  judged against `client_targeting` (LinkedIn pull rows by their head office alone,
+  `hq_only`; a people candidate outside the area is never bought).
+- **Versions:** a save sends back the lists' version (409 `changed` when the row, or for a
+  client with no row its rules or the starter list, changed since the page loaded them); a
+  LinkedIn count, pull or people run sends back the search's version (`linkedinVersion`),
+  which also covers the rules and the saved AI Ark filters.
+- **The AI Ark tab** (`src/components/aiark/linkedin-settings-card.tsx`, under People
+  filters; routes `GET`, `POST` (preview, nothing written) and `PUT
+  /api/aiark/linkedin-settings`, manager and up): per kind, where the lists came from (the
+  Clay search, copied from the other kind, saved by whom, or the rules and starter list),
+  the seed's flags and notes, the editable lists, the values not placed (Use a suggestion,
+  or Remove), the standard filters read only, what a search would send (searches, places
+  searched, not searched, keywords checked after the pull, blockers), the switch for the
+  client, and the log. Edits are kept per client while the page is open.
+- **The Companies tab:** a Search control (AI Ark, LinkedIn) on the pull panel and the people
+  panel; LinkedIn is disabled with its reason while the switch is off for the client, the
+  pipeline it needs is off, or the worker lacks the capability. Counts, pulls and runs send
+  `source: "linkedin"` and `linkedinVersion`; the pulls and people runs show their source.
+  Refusals are 409s with the reason: LinkedIn off or the client not on its list, company
+  pulls (for a company search) or people runs (for a people search) off or the client not
+  on their list, a worker without `linkedin_sources`, a pull or run of either source going
+  (one of each per client), the search changed, a balance under the people runs' minimum;
+  a blocked plan is a 400 for a count or pull and a 409 for a run. A LinkedIn people run
+  needs no Companies table or tracks first: it brings each bought person's company in.
+- **Settings:** the settings sheet (admin) edits the switch, its client list and the people
+  a company (1 to 100) for LinkedIn people runs. `linkedin_sources` is optional in `PUT
+  /api/companies/settings`: left out, what is stored is kept. A LinkedIn company search also
+  needs company pulls on for the client (`linkedin_companies`), a people search people runs
+  (`linkedin_people`). The worker's heartbeat lists `linkedin_sources` once it works both.
+- ⚠ **Migration 128 must be in the database before this code runs:** the pulls list reads
+  `aiark_company_runs.source`. Order: 125, 126, 127, then 128.
+- **Tests:** stop the worker, then `LITEST_TMP=<folder outside the repo> node --env-file=.env.local
+  scripts/test-linkedin.mjs` (local database only; made-up `LITEST_` clients, invented places
+  and keywords, removed at the end; every setting put back). No network: AI Ark answers
+  through the demo transport and `fetch` refuses every address. Part R runs the routes for
+  real through the TypeScript loader. The six suites of phases 2 and 3 must still pass.
+
 ## Known issues / TODO
 
 - [ ] Reoon bulk endpoint batch size — confirm exact cap from docs before tuning `VALIDATION_BATCH_SIZE`

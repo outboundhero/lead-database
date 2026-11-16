@@ -7,9 +7,13 @@ import type { SettingsState } from "@/lib/companies/types";
 
 // GET /api/companies/settings: the pipeline's settings as the worker reads them
 //     (enrich_settings: company pulls, people runs, personalisation, the spend
-//     caps and the model of each original AI step), with their version.
+//     caps, the model of each original AI step and the LinkedIn searches), with
+//     their version.
 // PUT /api/companies/settings {version, company_pipeline, people_pipeline,
-//     personalisation, spend_caps, models}: saves the settings sheet's edits.
+//     personalisation, spend_caps, models, linkedin_sources?}: saves the
+//     settings sheet's edits. linkedin_sources (the switch, its client list and
+//     the people a LinkedIn run buys at one company, 1 to 100) is optional:
+//     left out, what is stored is kept.
 //     Every switch keeps its client list (tags, upper case; an empty list
 //     covers no client). Numbers must be whole and in range, model ids match
 //     ^[a-z0-9][a-z0-9.\-]{1,60}$, a reasoning effort is none, minimal, low,

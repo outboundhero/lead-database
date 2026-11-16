@@ -20,12 +20,13 @@ import {
 } from "@/lib/companies/types";
 
 // The pipeline's settings (enrich_settings), admins only: company pulls, people
-// runs and personalisation, each switch with its client list (an empty list
-// covers no client), their caps, the daily spend caps, and for each original
-// Clay AI step its model, reasoning effort and most searches. Saved through
-// PUT /api/companies/settings; the worker reads them every 30 s, so a model
-// is swapped with no deploy. Fit scoring, promotion and the gate have their
-// own panel.
+// runs, the LinkedIn searches and personalisation, each switch with its client
+// list (an empty list covers no client), their caps, the daily spend caps, and
+// for each original Clay AI step its model, reasoning effort and most searches.
+// Saved through PUT /api/companies/settings; the worker reads them every 30 s,
+// so a model is swapped with no deploy. Fit scoring, promotion and the gate
+// have their own panel; each client's LinkedIn places and keywords are edited
+// on the AI Ark tab.
 
 const NOT_SENT = "__not_sent"; // a Select item can't have an empty value
 
@@ -49,6 +50,7 @@ function toInput(v: PipelineSettings): SettingsInput {
     personalisation: { ...v.personalisation, tags: [...v.personalisation.tags] },
     spend_caps: { reoon_checks_per_day: v.spend_caps.reoon_checks_per_day, openai_usd_per_day: { ...v.spend_caps.openai_usd_per_day } },
     models,
+    linkedin_sources: { ...v.linkedin_sources, tags: [...v.linkedin_sources.tags] },
   };
 }
 
@@ -158,6 +160,9 @@ export function SettingsSheet({
     );
   const setStep = <K extends keyof SettingsInput["models"][ModelStep]>(step: ModelStep, k: K, v: SettingsInput["models"][ModelStep][K]) =>
     setForm((f) => (f ? { ...f, models: { ...f.models, [step]: { ...f.models[step], [k]: v } } } : f));
+  type LinkedinInput = NonNullable<SettingsInput["linkedin_sources"]>;
+  const setLinkedin = <K extends keyof LinkedinInput>(k: K, v: LinkedinInput[K]) =>
+    setForm((f) => (f?.linkedin_sources ? { ...f, linkedin_sources: { ...f.linkedin_sources, [k]: v } } : f));
 
   const save = async () => {
     if (!form || !state) return;
@@ -196,6 +201,7 @@ export function SettingsSheet({
   const cp = form?.company_pipeline;
   const pp = form?.people_pipeline;
   const ps = form?.personalisation;
+  const ls = form?.linkedin_sources;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -284,6 +290,35 @@ export function SettingsSheet({
                   <NumberField label="Lowest AI Ark balance" hint="A run stops before going under it (credits)." value={pp.min_balance} min={0} max={1000000} onChange={(n) => set("people_pipeline", "min_balance", n)} />
                 </div>
               </Section>
+
+              {ls && (
+                <Section>
+                  <Switch
+                    label="LinkedIn searches"
+                    hint={
+                      ls.enabled
+                        ? "On, for the clients listed below: managers can pull their companies and look for their people through each client's LinkedIn search."
+                        : "Off: no LinkedIn pull or people run can start. Each client's LinkedIn places and keywords can still be edited on the AI Ark tab."
+                    }
+                    checked={ls.enabled}
+                    onChange={(v) => setLinkedin("enabled", v)}
+                  />
+                  <Clients label="LinkedIn searches" tags={ls.tags} onChange={(t) => setLinkedin("tags", t)} />
+                  <div className="flex flex-wrap gap-3">
+                    <NumberField
+                      label="People a company"
+                      hint="The most people one LinkedIn people run buys at one company, 1 to 100."
+                      value={ls.people_per_company}
+                      min={1}
+                      max={100}
+                      onChange={(n) => setLinkedin("people_per_company", n)}
+                    />
+                  </div>
+                  <p className="text-[12px] leading-relaxed text-muted-foreground">
+                    A LinkedIn company search also needs company pulls on for the client; a LinkedIn people search needs people runs on.
+                  </p>
+                </Section>
+              )}
 
               <Section>
                 <Switch

@@ -13,6 +13,7 @@ import { IosSegmentedControl } from "@/components/ui/ios/ios-segmented-control";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { useHasPermission } from "@/lib/context/role-context";
 import { ClientSelector } from "@/components/filters/client-selector";
+import { LinkedinSettingsCard } from "@/components/aiark/linkedin-settings-card";
 import type { AiArkPlan, AiArkRun, AiArkSetup, CountResult, EmployeeBand, PeopleFilters, RunMode, RunStatus, RunStrategy } from "@/lib/aiark/types";
 
 // The AI Ark tab: pick a client, check what AI Ark would be asked (the
@@ -632,6 +633,8 @@ function AiArkTab() {
                 )}
               </div>
             </Card>
+
+            <LinkedinSettingsCard tag={tag} />
           </div>
 
           <div className="flex min-w-0 flex-col gap-4">

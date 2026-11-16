@@ -121,8 +121,8 @@ export function companyPlanView(...args: Parameters<typeof companyPlan>): Compan
 
 // ── Settings (enrich_settings) ──────────────────────────────────────────────
 
-/** The settings rows this tab reads and its sheet edits. */
-const SETTING_KEYS = ["company_pipeline", "people_pipeline", "personalisation", "spend_caps", "models"];
+/** The settings rows this tab reads and its sheet edits (linkedin_sources: migration 128). */
+const SETTING_KEYS = ["company_pipeline", "people_pipeline", "personalisation", "spend_caps", "models", "linkedin_sources"];
 /** aiark_company_runs.size_requested takes at most 10,000. */
 export const PULL_SIZE_LIMIT = 10_000;
 const MAX_SEARCHES = 5;
@@ -155,6 +155,7 @@ export function normalizeSettings(rows: { key: string; value: unknown }[]): Pipe
     personalisation: s.personalisation,
     spend_caps: s.spend_caps as PipelineSettings["spend_caps"],
     models: s.models as PipelineSettings["models"],
+    linkedin_sources: { enabled: s.linkedin_sources.enabled, tags: [...s.linkedin_sources.tags], people_per_company: s.linkedin_sources.people_per_company },
   };
 }
 
@@ -227,7 +228,17 @@ function cleanModel(
   return ok ? { model, reasoning_effort: effort as Effort | null, max_searches: searches } : null;
 }
 
-type SettingsRows = { company_pipeline: Record<string, unknown>; people_pipeline: Record<string, unknown>; personalisation: Record<string, unknown>; spend_caps: Record<string, unknown>; models: Record<string, unknown> };
+type SettingsRows = {
+  company_pipeline: Record<string, unknown>;
+  people_pipeline: Record<string, unknown>;
+  personalisation: Record<string, unknown>;
+  spend_caps: Record<string, unknown>;
+  models: Record<string, unknown>;
+  /** Only when the sheet sent it: left out, the stored row is kept as it is. */
+  linkedin_sources?: Record<string, unknown>;
+};
+/** LinkedIn people runs: the most people bought at one company (D-P4-6), as settingsFrom reads it. */
+const PEOPLE_PER_COMPANY_MAX = 100;
 
 /**
  * Checks the settings sheet's edits (SettingsInput) and merges them into what
@@ -235,7 +246,8 @@ type SettingsRows = { company_pipeline: Record<string, unknown>; people_pipeline
  * fit_score, anything a later phase adds) are kept as stored. Returns the rows
  * to save, or the errors; `changes` says what changed, for the audit log.
  * Validation as phase 1: anything out of range is refused with its reason,
- * never quietly replaced.
+ * never quietly replaced. linkedin_sources (migration 128) is optional: left
+ * out, the stored row is kept and not written.
  */
 export function cleanSettingsInput(
   input: unknown,
@@ -299,6 +311,21 @@ export function cleanSettingsInput(
     },
   };
   const steps = MODEL_STEPS.map((step) => ({ step, m: cleanModel(modelsIn[step.key], step, errors) }));
+  // Left out (an older sheet, or a save that doesn't touch it): kept as stored, not written.
+  let linkedin: { enabled: boolean; tags: string[]; people_per_company: number } | null = null;
+  if (body.linkedin_sources !== undefined) {
+    const raw = body.linkedin_sources;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      errors.push("LinkedIn searches: must be the switch, its client list and the people a company.");
+    } else {
+      const ls = raw as Record<string, unknown>;
+      linkedin = {
+        enabled: bool(ls.enabled, "LinkedIn searches"),
+        tags: cleanTags(ls.tags, "LinkedIn searches", errors),
+        people_per_company: whole(ls.people_per_company, 1, PEOPLE_PER_COMPANY_MAX, "People a company (LinkedIn people runs)"),
+      };
+    }
+  }
   if (errors.length) return { value: null, errors, changes: [] };
 
   const changes: string[] = [];
@@ -334,6 +361,12 @@ export function cleanSettingsInput(
   diff("Reoon checks a day", k0.reoon_checks_per_day, caps.reoon_checks_per_day, fmt);
   diff("OpenAI dollars a day (pipeline)", k0.openai_usd_per_day.pipeline, caps.openai_usd_per_day.pipeline);
   diff("OpenAI dollars a day (fit)", k0.openai_usd_per_day.fit, caps.openai_usd_per_day.fit);
+  if (linkedin) {
+    const l0 = current.linkedin_sources;
+    diff("LinkedIn searches", l0.enabled, linkedin.enabled, said);
+    diff("LinkedIn searches' clients", l0.tags, linkedin.tags, listText);
+    diff("people a company (LinkedIn)", l0.people_per_company, linkedin.people_per_company);
+  }
 
   const storedModels = obj(stored.models);
   const models: Record<string, unknown> = { ...storedModels };
@@ -360,6 +393,7 @@ export function cleanSettingsInput(
       personalisation: { ...obj(stored.personalisation), ...personal },
       spend_caps: { ...obj(stored.spend_caps), reoon_checks_per_day: caps.reoon_checks_per_day, openai_usd_per_day: { ...obj(obj(stored.spend_caps).openai_usd_per_day), ...caps.openai_usd_per_day } },
       models,
+      ...(linkedin ? { linkedin_sources: { ...obj(stored.linkedin_sources), ...linkedin } } : {}),
     },
     errors,
     changes,
@@ -396,6 +430,7 @@ export function settingsInputOf(v: PipelineSettings): SettingsInput {
     personalisation: { ...v.personalisation },
     spend_caps: { reoon_checks_per_day: v.spend_caps.reoon_checks_per_day, openai_usd_per_day: { ...v.spend_caps.openai_usd_per_day } },
     models,
+    linkedin_sources: { ...v.linkedin_sources, tags: [...v.linkedin_sources.tags] },
   };
 }
 
@@ -412,6 +447,7 @@ export function workerView(w: WorkerState | null): CompanyWorker | null {
     secondsAgo: w.seconds_ago,
     companyRuns: Array.isArray(info.capabilities) && info.capabilities.includes("company_runs"),
     peopleRuns: Array.isArray(info.capabilities) && info.capabilities.includes("people_runs"),
+    linkedin: Array.isArray(info.capabilities) && info.capabilities.includes("linkedin_sources"),
     keys: info.keys ?? {},
     reoon: r && typeof r === "object"
       ? { daily: num(r.daily), instant: num(r.instant), readAt: typeof r.read_at === "string" ? r.read_at : null }
@@ -421,7 +457,7 @@ export function workerView(w: WorkerState | null): CompanyWorker | null {
 
 // ── Pulls and counts ────────────────────────────────────────────────────────
 
-export const COMPANY_RUN_FIELDS = `r.id, r.client_tag, r.mode, r.status, r.size_requested, r.table_id,
+export const COMPANY_RUN_FIELDS = `r.id, r.client_tag, r.mode, r.source, r.status, r.size_requested, r.table_id,
   r.match_count::float8 AS match_count, r.pulled, r.from_registry, r.bought_before,
   r.credits_used::float8 AS credits_used, r.credits_before::float8 AS credits_before, r.credits_after::float8 AS credits_after,
   r.attempts, r.next_run_at, r.last_error, r.stop_reason, r.created_at, r.started_at, r.finished_at, r.updated_at,
