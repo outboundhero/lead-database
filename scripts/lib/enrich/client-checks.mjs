@@ -433,6 +433,46 @@ export function companyTermHit(inputs, terms) {
   return word ? { term: word, label: "company description" } : null;
 }
 
+/** A text's words as AI Ark's WORD match reads them (hasWords in company-filters.mjs): letters and digits, lower case. */
+const wordList = (s) => text(s).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+
+/** Does the word list `outer` hold the words of `inner`, in order and side by side? */
+function holdsWords(outer, inner) {
+  for (let i = 0; i + inner.length <= outer.length; i++) {
+    if (inner.every((w, j) => outer[i + j] === w)) return true;
+  }
+  return false;
+}
+
+/**
+ * The first LinkedIn excluded keyword a company's name, industry or description
+ * holds as whole words, the way AI Ark matches the keywords it is sent (its
+ * WORD match, hasWords in company-filters.mjs): the keyword's words, in order
+ * and side by side. "pub" holds in "Joe's Pub", not in "Public Safety"; "spa"
+ * not in "Aerospace". The client's sheet exclusion terms are matched by
+ * companyTermHit instead. Null when no keyword holds.
+ *
+ * @param {{ company?: string, industry?: string, description?: string }} inputs
+ * @param {string[]} keywords
+ * @returns {{ term: string, label: string } | null}
+ */
+export function companyKeywordHit(inputs, keywords) {
+  const phrases = keywords.map((k) => ({ k, w: wordList(k) })).filter((x) => x.w.length);
+  if (!phrases.length) return null;
+  const fields = [
+    ["company name", companyAsHeld(inputs.company)],
+    ["industry", text(inputs.industry)],
+    ["company description", text(inputs.description)],
+  ];
+  for (const [label, value] of fields) {
+    const words = wordList(value);
+    if (!words.length) continue;
+    const hit = phrases.find((x) => holdsWords(words, x.w));
+    if (hit) return { term: hit.k, label };
+  }
+  return null;
+}
+
 async function clientExclusions({ inputs, table, row, db }) {
   const t = await targetingFor(db, table.client_tag, row?.next_run_at);
   if (!t) return { status: "error", note: `${table.client_tag} has no targeting rules`, retryable: false };
@@ -445,7 +485,7 @@ async function clientExclusions({ inputs, table, row, db }) {
       : `Matches the client's exclusion term "${hit.term}" (matched anywhere in the text, as the lead database does)`;
     return { status: "done", value: display, display, note };
   }
-  // A LinkedIn pull's row: the pull's own excluded keywords, every one of them, matched the same way.
+  // A LinkedIn pull's row: the pull's own excluded keywords, every one of them, as whole words (as AI Ark matches them).
   const run = text(inputs.linkedin_run);
   let linkedinCount = 0;
   if (run) {
@@ -453,11 +493,10 @@ async function clientExclusions({ inputs, table, row, db }) {
     const keywords = await linkedinKeywordsOf(db, run);
     if (!keywords) return { status: "error", note: "The LinkedIn pull that wrote this row holds no excluded keywords, so they could not be checked", retryable: false };
     linkedinCount = keywords.length;
-    const k = companyTermHit(inputs, keywords.filter((x) => !terms.includes(x)));
+    const k = companyKeywordHit(inputs, keywords.filter((x) => !terms.includes(x)));
     if (k) {
       const display = `LinkedIn keyword "${k.term}" in the ${k.label}`;
-      const how = k.label === "company description" ? "as a whole word" : "anywhere in the text, as the lead database matches the client's terms";
-      return { status: "done", value: display, display, note: `Matches the client's LinkedIn excluded keyword "${k.term}" (${how}; checked after the pull, sent to AI Ark or not)` };
+      return { status: "done", value: display, display, note: `Matches the client's LinkedIn excluded keyword "${k.term}" (as whole words, as AI Ark matches the keywords it is sent; checked after the pull, sent to AI Ark or not)` };
     }
   }
   let titleNote = "";

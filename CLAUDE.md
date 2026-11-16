@@ -2708,17 +2708,20 @@ spends nothing.
   after the pull, free, before anything more is spent on a company or person or a row is
   listed. A LinkedIn
   pull or run keeps the union in `filters.linkedin.keywords` (`union`, `sent`,
-  `checked_after`); the matcher is the sheet terms' one (`companyTermHit` in
-  `client-checks.mjs`: case-insensitive, anywhere in the name and industry, whole words in
-  the description). Company rows: `client_exclusions` reads the pull's union through the
+  `checked_after`); the matcher is AI Ark's own whole-word match (`companyKeywordHit` in
+  `client-checks.mjs`, as `hasWords`: the keyword's words, in order and side by side,
+  case-insensitive, in the name, industry and description), so a short keyword never
+  excludes a longer word that holds it ("pub" is not "Public Safety", "housing" is not
+  "Warehousing") and a plural is another word, as in the standard list's pairs ("cleaning
+  company", "cleaning companies"). Company rows: `client_exclusions` reads the pull's union through the
   row's `linkedin_run` input and a match is Excluded, naming the keyword, so nothing later
   works it; a row with no `linkedin_run` is judged exactly as before 128. People: a Look
   excludes a person whose Preview company matches, and after a Buy the person's full company
   record (with its description) is checked again, with the sheet terms, before any email
   step: a match ends the person Excluded, with no People row. The sheet's `exclude_terms` are
-  not sent on LinkedIn searches; they are checked after the pull, as for every row. Contains
-  matching on names and industries is stricter than AI Ark's whole words (a short keyword
-  inside a longer word excludes the row).
+  not sent on LinkedIn searches; they are checked after the pull, as for every row, with
+  their own matcher (`companyTermHit`: anywhere in the name and industry, whole words in the
+  description), as the send gate matches them.
 - **Places: never outside the sending rules.** A LinkedIn search covers only places the
   client's rules (`client_targeting.include_locations`) allow: an own place the rules cover
   (its city, state or country key) is searched; an own state or country they don't cover

@@ -52,7 +52,7 @@ import { linkedinPeopleRequests, linkedinRunFilters } from "./linkedin-requests.
 import { linkedinSettingsFor } from "./linkedin-settings.mjs";
 import { trackOf } from "./people-requests.mjs";
 import { LIST_BUDGET, LIST_REFRESH_MS, listsMadeToday } from "./runs.mjs";
-import { companyTermHit, geoFor, judgePlace, targetingFor } from "../enrich/client-checks.mjs";
+import { companyKeywordHit, companyTermHit, geoFor, judgePlace, targetingFor } from "../enrich/client-checks.mjs";
 import { COMPANY_SEARCH_KEYS, companyInputs } from "../enrich/company-template.mjs";
 import { COMPANY_INPUT_KEYS_V2 } from "../enrich/company-template-v2.mjs";
 import { aiarkPersonRowKey } from "../enrich/people-template.mjs";
@@ -317,8 +317,8 @@ async function screenArea(ctx, kit, people, { search, page }) {
         const where = await officeInArea(ctx.pool, run.client_tag, p.company);
         if (where.known && !where.inside) verdict = "outside";
       }
-      // Override O1: every LinkedIn keyword, sent to AI Ark or not, on what the Preview holds of the company.
-      if (verdict === "candidate" && companyTermHit({ company: f.company, industry: f.industry, description: f.description }, keywords)) verdict = "excluded";
+      // Override O1: every LinkedIn keyword, sent to AI Ark or not, as whole words on what the Preview holds of the company.
+      if (verdict === "candidate" && companyKeywordHit({ company: f.company, industry: f.industry, description: f.description }, keywords)) verdict = "excluded";
       if (verdict === "candidate" && registry.has(f.person_id)) verdict = "bought_before";
     }
     return { f, seq, verdict, held, track: found?.track ?? null, rank: found?.rank ?? null };
@@ -700,8 +700,8 @@ async function writePick(ctx, kit, c, w) {
 /**
  * Before any email step (override O1, O2): the person's full company record
  * and the record the company row would be built from, against the client's
- * exclusion terms and every LinkedIn keyword of the run (name, industry,
- * description), then the company's offices against the client's area.
+ * exclusion terms and every LinkedIn keyword of the run (as whole words; name,
+ * industry, description), then the company's offices against the client's area.
  *
  * @returns {Promise<{ verdict: "excluded" | "outside", why: string } | { verdict: null, where: object }>}
  */
@@ -713,7 +713,7 @@ async function finalCheck(ctx, records, bringFrom) {
   for (const rec of records) {
     if (!rec) continue;
     const facts = companyFacts(rec);
-    const hit = companyTermHit(facts, terms) ?? companyTermHit(facts, keywords);
+    const hit = companyTermHit(facts, terms) ?? companyKeywordHit(facts, keywords);
     if (hit) return { verdict: "excluded", why: `"${hit.term}" in the ${hit.label}` };
   }
   const where = await officeInArea(ctx.pool, run.client_tag, bringFrom);

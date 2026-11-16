@@ -64,7 +64,7 @@ import {
 import { bringCompanyIn, linkedinCompanyFor, pickArea } from "./lib/aiark/linkedin-people.mjs";
 import { buildCityIndex, checkSeedLayout, convertPick, planSeed, readSeedFile, SeedLayoutError } from "./lib/aiark/linkedin-seed.mjs";
 import { advanceOnePeopleRun, approveBuy, cancelPeopleRun, createPeopleRun, PeopleRunRefused, personRowCells } from "./lib/aiark/people-runs.mjs";
-import { CLIENT_ACTIONS, companyTermHit, geoFor, resetClientChecks } from "./lib/enrich/client-checks.mjs";
+import { CLIENT_ACTIONS, companyKeywordHit, companyTermHit, geoFor, resetClientChecks } from "./lib/enrich/client-checks.mjs";
 import { COMPANY_ACTIONS } from "./lib/enrich/company-actions.mjs";
 import { companyInputs } from "./lib/enrich/company-template.mjs";
 import { ensurePipelineTables } from "./lib/enrich/templates.mjs";
@@ -624,11 +624,27 @@ function partO3() {
   const k = keywordsFor([...fillers, "quux gadget emporium"]);
   check("a keyword over AI Ark's request limit is checked after the pull, and kept in the union", k.checkedAfter.includes("quux gadget emporium") && k.union.includes("quux gadget emporium") && !k.sent.includes("quux gadget emporium"));
   const unionLower = k.union.map((x) => x.toLowerCase());
-  check("the after-pull matcher finds it as the sheet terms are found: anywhere in the name or industry, whole words in the description",
-    companyTermHit({ company: "The Quux Gadget Emporium LLC", industry: "", description: "" }, unionLower)?.label === "company name" &&
-      companyTermHit({ company: "Acme", industry: "", description: "We are the quux gadget emporium of the north." }, unionLower)?.label === "company description" &&
-      companyTermHit({ company: "Acme", industry: "", description: "quux gadget emporiums" }, ["quux gadget emporium"])?.label === "company description" &&
-      companyTermHit({ company: "Acme", industry: "", description: "megaquux gadget emporium" }, ["quux gadget emporium"]) === null);
+  check("the after-pull matcher finds it as whole words, as AI Ark does: in the name, the industry and the description",
+    companyKeywordHit({ company: "The Quux Gadget Emporium LLC", industry: "", description: "" }, unionLower)?.label === "company name" &&
+      companyKeywordHit({ company: "Acme", industry: "Quux Gadget Emporium Services", description: "" }, unionLower)?.label === "industry" &&
+      companyKeywordHit({ company: "Acme", industry: "", description: "We are the quux gadget emporium of the north." }, unionLower)?.label === "company description" &&
+      companyKeywordHit({ company: "Acme", industry: "", description: "megaquux gadget emporium" }, ["quux gadget emporium"]) === null);
+  const shortKw = ["pub", "spa", "housing", "mechanic", "hospital", "technology", "bank", "bar"];
+  check("a short keyword never matches inside a longer word, so no whole industry goes (\"pub\" is not Public Safety, \"housing\" not Warehousing)",
+    ["Public Relations and Communications Services", "Book and Periodical Publishing", "Public Safety", "Aviation and Aerospace Component Manufacturing",
+      "Mechanical Or Industrial Engineering", "Warehousing and Storage", "Hospitality", "Biotechnology Research", "Banking"]
+      .every((industry) => companyKeywordHit({ company: "Acme", industry, description: "" }, shortKw) === null) &&
+      companyKeywordHit({ company: "Barquux Innovation Center", industry: "", description: "" }, shortKw) === null);
+  check("... and finds the whole word wherever it is: a bar's name, a pub in the description, a plural only when listed",
+    companyKeywordHit({ company: "Joe's Bar & Grill", industry: "", description: "" }, shortKw)?.term === "bar" &&
+      companyKeywordHit({ company: "Acme", industry: "", description: "A family pub since 1990." }, shortKw)?.label === "company description" &&
+      companyKeywordHit({ company: "Acme", industry: "Facilities Services", description: "" }, ["facilities service"]) === null &&
+      companyKeywordHit({ company: "Acme", industry: "Facilities Services", description: "" }, ["facilities services"])?.label === "industry");
+  const wordPairs = [["Joe's Bar & Grill", "bar"], ["Barbershop", "bar"], ["City.gov services", ".gov"], ["Warehousing and Storage", "housing"], ["Quux-Gadget Emporium", "quux gadget"], ["Remote Sensing Labs", "Remote"]];
+  check("it agrees with AI Ark's WORD match as the request builders model it (hasWords)",
+    wordPairs.every(([t, kw]) => Boolean(companyKeywordHit({ company: t, industry: "", description: "" }, [kw.toLowerCase()])) === hasWords(t, kw)));
+  check("the client's sheet terms keep the lead database's match (anywhere in the name and industry)",
+    companyTermHit({ company: "Acme", industry: "Public Safety", description: "" }, ["pub"])?.label === "industry" && companyTermHit({ company: "Barbershop Co", industry: "", description: "" }, ["bar"])?.label === "company name");
 
   section("A11. The pick of a LinkedIn run (pure)");
   const cand = (id, company, seq, extra = {}) => ({ person_id: id, company_id: company, verdict: "candidate", track: null, rank: null, seq, ...extra });

@@ -113,7 +113,7 @@ function linkedinParts(effective, built, kind, geo) {
     );
   }
   notes.push(
-    `AI Ark matches the excluded keywords it is sent as whole words in a company's name, industry and description. After the pull all ${fmt(k.union.length)} are checked again ${where2}, anywhere in the name and industry and as whole words in the description, as the client's sheet exclusion terms are.`
+    `AI Ark matches the excluded keywords it is sent as whole words in a company's name, industry and description. After the pull all ${fmt(k.union.length)} are checked again ${where2}, as whole words the same way ("pub" excludes "Joe's Pub", not "Public Safety"). The client's sheet exclusion terms are still matched as the lead database matches them (anywhere in the name and industry).`
   );
   if (search.notSearched.length) {
     notes.push(`${fmt(search.notSearched.length)} of this client's LinkedIn places are ${search.notSearched.every((x) => x.why === search.notSearched[0].why) ? search.notSearched[0].why : "not searched: outside the client's sending rules"}. ${NOT_SEARCHED_FIX}`);

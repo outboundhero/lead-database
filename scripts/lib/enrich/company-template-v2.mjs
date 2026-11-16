@@ -301,7 +301,7 @@ const PHASE1 = {
   rule_match: {
     name: "Client exclusions", kind: "action", action: "client_exclusions", provider: "Client rules",
     inputs: { company: "{{company}}", industry: "{{industry}}", description: "{{description}}", linkedin_run: "{{linkedin_run}}" },
-    description: "The client's exclusion terms: anywhere in the company name or industry, as the send gate matches them, and as whole words in the description. On a LinkedIn pull's row, the pull's excluded keywords too, matched the same way.",
+    description: "The client's exclusion terms: anywhere in the company name or industry, as the send gate matches them, and as whole words in the description. On a LinkedIn pull's row, the pull's excluded keywords too, as whole words in the name, industry and description, as AI Ark matches them.",
   },
   passes_filters: {
     name: "Passes the client's rules", kind: "formula", data_type: "boolean", formula: "{{master_filter}} === true",
