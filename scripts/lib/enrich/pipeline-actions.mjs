@@ -121,7 +121,12 @@ function keyed(action, adapter) {
 
 // ── people_at_company ───────────────────────────────────────────────────────
 
-/** The people sources a track waits for. A later source adds itself here. */
+/**
+ * The people sources a track waits for. LinkedIn people runs stay out (phase 4,
+ * decision 23): an area search never looks at a given company on purpose, so
+ * waiting for it would keep the AI searches (C#41, C#56) from ever running. A
+ * LinkedIn person with a track phrase still counts in `found` (enrich_contacts).
+ */
 export const PEOPLE_SOURCES = Object.freeze(["ai_ark"]);
 
 /**

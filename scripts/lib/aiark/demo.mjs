@@ -24,6 +24,13 @@
 // stand-in has served from Company Search (or was given in `companies`) keeps
 // its name, domain and office; any other id gets a made-up company of its own.
 //
+// Every Preview person's company object carries its offices (location:
+// headquarter and locations), as AI Ark's does: the company's own for people
+// by company id, the person's place otherwise. With `areaCompanies` an area
+// search (LinkedIn people runs) puts its people at that many made-up companies
+// of each place, the ones Company Search returns for the place, so a run meets
+// several people at one company.
+//
 // State (lists, export jobs, the credit balance) lives in this process only.
 
 import { createHash, randomUUID } from "node:crypto";
@@ -72,15 +79,23 @@ function staffOf(band) {
   return { total: Math.round((a + b) / 2), range: { start: a, end: b } };
 }
 
-function previewItem(p) {
+/** A company's offices as AI Ark's people records carry them: its own, or (made-up companies) at the person's place. */
+function officesFor(p) {
+  if (p.companyLocation) return p.companyLocation;
+  const hq = { continent: "North America", country: p.country, ...(p.state ? { state: p.state } : {}), city: p.city };
+  return { headquarter: hq, locations: [hq] };
+}
+
+function previewItem(p, { description = true, company = true } = {}) {
   const short = p.state ? `${p.city}, ${p.state}` : p.city;
   return {
     id: p.id,
     profile: { first_name: p.first, last_name: mask(p.last), title: p.title, headline: `${p.title} at ${p.company}` },
-    company: {
+    company: company ? {
       id: p.companyId ?? demoId(`co:${p.domain}`, 0),
-      summary: { name: p.company, industry: p.industry, description: p.description, staff: staffOf(p.staff) },
-    },
+      summary: { name: p.company, industry: p.industry, ...(description ? { description: p.description } : {}), staff: staffOf(p.staff) },
+      location: officesFor(p),
+    } : null,
     location: {
       country: p.country,
       ...(p.state ? { state: p.state } : {}),
@@ -92,8 +107,8 @@ function previewItem(p) {
   };
 }
 
-function fullPerson(p, { processing = false } = {}) {
-  const base = previewItem(p);
+function fullPerson(p, { processing = false, company = true } = {}) {
+  const base = previewItem(p, { company });
   const handle = `${slug(`${p.first} ${p.last}`)}-${p.id.slice(0, 4)}`;
   const email = processing
     ? { state: "PROCESSING", output: [] }
@@ -103,14 +118,14 @@ function fullPerson(p, { processing = false } = {}) {
     identifier: handle,
     profile: { ...base.profile, last_name: p.last, full_name: `${p.first} ${p.last}` },
     link: { linkedin: `https://linkedin.example/in/${handle}`, twitter: null, github: null, facebook: null },
-    company: {
+    company: base.company ? {
       ...base.company,
       link: {
         website: `https://${p.domain}`,
         domain: p.domain,
         linkedin: `https://linkedin.example/company/${slug(p.company)}`,
       },
-    },
+    } : null,
     email,
     last_updated: "2026-10-01",
   };
@@ -144,6 +159,7 @@ function companyFacts(record) {
     city: String(hq.city ?? "Springfield").replace(/,.*$/, ""),
     state: hq.state ? String(hq.state) : "Illinois",
     country: hq.country ? String(hq.country) : "United States",
+    location: record?.location && typeof record.location === "object" ? record.location : null,
   };
 }
 
@@ -205,11 +221,17 @@ function excludedByFilters(p, ask) {
  *                                          refusal, 402, 401, 403, 404, 429, 500 …), 0 for no answer
  *                                          at all, { status, charge: true } to charge the page first,
  *                                          or { status: 400, message } for another refusal
+ *                 previewWithoutDescription  Preview company objects carry no description (Export
+ *                                          Single's still does)
+ *                 noCompanyEvery           every Nth person (by id) has no company at all
  *   companiesPerPlace  a fixed number of companies per place (default 30 to 119, by place)
  *   companies   Company Search records the stand-in knows by id before any search (people runs'
  *               tests): their people carry the company's name, domain and office
+ *   areaCompanies  an area search's people work at this many made-up companies of each place
+ *               (makeCompany's, the ones Company Search returns for the place), with their offices;
+ *               unset, each person's company is made up from their name and sits at their place
  */
-export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4_000, processingMs = 0, faults = {}, companiesPerPlace = null, companies = [] } = {}) {
+export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4_000, processingMs = 0, faults = {}, companiesPerPlace = null, companies = [], areaCompanies = null } = {}) {
   const lists = new Map(); // list id -> Set of person or company ids
   const jobs = new Map(); // trackId -> job
   const people = new Map(); // person id -> person, for single exports
@@ -217,7 +239,9 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
   const companyCache = new Map(); // place -> companies[]
   const companyIndex = new Map(); // company id -> the facts its people carry (served or given)
   for (const c of companies ?? []) if (c?.id) companyIndex.set(String(c.id), companyFacts(c));
-  const state = { balance, calls: 0, charged: 0, listsMade: 0, companyCalls: 0, refundedOnce: false, expiredOnce: false };
+  const state = { balance, calls: 0, charged: 0, listsMade: 0, companyCalls: 0, previewCalls: 0, refundedOnce: false, expiredOnce: false };
+  /** A person AI Ark gives no company (faults.noCompanyEvery). */
+  const noCompany = (p) => Boolean(faults.noCompanyEvery) && hash32(`noco|${p.id}`) % faults.noCompanyEvery === 0;
   const REFUNDED = "this request was automatically refunded because the results were not delivered within the time limit. you can submit it again.";
 
   const answer = (status, json, headers = {}) => ({
@@ -239,6 +263,25 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
     state.balance += back;
     state.charged = Math.round((state.charged - back) * 100) / 100;
   };
+
+  /**
+   * With areaCompanies, an area search's person works at one of that many
+   * made-up companies of the place they were found for (makeCompany's, as
+   * Company Search returns them there): its id, name, domain, industry,
+   * description and offices.
+   */
+  function atAreaCompany(p, seed, i, ask) {
+    if (!areaCompanies || !ask.placesRaw.length) return p;
+    const r = hash32(`${seed}#${i}`);
+    const place = ask.placesRaw[(r >>> 3) % ask.placesRaw.length];
+    const c = makeCompany(place, hash32(`area|${seed}|${i}`) % areaCompanies);
+    if (!companyIndex.has(c.id)) companyIndex.set(c.id, companyFacts(c));
+    const domain = String(c.link?.domain ?? "").toLowerCase().replace(/^[a-z]+:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "") || `${slug(c.summary.name)}.example`;
+    return {
+      ...p, companyId: c.id, company: c.summary.name, domain, industry: c.summary.industry, description: c.summary.description,
+      staff: `${c.summary.staff.range.start}-${c.summary.staff.range.end}`, companyLocation: c.location,
+    };
+  }
 
   /** The people at the companies a search names, in the companies' order: those its titles and keywords let through. */
   function companyPopulation(f, ids) {
@@ -277,7 +320,7 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
       if (!ask.titles.length && !ask.seniority.length && !ask.departments.length) total *= 4;
       all = [];
       for (let i = 0; i < total; i++) {
-        const p = makePerson(seed, i, ask);
+        const p = atAreaCompany(makePerson(seed, i, ask), seed, i, ask);
         if (excludedByFilters(p, ask)) continue;
         all.push(p);
         people.set(p.id, p);
@@ -386,6 +429,7 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
     if (method === "GET" && path === "/v1/payments/credits") return answer(200, { total: Math.floor(state.balance) });
 
     if (method === "POST" && path === "/v1/people/preview") {
+      state.previewCalls++;
       const previewFault = faults.previewAnswers?.length ? faults.previewAnswers.shift() : null;
       const page = Number(req.page);
       const size = Number(req.size);
@@ -410,7 +454,9 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
       if (!charge(1)) return answer(402, { status: 402, error: "not enough balance" });
       const all = matching(req);
       if (!all.length) return appError(404, "data not found");
-      const content = all.slice(page * size, page * size + size).map(previewItem);
+      const content = all
+        .slice(page * size, page * size + size)
+        .map((p) => previewItem(p, { description: !faults.previewWithoutDescription, company: !noCompany(p) }));
       return answer(200, {
         content,
         size,
@@ -446,7 +492,7 @@ export function createDemoTransport({ balance = 25_000, latencyMs = 0, jobMs = 4
       if (!p) return notFound("person not found");
       if (!(p.email.found && p.email.status === "VALID")) return notFound("no email found");
       if (!charge(1)) return answer(402, { status: 402, error: "not enough balance" });
-      return answer(200, { status: 200, error: null, data: fullPerson(p) }, { "X-Credit": "-1.0" });
+      return answer(200, { status: 200, error: null, data: fullPerson(p, { company: !noCompany(p) }) }, { "X-Credit": "-1.0" });
     }
 
     if (method === "POST" && path === "/v1/people/export") {

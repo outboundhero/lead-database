@@ -137,7 +137,7 @@ export function peopleCountAt(companyId) {
  * catch-all domain.
  *
  * @param {{ id: string, name: string, domain: string, industry: string, description: string, staff: string,
- *           city: string, state: string | null, country: string }} company
+ *           city: string, state: string | null, country: string, location?: object | null }} company
  * @param {number} i
  * @param {{ titles: string[] }} ask
  */
@@ -178,6 +178,8 @@ export function makeCompanyPerson(company, i, ask) {
   return {
     id: demoId(`pp|${company.id}`, i),
     companyId: company.id,
+    // The company's own offices, as AI Ark's people records carry them (its head office when only that is known).
+    companyLocation: company.location ?? { headquarter: { city: company.city, ...(company.state ? { state: company.state } : {}), country: company.country || "United States" } },
     first,
     last,
     title,

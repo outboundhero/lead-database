@@ -52,6 +52,10 @@
 //
 // Nothing here reads or writes leads, and these runs never appear on the AI
 // Ark tab (pullsToAdd reads aiark_runs only).
+//
+// LinkedIn people runs (source "linkedin", which looks by area: migration 128)
+// take the same queue, claim, brakes and pause, with their own Look, pick and
+// Buy (linkedin-people.mjs, handed this file's helpers as KIT below).
 
 import { randomUUID } from "node:crypto";
 import { AiArkError, clip, PAGE_MAX, personInputs, SEARCH_CAP } from "./client.mjs";
@@ -60,6 +64,7 @@ import { excludedTitlesFor, IDS_PER_SEARCH, peopleRequestsFor, peopleSourceInfo,
 import { scopeOf, standardFor } from "./standard-filters.mjs";
 // Registers the "linkedin" people source (by area) wherever people runs are worked.
 import "./linkedin-requests.mjs";
+import { buyByArea, createLinkedinPeopleRun, lookByArea } from "./linkedin-people.mjs";
 import { CLIENT_ACTIONS } from "../enrich/client-checks.mjs";
 import { normTag, readSettings, settingsFrom, TRACKS } from "../enrich/settings.mjs";
 import { ensurePipelineTables } from "../enrich/templates.mjs";
@@ -88,16 +93,20 @@ const round2 = (n) => Math.round(Number(n) * 100) / 100;
 const text = (v) => (v == null ? "" : String(v).replace(/\s+/g, " ").trim());
 const backoffMs = (attempts) => Math.min(30_000 * 2 ** (attempts - 1), BACKOFF_MAX_MS);
 
-/** A refusal to start a run, with its reason: the route answers 409. */
+/** A refusal to start a run, with its reason: the route answers 409 (changed: the settings changed since the page loaded them). */
 export class PeopleRunRefused extends Error {
-  constructor(message) {
+  constructor(message, { changed = false } = {}) {
     super(message);
     this.name = "PeopleRunRefused";
     this.status = 409;
+    this.changed = changed;
   }
 }
 class LostClaim extends Error {}
 class Cancelled extends Error {}
+/** Does a run's source look by area (the LinkedIn people runs)? */
+const byArea = (run) => peopleSourceInfo(run?.source)?.look === "by_area";
+
 /** A free check of the screen could not be made (the client's rules are gone, say): the run ends with it. */
 class CheckFailed extends Error {}
 /** A write failed and the run could not be read back: what its row holds is unknown, so nothing is written over it. */
@@ -206,24 +215,27 @@ export async function activePeopleRun(db, tag) {
  *
  * Throws PeopleRunRefused for a reason the route answers 409.
  *
+ * A LinkedIn people run (a source that looks by area) is made by
+ * createLinkedinPeopleRun (linkedin-people.mjs): refused unless LinkedIn
+ * people runs are on for the client, with a run of any source going, when
+ * `version` (the LinkedIn settings' version the page loaded) is no longer
+ * current (PeopleRunRefused with changed), or with a plan blocker.
+ *
  * @param {Db} db  a client inside the caller's transaction
  * @param {{ tag: string, mode: "live" | "demo", source?: string, maxPeople?: number | null, createdBy?: string | null,
- *           settings?: import("../enrich/settings.mjs").PipelineSettings | null,
+ *           settings?: import("../enrich/settings.mjs").PipelineSettings | null, version?: string | null,
  *           ensureTables?: typeof ensurePipelineTables }} opts
  *   ensureTables: tests only, a stand-in for ensurePipelineTables
  * @returns {Promise<Record<string, any>>} the aiark_people_runs row
  */
-export async function createPeopleRun(db, { tag, mode, source = "ai_ark", maxPeople = null, createdBy = null, settings = null, ensureTables = ensurePipelineTables }) {
+export async function createPeopleRun(db, { tag, mode, source = "ai_ark", maxPeople = null, createdBy = null, settings = null, version = null, ensureTables = ensurePipelineTables }) {
   const t = normTag(tag);
   if (!t) throw new PeopleRunRefused("No client tag");
   if (mode !== "live" && mode !== "demo") throw new PeopleRunRefused("mode must be live or demo");
-  // TODO(L1): the by-area path (LinkedIn people runs: Look by area, pick up to
-  // linkedin_sources.people_per_company a company, bring each bought person's
-  // company in). Until it is built such a run is refused, so nothing spends.
   const sourceInfo = peopleSourceInfo(source);
   if (!sourceInfo) throw new PeopleRunRefused(`No people source "${source}"`);
-  if (sourceInfo.look !== "by_company") throw new PeopleRunRefused(`${sourceInfo.label} people runs are not built yet, so nothing was started.`);
   const s = settings ?? settingsFrom((await db.query(`SELECT key, value FROM enrich_settings`)).rows);
+  if (sourceInfo.look === "by_area") return createLinkedinPeopleRun(db, { tag: t, mode, source, maxPeople, createdBy, settings: s, version, ensureTables }, KIT);
   const pp = s.people_pipeline;
   if (!pp.enabled) throw new PeopleRunRefused("People runs are off, so nothing was started.");
   if (!s.flagOn("people_pipeline", t)) throw new PeopleRunRefused(`${t} is not on the people runs' client list, so nothing was started.`);
@@ -457,6 +469,9 @@ async function tabExportUnread(pool, mode) {
  */
 async function beforePaidCall(ctx, price) {
   const { run, settings } = ctx;
+  if (byArea(run) && !settings.flagOn("linkedin_people", run.client_tag)) {
+    return { stop: `LinkedIn people runs were switched off for ${run.client_tag}, so nothing more was bought.` };
+  }
   if (!settings.flagOn("people_pipeline", run.client_tag)) {
     return { stop: `People runs were switched off for ${run.client_tag}, so nothing more was bought.` };
   }
@@ -573,11 +588,14 @@ async function screenOne(ctx, f, company) {
 
 /**
  * A People row's input cells (PEOPLE_INPUTS) for an AI Ark person: the source
- * object P#1's place holds, the email, the person's own place as the written
- * city and state (D13), and the run's own facts. Every value is text except
- * the source object.
+ * object P#1's place holds, the email, the written city and state (D13: an AI
+ * Ark person's own place; a LinkedIn person's office, passed as `written`),
+ * who found them (found_by: "aiark", or "linkedin") and the run's own facts.
+ * Every value is text except the source object.
  */
-export function personRowCells({ tag, company, track, rank, person, email = "", emailStatus = "", domainType = "", stage, source, pulledBefore = "" }) {
+export function personRowCells({
+  tag, company, track, rank, person, email = "", emailStatus = "", domainType = "", stage, source, pulledBefore = "", foundBy = "aiark", written = null,
+}) {
   const so = sourceObject(person);
   const f = factsOf(person);
   const values = {
@@ -585,12 +603,12 @@ export function personRowCells({ tag, company, track, rank, person, email = "", 
     email: text(email).toLowerCase(),
     client_tag: normTag(tag),
     company_website: text(company.website),
-    written_city: f.city,
-    written_state: f.region,
+    written_city: written ? text(written.city) : f.city,
+    written_state: written ? text(written.state) : f.region,
     company_row: String(company.company_row_id),
     company_aiark_id: company.company_id,
     person_aiark_id: f.person_id,
-    found_by: "aiark",
+    found_by: foundBy,
     stage,
     track: track ?? "",
     rank: Number.isInteger(rank) ? String(rank) : "",
@@ -1425,13 +1443,18 @@ export async function advanceOnePeopleRun({
     pool, env, log, run, client: got.client, progress: run.progress ?? {}, spent: Number(run.credits_used), shouldStop,
     maxBuysPerSlice: Math.max(1, Math.floor(maxBuysPerSlice) || 10), settings: settings ?? (await readSettings(pool)), balance: null,
   };
+  const area = byArea(run);
   const why = !got.client
     ? got.why
     : !run.people_table_id || !run.companies_table_id
       ? "The client's People or Companies table was deleted, so the run has nowhere to read or write"
-      : !run.filters?.tracks
-        ? "The run has no tracks to look for"
-        : null;
+      : area
+        ? !Array.isArray(run.filters?.bodies) || !run.filters.bodies.length
+          ? "The run has no searches to make"
+          : null
+        : !run.filters?.tracks
+          ? "The run has no tracks to look for"
+          : null;
   if (why) {
     await pool.query(
       `UPDATE aiark_people_runs SET status = CASE WHEN status = 'running' THEN 'error' ELSE status END, last_error = $3,
@@ -1452,7 +1475,11 @@ export async function advanceOnePeopleRun({
     }
     const waitingForBuy =
       ctx.progress.look_done && Number(run.picked) > 0 && !run.buy_approved_at && !ctx.settings.flagOn("auto_buy", run.client_tag);
-    const out = !ctx.progress.look_done ? await sliceLook(ctx) : waitingForBuy ? { pause: true } : await sliceBuy(ctx);
+    const out = !ctx.progress.look_done
+      ? area ? await lookByArea(ctx, KIT) : await sliceLook(ctx)
+      : waitingForBuy
+        ? { pause: true }
+        : area ? await buyByArea(ctx, KIT) : await sliceBuy(ctx);
     if (out.fail) {
       await finish(ctx, { status: "error", lastError: out.fail });
     } else if (out.stop) {
@@ -1497,3 +1524,10 @@ export async function advanceOnePeopleRun({
 
 /** For the tab and the tests: the ids-per-search a run starts at (people_pipeline.ids_per_search's default). */
 export { IDS_PER_SEARCH };
+
+/** This file's helpers the LinkedIn path (linkedin-people.mjs) works with, handed over so the two never import each other. */
+const KIT = Object.freeze({
+  savePosition, beforePaidCall, markLost, readBack, sane, plainOf, screenOne, factsOf, registryOf, tabCellsOf, tabRowsOf, recordOf,
+  personRowCells, mapLimit, sleep, activePeopleRun, PeopleRunRefused, LostClaim, Cancelled,
+  consts: { SCREEN_THREADS, LOST_PAGES_MAX, LOST_ANSWERS_MAX, WRITE_RETRIES, WRITE_RETRY_MS },
+});

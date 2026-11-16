@@ -10,6 +10,9 @@
 //   - AI Ark people runs (people-runs.mjs): a person bought (stage bought or
 //     no_email), or a person another run already bought, copied free with their
 //     email (stage copied). Row key "aiark:<person id>".
+//   - LinkedIn people runs (linkedin-people.mjs, migration 128): the same
+//     stages and row key, found_by linkedin, and the office's city and state as
+//     the written place (D13).
 //   - The AI searches' write-tos on the company row (C#43, C#51, C#58): row key
 //     "w:<company row id>:<writer column key>", stage found, no email until a
 //     finder finds one.
@@ -33,7 +36,7 @@ export const PEOPLE_TABLE_NAME = "People (pipeline)";
 /** stage: how the row came. */
 export const PEOPLE_STAGES = Object.freeze(["bought", "no_email", "copied", "found"]);
 /** found_by: who found the person. */
-export const PEOPLE_FOUND_BY = Object.freeze(["aiark", "facilities_1", "facilities_2", "ceo"]);
+export const PEOPLE_FOUND_BY = Object.freeze(["aiark", "linkedin", "facilities_1", "facilities_2", "ceo"]);
 /** The AI searches' write-to columns on the company row, the writer each one is, and its track. */
 export const PEOPLE_WRITERS = Object.freeze({
   person_2_facilities_1_write_to: { found_by: "facilities_1", track: "operations" }, // C#43, from C#41
@@ -75,12 +78,12 @@ export const PEOPLE_INPUTS = Object.freeze([
   { key: "company_website", from: "P#36", description: "The company row's use_website (C#26), as the write-tos write it. P#37 normalises it into P#38 use_domain." },
   ...PEOPLE_WRITTEN_KEYS.map((k) => ({
     key: writtenKey(k), from: null,
-    description: `A value a writer gave ${k}: the write-tos map into it; AI Ark people runs write only written_city and written_state (the person's own place, D13).`,
+    description: `A value a writer gave ${k}: the write-tos map into it; people runs write only written_city and written_state (D13: an AI Ark person's own place, a LinkedIn person's office in the client's area).`,
   })),
   { key: "company_row", from: null, description: "The company row's id (enrich_rows.id of the client's Companies (pipeline) table), as text." },
   { key: "company_aiark_id", from: null, description: "AI Ark's company id." },
   { key: "person_aiark_id", from: null, description: "AI Ark's person id. Empty for write-to people." },
-  { key: "found_by", from: null, description: "aiark, facilities_1, facilities_2 or ceo." },
+  { key: "found_by", from: null, description: "aiark, linkedin, facilities_1, facilities_2 or ceo." },
   { key: "stage", from: null, description: "bought, no_email, copied or found." },
   { key: "track", from: null, description: "operations, facility_office or ceo: the candidate's track, or the writer's." },
   { key: "rank", from: null, description: "The candidate's rank in its track (the index of the first phrase its title holds), as text." },
@@ -94,7 +97,7 @@ export const PEOPLE_INPUTS = Object.freeze([
   { key: "aiark_email_status", from: null, description: "AI Ark's own check of the email: VALID, INVALID (reason) or PENDING." },
   { key: "aiark_email_domain_type", from: null, description: "SMTP, CATCH_ALL or UNKNOWN, as AI Ark reports the mailbox." },
   { key: "pulled_before", from: null, description: "Filled when the person was bought before by another run (copies)." },
-  { key: "source", from: null, description: "Where the row came from, shown on the Clay tab (\"AI Ark people run\", \"Copied from an earlier run (no charge)\", \"AI search (write-to)\")." },
+  { key: "source", from: null, description: "Where the row came from, shown on the Clay tab (\"AI Ark people run\", \"LinkedIn people run (AI Ark)\", \"Copied from an earlier run (no charge)\", \"AI search (write-to)\")." },
 ]);
 
 export const PEOPLE_INPUT_KEYS = Object.freeze(PEOPLE_INPUTS.map((c) => c.key));

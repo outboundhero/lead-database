@@ -28,7 +28,9 @@
 -- LinkedIn company rows keep only companies whose head office is in the
 -- client's places (aiark_companies.hq_keys, and the row input hq_only). A
 -- LinkedIn person's company is brought into the client's Companies table when
--- the person is bought, so a LinkedIn candidate may have no company row yet.
+-- the person is bought, so a LinkedIn candidate may have no company row yet;
+-- a Look keeps the order AI Ark gave its people in (aiark_people_candidates.seq)
+-- and the Preview's company objects (aiark_people_preview_companies, server-only).
 --
 -- Ships OFF: linkedin_sources is disabled with an empty client list, so no
 -- LinkedIn pull or run can start; viewing and editing the settings spends
@@ -68,6 +70,21 @@ ALTER TABLE aiark_people_candidates ADD CONSTRAINT aiark_people_candidates_verdi
 ALTER TABLE aiark_people_candidates DROP CONSTRAINT IF EXISTS aiark_people_candidates_company_check;
 ALTER TABLE aiark_people_candidates ADD CONSTRAINT aiark_people_candidates_company_check
   CHECK (company_id IS NOT NULL OR verdict = 'no_company');
+-- The order AI Ark gave a LinkedIn Look's people in (search, page, position):
+-- the pick takes the people with a track phrase first, then the others in
+-- this order. Null for people runs by company id.
+ALTER TABLE aiark_people_candidates ADD COLUMN IF NOT EXISTS seq integer;
+
+-- The company object a LinkedIn Look's Preview gave for each company it met
+-- (name, industry, description, offices; no domain), once per run and
+-- company: a person bought with no email has their company brought into the
+-- client's Companies table from it. Removed with the run.
+CREATE TABLE IF NOT EXISTS aiark_people_preview_companies (
+  run_id     uuid NOT NULL REFERENCES aiark_people_runs(id) ON DELETE CASCADE,
+  company_id text NOT NULL,
+  record     jsonb NOT NULL,
+  PRIMARY KEY (run_id, company_id)
+);
 
 -- The head office's place keys ('US', 'US|IL', 'US|IL|springfield'), so a
 -- LinkedIn pull copies from the registry only companies headquartered in the
@@ -145,19 +162,21 @@ INSERT INTO enrich_settings (key, value) VALUES
 ON CONFLICT (key) DO NOTHING;
 
 -- Access: server-only.
-ALTER TABLE client_linkedin_settings     ENABLE ROW LEVEL SECURITY;
-ALTER TABLE client_linkedin_settings_log ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON client_linkedin_settings, client_linkedin_settings_log FROM anon, authenticated;
+ALTER TABLE client_linkedin_settings       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE client_linkedin_settings_log   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE aiark_people_preview_companies ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON client_linkedin_settings, client_linkedin_settings_log, aiark_people_preview_companies FROM anon, authenticated;
 REVOKE ALL ON SEQUENCE client_linkedin_settings_log_id_seq FROM anon, authenticated;
 
 COMMENT ON TABLE client_linkedin_settings IS 'AI Ark tab: each client''s own LinkedIn places and excluded keywords, per kind (people, companies), seeded from its newest Clay search (128).';
 COMMENT ON TABLE client_linkedin_settings_log IS 'AI Ark tab: every save and seed write of client_linkedin_settings, with the lists before and after (128).';
+COMMENT ON TABLE aiark_people_preview_companies IS 'LinkedIn people runs: the Preview''s company object of each company a Look met, for bringing in the company of a person bought with no email (128).';
 
 DO $$
 DECLARE missing text;
 BEGIN
   SELECT string_agg(t, ', ') INTO missing
-    FROM unnest(ARRAY['client_linkedin_settings', 'client_linkedin_settings_log']) t
+    FROM unnest(ARRAY['client_linkedin_settings', 'client_linkedin_settings_log', 'aiark_people_preview_companies']) t
    WHERE to_regclass('public.' || t) IS NULL;
   IF missing IS NOT NULL THEN
     RAISE EXCEPTION '128: missing tables: %', missing;
@@ -182,11 +201,15 @@ BEGIN
               AND attname = 'company_row_id' AND attnotnull) THEN
     RAISE EXCEPTION '128: aiark_people_candidates.company_row_id is still NOT NULL';
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_schema = 'public' AND table_name = 'aiark_people_candidates' AND column_name = 'seq') THEN
+    RAISE EXCEPTION '128: aiark_people_candidates.seq is missing';
+  END IF;
   IF (SELECT count(*) FROM enrich_settings WHERE key IN ('linkedin_sources', 'linkedin_starter_keywords')) <> 2 THEN
     RAISE EXCEPTION '128: a LinkedIn setting is missing';
   END IF;
   SELECT string_agg(t, ', ') INTO missing
-    FROM unnest(ARRAY['client_linkedin_settings', 'client_linkedin_settings_log']) t
+    FROM unnest(ARRAY['client_linkedin_settings', 'client_linkedin_settings_log', 'aiark_people_preview_companies']) t
    WHERE NOT (SELECT relrowsecurity FROM pg_class WHERE oid = ('public.' || t)::regclass)
       OR has_table_privilege('anon', 'public.' || t, 'SELECT')
       OR has_table_privilege('authenticated', 'public.' || t, 'SELECT');

@@ -457,10 +457,11 @@ const listsStale = (p) => !p.lists_at || Date.now() - Date.parse(p.lists_at) > L
 const listsAlive = (p) => Boolean(p.lists_at) && Date.now() - Date.parse(p.lists_at) < LIST_LIFE_MS;
 
 /**
- * Exclusion lists this mode made in the last 24 hours, by people runs and
- * company pulls together: AI Ark allows 50 a day, and its docs don't say the
- * two kinds have budgets of their own, so they share one (LIST_BUDGET). Each
- * run logs the lists it makes in progress.lists_log.
+ * Exclusion lists this mode made in the last 24 hours, by the AI Ark tab's
+ * runs, company pulls and (LinkedIn) people runs together: AI Ark allows 50 a
+ * day, and its docs don't say the kinds have budgets of their own, so they
+ * share one (LIST_BUDGET). Each run logs the lists it makes in
+ * progress.lists_log.
  *
  * @param {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> }} db
  * @param {"live" | "demo"} mode
@@ -470,7 +471,9 @@ export async function listsMadeToday(db, mode) {
     `SELECT count(*)::int AS made
        FROM (SELECT progress FROM aiark_runs WHERE mode = $1
              UNION ALL
-             SELECT progress FROM aiark_company_runs WHERE mode = $1) r,
+             SELECT progress FROM aiark_company_runs WHERE mode = $1
+             UNION ALL
+             SELECT progress FROM aiark_people_runs WHERE mode = $1) r,
             jsonb_array_elements_text(coalesce(r.progress->'lists_log', '[]'::jsonb)) AS t(at)
       WHERE t.at::timestamptz > now() - interval '24 hours'`,
     [mode]
