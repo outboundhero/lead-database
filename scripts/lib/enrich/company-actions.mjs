@@ -4,7 +4,8 @@
 //
 //   client_office       free   the office in the client's area: every office of
 //                              the company judged as client_area judges a person
-//                              (judgePlace), the head office first
+//                              (judgePlace), the head office first; on a LinkedIn
+//                              pull's row (hq_only) the head office alone
 //   held_general_email  free   a general inbox for this company the database
 //                              already holds: role addresses at its domain, then
 //                              general-inbox leads at the same company and office
@@ -45,12 +46,20 @@ function parseOffices(v) {
   }
 }
 
+/** Is a cell's value the text "true" (or true)? */
+const isTrue = (v) => v === true || text(v).toLowerCase() === "true";
+
 async function clientOffice({ inputs, table, row, db }) {
   const t = await targetingFor(db, table.client_tag, row?.next_run_at);
   if (!t) return { status: "error", note: `${table.client_tag} has no targeting rules`, retryable: false };
   const offices = parseOffices(inputs.offices);
   if (!offices.length) {
     const why = "AI Ark gave no office for this company, so the lead database couldn't place it";
+    return { status: "done", value: { inside: false, hq: false, office: null, why, offices_inside: 0 }, display: "Can't tell", note: why };
+  }
+  const hqOnly = isTrue(inputs.hq_only);
+  if (hqOnly && !offices.some((o) => o.hq)) {
+    const why = "AI Ark gave no head office for this company, and a LinkedIn pull keeps head offices only, so the lead database couldn't place it";
     return { status: "done", value: { inside: false, hq: false, office: null, why, offices_inside: 0 }, display: "Can't tell", note: why };
   }
   const { geo } = await geoFor(db);
@@ -61,7 +70,9 @@ async function clientOffice({ inputs, table, row, db }) {
     judged.push({ office: o, verdict: await judgePlace({ city: o.city, state, country: o.country }, { targeting: t, db }) });
   }
   const inside = judged.filter((j) => j.verdict.value === true);
-  const chosen = inside.find((j) => j.office.hq) ?? inside[0] ?? null;
+  // A LinkedIn pull's row (hq_only): the head office alone counts, as Clay's company search kept head offices.
+  const counted = hqOnly ? inside.filter((j) => j.office.hq) : inside;
+  const chosen = counted.find((j) => j.office.hq) ?? counted[0] ?? null;
   const shown = chosen ?? judged.find((j) => j.office.hq) ?? judged[0];
   const place = shown.verdict.place ?? null;
   const country = place?.country ?? null;
@@ -75,8 +86,19 @@ async function clientOffice({ inputs, table, row, db }) {
     country_name: country ? geo.countryName.get(country) ?? null : null,
     postal_code: text(shown.office.postal_code) || null,
   };
+  if (hqOnly && !chosen) {
+    const cantTell = shown.verdict.display === "Can't tell";
+    const branches = inside.length;
+    const why = shown.verdict.note;
+    return {
+      status: "done",
+      value: { inside: false, hq: true, office, why, offices_inside: branches },
+      display: cantTell ? "Can't tell" : "Outside (head office)",
+      note: `The head office is not in the client's area, and a LinkedIn pull keeps head offices only: ${why}.${branches ? ` ${plural(branches, "other office is", "other offices are")} inside; an AI Ark pull of the same company would count ${branches === 1 ? "it" : "them"}.` : ""}`,
+    };
+  }
   if (chosen) {
-    const which = chosen.office.hq ? "The head office" : "A branch (the head office is not inside)";
+    const which = chosen.office.hq ? (hqOnly ? "The head office (a LinkedIn pull keeps head offices only)" : "The head office") : "A branch (the head office is not inside)";
     return {
       status: "done",
       value: { inside: true, hq: Boolean(chosen.office.hq), office, why: chosen.verdict.note, offices_inside: inside.length },

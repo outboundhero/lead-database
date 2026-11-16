@@ -16,6 +16,7 @@
 // Nothing here reads or writes leads.
 
 import { cityKey } from "../aiark/geo.mjs";
+import { isLinkedinSource, LINKEDIN_LABELS } from "../aiark/linkedin-labels.mjs";
 import { COMPANY_TEMPLATE_V2 } from "./company-template-v2.mjs";
 import { bareDomain } from "./domain.mjs";
 import { ERROR_OUTCOME, relist, WAITING_OUTCOME } from "./project-contacts.mjs";
@@ -47,7 +48,8 @@ export function companySummaryV2(values, { waiting = false, failed = false } = {
   const outcome = waiting ? WAITING_OUTCOME : failed ? ERROR_OUTCOME : str(v.company_outcome) ?? "Not worked out";
   const company = str(v.company);
   return {
-    source: "AI Ark",
+    // A LinkedIn pull's row, or a LinkedIn person's company brought in (its source input says which): LinkedIn (AI Ark).
+    source: isLinkedinSource(v.source) ? LINKEDIN_LABELS.projection : "AI Ark",
     template: COMPANY_TEMPLATE_V2,
     aiark_id: str(v.aiark_id),
     company,

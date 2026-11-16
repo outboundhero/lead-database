@@ -31,21 +31,15 @@ import { ARRAY_MAX } from "./client.mjs";
 import { buildRequests, bytes, PLACES_BYTES } from "./filters.mjs";
 import { buildCompanyRequests, pickCompanyFilters } from "./company-filters.mjs";
 import { placeString } from "./geo.mjs";
+import { LINKEDIN_LABELS } from "./linkedin-labels.mjs";
 import { CHECKED_AFTER, NOT_SEARCHED_FIX } from "./linkedin-settings.mjs";
 import { registerPeopleSource } from "./people-requests.mjs";
 
 /** Excluded places go in every search: at most this many bytes of them (an include group's budget). */
 export const EXCLUDE_PLACES_BYTES = PLACES_BYTES;
 
-/** What the LinkedIn sources are called wherever they are written or shown. */
-export const LINKEDIN_LABELS = Object.freeze({
-  source: "LinkedIn",
-  companyPull: "LinkedIn company pull (AI Ark)", // enrich_sources.label of the rows a LinkedIn pull bought
-  peopleRun: "LinkedIn people run (AI Ark)", // enrich_sources.label of the People rows a LinkedIn run bought
-  companyRows: "LinkedIn companies (AI Ark)", // the company row's source input, a LinkedIn pull's rows (design 2C.1)
-  personCompanies: "LinkedIn people (AI Ark)", // the source of a LinkedIn person's company brought in (design 2C.2)
-  projection: "LinkedIn (AI Ark)", // enrich_companies.source of a LinkedIn row
-});
+/** What the LinkedIn sources are called wherever they are written or shown (linkedin-labels.mjs). */
+export { LINKEDIN_LABELS };
 
 // The AI Ark tab's notes that say something untrue of a LinkedIn search: the
 // offices note (a LinkedIn pull keeps head offices), the whole-word and limit

@@ -42,10 +42,24 @@
 // company_pipeline.min_balance. A page whose
 // answer was lost (a network error or a 5xx) may have been charged: it counts
 // against the brake at full price, the pull backs off, and 3 in a row stop it.
+//
+// LinkedIn pulls (source 'linkedin', migration 128) take the same slices, with
+// the places and keywords of the client's LinkedIn settings (the route passes
+// the made-up rules linkedinTargeting() builds, and filters.linkedin):
+//   - the copy takes registry companies whose head office is in those places
+//     (aiark_companies.hq_keys, filled from the record when first read);
+//   - every row they write carries hq_only ("true": client_office judges the
+//     head office alone) and linkedin_run (client_exclusions also checks the
+//     pull's excluded keywords, all of them, sent to AI Ark or not);
+//   - one row per company: a LinkedIn pull leaves a company already in the
+//     table as it is, while an AI Ark pull that takes a company a LinkedIn
+//     pull wrote (its copy matches it, or AI Ark returns it) clears those two
+//     inputs and queues the row again, so any office in the area counts.
 
 import { randomUUID } from "node:crypto";
 import { AiArkError, clip, COMPANY_PRICE, LIST_MAX, LISTS_PER_DAY, LISTS_PER_REQUEST, PAGE_MAX, SEARCH_CAP } from "./client.mjs";
-import { companyMatch, companyPlaceKeys, companySpendCeiling, matchesCompanyFilters } from "./company-filters.mjs";
+import { companyHqKeys, companyMatch, companyPlaceKeys, companySpendCeiling, matchesCompanyFilters } from "./company-filters.mjs";
+import { LINKEDIN_LABELS } from "./linkedin-labels.mjs";
 import { aiArkFor, LEASE_MIN, LIST_BUDGET, LIST_LIFE_MS, LIST_REFRESH_MS, listsMadeToday } from "./runs.mjs";
 import { geoFor } from "../enrich/client-checks.mjs";
 import { COMPANY_SEARCH_KEYS, companyInputs, SOURCE_BOUGHT, SOURCE_COPIED } from "../enrich/company-template.mjs";
@@ -53,6 +67,8 @@ import { COMPANY_INPUT_KEYS_V2 } from "../enrich/company-template-v2.mjs";
 import { readSettings } from "../enrich/settings.mjs";
 import { ensurePipelineTables } from "../enrich/templates.mjs";
 
+/** Where a company pull's companies come from: AI Ark's Company Search for the client's rules, or its LinkedIn settings. */
+export const COMPANY_SOURCES = Object.freeze(["ai_ark", "linkedin"]);
 const MAX_ATTEMPTS = 6;
 const BACKOFF_MAX_MS = 15 * 60_000;
 const COPY_BATCH = 1_000; // registry companies looked at per slice
@@ -104,21 +120,40 @@ export async function ensureTemplateTable(db, tag, { settings = null } = {}) {
  * here from the client's rules and the request's company filters, and kept on
  * the pull as filters.copy, so the copy asks for what AI Ark is asked for.
  *
+ * A LinkedIn pull (source "linkedin") passes the made-up rules its requests
+ * were built from (`targeting`: linkedinTargeting(effective)) instead: the copy
+ * matches those places, by head office (copy.hq); its bought source is kind
+ * linkedin; and `filters.linkedin` (linkedinRunFilters(effective), from the
+ * route) must hold the keywords' whole union, which every row's exclusion
+ * check reads after the pull.
+ *
  * @param {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> }} db  a client inside the caller's transaction
  * @param {{ tag: string, mode: "live" | "demo", size: number, filters: object, requests: object[],
- *           matchCount?: number | null, createdBy?: string | null }} opts
- *   filters: what the tab showed (versions, report, notes); requests: buildCompanyRequests()'s bodies
+ *           matchCount?: number | null, createdBy?: string | null, source?: "ai_ark" | "linkedin", targeting?: object | null }} opts
+ *   filters: what the tab showed (versions, report, notes; for LinkedIn, filters.linkedin); requests: the search bodies
  * @returns {Promise<{ id: string, table_id: string, status: string } & Record<string, unknown>>} the aiark_company_runs row
  */
-export async function createCompanyRun(db, { tag, mode, size, filters, requests, matchCount = null, createdBy = null }) {
+export async function createCompanyRun(db, { tag, mode, size, filters, requests, matchCount = null, createdBy = null, source = "ai_ark", targeting = null }) {
+  if (!COMPANY_SOURCES.includes(source)) throw new Error(`A company pull's source is ai_ark or linkedin, not "${source}"`);
+  const linkedin = source === "linkedin";
+  if (linkedin && !targeting) throw new Error("A LinkedIn pull needs the rules its search was built from (linkedinTargeting)");
+  if (linkedin && !Array.isArray(filters?.linkedin?.keywords?.union)) {
+    throw new Error("A LinkedIn pull needs its settings in filters.linkedin (linkedinRunFilters), with the excluded keywords checked after the pull");
+  }
   const id = randomUUID();
   const table = await ensureTemplateTable(db, tag);
-  const { rows: [targeting] } = await db.query(`SELECT include_locations, exclude_locations FROM client_targeting WHERE client_tag = $1`, [tag]);
+  let rules = targeting;
+  if (!linkedin) {
+    const { rows: [t] } = await db.query(`SELECT include_locations, exclude_locations FROM client_targeting WHERE client_tag = $1`, [tag]);
+    rules = t ?? null;
+  }
   const { geo } = await geoFor(db);
-  const copy = companyMatch({ targeting: targeting ?? null, request: requests?.[0], geo });
+  const copy = companyMatch({ targeting: rules ?? null, request: requests?.[0], geo });
+  if (linkedin) copy.hq = true;
+  const demo = mode === "demo" ? " (made-up companies)" : "";
   const { rows: [bought] } = await db.query(
-    `INSERT INTO enrich_sources (table_id, kind, label, meta, created_by) VALUES ($1, 'ai_ark', $2, $3, $4) RETURNING id`,
-    [table.id, `AI Ark company pull${mode === "demo" ? " (made-up companies)" : ""}`, JSON.stringify({ run_id: id, mode, size }), createdBy]
+    `INSERT INTO enrich_sources (table_id, kind, label, meta, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+    [table.id, linkedin ? "linkedin" : "ai_ark", `${linkedin ? LINKEDIN_LABELS.companyPull : "AI Ark company pull"}${demo}`, JSON.stringify({ run_id: id, mode, size }), createdBy]
   );
   const { rows: [copied] } = await db.query(
     `INSERT INTO enrich_sources (table_id, kind, label, meta, created_by) VALUES ($1, 'registry', $2, $3, $4) RETURNING id`,
@@ -126,9 +161,9 @@ export async function createCompanyRun(db, { tag, mode, size, filters, requests,
   );
   const { rows: [run] } = await db.query(
     `INSERT INTO aiark_company_runs (id, client_tag, mode, size_requested, table_id, source_id, registry_source_id, filters, requests,
-                                     match_count, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-    [id, tag, mode, size, table.id, bought.id, copied.id, JSON.stringify({ ...(filters ?? {}), copy }), JSON.stringify(requests), matchCount, createdBy]
+                                     match_count, created_by, source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+    [id, tag, mode, size, table.id, bought.id, copied.id, JSON.stringify({ ...(filters ?? {}), copy }), JSON.stringify(requests), matchCount, createdBy, source]
   );
   return run;
 }
@@ -215,7 +250,7 @@ async function finish(ctx, { status, stopReason = null, lastError = null }) {
   if (r?.registry_source_id) {
     await ctx.pool.query(`UPDATE enrich_sources SET received = $2, created = $2 WHERE id = $1`, [r.registry_source_id, r.from_registry]);
   }
-  ctx.log?.(`AI Ark company pull ${ctx.run.id.slice(0, 8)}: ${r?.status ?? "?"}${stopReason ? `: ${stopReason}` : ""}${lastError ? ` (${lastError})` : ""}`);
+  ctx.log?.(`${pullName(ctx.run)} ${ctx.run.id.slice(0, 8)}: ${r?.status ?? "?"}${stopReason ? `: ${stopReason}` : ""}${lastError ? ` (${lastError})` : ""}`);
   return r?.status;
 }
 
@@ -255,9 +290,19 @@ function dateOf(v) {
   return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s ? null : s;
 }
 
-/** One company as the write statement takes it, with the table's own tag as its client_tag input (C#9). */
-function companyRow(record, { source, pulledBefore = null, geo = null, clientTag }, plain = false) {
-  const inputs = { ...companyInputs(record, { source, pulledBefore }), client_tag: String(clientTag ?? "") };
+/** How a pull is named in the worker's log. */
+const pullName = (run) => (run?.source === "linkedin" ? "LinkedIn company pull" : "AI Ark company pull");
+
+/**
+ * One company as the write statement takes it, with the table's own tag as its
+ * client_tag input (C#9); a LinkedIn pull's row also hq_only and linkedin_run.
+ */
+function companyRow(record, { source, pulledBefore = null, geo = null, clientTag, linkedinRun = null }, plain = false) {
+  const inputs = {
+    ...companyInputs(record, { source, pulledBefore }),
+    client_tag: String(clientTag ?? ""),
+    ...(linkedinRun ? { hq_only: "true", linkedin_run: String(linkedinRun) } : {}),
+  };
   const cells = {};
   for (const k of COMPANY_INPUT_KEYS_V2) {
     const v = inputs[k];
@@ -273,8 +318,28 @@ function companyRow(record, { source, pulledBefore = null, geo = null, clientTag
     name: cells.company ?? null,
     domain: cells.domain ?? null,
     place_keys: geo ? companyPlaceKeys(record, geo) : [],
+    hq_keys: geo ? companyHqKeys(record, geo) : null,
     updated: dateOf(record.last_updated),
   };
+}
+
+/**
+ * Rows a LinkedIn pull wrote that an AI Ark pull now takes too: their hq_only
+ * and linkedin_run inputs cleared (any office counts, the client's own terms
+ * only) and the rows queued again, preempting a pass already under way (its
+ * paid answers are remembered, so the new pass reuses them).
+ */
+async function clearLinkedin(db, rowIds) {
+  if (!rowIds.length) return 0;
+  const { rows } = await db.query(
+    `WITH d AS (DELETE FROM enrich_cells WHERE row_id = ANY($1::bigint[]) AND column_key IN ('hq_only', 'linkedin_run') RETURNING 1)
+     UPDATE enrich_rows
+        SET run_status = 'queued', next_run_at = now(), attempts = 0, claim_token = NULL, claimed_at = NULL, last_error = NULL, updated_at = now()
+      WHERE id = ANY($1::bigint[])
+     RETURNING id`,
+    [rowIds]
+  );
+  return rows.length;
 }
 
 const WRITE_SQL = `
@@ -284,7 +349,7 @@ const WRITE_SQL = `
   ), x AS (
     SELECT * FROM jsonb_to_recordset($5::jsonb)
            AS x(company_id text, row_key text, search text, cells jsonb, record jsonb, name text, domain text,
-                place_keys text[], updated date)
+                place_keys text[], hq_keys text[], updated date)
   ), r AS (
     INSERT INTO enrich_rows (table_id, source_id, row_key, search_text)
     SELECT $3::uuid, $4::uuid, x.row_key, x.search FROM x
@@ -296,11 +361,22 @@ const WRITE_SQL = `
       FROM r JOIN x ON x.row_key = r.row_key CROSS JOIN LATERAL jsonb_each_text(x.cells) AS kv
     RETURNING 1
   ), g AS (
-    INSERT INTO aiark_companies (company_id, demo, run_id, name, domain, place_keys, record, aiark_updated)
-    SELECT x.company_id, $6::boolean, $1::uuid, x.name, x.domain, coalesce(x.place_keys, '{}'::text[]), x.record, x.updated
+    INSERT INTO aiark_companies (company_id, demo, run_id, name, domain, place_keys, hq_keys, record, aiark_updated)
+    SELECT x.company_id, $6::boolean, $1::uuid, x.name, x.domain, coalesce(x.place_keys, '{}'::text[]), x.hq_keys, x.record, x.updated
       FROM x WHERE $7::boolean
     ON CONFLICT (company_id) DO NOTHING
     RETURNING 1
+  ), lk AS (
+    SELECT e.id FROM x JOIN enrich_rows e ON e.table_id = $3::uuid AND e.row_key = x.row_key
+     WHERE $12::boolean AND EXISTS (SELECT 1 FROM enrich_cells h WHERE h.row_id = e.id AND h.column_key = 'hq_only')
+  ), dl AS (
+    DELETE FROM enrich_cells d WHERE d.row_id IN (SELECT id FROM lk) AND d.column_key IN ('hq_only', 'linkedin_run')
+    RETURNING 1
+  ), rq AS (
+    UPDATE enrich_rows q
+       SET run_status = 'queued', next_run_at = now(), attempts = 0, claim_token = NULL, claimed_at = NULL, last_error = NULL, updated_at = now()
+     WHERE q.id IN (SELECT id FROM lk)
+    RETURNING q.id
   ), u AS (
     UPDATE aiark_company_runs q
        SET pulled = q.pulled + (SELECT count(*) FROM r)::int,
@@ -313,7 +389,8 @@ const WRITE_SQL = `
     RETURNING q.pulled, q.credits_used
   )
   SELECT (SELECT held FROM st) AS held, (SELECT status FROM st) AS status, (SELECT count(*) FROM r)::int AS inserted,
-         (SELECT count(*) FROM g)::int AS registered, (SELECT pulled FROM u) AS pulled, (SELECT credits_used::float8 FROM u) AS used`;
+         (SELECT count(*) FROM g)::int AS registered, (SELECT pulled FROM u) AS pulled, (SELECT credits_used::float8 FROM u) AS used,
+         (SELECT count(*) FROM rq)::int AS taken_over`;
 
 /**
  * Companies into the client's table (and, for a bought page, the registry),
@@ -324,9 +401,11 @@ const WRITE_SQL = `
  * no credits and no "bought before" again.
  */
 async function writeOnce(ctx, { companies, sourceId, register, credits = 0, boughtBefore = 0, pageId = null, progress = null }) {
+  // An AI Ark pull's bought page takes over the rows a LinkedIn pull wrote for the same companies.
+  const takeOver = register && ctx.run.source !== "linkedin";
   const { rows: [r] } = await ctx.pool.query(WRITE_SQL, [
     ctx.run.id, ctx.run.claim_token, ctx.run.table_id, sourceId, JSON.stringify(companies), ctx.run.mode === "demo", register,
-    pageId, boughtBefore, credits, progress === null ? null : JSON.stringify(progress),
+    pageId, boughtBefore, credits, progress === null ? null : JSON.stringify(progress), takeOver,
   ]);
   ctx.pulled = r.pulled;
   ctx.spent = r.used;
@@ -377,6 +456,28 @@ async function writeCompanies(ctx, args, build) {
 
 // ── 1. The registry copy ────────────────────────────────────────────────────
 
+/**
+ * An AI Ark pull's copy also takes over the rows a LinkedIn pull wrote in this
+ * table for companies it would copy (an office in its places, its company
+ * filters): their head-office-only judgement and LinkedIn keywords are
+ * cleared and they are queued again. Nothing happens in a table with no
+ * LinkedIn rows. Free; idempotent.
+ */
+async function takeOverLinkedinRows(ctx, copy, geo) {
+  const { run, pool } = ctx;
+  const { rows } = await pool.query(
+    `SELECT h.row_id::bigint AS row_id, c.record
+       FROM enrich_cells h
+       JOIN enrich_rows e ON e.id = h.row_id
+       JOIN aiark_companies c ON c.company_id = substr(e.row_key, 7) AND c.demo = $3
+      WHERE h.table_id = $1 AND h.column_key = 'hq_only' AND e.row_key LIKE 'aiark:%' AND c.place_keys && $2::text[]`,
+    [run.table_id, copy.include, run.mode === "demo"]
+  );
+  const ids = rows.filter((r) => matchesCompanyFilters(r.record, copy, geo)).map((r) => Number(r.row_id));
+  const n = await clearLinkedin(pool, ids);
+  if (n) ctx.progress = { ...ctx.progress, taken_over: Number(ctx.progress.taken_over ?? 0) + n };
+}
+
 async function sliceCopy(ctx) {
   const { run, pool } = ctx;
   const copy = run.filters?.copy;
@@ -386,22 +487,51 @@ async function sliceCopy(ctx) {
     await savePosition(ctx);
     return { more: true };
   }
-  const { rows } = await pool.query(
-    `SELECT c.company_id, c.record
-       FROM aiark_companies c
-      WHERE c.demo = $1 AND c.place_keys && $2::text[] AND c.company_id > $3
-        AND NOT EXISTS (SELECT 1 FROM enrich_rows r WHERE r.table_id = $4 AND r.row_key = 'aiark:' || c.company_id)
-      ORDER BY c.company_id
-      LIMIT $5`,
-    [run.mode === "demo", copy.include, p.copy_after ?? "", run.table_id, ctx.copyBatch]
-  );
+  const linkedin = run.source === "linkedin";
   const { geo } = await geoFor(pool);
+  if (!linkedin) await takeOverLinkedinRows(ctx, copy, geo);
+  // A LinkedIn pull copies companies headquartered in its places: hq_keys, filled here for rows bought before 128.
+  const { rows } = await pool.query(
+    linkedin
+      ? `SELECT c.company_id, c.record, c.hq_keys
+           FROM aiark_companies c
+          WHERE c.demo = $1 AND (c.hq_keys && $2::text[] OR (c.hq_keys IS NULL AND c.place_keys && $2::text[])) AND c.company_id > $3
+            AND NOT EXISTS (SELECT 1 FROM enrich_rows r WHERE r.table_id = $4 AND r.row_key = 'aiark:' || c.company_id)
+          ORDER BY c.company_id
+          LIMIT $5`
+      : `SELECT c.company_id, c.record
+           FROM aiark_companies c
+          WHERE c.demo = $1 AND c.place_keys && $2::text[] AND c.company_id > $3
+            AND NOT EXISTS (SELECT 1 FROM enrich_rows r WHERE r.table_id = $4 AND r.row_key = 'aiark:' || c.company_id)
+          ORDER BY c.company_id
+          LIMIT $5`,
+    [run.mode === "demo", copy.include, ctx.progress.copy_after ?? "", run.table_id, ctx.copyBatch]
+  );
+  let looked = rows;
+  if (linkedin) {
+    const fill = rows.filter((r) => r.hq_keys == null).map((r) => ({ id: r.company_id, k: companyHqKeys(r.record, geo) }));
+    if (fill.length) {
+      await pool.query(
+        `UPDATE aiark_companies c SET hq_keys = x.k FROM jsonb_to_recordset($1::jsonb) AS x(id text, k text[]) WHERE c.company_id = x.id AND c.hq_keys IS NULL`,
+        [JSON.stringify(fill)]
+      );
+    }
+    const filled = new Map(fill.map((f) => [f.id, f.k]));
+    const include = new Set(copy.include);
+    looked = rows.filter((r) => (r.hq_keys ?? filled.get(r.company_id) ?? []).some((k) => include.has(k)));
+  }
   const room = Math.max(0, run.size_requested - ctx.pulled);
-  const picked = rows.filter((r) => matchesCompanyFilters(r.record, copy, geo)).slice(0, room);
+  const picked = looked.filter((r) => matchesCompanyFilters(r.record, copy, geo)).slice(0, room);
   for (let i = 0; i < picked.length; i += WRITE_CHUNK) {
     const chunk = picked.slice(i, i + WRITE_CHUNK);
     await writeCompanies(ctx, { sourceId: run.registry_source_id, register: false }, (plain) =>
-      chunk.map((r) => companyRow({ ...r.record, id: r.company_id }, { source: SOURCE_COPIED, clientTag: run.client_tag }, plain))
+      chunk.map((r) =>
+        companyRow(
+          { ...r.record, id: r.company_id },
+          { source: linkedin ? LINKEDIN_LABELS.companyRowsCopied : SOURCE_COPIED, clientTag: run.client_tag, linkedinRun: linkedin ? run.id : null },
+          plain
+        )
+      )
     );
   }
   const done = rows.length < ctx.copyBatch || ctx.pulled >= run.size_requested;
@@ -584,6 +714,7 @@ async function sliceBuy(ctx) {
     : { rows: [] };
   const before = new Map(prior.map((x) => [x.company_id, x]));
   const { geo } = await geoFor(pool);
+  const linkedin = run.source === "linkedin";
   const seen = new Set();
   const unique = content.filter((c) => !seen.has(String(c.id)) && seen.add(String(c.id)));
   const lastPage = res.content.length < size || offset + size >= res.totalElements;
@@ -605,7 +736,9 @@ async function sliceBuy(ctx) {
         const pulledBefore = prev
           ? `Bought ${new Date(prev.pulled_at).toISOString().slice(0, 10)}${prev.run_id ? ` (pull ${String(prev.run_id).slice(0, 6)})` : ""}`
           : null;
-        return companyRow(c, { source: SOURCE_BOUGHT, pulledBefore, geo, clientTag: run.client_tag }, plain);
+        return linkedin
+          ? companyRow(c, { source: LINKEDIN_LABELS.companyRows, pulledBefore, geo, clientTag: run.client_tag, linkedinRun: run.id }, plain)
+          : companyRow(c, { source: SOURCE_BOUGHT, pulledBefore, geo, clientTag: run.client_tag }, plain);
       })
   );
   if (w.status === "cancelled") throw new Cancelled();
@@ -645,7 +778,7 @@ export async function advanceOneCompanyRun({
         WHERE id = $1 AND claim_token = $2`,
       [run.id, run.claim_token, why]
     );
-    log(`AI Ark company pull ${run.id.slice(0, 8)}: ${why}`);
+    log(`${pullName(run)} ${run.id.slice(0, 8)}: ${why}`);
     return run.id;
   }
 
@@ -682,9 +815,9 @@ export async function advanceOneCompanyRun({
     }
   } catch (e) {
     if (e instanceof LostClaim) {
-      log(`AI Ark company pull ${run.id.slice(0, 8)}: claim lost mid-slice (reclaimed elsewhere), stopped`);
+      log(`${pullName(run)} ${run.id.slice(0, 8)}: claim lost mid-slice (reclaimed elsewhere), stopped`);
     } else if (e instanceof Unread) {
-      log(`AI Ark company pull ${run.id.slice(0, 8)}: ${e.message}, and the pull could not be read back; left as it is until its lease runs out`);
+      log(`${pullName(run)} ${run.id.slice(0, 8)}: ${e.message}, and the pull could not be read back; left as it is until its lease runs out`);
     } else if (e instanceof Cancelled) {
       await finish(ctx, { status: "cancelled" });
     } else if (e instanceof AiArkError && e.kind === "credits") {
@@ -697,7 +830,7 @@ export async function advanceOneCompanyRun({
       const msg = String(e?.message ?? e).slice(0, 300);
       if (attempts >= MAX_ATTEMPTS) await finish(ctx, { status: "error", lastError: `Gave up after ${attempts} tries: ${msg}` }).catch(() => {});
       else await release(ctx, { inMs: backoffMs(attempts), attempts, lastError: msg }).catch(() => {});
-      log(`AI Ark company pull ${run.id.slice(0, 8)}: ${msg} (try ${attempts} of ${MAX_ATTEMPTS})`);
+      log(`${pullName(run)} ${run.id.slice(0, 8)}: ${msg} (try ${attempts} of ${MAX_ATTEMPTS})`);
     }
   }
   return run.id;

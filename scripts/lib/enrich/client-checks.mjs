@@ -8,7 +8,10 @@
 //   client_area        the person's city/state against the client's locations
 //   client_exclusions  the company against the client's exclusion terms, and
 //                      for cleaning clients the job title against the cleaning
-//                      title exclusions
+//                      title exclusions; on a LinkedIn pull's row also against
+//                      that pull's excluded keywords (all of them, sent to AI
+//                      Ark or not, stored on the pull: migration 128), matched
+//                      the same way
 //
 // Each mirrors the database's own rule (fn_client_eligibility_conditions):
 // exclusion terms match anywhere in the company name and industry, cleaning
@@ -384,10 +387,37 @@ async function clientArea({ inputs, table, row, db }) {
 
 // ── client_exclusions ───────────────────────────────────────────────────────
 
-async function clientExclusions({ inputs, table, row, db }) {
-  const t = await targetingFor(db, table.client_tag, row?.next_run_at);
-  if (!t) return { status: "error", note: `${table.client_tag} has no targeting rules`, retryable: false };
-  const terms = (Array.isArray(t.exclude_terms) ? t.exclude_terms : []).map((s) => text(s).toLowerCase()).filter(Boolean);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const linkedinCache = new Map(); // run id -> its keywords (a run's stored filters never change)
+
+/**
+ * The excluded keywords a LinkedIn pull or people run stored (filters.linkedin.keywords.union:
+ * the standard ones and the client's own, all of them), lower case; null when the run holds none.
+ */
+export async function linkedinKeywordsOf(db, runId) {
+  if (linkedinCache.has(runId)) return linkedinCache.get(runId);
+  const { rows } = await db.query(
+    `SELECT filters -> 'linkedin' -> 'keywords' -> 'union' AS union FROM aiark_company_runs WHERE id = $1::uuid
+     UNION ALL
+     SELECT filters -> 'linkedin' -> 'keywords' -> 'union' FROM aiark_people_runs WHERE id = $1::uuid`,
+    [runId]
+  );
+  const list = Array.isArray(rows[0]?.union) ? [...new Set(rows[0].union.map((s) => text(s).toLowerCase()).filter(Boolean))] : null;
+  if (linkedinCache.size > 200) linkedinCache.delete(linkedinCache.keys().next().value);
+  if (list) linkedinCache.set(runId, list);
+  return list;
+}
+
+/**
+ * The first term a company's name, industry or description holds, the way the
+ * lead database matches the client's exclusion terms: anywhere in the name and
+ * the industry, as whole words in the description. Null when none does.
+ *
+ * @param {{ company?: string, industry?: string, description?: string }} inputs
+ * @param {string[]} terms  lower case
+ * @returns {{ term: string, label: string } | null}
+ */
+export function companyTermHit(inputs, terms) {
   const fields = [
     ["company name", companyAsHeld(inputs.company)],
     ["industry", text(inputs.industry)],
@@ -396,16 +426,39 @@ async function clientExclusions({ inputs, table, row, db }) {
     const v = value.toLowerCase();
     if (!v) continue;
     const term = terms.find((x) => v.includes(x));
-    if (term) {
-      const display = `"${term}" in the ${label}`;
-      return { status: "done", value: display, display, note: `Matches the client's exclusion term "${term}" (matched anywhere in the text, as the lead database does)` };
-    }
+    if (term) return { term, label };
   }
   const description = text(inputs.description);
   const word = description ? terms.find((x) => new RegExp(wholeTermSource(x), "iu").test(description)) : null;
-  if (word) {
-    const display = `"${word}" in the company description`;
-    return { status: "done", value: display, display, note: `The description has the client's exclusion term "${word}" as a whole word` };
+  return word ? { term: word, label: "company description" } : null;
+}
+
+async function clientExclusions({ inputs, table, row, db }) {
+  const t = await targetingFor(db, table.client_tag, row?.next_run_at);
+  if (!t) return { status: "error", note: `${table.client_tag} has no targeting rules`, retryable: false };
+  const terms = (Array.isArray(t.exclude_terms) ? t.exclude_terms : []).map((s) => text(s).toLowerCase()).filter(Boolean);
+  const hit = companyTermHit(inputs, terms);
+  if (hit) {
+    const display = `"${hit.term}" in the ${hit.label}`;
+    const note = hit.label === "company description"
+      ? `The description has the client's exclusion term "${hit.term}" as a whole word`
+      : `Matches the client's exclusion term "${hit.term}" (matched anywhere in the text, as the lead database does)`;
+    return { status: "done", value: display, display, note };
+  }
+  // A LinkedIn pull's row: the pull's own excluded keywords, every one of them, matched the same way.
+  const run = text(inputs.linkedin_run);
+  let linkedinCount = 0;
+  if (run) {
+    if (!UUID.test(run)) return { status: "error", note: `The row names a LinkedIn pull that is not one ("${run.slice(0, 40)}")`, retryable: false };
+    const keywords = await linkedinKeywordsOf(db, run);
+    if (!keywords) return { status: "error", note: "The LinkedIn pull that wrote this row holds no excluded keywords, so they could not be checked", retryable: false };
+    linkedinCount = keywords.length;
+    const k = companyTermHit(inputs, keywords.filter((x) => !terms.includes(x)));
+    if (k) {
+      const display = `LinkedIn keyword "${k.term}" in the ${k.label}`;
+      const how = k.label === "company description" ? "as a whole word" : "anywhere in the text, as the lead database matches the client's terms";
+      return { status: "done", value: display, display, note: `Matches the client's LinkedIn excluded keyword "${k.term}" (${how}; checked after the pull, sent to AI Ark or not)` };
+    }
   }
   let titleNote = "";
   if (t.commercial_cleaning) {
@@ -418,7 +471,8 @@ async function clientExclusions({ inputs, table, row, db }) {
     }
     titleNote = ` and the ${titleTerms.length} cleaning title exclusions`;
   }
-  return { status: "empty", note: `Clear of the client's ${terms.length} exclusion terms${titleNote}` };
+  const linkedinNote = run ? ` and the LinkedIn pull's ${linkedinCount} excluded keywords` : "";
+  return { status: "empty", note: `Clear of the client's ${terms.length} exclusion terms${linkedinNote}${titleNote}` };
 }
 
 export const CLIENT_ACTIONS = {
@@ -430,6 +484,7 @@ export const CLIENT_ACTIONS = {
 /** For tests: forget cached rules and titles. */
 export function resetClientChecks() {
   targetingCache.clear();
+  linkedinCache.clear();
   geoCache = null;
   titleCache = null;
 }

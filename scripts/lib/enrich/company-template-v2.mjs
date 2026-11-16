@@ -78,11 +78,16 @@ export const AIARK_EMAIL_REOON_APPEND = " && {{passes_filters}} && !{{held_usabl
 /**
  * The input cells a pull writes for each company: phase 1's T#1 to T#16
  * (companyInputs() in company-template.mjs, unchanged), plus client_tag (C#9),
- * the table's own tag, written by the pull on every row.
+ * the table's own tag, written by the pull on every row, and two a LinkedIn
+ * pull writes on its own rows (migration 128): hq_only ("true": the office
+ * check judges the head office alone) and linkedin_run (the pull's id: the
+ * client's exclusion check also reads that pull's LinkedIn keywords). Both are
+ * absent on every other row, which is judged as before 128.
  */
 export const COMPANY_INPUT_KEYS_V2 = Object.freeze([
   "company", "aiark_id", "website", "domain", "linkedin", "phone", "aiark_email", "industry", "employees",
   "company_type", "description", "offices", "office_count", "aiark_updated", "pulled_before", "source", "client_tag",
+  "hq_only", "linkedin_run",
 ]);
 
 /** The switches the people side carries (2A.2). */
@@ -267,12 +272,23 @@ const PHASE1 = {
     name: "Bought before", kind: "input",
     description: "Filled when AI Ark returned a company an earlier pull had already bought (past its exclusion lists). It was paid for again and is written once.",
   },
-  source: { name: "Source", kind: "input", description: "AI Ark pull: bought by the pull. Copied from an earlier pull: bought for any client before, inside this client's places, and copied for free." },
+  source: {
+    name: "Source", kind: "input",
+    description: "AI Ark pull: bought by the pull. Copied from an earlier pull: bought for any client before, inside this client's places, and copied for free. LinkedIn companies (AI Ark): bought or copied by a LinkedIn pull. LinkedIn people (AI Ark): the company of a person a LinkedIn people run bought.",
+  },
   client_tag: { name: "Client tag", kind: "input", description: "The table's own client tag, written by the pull on every row (C#9)." },
+  hq_only: {
+    name: "Head office only", kind: "input", hidden: true,
+    description: "\"true\" on a LinkedIn pull's rows: only the head office counts for the client's area. Cleared when an AI Ark pull takes the company too, so any office in the area counts again.",
+  },
+  linkedin_run: {
+    name: "LinkedIn pull", kind: "input", hidden: true,
+    description: "The LinkedIn pull that wrote the row: its excluded keywords (the standard ones and the client's own, all of them, sent to AI Ark or not) are checked with the client's exclusion terms. Cleared with Head office only.",
+  },
   office: {
     name: "Office in the client's area", kind: "action", action: "client_office", data_type: "json", provider: "Client rules",
-    inputs: { offices: "{{offices}}" },
-    description: "Checks every office against the client's places and excluded places, exactly as the send gate would place a lead there. The head office when it is inside, else the first office inside. Outside: no office is. Can't tell: AI Ark gave no state the lead database could place.",
+    inputs: { offices: "{{offices}}", hq_only: "{{hq_only}}" },
+    description: "Checks every office against the client's places and excluded places, exactly as the send gate would place a lead there. The head office when it is inside, else the first office inside. Outside: no office is. Can't tell: AI Ark gave no state the lead database could place. On a LinkedIn pull's row only the head office counts: Outside (head office) when it is not inside.",
   },
   use_city: { name: "City", kind: "formula", formula: "{{office}}?.office?.city", description: "The office's city (in C#7's place)." },
   use_state: { name: "State", kind: "formula", formula: "{{office}}?.office?.state", description: "The office's state, as a code (in C#8's place)." },
@@ -284,8 +300,8 @@ const PHASE1 = {
   in_area: { name: "Inside the client's area", kind: "formula", data_type: "boolean", formula: "{{office}}?.inside === true" },
   rule_match: {
     name: "Client exclusions", kind: "action", action: "client_exclusions", provider: "Client rules",
-    inputs: { company: "{{company}}", industry: "{{industry}}", description: "{{description}}" },
-    description: "The client's exclusion terms: anywhere in the company name or industry, as the send gate matches them, and as whole words in the description.",
+    inputs: { company: "{{company}}", industry: "{{industry}}", description: "{{description}}", linkedin_run: "{{linkedin_run}}" },
+    description: "The client's exclusion terms: anywhere in the company name or industry, as the send gate matches them, and as whole words in the description. On a LinkedIn pull's row, the pull's excluded keywords too, matched the same way.",
   },
   passes_filters: {
     name: "Passes the client's rules", kind: "formula", data_type: "boolean", formula: "{{master_filter}} === true",
