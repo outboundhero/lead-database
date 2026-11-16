@@ -82,7 +82,7 @@ import { normTag, starterFrom } from "../enrich/settings.mjs";
  *   own: LinkedinOwn,
  *   filters: { value: Record<string, any>, from: "saved" | "cleaning" },
  *   cleaning: true,
- *   keywords: { standard: string[], own: string[], union: string[], sent: string[], checkedAfter: string[], notApplied: string[] },
+ *   keywords: { standard: string[], own: string[], union: string[], sent: string[], checkedAfter: string[] },
  *   search: PlacesSearched,
  *   outsideRules: PlaceEntry[],
  *   row: LinkedinRow | null,
@@ -94,7 +94,6 @@ import { normTag, starterFrom } from "../enrich/settings.mjs";
  *   own: the client's own lists as stored (the row's, or derived for a client with no row: rules places, starter keywords);
  *   filters.from "cleaning": the standard filters (never "none" on LinkedIn);
  *   keywords.checkedAfter: keywords of the union AI Ark's request could not take: "checked after the pull (AI Ark limit)";
- *     keywords.notApplied is the same list under its Day 0 name (kept for callers written against it);
  *   search: the places a search sends, narrowed to the client's sending rules (narrowPlaces), and what was left out;
  *   outsideRules: own include places the client's database area (client_targeting) does not cover (each is either
  *     replaced by the rules' places inside it or not searched: see search);
@@ -190,14 +189,14 @@ export const NOT_SEARCHED_FIX = "Adding them to the client's rules (Clients page
  * after the pull; the ones AI Ark's request could not take are checkedAfter.
  *
  * @param {string[]} own  the client's own excluded keywords for the kind
- * @returns {{ standard: string[], own: string[], union: string[], sent: string[], checkedAfter: string[], notApplied: string[] }}
+ * @returns {{ standard: string[], own: string[], union: string[], sent: string[], checkedAfter: string[] }}
  *   union: standard first, then the client's own new ones (what the after-pull check reads); sent: what AI Ark is
- *   asked (condensed); checkedAfter: keywords of the union no sent phrase covers; notApplied: the same list (Day 0 name)
+ *   asked (condensed); checkedAfter: keywords of the union no sent phrase covers
  */
 export function keywordsFor(own) {
   const a = accountFilters({ targeting: { exclude_terms: Array.isArray(own) ? own : [] }, filters: null, cleaning: true });
   const checkedAfter = a.terms.filter((t) => !a.companyTerms.some((sent) => hasWords(t, sent)));
-  return { standard: [...a.standardTerms], own: [...a.clientTerms], union: [...a.terms], sent: [...a.companyTerms], checkedAfter, notApplied: checkedAfter };
+  return { standard: [...a.standardTerms], own: [...a.clientTerms], union: [...a.terms], sent: [...a.companyTerms], checkedAfter };
 }
 
 // ── Places ──────────────────────────────────────────────────────────────────

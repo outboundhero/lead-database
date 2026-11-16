@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { CLEANING_EXCLUDE_COMPANY_TYPES } from "../../../scripts/lib/aiark/cleaning-filters.mjs";
-import { pickCompanyFilters, placeKeyOf } from "../../../scripts/lib/aiark/company-filters.mjs";
+import { pickCompanyFilters } from "../../../scripts/lib/aiark/company-filters.mjs";
 import { createCompanyRun } from "../../../scripts/lib/aiark/company-runs.mjs";
 import type { loadGeo } from "../../../scripts/lib/aiark/geo.mjs";
 import {
@@ -47,8 +47,9 @@ import type {
 // Two overrides of the phase 4 contract are read from the resolver's answer:
 //   O1  keywords.checkedAfter: the keywords AI Ark's request can't hold, which
 //       are checked after the pull (keywordsView, checkedAfterOf);
-//   O2  area: the client's own places narrowed to its sending rules, and those
-//       left out, "not searched" (areaOf).
+//   O2  search: the client's own places narrowed to its sending rules, those
+//       left out ("not searched") and the own states or countries searched as
+//       the rules' places inside them (narrowPlaces; read by areaOf).
 // Each is read in one function, so the shape the engine gives them is named
 // in one place.
 
@@ -114,48 +115,27 @@ export function changedText(tag: string, kind: LinkedinKind, what: "counted" | "
  * O1: the keywords of the union AI Ark's request can't hold. They are not
  * dropped: every company and person a LinkedIn search finds is checked against
  * the whole list after the pull. The resolver gives them as
- * keywords.checkedAfter; an engine without O1 calls the same list notApplied.
+ * keywords.checkedAfter (keywordsFor in linkedin-settings.mjs).
  */
 export function checkedAfterOf(e: Effective): string[] {
-  const k = e.keywords as Effective["keywords"] & { checkedAfter?: unknown };
-  const list = Array.isArray(k.checkedAfter) ? k.checkedAfter : k.notApplied;
-  return Array.isArray(list) ? list.filter((x): x is string => typeof x === "string") : [];
+  return [...e.keywords.checkedAfter];
 }
 
 /**
  * O2: the places a LinkedIn search sends (the client's own include places
- * narrowed to its sending rules, client_targeting) and those left out (not
- * searched: outside the sending rules). The resolver gives them as
- * area = { sent, notSearched }. An engine without O2 sends the client's own
- * places as they are, and its outsideRules (own places the rules don't cover)
- * stand in for the list; `o2` says which.
+ * narrowed to its sending rules, client_targeting), those left out (not
+ * searched: outside the sending rules), and each own state or country the
+ * rules don't cover whole with the rules' places inside it that are searched
+ * instead. All three are the resolver's `search` (narrowPlaces), so the page,
+ * the count, the pull and the run never disagree on what is searched.
  */
-export function areaOf(e: Effective): { sent: PlaceEntry[]; notSearched: PlaceEntry[]; o2: boolean } {
-  const a = (e as Effective & { area?: { sent?: unknown; notSearched?: unknown } | null }).area;
-  if (a && Array.isArray(a.sent) && Array.isArray(a.notSearched)) {
-    return { sent: a.sent as PlaceEntry[], notSearched: a.notSearched as PlaceEntry[], o2: true };
-  }
-  return { sent: e.own.include_locations, notSearched: e.outsideRules, o2: false };
-}
-
-/**
- * O2, as the page shows it: each of the client's own states or countries the
- * sending rules don't cover whole, with the rules' places inside it that the
- * search sends instead. Only grouping for the page: what is sent is the
- * engine's.
- */
-function narrowedOf(e: Effective, area: { sent: PlaceEntry[]; notSearched: PlaceEntry[] }): Array<{ entry: PlaceEntry; into: PlaceEntry[] }> {
-  const sentKeys = area.sent.map((p) => placeKeyOf(p) ?? "");
-  const outKeys = new Set(area.notSearched.map((p) => placeKeyOf(p) ?? ""));
-  const out: Array<{ entry: PlaceEntry; into: PlaceEntry[] }> = [];
-  for (const entry of e.own.include_locations) {
-    if (entry.city) continue;
-    const k = placeKeyOf(entry);
-    if (!k || sentKeys.includes(k) || outKeys.has(k)) continue;
-    const into = area.sent.filter((_p, i) => sentKeys[i].startsWith(`${k}|`));
-    if (into.length) out.push({ entry, into });
-  }
-  return out;
+export function areaOf(e: Effective): { sent: PlaceEntry[]; notSearched: PlaceEntry[]; narrowed: Array<{ entry: PlaceEntry; into: PlaceEntry[] }> } {
+  const s = e.search;
+  return {
+    sent: [...s.include],
+    notSearched: s.notSearched.map((n) => n.entry),
+    narrowed: s.replaced.map((r) => ({ entry: r.entry, into: [...r.by] })),
+  };
 }
 
 const viewsOf = (entries: PlaceEntry[], g: Geo): PlaceView[] => entries.map((entry) => ({ entry, text: placeText(entry, g) }));
@@ -179,7 +159,7 @@ const planOf = (built: Built): LinkedinPlan => ({
 /** O2 as the page shows it: the places sent, those not searched, and the own states or countries searched as the rules' places inside them. */
 export function areaView(e: Effective, g: Geo): { placesSent: PlaceView[]; notSearched: PlaceView[]; narrowed: NarrowedPlace[] } {
   const area = areaOf(e);
-  const narrowed: NarrowedPlace[] = narrowedOf(e, area).map((n) => ({ entry: { entry: n.entry, text: placeText(n.entry, g) }, into: viewsOf(n.into, g) }));
+  const narrowed: NarrowedPlace[] = area.narrowed.map((n) => ({ entry: { entry: n.entry, text: placeText(n.entry, g) }, into: viewsOf(n.into, g) }));
   return { placesSent: viewsOf(area.sent, g), notSearched: viewsOf(area.notSearched, g), narrowed };
 }
 
@@ -354,7 +334,7 @@ export async function linkedinPlanView(
     places: e.own.include_locations.length,
     placesSent: area.sent.length,
     notSearched: area.notSearched.length,
-    narrowed: narrowedOf(e, area).length,
+    narrowed: area.narrowed.length,
     excludedPlaces: e.own.exclude_locations.length,
     unplaced: e.own.unplaced.length,
     keywords: { union: e.keywords.union.length, sent: e.keywords.sent.length, checkedAfter: checkedAfterOf(e).length },

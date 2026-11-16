@@ -368,10 +368,12 @@ export async function candidatesPage(c: PoolClient, { runId, after }: { runId: s
     where = `AND (coalesce(k.company_row_id, 0), k.person_id) > ($3::bigint, $4::text)`;
   }
   const { rows } = await c.query<Candidate & { company_row_id: string | null; row_id: string | null }>(
-    `SELECT k.person_id, k.company_row_id::bigint AS company_row_id, e.company, k.first_name, k.last_name, k.title, k.city, k.region,
-            k.country, k.seniority, k.track, k.rank, k.verdict, k.pick, k.row_id::bigint AS row_id
+    `SELECT k.person_id, k.company_row_id::bigint AS company_row_id, coalesce(e.company, pc.record #>> '{summary,name}') AS company,
+            k.first_name, k.last_name, k.title, k.city, k.region, k.country, k.seniority, k.track, k.rank, k.verdict, k.pick, k.row_id::bigint AS row_id
        FROM aiark_people_candidates k
        LEFT JOIN enrich_companies e ON e.row_id = k.company_row_id
+       -- A LinkedIn Look's candidate has no company row until bought: its company is named from the Preview (128).
+       LEFT JOIN aiark_people_preview_companies pc ON k.company_row_id IS NULL AND pc.run_id = k.run_id AND pc.company_id = k.company_id
       WHERE k.run_id = $1 ${where}
       ORDER BY coalesce(k.company_row_id, 0), k.person_id
       LIMIT $2`,

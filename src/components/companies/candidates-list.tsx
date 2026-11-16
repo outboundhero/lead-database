@@ -16,7 +16,7 @@ export const VERDICT: Record<CandidateVerdict, { label: string; cls: string; hin
   held: { label: "In the database", cls: "bg-[var(--success)]/15 text-[var(--success)]", hint: "A lead with the same name at the company is already held, so the company is skipped." },
   never_contact: { label: "Never contact", cls: "bg-destructive/12 text-destructive", hint: "On the never-contact list." },
   bounced: { label: "Bounced", cls: "bg-destructive/12 text-destructive", hint: "A lead of theirs bounced." },
-  outside: { label: "Outside the area", cls: "bg-muted text-muted-foreground", hint: "Their own place is outside the client's area." },
+  outside: { label: "Outside the area", cls: "bg-muted text-muted-foreground", hint: "Their own place is outside the client's area (on a LinkedIn run, also when no office of their company is inside it)." },
   excluded: { label: "Excluded", cls: "bg-muted text-muted-foreground", hint: "The company or the title matches the client's exclusions (or, on a LinkedIn run, its LinkedIn keywords)." },
   no_track: { label: "No track", cls: "bg-muted text-muted-foreground", hint: "Their title holds none of the tracks' phrases." },
   bought_before: { label: "Bought before", cls: "bg-[var(--warning)]/15 text-[var(--warning)]", hint: "Another run bought them: copied free with their email, if they had one." },

@@ -2704,13 +2704,21 @@ spends nothing.
 - **Keywords sent:** the standard ones first, then the client's own, once each (case aside),
   on a company's name, industry and description, as far as AI Ark's request holds them
   (1,900 bytes and 300 values, `accountFilters`). The rest are **checked after the pull (AI
-  Ark limit)**, never dropped: every company a LinkedIn pull writes is judged against the
-  client's whole keyword list (the run keeps it in `filters.linkedin`; case-insensitive,
-  anywhere in the name, industry and description, as the sheet's exclusion terms are) and a
-  match is Excluded, so nothing later works it; a LinkedIn Look excludes a matching person
-  before any Buy, and a bought person's full company record is checked again before any
-  email step. The sheet's `exclude_terms` are not sent on LinkedIn searches; they are
-  checked after the pull, as for every row.
+  Ark limit)**, never dropped: every keyword of the union (standard and own) is checked
+  after the pull, free, before anything more is spent on a company or person or a row is
+  listed. A LinkedIn
+  pull or run keeps the union in `filters.linkedin.keywords` (`union`, `sent`,
+  `checked_after`); the matcher is the sheet terms' one (`companyTermHit` in
+  `client-checks.mjs`: case-insensitive, anywhere in the name and industry, whole words in
+  the description). Company rows: `client_exclusions` reads the pull's union through the
+  row's `linkedin_run` input and a match is Excluded, naming the keyword, so nothing later
+  works it; a row with no `linkedin_run` is judged exactly as before 128. People: a Look
+  excludes a person whose Preview company matches, and after a Buy the person's full company
+  record (with its description) is checked again, with the sheet terms, before any email
+  step: a match ends the person Excluded, with no People row. The sheet's `exclude_terms` are
+  not sent on LinkedIn searches; they are checked after the pull, as for every row. Contains
+  matching on names and industries is stricter than AI Ark's whole words (a short keyword
+  inside a longer word excludes the row).
 - **Places: never outside the sending rules.** A LinkedIn search covers only places the
   client's rules (`client_targeting.include_locations`) allow: an own place the rules cover
   (its city, state or country key) is searched; an own state or country they don't cover
@@ -2721,7 +2729,51 @@ spends nothing.
   never sent without places. The stored lists never change for it: adding the places to
   the client's rules (Clients page or the onboarding sheet) brings them in. Rows are still
   judged against `client_targeting` (LinkedIn pull rows by their head office alone,
-  `hq_only`; a people candidate outside the area is never bought).
+  `hq_only`; a people candidate outside the area is never bought). The narrowing is
+  `narrowPlaces` in `linkedin-settings.mjs` (the resolver's `search`: `include`,
+  `notSearched` with why, `replaced`); the builders send `search.include` only, and the run
+  keeps `places`, `places_not_searched` and `places_replaced` in `filters.linkedin`.
+- **LinkedIn company pulls** (`createCompanyRun(..., { source: "linkedin", targeting })` in
+  `company-runs.mjs`, `targeting` = `linkedinTargeting(effective)`): the run's `source`
+  column is `linkedin`, the bought rows' source kind `linkedin` (label `LinkedIn company pull
+  (AI Ark)`), and the free registry copy takes only companies whose head office
+  (`aiark_companies.hq_keys`, filled for rows bought before 128 when first read) is in the
+  places searched. Every row it writes carries the inputs `hq_only` and `linkedin_run` (the
+  pull's id): `client_office` judges the head office alone ("Outside (head office)" when it
+  is outside the client's area, though AI Ark found the company by any office, so such a row
+  is paid for) and `client_exclusions` the pull's keywords. **One row per company:** a later
+  AI Ark pull that meets a LinkedIn row of the client (its free copy or a bought page) takes
+  it over: both inputs cleared and the row queued again, judged from then on as an AI Ark row
+  on any office. The Companies tab shows these rows' source as "LinkedIn (AI Ark)".
+- **LinkedIn people runs** (by area, `scripts/lib/aiark/linkedin-people.mjs`, reached from
+  `people-runs.mjs` through `peopleSourceInfo(source).look === "by_area"`, which hands it its
+  own helpers so it never imports `people-runs.mjs` back):
+  `createPeopleRun(..., { source: "linkedin", version })` refuses
+  (409) unless `linkedin_people` is on for the client, with a run of either source going,
+  on a changed version (`changed`) and with plan blockers; it needs no Companies table rows
+  or tracks first. **Look:** each search paged up to `pages_per_search` (1 credit a page)
+  with exclusion lists of the people this client's LinkedIn runs already looked at and the
+  registry's bought people, inside the shared daily list budget (`listsMadeToday`, 45 a
+  day, now counting people runs' lists); without the lists it needs, the run stops before
+  paying for a page. Free screen: `no_company` (AI Ark gives no company), `outside` (the
+  person's own place, or a Preview company whose offices are all outside the area),
+  `excluded` (the client's terms or any LinkedIn keyword on the Preview company), held,
+  bought before. Candidates keep AI Ark's order (`seq`) and no company row yet; the
+  Preview's company objects are kept in `aiark_people_preview_companies` (server-only,
+  removed with the run). **Pick:** at most `linkedin_sources.people_per_company` (13) a
+  company, less the usable contacts already held there; people with a track phrase first,
+  then AI Ark's order, every company's first person before any second; at most `max_people`
+  bought (copies of people bought before with an email are free and not counted). **Buy**
+  (a manager's click unless `auto_buy`): Export Single per pick after the registry is
+  checked again; the full company record is checked again (terms, keywords, offices); the
+  company is brought in from the registry, else the person's own company record (with its
+  domain), else the Preview's object (no domain), never by a Company Search, labelled
+  `LinkedIn people (AI Ark)` and judged on any office (no `hq_only`); the People row gets
+  `found_by` `linkedin` and, as D13 says, the city and state of the company's office in the
+  client's area (head office first). `PEOPLE_SOURCES` stays `["ai_ark"]`, so the AI searches
+  never wait for a LinkedIn run; P#27 stays behind `linkedin_profile_reads` (off). Known
+  limit: a company first brought in from a Preview object keeps no domain, and later picks
+  at it reuse that row.
 - **Versions:** a save sends back the lists' version (409 `changed` when the row, or for a
   client with no row its rules or the starter list, changed since the page loaded them); a
   LinkedIn count, pull or people run sends back the search's version (`linkedinVersion`),
@@ -2743,14 +2795,26 @@ spends nothing.
   on their list, a worker without `linkedin_sources`, a pull or run of either source going
   (one of each per client), the search changed, a balance under the people runs' minimum;
   a blocked plan is a 400 for a count or pull and a 409 for a run. A LinkedIn people run
-  needs no Companies table or tracks first: it brings each bought person's company in.
+  needs no Companies table or tracks first: it brings each bought person's company in. Its
+  Buy (`POST /api/companies/people/runs/buy`) is also refused (409) while LinkedIn is off for
+  the client or the worker lacks `linkedin_sources`, and the worker stops a LinkedIn run
+  before its next paid call once the switch is off. Switching off does not stop a company
+  pull already queued or running (as for AI Ark pulls): cancel it on the tab. A LinkedIn
+  candidate not bought yet is listed with its company's name from the Preview.
 - **Settings:** the settings sheet (admin) edits the switch, its client list and the people
   a company (1 to 100) for LinkedIn people runs. `linkedin_sources` is optional in `PUT
   /api/companies/settings`: left out, what is stored is kept. A LinkedIn company search also
   needs company pulls on for the client (`linkedin_companies`), a people search people runs
   (`linkedin_people`). The worker's heartbeat lists `linkedin_sources` once it works both.
+- **Migration 128** adds `aiark_company_runs.source` (`ai_ark` for every older pull), the
+  `linkedin` people run source and source kind, nullable `company_row_id` and `company_id` on
+  `aiark_people_candidates` with the `no_company` verdict and `seq`,
+  `aiark_people_preview_companies`, `aiark_companies.hq_keys` (GIN index), the
+  `enrich_contacts` LinkedIn URL index, `client_linkedin_settings` and its log, and the
+  settings rows `linkedin_sources` (off) and `linkedin_starter_keywords` (empty).
 - ⚠ **Migration 128 must be in the database before this code runs:** the pulls list reads
-  `aiark_company_runs.source`. Order: 125, 126, 127, then 128.
+  `aiark_company_runs.source`, every company pull writes it, and the worker's people runs
+  and copy steps read the new columns. Order: 125, 126, 127, then 128.
 - **Tests:** stop the worker, then `LITEST_TMP=<folder outside the repo> node --env-file=.env.local
   scripts/test-linkedin.mjs` (local database only; made-up `LITEST_` clients, invented places
   and keywords, removed at the end; every setting put back). No network: AI Ark answers

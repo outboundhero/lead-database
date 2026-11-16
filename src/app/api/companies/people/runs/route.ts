@@ -255,7 +255,9 @@ async function startLinkedinRun({ tag, mode, maxPeople, loadedVersion, userId }:
     return NextResponse.json({ run }, { status: 201 });
   } catch (err) {
     const why = refusal(err);
-    if (why) return NextResponse.json({ error: why }, { status: 409 });
+    // The engine checks the version again under its lock: a change in between is a 409 with `changed`, as above.
+    const changed = err instanceof PeopleRunRefused && err.changed === true;
+    if (why) return NextResponse.json({ error: why, ...(changed ? { changed: true } : {}) }, { status: 409 });
     console.error("companies/people/runs POST (LinkedIn):", err);
     return NextResponse.json({ error: "Could not start the LinkedIn people run" }, { status: 500 });
   }

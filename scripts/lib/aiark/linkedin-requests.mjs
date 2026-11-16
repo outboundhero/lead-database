@@ -74,8 +74,8 @@ function searchOf(effective) {
   return effective.search ?? { include: effective.own.include_locations, exclude: effective.own.exclude_locations, notSearched: [], replaced: [], narrowed: false, rulePlaces: 0 };
 }
 
-/** The keywords AI Ark's request could not take (override O1's name, or the Day 0 one). */
-const checkedAfterOf = (k) => k.checkedAfter ?? k.notApplied ?? [];
+/** The keywords AI Ark's request could not take (override O1): checked after the pull. */
+const checkedAfterOf = (k) => k.checkedAfter ?? [];
 
 /** The excluded places as AI Ark is sent them, and a blocker when they can't go in one search. */
 function excludedPlaces(effective, geo) {
@@ -140,7 +140,7 @@ function linkedinParts(effective, built, kind, geo) {
       notSearched: search.notSearched,
       replaced: search.replaced,
       excludePlacesSent: ex.sent.length,
-      keywords: { standard: k.standard.length, own: k.own.length, union: k.union.length, sent: k.sent.length, checkedAfter: after, notApplied: after },
+      keywords: { standard: k.standard.length, own: k.own.length, union: k.union.length, sent: k.sent.length, checkedAfter: after },
     },
   };
   return { requests: blockers.length ? [] : built.requests, report, notes, blockers, pullBlockers: built.pullBlockers };

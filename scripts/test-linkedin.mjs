@@ -90,16 +90,10 @@ delete process.env.AIARK_DEMO_CREDITS;
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let passed = 0;
 let failed = 0;
-let pending = 0;
 function check(name, ok, detail = "") {
   if (ok) passed++;
   else failed++;
   console.log(`${ok ? "  ok  " : "  FAIL"} ${name}${!ok && detail ? ` : ${detail}` : ""}`);
-}
-/** A check that runs once its builder's part is in this tree. */
-function later(name, who) {
-  pending++;
-  console.log(`  ...  ${name} (${who})`);
 }
 const section = (s) => console.log(`\n${s}`);
 
@@ -290,10 +284,10 @@ function partA() {
   const few = keywordsFor(["Quuxable Diner", "janitorial", "JANITORIAL services"]);
   check("standard first, then own new ones, once each (case aside)",
     few.union.length === CLEANING_EXCLUDE_KEYWORDS.length + 1 && few.union.slice(0, CLEANING_EXCLUDE_KEYWORDS.length).every((t, i) => t.toLowerCase() === CLEANING_EXCLUDE_KEYWORDS[i].toLowerCase()) && few.union.at(-1) === "Quuxable Diner");
-  check("few own keywords: all applied", few.notApplied.length === 0 && few.sent.includes("Quuxable Diner"));
+  check("few own keywords: all applied", few.checkedAfter.length === 0 && few.sent.includes("Quuxable Diner"));
   const many = keywordsFor(ownWords(120));
   check("over the limit: the rest listed as checked after the pull, never dropped silently (O1)",
-    many.checkedAfter.length > 0 && many.union.every((t) => many.checkedAfter.includes(t) || many.sent.some((s) => hasWords(t, s))) && many.notApplied === many.checkedAfter,
+    many.checkedAfter.length > 0 && many.union.every((t) => many.checkedAfter.includes(t) || many.sent.some((s) => hasWords(t, s))) && !("notApplied" in many),
     `${many.checkedAfter.length} checked after`);
   check("every standard keyword is applied", CLEANING_EXCLUDE_KEYWORDS.every((t) => many.sent.some((s) => hasWords(t, s))));
   check("what is sent fits AI Ark's limit", bytes(many.sent) <= COMPANY_TERMS_BYTES && many.sent.length <= 300);
@@ -354,7 +348,7 @@ function partA() {
     JSON.stringify(body.account.type.any.exclude) === JSON.stringify(CLEANING_EXCLUDE_COMPANY_TYPES) && body.account.keyword.any.exclude.content.some((t) => t.startsWith("quuxable widget")) &&
       JSON.stringify(body.contact.keyword.any.exclude.content) === JSON.stringify(condensePhrases(CLEANING_EXCLUDE_KEYWORDS)));
   check("the keywords AI Ark's request can't take are listed in the report and a note as checked after the pull, never as 'not applied' (O1)",
-    pr.report.linkedin.keywords.notApplied.length === people.keywords.notApplied.length && people.keywords.notApplied.length > 0 &&
+    pr.report.linkedin.keywords.checkedAfter.length === people.keywords.checkedAfter.length && people.keywords.checkedAfter.length > 0 && !("notApplied" in pr.report.linkedin.keywords) &&
       pr.notes.some((n) => /checked after the pull \(AI Ark limit\)/.test(n)) && !pr.notes.some((n) => /not applied/i.test(n)) && !pr.notes.some((n) => n.startsWith("AI Ark's limits leave room for")) &&
       JSON.stringify(pr.report.linkedin.keywords.checkedAfter) === JSON.stringify(people.keywords.checkedAfter));
   check("the sheet's exclusion terms are not sent: the made-up rules are the resolver's", JSON.stringify(linkedinTargeting(people).exclude_terms) === JSON.stringify(people.own.exclude_keywords));
@@ -1356,6 +1350,7 @@ async function partR() {
     settings: await route("companies/settings"),
     peopleRuns: await route("companies/people/runs"),
     peopleSetup: await route("companies/people/setup"),
+    buy: await route("companies/people/runs/buy"),
   };
   const serverLib = await srcModule("lib/companies/server.ts");
   const heartbeat = ({ online = true, linkedin = true } = {}) => ({
@@ -1401,7 +1396,7 @@ async function partR() {
     // Made-up cities in a state that exists, so typed places resolve as they would in production.
     const st = await one(`SELECT country_code, admin1_code, state_code, name FROM geo_admin1 WHERE country_code = 'US' ORDER BY state_code LIMIT 1`);
     const CITY = { kept: "Quuxford", rule: "Zorbleton", out: "Vrillport" };
-    let gid = 9_990_100_000;
+    let gid = 9_990_150_000; // part C keeps its own cities (from C_GEO_IDS) until the end of the run
     for (const [city, population] of [[CITY.kept, 500], [CITY.rule, 400], [CITY.out, 300]]) {
       await pool.query(
         `INSERT INTO geo_locations (geoname_id, city, city_key, country_code, admin1_code, population) VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -1440,10 +1435,6 @@ async function partR() {
       await seed(tags.empty, "companies", { include_locations: [at(CITY.out)], exclude_keywords: ["quuxable diner"] }),
     ];
     if (seeded.some((x) => x.status !== "written")) throw new Error(`R fixtures not seeded: ${JSON.stringify(seeded)}`);
-    // O1 and O2 are the engine's (Builder L1): the checks that need them wait until its resolver has them.
-    const probe = await linkedinSettingsFor(pool, { tag: tags.row, kind: "companies" });
-    const o1 = Array.isArray(probe.keywords.checkedAfter);
-    const o2 = Boolean(probe.area && Array.isArray(probe.area.notSearched) && Array.isArray(probe.area.sent));
     T.worker = heartbeat();
 
     section("R1. GET /api/aiark/linkedin-settings");
@@ -1566,25 +1557,22 @@ async function partR() {
     r = await pull({ linkedinVersion: "row:old|filters:none" });
     check("... a changed LinkedIn search: 409 with changed", r.status === 409 && r.body.changed === true);
     r = await pull({ linkedinVersion: li.version });
-    if (r.status === 409 && /can't make LinkedIn company pulls yet/.test(r.body.error ?? "")) {
-      check("an engine that can't make a LinkedIn pull: refused (409), nothing written", (await one(`SELECT count(*)::int AS n FROM aiark_company_runs WHERE client_tag = $1`, [R])).n === 0);
-      later("the pull: 201, source linkedin, filters.linkedin with its version, listed with its source", "Builder L1: createCompanyRun's source and targeting");
-      later("O1: the pull keeps keywords.sent and keywords.checked_after in filters.linkedin", "Builder L1");
-    } else {
-      const row = r.body.run ? await one(`SELECT source, filters FROM aiark_company_runs WHERE id = $1`, [r.body.run.id]) : null;
-      check("the pull: 201, source linkedin, filters.linkedin with the version it was asked with",
-        r.status === 201 && r.body.run.source === "linkedin" && row?.source === "linkedin" && row.filters.linkedin?.version === li.version && row.filters.linkedin_version === li.version,
-        JSON.stringify(r.body).slice(0, 300));
-      const listed = await call(routes.runs.GET, { query: { tag: R } });
-      check("... the pulls list shows its source", listed.body.runs.some((x) => x.id === r.body.run?.id && x.source === "linkedin"));
-      if (o1) {
-        check("O1: the pull keeps keywords.sent and keywords.checked_after in filters.linkedin",
-          Array.isArray(row?.filters.linkedin?.keywords?.sent) && Array.isArray(row?.filters.linkedin?.keywords?.checked_after) && row.filters.linkedin.keywords.checked_after.length > 0);
-      } else later("O1: the pull keeps keywords.sent and keywords.checked_after in filters.linkedin", "Builder L1: O1 in linkedinRunFilters");
-      const again = await pull({ linkedinVersion: li.version });
-      check("... a second pull while it is queued: 409", again.status === 409 && /already has a company pull going/.test(again.body.error));
-      await pool.query(`UPDATE aiark_company_runs SET status = 'cancelled', finished_at = now() WHERE client_tag = $1 AND status IN ('queued', 'running')`, [R]);
-    }
+    const row = r.body.run ? await one(`SELECT source, filters FROM aiark_company_runs WHERE id = $1`, [r.body.run.id]) : null;
+    check("the pull: 201, source linkedin, filters.linkedin with the version it was asked with",
+      r.status === 201 && r.body.run.source === "linkedin" && row?.source === "linkedin" && row.filters.linkedin?.version === li.version && row.filters.linkedin_version === li.version,
+      JSON.stringify(r.body).slice(0, 300));
+    const listed = await call(routes.runs.GET, { query: { tag: R } });
+    check("... the pulls list shows its source", listed.body.runs.some((x) => x.id === r.body.run?.id && x.source === "linkedin"));
+    const lk = row?.filters.linkedin?.keywords;
+    check("O1: the pull keeps keywords.sent and keywords.checked_after in filters.linkedin, and the whole union it checks after the pull",
+      Array.isArray(lk?.sent) && Array.isArray(lk?.checked_after) && lk.checked_after.length > 0 && Array.isArray(lk?.union) && lk.checked_after.every((k) => lk.union.includes(k)) &&
+        !("not_applied" in (lk ?? {})), JSON.stringify(Object.keys(lk ?? {})));
+    check("O2: the pull keeps the places searched and those not searched, with why", Array.isArray(row?.filters.linkedin?.places) && row.filters.linkedin.places.length === 2 &&
+      row.filters.linkedin.places_not_searched?.length === 1 && /outside the client's sending rules/.test(JSON.stringify(row.filters.linkedin.places_not_searched)),
+      JSON.stringify({ places: row?.filters.linkedin?.places?.length, out: row?.filters.linkedin?.places_not_searched }));
+    const again = await pull({ linkedinVersion: li.version });
+    check("... a second pull while it is queued: 409", again.status === 409 && /already has a company pull going/.test(again.body.error));
+    await pool.query(`UPDATE aiark_company_runs SET status = 'cancelled', finished_at = now() WHERE client_tag = $1 AND status IN ('queued', 'running')`, [R]);
     const sc0 = (await call(routes.setup.GET, { query: { tag: R } })).body;
     const ai = await call(routes.runs.POST, { body: { tag: R, mode: "demo", size: 5, matchCount: 10, rulesVersion: sc0.targeting.version, filtersVersion: sc0.filters.version } });
     check("a pull with no source is an AI Ark pull, as before 128", ai.status === 201 && ai.body.run.source === "ai_ark", JSON.stringify(ai.body).slice(0, 300));
@@ -1625,12 +1613,26 @@ async function partR() {
     check("AI Ark's balance under the people runs' minimum: 409, read free", r.status === 409 && /under the people runs' minimum/.test(r.body.error), JSON.stringify(r.body));
     check("a source that is not one: still 400", (await prun({ source: "clay" })).status === 400);
     r = await prun({});
-    if (r.status === 409 && /not built yet/.test(r.body.error ?? "")) {
-      check("the engine without its by-area path refuses (409), nothing written", (await one(`SELECT count(*)::int AS n FROM aiark_people_runs WHERE client_tag = $1`, [R])).n === 0);
-      later("a LinkedIn people run starts: 201, source linkedin, no Companies table or tracks needed first", "Builder L1: createPeopleRun's by-area path");
-    } else {
-      check("a LinkedIn people run starts: 201, source linkedin", r.status === 201 && r.body.run?.source === "linkedin", JSON.stringify(r.body).slice(0, 300));
-    }
+    const prow = r.body.run ? await one(`SELECT source, filters FROM aiark_people_runs WHERE id = $1`, [r.body.run.id]) : null;
+    check("a LinkedIn people run starts: 201, source linkedin, the version it was asked with and every keyword in its stored filters",
+      r.status === 201 && r.body.run?.source === "linkedin" && prow?.source === "linkedin" && prow.filters.linkedin?.version === pli.version &&
+        Array.isArray(prow.filters.linkedin?.keywords?.union) && Array.isArray(prow.filters.linkedin?.keywords?.checked_after),
+      JSON.stringify(r.body).slice(0, 300));
+    await pool.query(`UPDATE aiark_people_runs SET status = 'cancelled', finished_at = now() WHERE client_tag = $1 AND status IN ('queued', 'running', 'looked')`, [R]);
+    // The Buy of a LinkedIn run that waits for it: refused while LinkedIn is off for the client or the worker lacks it.
+    const looked = await one(`INSERT INTO aiark_people_runs (client_tag, mode, max_people, filters, source, status) VALUES ($1, 'demo', 1, '{}', 'linkedin', 'looked') RETURNING id`, [R]);
+    const approvedAt = async () => (await one(`SELECT buy_approved_at FROM aiark_people_runs WHERE id = $1`, [looked.id])).buy_approved_at;
+    await switches({ cp: true, pp: true, ls: false, tags: [R] });
+    let b = await call(routes.buy.POST, { body: { id: looked.id } });
+    check("Buy of a LinkedIn run while LinkedIn searches are off for the client: 409, nothing approved",
+      b.status === 409 && /LinkedIn searches are off/.test(b.body.error ?? "") && (await approvedAt()) === null, JSON.stringify(b.body));
+    await switches({ cp: true, pp: true, ls: true, tags: [R] });
+    T.worker = heartbeat({ linkedin: false });
+    b = await call(routes.buy.POST, { body: { id: looked.id } });
+    check("... and with a worker that doesn't do LinkedIn searches: 409, nothing approved",
+      b.status === 409 && /doesn't do LinkedIn searches/.test(b.body.error ?? "") && (await approvedAt()) === null, JSON.stringify(b.body));
+    T.worker = heartbeat();
+    await pool.query(`DELETE FROM aiark_people_runs WHERE id = $1`, [looked.id]);
 
     section("R5. The settings sheet: linkedin_sources");
     await resetSwitches();
@@ -1708,55 +1710,47 @@ async function partR() {
 
     section("R7. O1 and O2 as the page and the routes show them");
     // How the page reads the engine's answer, on a made-up one (the made-up geo of part A): the
-    // resolver's area (O2) and keywords.checkedAfter (O1), whatever Builder L1's engine has yet.
+    // resolver's search (O2, narrowPlaces) and keywords.checkedAfter (O1), read in one function each.
     const view = await srcModule("lib/linkedin/server.ts");
-    const base = resolveLinkedin({
-      tag: "LITEST_SIM", kind: "companies", targeting: { include_locations: [place("Quuxville"), place("Barville")], version: "r" }, saved: null, clientType: "OS",
-      starter: { items: [], version: 1, updatedAt: "s", loaded: true }, row: { client_tag: "LITEST_SIM", kind: "companies", include_locations: [place("Quuxville"), place("Farville"), place(null)],
-        exclude_locations: [], unplaced: [], exclude_keywords: ownWords(120), version: "v" },
-    });
-    const sim = view.areaView({ ...base, area: { sent: [place("Quuxville"), place("Barville")], notSearched: [place("Farville")] } }, GEO);
-    check("the page reads O2 from the resolver's area: places sent, not searched, and the state searched as the rules' places inside it",
+    const simRow = { client_tag: "LITEST_SIM", kind: "companies", include_locations: [place("Quuxville"), place("Farville"), place(null)],
+      exclude_locations: [], unplaced: [], exclude_keywords: ownWords(120), version: "v" };
+    const simOf = (targeting) => resolveLinkedin({ tag: "LITEST_SIM", kind: "companies", targeting, saved: null, clientType: "OS", starter: { items: [], version: 1, updatedAt: "s", loaded: true }, row: simRow });
+    const base = simOf({ include_locations: [place("Quuxville"), place("Barville")], version: "r" });
+    const sim = view.areaView(base, GEO);
+    check("the page reads O2 from the resolver's search: places sent, not searched, and the state searched as the rules' places inside it",
       JSON.stringify(sim.placesSent.map((p) => p.text)) === JSON.stringify(["Quuxville, Zedland", "Barville, Zedland"]) &&
         JSON.stringify(sim.notSearched.map((p) => p.text)) === JSON.stringify(["Farville, Zedland"]) &&
-        sim.narrowed.length === 1 && sim.narrowed[0].entry.text === "Zedland" && sim.narrowed[0].into.length === 2, JSON.stringify(sim));
-    const noArea = view.areaView(base, GEO);
-    check("... an engine without O2 sends the own places as they are (nothing narrowed)", noArea.placesSent.length === 3 && noArea.narrowed.length === 0);
-    check("the page reads O1's list from keywords.checkedAfter, and from notApplied before it",
-      JSON.stringify(view.checkedAfterOf({ ...base, keywords: { ...base.keywords, checkedAfter: ["quux one"] } })) === JSON.stringify(["quux one"]) &&
-        JSON.stringify(view.checkedAfterOf(base)) === JSON.stringify(base.keywords.notApplied ?? base.keywords.checkedAfter) && view.checkedAfterOf(base).length > 0);
+        sim.narrowed.length === 1 && sim.narrowed[0].entry.text === "Zedland" && sim.narrowed[0].into.length === 2 &&
+        JSON.stringify(sim.placesSent.map((p) => p.entry)) === JSON.stringify(base.search.include), JSON.stringify(sim));
+    const noRules = view.areaView(simOf(null), GEO);
+    check("... a client whose rules hold no places: its own places sent as they are, nothing narrowed or left out",
+      noRules.placesSent.length === 3 && noRules.narrowed.length === 0 && noRules.notSearched.length === 0, JSON.stringify(noRules));
+    check("the page reads O1's list from the resolver's keywords.checkedAfter",
+      JSON.stringify(view.checkedAfterOf(base)) === JSON.stringify(base.keywords.checkedAfter) && view.checkedAfterOf(base).length > 0 &&
+        view.keywordsView(base).checkedAfter.length === base.keywords.checkedAfter.length);
     const rv = (await get({ tag: R, kind: "companies" })).body.companies;
     check("O1: the keywords AI Ark's request can't hold are listed, to be checked after the pull, none dropped",
       rv.keywords.checkedAfter.length > 0 && rv.keywords.union === CLEANING_EXCLUDE_KEYWORDS.length + 120 && rv.keywords.checkedAfter.every((k) => rv.own.exclude_keywords.includes(k)));
-    if (o1) {
-      const texts = [...rv.plan.notes, ...(await plan()).notes, ...(await preview({ tag: R, kind: "companies", value: { include_locations: rv.own.include_locations.map((p) => p.entry), exclude_locations: [], unplaced: [], exclude_keywords: rv.own.exclude_keywords } })).body.plan.notes];
-      check("O1: nothing on the page or the Companies tab says 'not applied'", !texts.some((n) => /not applied/i.test(n)), texts.join(" | ").slice(0, 300));
-    } else later("O1: nothing on the page or the Companies tab says 'not applied'", "Builder L1: O1's list and notes in the resolver and builders");
-    if (o2) {
-      check("O2: a city the rules cover is searched; the state they don't cover is searched as the rules' cities inside it",
-        JSON.stringify(rv.placesSent.map((p) => p.text)) === JSON.stringify([txt(CITY.kept), txt(CITY.rule)]) && rv.narrowed.length === 1 && rv.narrowed[0].entry.text === txt(null) &&
-          JSON.stringify(rv.narrowed[0].into.map((p) => p.text)) === JSON.stringify([txt(CITY.kept), txt(CITY.rule)]), JSON.stringify([rv.placesSent, rv.narrowed]));
-      check("O2: a city outside the rules is not searched, and listed", JSON.stringify(rv.notSearched.map((p) => p.text)) === JSON.stringify([txt(CITY.out)]), JSON.stringify(rv.notSearched));
-      const sp = await plan();
-      check("O2: the Companies tab counts the same", sp.placesSent === 2 && sp.notSearched === 1 && sp.narrowed === 1 && sp.places === 3, JSON.stringify(sp));
-      const nrv = (await get({ tag: tags.norules, kind: "companies" })).body.companies;
-      check("O2: a client whose rules hold no places is not narrowed", nrv.rules.places === 0 && nrv.notSearched.length === 0 && nrv.placesSent.length === 1 && nrv.plan.blockers.length === 0);
-      const ev = (await get({ tag: tags.empty, kind: "companies" })).body.companies;
-      check("O2: nothing left inside the rules: blocked, with the reason, never a search without places",
-        ev.placesSent.length === 0 && ev.notSearched.length === 1 && ev.plan.searches === 0 && ev.plan.blockers.length > 0, JSON.stringify(ev.plan));
-      await switches({ cp: true, pp: true, ls: true, tags: [tags.empty] });
-      const evc = await count({ linkedinVersion: ev.searchVersion }, tags.empty);
-      check("... and its count: 400 with that reason, nothing counted", evc.status === 400 && evc.body.error === ev.plan.blockers.join(" "), JSON.stringify(evc.body));
-      await resetSwitches();
-    } else {
-      for (const name of [
-        "O2: a city the rules cover is searched; the state they don't cover is searched as the rules' cities inside it",
-        "O2: a city outside the rules is not searched, and listed",
-        "O2: the Companies tab counts the same",
-        "O2: a client whose rules hold no places is not narrowed",
-        "O2: nothing left inside the rules: blocked, with the reason (the count too)",
-      ]) later(name, "Builder L1: O2's narrowing in the resolver (effective.area)");
-    }
+    const texts = [...rv.plan.notes, ...(await plan()).notes, ...(await preview({ tag: R, kind: "companies", value: { include_locations: rv.own.include_locations.map((p) => p.entry), exclude_locations: [], unplaced: [], exclude_keywords: rv.own.exclude_keywords } })).body.plan.notes];
+    check("O1: nothing on the page or the Companies tab says 'not applied'; the notes say 'checked after the pull (AI Ark limit)'",
+      !texts.some((n) => /not applied/i.test(n)) && texts.some((n) => n.includes("checked after the pull (AI Ark limit)")), texts.join(" | ").slice(0, 300));
+    check("O2: a city the rules cover is searched; the state they don't cover is searched as the rules' cities inside it",
+      JSON.stringify(rv.placesSent.map((p) => p.text)) === JSON.stringify([txt(CITY.kept), txt(CITY.rule)]) && rv.narrowed.length === 1 && rv.narrowed[0].entry.text === txt(null) &&
+        JSON.stringify(rv.narrowed[0].into.map((p) => p.text)) === JSON.stringify([txt(CITY.kept), txt(CITY.rule)]), JSON.stringify([rv.placesSent, rv.narrowed]));
+    check("O2: a city outside the rules is not searched, and listed, with the way to bring it in",
+      JSON.stringify(rv.notSearched.map((p) => p.text)) === JSON.stringify([txt(CITY.out)]) && rv.plan.notes.some((n) => n.includes("not searched: outside the client's sending rules") && n.includes("Clients page or onboarding sheet")),
+      JSON.stringify([rv.notSearched, rv.plan.notes]));
+    const sp = await plan();
+    check("O2: the Companies tab counts the same", sp.placesSent === 2 && sp.notSearched === 1 && sp.narrowed === 1 && sp.places === 3, JSON.stringify(sp));
+    const nrv = (await get({ tag: tags.norules, kind: "companies" })).body.companies;
+    check("O2: a client whose rules hold no places is not narrowed", nrv.rules.places === 0 && nrv.notSearched.length === 0 && nrv.placesSent.length === 1 && nrv.plan.blockers.length === 0);
+    const ev = (await get({ tag: tags.empty, kind: "companies" })).body.companies;
+    check("O2: nothing left inside the rules: blocked, with the reason, never a search without places",
+      ev.placesSent.length === 0 && ev.notSearched.length === 1 && ev.plan.searches === 0 && ev.plan.blockers.length > 0, JSON.stringify(ev.plan));
+    await switches({ cp: true, pp: true, ls: true, tags: [tags.empty] });
+    const evc = await count({ linkedinVersion: ev.searchVersion }, tags.empty);
+    check("... and its count: 400 with that reason, nothing counted", evc.status === 400 && evc.body.error === ev.plan.blockers.join(" "), JSON.stringify(evc.body));
+    await resetSwitches();
     const after = await all(`SELECT client_tag, kind, include_locations FROM client_linkedin_settings WHERE client_tag = ANY($1::text[]) ORDER BY client_tag, kind`, [[tags.row, tags.norules, tags.empty]]);
     // jsonb keeps its own key order, so entries are compared part by part, in list order.
     const canon = (list) => JSON.stringify(list.map((e) => [e.country, e.state ?? null, e.city ?? null]));
@@ -1857,7 +1851,7 @@ try {
   const settingsBack = JSON.stringify(await all(`SELECT key, value FROM enrich_settings ORDER BY key`)) === settingsBefore;
   const clean = Object.values(leftover).every((n) => n === 0) && settingsBack;
   console.log(`\ncleaned up: ${clean ? "yes" : `NO ${JSON.stringify({ ...leftover, settingsBack })}`}`);
-  console.log(`${passed} passed, ${failed} failed${pending ? `, ${pending} waiting for their builder` : ""} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+  console.log(`${passed} passed, ${failed} failed (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
   await pool.end();
   process.exit(failed || !clean ? 1 : 0);
 }
