@@ -117,7 +117,9 @@ const SEARCH_KEYS = [
 ];
 // What this worker can run: the Companies tab starts a pull or a people run only when the worker says it can.
 // pipeline_v2: the Clay originals' templates (companies_v2, inboxes_v1, people_v1).
-const CAPABILITIES = ["company_runs", "pipeline_v2", "people_runs"];
+// linkedin_sources: LinkedIn company pulls and LinkedIn people runs (migration 128), claimed from the same two
+// run tables by the same slices (a people run's source says whether it looks by company or by area).
+const CAPABILITIES = ["company_runs", "pipeline_v2", "people_runs", "linkedin_sources"];
 const SWEEP_WAITING_MS = 3600_000;
 
 if (!env.DATABASE_URL) {
