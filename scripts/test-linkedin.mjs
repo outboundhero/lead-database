@@ -270,8 +270,9 @@ function partA() {
     few.union.length === CLEANING_EXCLUDE_KEYWORDS.length + 1 && few.union.slice(0, CLEANING_EXCLUDE_KEYWORDS.length).every((t, i) => t.toLowerCase() === CLEANING_EXCLUDE_KEYWORDS[i].toLowerCase()) && few.union.at(-1) === "Quuxable Diner");
   check("few own keywords: all applied", few.notApplied.length === 0 && few.sent.includes("Quuxable Diner"));
   const many = keywordsFor(ownWords(120));
-  check("over the limit: the rest listed as not applied, never dropped silently",
-    many.notApplied.length > 0 && many.union.every((t) => many.notApplied.includes(t) || many.sent.some((s) => hasWords(t, s))), `${many.notApplied.length} not applied`);
+  check("over the limit: the rest listed as checked after the pull, never dropped silently (O1)",
+    many.checkedAfter.length > 0 && many.union.every((t) => many.checkedAfter.includes(t) || many.sent.some((s) => hasWords(t, s))) && many.notApplied === many.checkedAfter,
+    `${many.checkedAfter.length} checked after`);
   check("every standard keyword is applied", CLEANING_EXCLUDE_KEYWORDS.every((t) => many.sent.some((s) => hasWords(t, s))));
   check("what is sent fits AI Ark's limit", bytes(many.sent) <= COMPANY_TERMS_BYTES && many.sent.length <= 300);
   check("the standard keywords alone fit, with room for the client's own", bytes(condensePhrases(CLEANING_EXCLUDE_KEYWORDS)) < COMPANY_TERMS_BYTES);
@@ -293,8 +294,12 @@ function partA() {
   const withRow = resolveLinkedin({ tag: "LITEST_A", kind: "companies", row, targeting: rules, starter, saved: { ...EMPTY_PEOPLE_FILTERS, titles: ["Quux Wrangler"], version: "saved-v1" }, clientType: "Cleaning" });
   check("a row: its own lists, never the rules or the starter list", withRow.from === "row" && withRow.own.include_locations.length === 2 && JSON.stringify(withRow.own.exclude_keywords) === JSON.stringify(["Quuxable Diner"]) && withRow.own.unplaced.length === 1);
   check("a row: the saved AI Ark filters win, as on the AI Ark tab", withRow.filters.from === "saved" && JSON.stringify(withRow.filters.value.titles) === JSON.stringify(["Quux Wrangler"]));
-  check("a row: its version, and the saved filters' version beside it", withRow.versions.own === "row:row-v1" && withRow.version === "row:row-v1|filters:saved-v1" && ownVersionOf({ row }) === "row:row-v1");
+  check("a row: its version, the rules' version (its places are narrowed to them) and the saved filters' version beside it",
+    withRow.versions.own === "row:row-v1" && withRow.version === "row:row-v1|rules:rules-v1|filters:saved-v1" && ownVersionOf({ row }) === "row:row-v1" && withRow.versions.rules === "rules-v1");
   check("places outside the client's database area are named", withRow.outsideRules.length === 1 && withRow.outsideRules[0].city === "Farville");
+  check("... and not searched (O2): the stored lists keep them",
+    withRow.search.notSearched.length === 1 && withRow.search.notSearched[0].entry.city === "Farville" && /not searched: outside the client's sending rules/.test(withRow.search.notSearched[0].why) &&
+      withRow.search.include.length === 1 && withRow.own.include_locations.length === 2);
   check("a state or country in the rules covers its cities", outsideRules([place("Farville", "YV")], { include_locations: [place(null, "YV")] }).length === 0 && outsideRules([place("Farville", "YV")], { include_locations: [{ country: "US" }] }).length === 0);
   let bad = 0;
   try {
@@ -326,25 +331,29 @@ function partA() {
   check("the standard company types and keywords, and the client's own keywords on the company",
     JSON.stringify(body.account.type.any.exclude) === JSON.stringify(CLEANING_EXCLUDE_COMPANY_TYPES) && body.account.keyword.any.exclude.content.some((t) => t.startsWith("quuxable widget")) &&
       JSON.stringify(body.contact.keyword.any.exclude.content) === JSON.stringify(condensePhrases(CLEANING_EXCLUDE_KEYWORDS)));
-  check("the keywords not applied are listed in the report and a note, never as 'checked after the pull'",
+  check("the keywords AI Ark's request can't take are listed in the report and a note as checked after the pull, never as 'not applied' (O1)",
     pr.report.linkedin.keywords.notApplied.length === people.keywords.notApplied.length && people.keywords.notApplied.length > 0 &&
-      pr.notes.some((n) => /not applied \(AI Ark limit\)/.test(n)) && !pr.notes.some((n) => n.startsWith("AI Ark's limits leave room for")));
+      pr.notes.some((n) => /checked after the pull \(AI Ark limit\)/.test(n)) && !pr.notes.some((n) => /not applied/i.test(n)) && !pr.notes.some((n) => n.startsWith("AI Ark's limits leave room for")) &&
+      JSON.stringify(pr.report.linkedin.keywords.checkedAfter) === JSON.stringify(people.keywords.checkedAfter));
   check("the sheet's exclusion terms are not sent: the made-up rules are the resolver's", JSON.stringify(linkedinTargeting(people).exclude_terms) === JSON.stringify(people.own.exclude_keywords));
   const companies = resolveLinkedin({ tag: "LITEST_A", kind: "companies", row, targeting: rules, starter, saved: null, clientType: "Non-Cleaning" });
   const cr = linkedinCompanyRequests({ effective: companies, geo: GEO });
   check("a company search: any office in the places, the standard sizes, industries and company types",
-    cr.requests.length === 1 && cr.requests[0].account.location.any.include.includes("Farville, Yonder Vale") && Boolean(cr.requests[0].account.employeeSize) &&
+    cr.requests.length === 1 && cr.requests[0].account.location.any.include.includes("Quuxville, Zedland") && !cr.requests[0].account.location.any.include.includes("Farville, Yonder Vale") && Boolean(cr.requests[0].account.employeeSize) &&
       Boolean(cr.requests[0].account.industries?.any?.exclude) && JSON.stringify(cr.requests[0].account.type.any.exclude) === JSON.stringify(CLEANING_EXCLUDE_COMPANY_TYPES));
-  check("a company search says head offices are judged, and names the places outside the client's area",
-    cr.notes.some((n) => /head office/.test(n)) && !cr.notes.some((n) => n.startsWith("AI Ark finds a company when any of its offices is in one of these places, not only")) && cr.notes.some((n) => /outside the client's database area/.test(n)));
-  const empty = linkedinCompanyRequests({ effective: { ...companies, own: { ...companies.own, include_locations: [] } }, geo: GEO });
+  check("a company search says head offices are judged, and names the places not searched, outside the client's sending rules (O2)",
+    cr.notes.some((n) => /head office/.test(n)) && !cr.notes.some((n) => n.startsWith("AI Ark finds a company when any of its offices is in one of these places, not only")) &&
+      cr.notes.some((n) => /not searched: outside the client's sending rules/.test(n) && /Clients page or onboarding sheet/.test(n)) && cr.report.linkedin.notSearched.length === 1);
+  const empty = linkedinCompanyRequests({ effective: resolveLinkedin({ tag: "LITEST_A", kind: "companies", row: { ...row, include_locations: [] }, targeting: rules, starter, saved: null }), geo: GEO });
   check("no places: blocked in LinkedIn's words, nothing sent", empty.requests.length === 0 && empty.blockers.some((b) => /LinkedIn companies settings hold no places/.test(b)));
   const longOut = Array.from({ length: 80 }, (_, i) => place(`Quuxburg Number ${i}`));
-  const tooMany = linkedinCompanyRequests({ effective: { ...companies, own: { ...companies.own, exclude_locations: longOut } }, geo: GEO });
+  const tooMany = linkedinCompanyRequests({ effective: resolveLinkedin({ tag: "LITEST_A", kind: "companies", row: { ...row, exclude_locations: longOut }, targeting: rules, starter, saved: null }), geo: GEO });
   check("excluded places over what one search holds: blocked, never cut", tooMany.requests.length === 0 && tooMany.blockers.some((b) => /to leave out are more than one AI Ark search can hold/.test(b)) && bytes(longOut.map((e) => placeText(e, GEO))) > EXCLUDE_PLACES_BYTES);
   check("the starter list not loaded: blocked", linkedinPeopleRequests({ effective: { ...noStarter, kind: "people" }, geo: GEO }).requests.length === 0);
   const kept = linkedinRunFilters(people);
-  check("what a run keeps: the places, the keywords sent and not applied, the version", kept.version === people.version && kept.keywords.not_applied.length === people.keywords.notApplied.length && kept.places.length === 2 && kept.kind === "people");
+  check("what a run keeps: the places searched and those not, the keywords sent, checked after and the whole union, the version",
+    kept.version === people.version && kept.keywords.checked_after.length === people.keywords.checkedAfter.length && kept.keywords.union.length === people.keywords.union.length &&
+      !("not_applied" in kept.keywords) && kept.places.length === 1 && kept.places_not_searched.length === 1 && kept.kind === "people");
   let wrongKind = 0;
   try {
     linkedinCompanyRequests({ effective: people, geo: GEO });

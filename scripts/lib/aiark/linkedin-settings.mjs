@@ -18,9 +18,20 @@
 // Keywords sent (D-P4-3): the standard keywords first, then the client's own
 // for the kind, once each (case aside), on a company's name, industry and
 // description, as far as AI Ark's request limit allows (accountFilters in
-// filters.mjs: 1,900 bytes and 300 values). The rest are "not applied (AI Ark
-// limit)": listed on the AI Ark tab and in each run's stored filters, and not
-// checked after the pull.
+// filters.mjs: 1,900 bytes and 300 values). Every keyword is enforced: the whole
+// union (standard and own) is checked after the pull, free, before anything is
+// spent on a record or a row is listed (company rows: client_exclusions with the
+// run's keywords; people: at the Look and again after a Buy). Those AI Ark's
+// request could not take are shown as "checked after the pull (AI Ark limit)".
+//
+// Places searched (the sending rules, override O2): the client's own include
+// places narrowed to its database rules (client_targeting.include_locations),
+// so nothing is paid for outside the area the send gate allows: an entry the
+// rules cover is kept, a state or country entry the rules don't cover is
+// replaced by the rules' entries inside it, a city entry they don't cover is
+// left out, and so is an entry the rules exclude. A client whose rules hold no
+// include places is not narrowed. The stored lists never change; what is left
+// out is listed as "not searched: outside the client's sending rules".
 //
 // Places are client_targeting's format ({country, state, city} codes, the geo
 // reference's city spelling with accents folded), so placeString() sends them
@@ -71,20 +82,32 @@ import { normTag, starterFrom } from "../enrich/settings.mjs";
  *   own: LinkedinOwn,
  *   filters: { value: Record<string, any>, from: "saved" | "cleaning" },
  *   cleaning: true,
- *   keywords: { standard: string[], own: string[], union: string[], sent: string[], notApplied: string[] },
+ *   keywords: { standard: string[], own: string[], union: string[], sent: string[], checkedAfter: string[], notApplied: string[] },
+ *   search: PlacesSearched,
  *   outsideRules: PlaceEntry[],
  *   row: LinkedinRow | null,
  *   starter: { loaded: boolean, items: number, version: number | null },
  *   blockers: string[],
- *   versions: { own: string, filters: string | null },
+ *   versions: { own: string, filters: string | null, rules: string | null },
  *   version: string,
  * }} EffectiveLinkedin
- *   own: the client's own lists (the row's, or derived for a client with no row: rules places, starter keywords);
+ *   own: the client's own lists as stored (the row's, or derived for a client with no row: rules places, starter keywords);
  *   filters.from "cleaning": the standard filters (never "none" on LinkedIn);
- *   keywords.notApplied: own keywords AI Ark's limit leaves out ("not applied (AI Ark limit)");
- *   outsideRules: own include places the client's database area (client_targeting) does not cover: records
- *     found only there are paid for, then marked outside the client's area, and the send gate refuses them;
- *   versions.own: what a save must send back; version: own and the saved filters, what a count or a pull compares
+ *   keywords.checkedAfter: keywords of the union AI Ark's request could not take: "checked after the pull (AI Ark limit)";
+ *     keywords.notApplied is the same list under its Day 0 name (kept for callers written against it);
+ *   search: the places a search sends, narrowed to the client's sending rules (narrowPlaces), and what was left out;
+ *   outsideRules: own include places the client's database area (client_targeting) does not cover (each is either
+ *     replaced by the rules' places inside it or not searched: see search);
+ *   versions.own: what a save must send back; versions.rules: the rules' version, which the places searched depend on;
+ *   version: own, the rules (for a client with its own row) and the saved filters: what a count, pull or run compares
+ */
+/**
+ * The places a LinkedIn search sends, narrowed to the client's sending rules (override O2).
+ * @typedef {{ include: PlaceEntry[], exclude: PlaceEntry[], notSearched: Array<{ entry: PlaceEntry, why: string }>,
+ *   replaced: Array<{ entry: PlaceEntry, by: PlaceEntry[] }>, narrowed: boolean, rulePlaces: number }} PlacesSearched
+ *   include: the places sent (de-duplicated, in order); exclude: the client's own places left out, sent as stored;
+ *   notSearched: own include places left out, with why; replaced: own state or country places the rules don't cover,
+ *   and the rules' places inside each that are searched instead; narrowed: false when the rules hold no include places
  */
 
 export const LINKEDIN_KINDS = Object.freeze(["people", "companies"]);
@@ -105,6 +128,7 @@ export const LINKEDIN_FLAGS = Object.freeze({
 });
 
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const fmtN = (n) => Number(n).toLocaleString("en-US");
 const clean = (v) => (v == null ? "" : String(v).replace(/\s+/g, " ").trim());
 /** Accents folded, lower case, spaces collapsed: how geo.mjs keys state and country names. */
 const fold = (v) => clean(v).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
@@ -149,22 +173,31 @@ export function sameOwn(a, b) {
 
 // ── Keywords (D-P4-3) ───────────────────────────────────────────────────────
 
+/** How a keyword AI Ark's request could not take is shown, everywhere (override O1). */
+export const CHECKED_AFTER = "checked after the pull (AI Ark limit)";
+/** How a place the sending rules leave out is shown, everywhere (override O2). */
+export const NOT_SEARCHED = "not searched: outside the client's sending rules";
+export const NOT_SEARCHED_EXCLUDED = "not searched: the client's sending rules leave this place out";
+/** What brings a place left out back in. */
+export const NOT_SEARCHED_FIX = "Adding them to the client's rules (Clients page or onboarding sheet) brings them in.";
+
 /**
  * The excluded keywords a LinkedIn search sends: the standard ones, then the
  * client's own for the kind not already among them (case aside), as far as
- * AI Ark's limit allows; the rest are not applied. A sent phrase covers every
- * listed keyword that holds its words in order ("cleaning" covers "cleaning
- * services"), so a covered keyword counts as applied.
+ * AI Ark's limit allows. A sent phrase covers every listed keyword that holds
+ * its words in order ("cleaning" covers "cleaning services"), so a covered
+ * keyword counts as sent. Every keyword of the union, sent or not, is checked
+ * after the pull; the ones AI Ark's request could not take are checkedAfter.
  *
  * @param {string[]} own  the client's own excluded keywords for the kind
- * @returns {{ standard: string[], own: string[], union: string[], sent: string[], notApplied: string[] }}
- *   union: standard first, then the client's own new ones; sent: what AI Ark is asked (condensed);
- *   notApplied: keywords of the union no sent phrase covers
+ * @returns {{ standard: string[], own: string[], union: string[], sent: string[], checkedAfter: string[], notApplied: string[] }}
+ *   union: standard first, then the client's own new ones (what the after-pull check reads); sent: what AI Ark is
+ *   asked (condensed); checkedAfter: keywords of the union no sent phrase covers; notApplied: the same list (Day 0 name)
  */
 export function keywordsFor(own) {
   const a = accountFilters({ targeting: { exclude_terms: Array.isArray(own) ? own : [] }, filters: null, cleaning: true });
-  const notApplied = a.terms.filter((t) => !a.companyTerms.some((sent) => hasWords(t, sent)));
-  return { standard: [...a.standardTerms], own: [...a.clientTerms], union: [...a.terms], sent: [...a.companyTerms], notApplied };
+  const checkedAfter = a.terms.filter((t) => !a.companyTerms.some((sent) => hasWords(t, sent)));
+  return { standard: [...a.standardTerms], own: [...a.clientTerms], union: [...a.terms], sent: [...a.companyTerms], checkedAfter, notApplied: checkedAfter };
 }
 
 // ── Places ──────────────────────────────────────────────────────────────────
@@ -299,11 +332,20 @@ export async function checkPlaces(db, entries, geo, { verify = false, label = (e
   return { entries: kept, errors };
 }
 
+/** Does a set of place keys hold an entry: its own key, its state's or its country's? */
+function holdsPlace(keys, e) {
+  const k = placeKeyOf(e);
+  if (!k) return false;
+  const [country, state] = k.split("|");
+  return keys.has(k) || Boolean(state && keys.has(`${country}|${state}`)) || keys.has(country);
+}
+
 /**
  * The client's own include places its database area does not cover: an entry
  * is covered when the rules' include places hold it, its state or its country
- * (by place key). Records found only in the others are paid for, then marked
- * outside the client's area, and the send gate refuses them.
+ * (by place key). Under the sending rules (narrowPlaces) none of them is
+ * searched as it stands: a city is left out, a state or country is replaced by
+ * the rules' places inside it.
  *
  * @param {PlaceEntry[]} entries
  * @param {{ include_locations?: PlaceEntry[] } | null} targeting  client_targeting's row
@@ -311,12 +353,68 @@ export async function checkPlaces(db, entries, geo, { verify = false, label = (e
  */
 export function outsideRules(entries, targeting) {
   const keys = new Set(entriesOf(targeting?.include_locations).map(placeKeyOf).filter(Boolean));
-  return entriesOf(entries).filter((e) => {
-    const k = placeKeyOf(e);
-    if (!k) return true;
-    const [country, state] = k.split("|");
-    return !(keys.has(k) || (state && keys.has(`${country}|${state}`)) || keys.has(country));
-  });
+  return entriesOf(entries).filter((e) => !placeKeyOf(e) || !holdsPlace(keys, e));
+}
+
+/**
+ * The places a LinkedIn search sends (override O2): the client's own include
+ * places narrowed to its sending rules (client_targeting.include_locations),
+ * so no record is paid for outside the area the send gate allows.
+ *   - an entry the rules cover (they hold its key, its state's or its country's) is kept;
+ *   - a state or country entry they don't cover is replaced by the rules' entries inside it;
+ *   - a city entry they don't cover is left out;
+ *   - an entry the rules' exclude_locations hold is left out.
+ * De-duplicated (by place key), in a stable order. A client whose rules hold no
+ * include places (no row, or an empty list) is not narrowed: its send gate does
+ * not limit places. The own lists are never changed. Pure.
+ *
+ * @param {PlaceEntry[]} entries  the client's own include places
+ * @param {{ include_locations?: PlaceEntry[], exclude_locations?: PlaceEntry[] } | null} targeting  client_targeting's row
+ * @param {{ exclude?: PlaceEntry[] }} [opts]  exclude: the client's own places to leave out, sent as they are
+ * @returns {PlacesSearched}
+ */
+export function narrowPlaces(entries, targeting, { exclude = [] } = {}) {
+  const own = entriesOf(entries);
+  const rules = entriesOf(targeting?.include_locations).filter((e) => placeKeyOf(e));
+  const out = { include: [], exclude: entriesOf(exclude), notSearched: [], replaced: [], narrowed: rules.length > 0, rulePlaces: rules.length };
+  const seen = new Set();
+  const send = (e) => {
+    const k = placeKeyOf(e) ?? JSON.stringify(e);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.include.push(e);
+  };
+  if (!rules.length) {
+    for (const e of own) send(e);
+    return out;
+  }
+  const ruleKeys = new Set(rules.map(placeKeyOf));
+  const ruleOut = new Set(entriesOf(targeting?.exclude_locations).map(placeKeyOf).filter(Boolean));
+  const leftOut = (e) => ruleOut.size > 0 && holdsPlace(ruleOut, e);
+  for (const e of own) {
+    if (!placeKeyOf(e)) {
+      out.notSearched.push({ entry: e, why: NOT_SEARCHED });
+      continue;
+    }
+    if (leftOut(e)) {
+      out.notSearched.push({ entry: e, why: NOT_SEARCHED_EXCLUDED });
+      continue;
+    }
+    if (holdsPlace(ruleKeys, e)) {
+      send(e);
+      continue;
+    }
+    if (!e.city) {
+      const inside = rules.filter((r) => r.country === e.country && (!e.state || r.state === e.state) && !leftOut(r));
+      if (inside.length) {
+        out.replaced.push({ entry: e, by: inside });
+        for (const r of inside) send(r);
+        continue;
+      }
+    }
+    out.notSearched.push({ entry: e, why: NOT_SEARCHED });
+  }
+  return out;
 }
 
 // ── Checking what a manager or the seed sends ───────────────────────────────
@@ -417,10 +515,20 @@ export function resolveLinkedin({ tag, kind, row, targeting, starter, saved, cli
   if (!row && !starter?.loaded) {
     blockers.push(`${t} has no LinkedIn ${kind} settings of its own, and the starter keyword list is not loaded yet (the LinkedIn seed writes it), so its search would leave out nothing beyond the standard keywords. Save this client's own keywords on the AI Ark tab, or load the starter list first.`);
   }
+  const search = narrowPlaces(own.include_locations, targeting, { exclude: own.exclude_locations });
+  if (own.include_locations.length && !search.include.length) {
+    blockers.push(`None of ${t}'s ${fmtN(own.include_locations.length)} LinkedIn ${kind} places is inside its sending rules, so nothing would be searched. ${NOT_SEARCHED_FIX} Or change the LinkedIn places on the AI Ark tab.`);
+  }
   const savedValue = saved ? Object.fromEntries(Object.entries(saved).filter(([k]) => k !== "version" && k !== "updated_at")) : null;
   const f = filtersFor(savedValue, { clientType, scope: "linkedin" });
   const filters = { value: f.from === "saved" ? cleanPeopleFilters(f.value).value : f.value, from: f.from === "saved" ? "saved" : "cleaning" };
-  const versions = { own: ownVersionOf({ row, targeting, starter }), filters: saved ? String(saved.version ?? "") || null : null };
+  const versions = {
+    own: ownVersionOf({ row, targeting, starter }),
+    filters: saved ? String(saved.version ?? "") || null : null,
+    rules: targeting ? String(targeting.version ?? "") || null : null,
+  };
+  // A client with its own row searches its places narrowed to its rules, so a change of the rules is a change of the plan.
+  const rulesPart = row ? `|rules:${versions.rules ?? "none"}` : "";
   return {
     tag: t,
     kind,
@@ -429,12 +537,13 @@ export function resolveLinkedin({ tag, kind, row, targeting, starter, saved, cli
     filters,
     cleaning: true,
     keywords: keywordsFor(own.exclude_keywords),
+    search,
     outsideRules: outsideRules(own.include_locations, targeting),
     row: row ?? null,
     starter: { loaded: Boolean(starter?.loaded), items: starter?.items?.length ?? 0, version: starter?.version ?? null },
     blockers,
     versions,
-    version: `${versions.own}|filters:${versions.filters ?? "none"}`,
+    version: `${versions.own}${rulesPart}|filters:${versions.filters ?? "none"}`,
   };
 }
 
