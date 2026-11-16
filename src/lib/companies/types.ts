@@ -2,6 +2,7 @@
 
 import type { EmployeeBand, Readiness, RunMode } from "@/lib/aiark/types";
 import type { RowStatus } from "@/lib/enrich/types";
+import type { LinkedinPlanView, PullSource } from "@/lib/linkedin/types";
 
 export type CompanyRunStatus = "queued" | "running" | "done" | "stopped" | "error" | "cancelled";
 export const ACTIVE_RUN_STATUSES: CompanyRunStatus[] = ["queued", "running"];
@@ -134,6 +135,12 @@ export interface PipelineSettings {
   };
   /** One entry per AI step; fit_score (phase 3) is kept as stored. Null: the step is unset and does not run. */
   models: Record<ModelStep, ModelSetting | null> & Record<string, ModelSetting | null>;
+  /**
+   * The LinkedIn searches (migration 128): one switch with its client list, and the most people a LinkedIn
+   * people run buys at one company. A company search also needs company pulls on for the client, a people
+   * search people runs.
+   */
+  linkedin_sources: { enabled: boolean; tags: string[]; people_per_company: number };
 }
 
 /** The settings as stored, and their version (sent back with a save). */
@@ -176,6 +183,8 @@ export interface SettingsInput {
   personalisation: PipelineSettings["personalisation"];
   spend_caps: { reoon_checks_per_day: number; openai_usd_per_day: { pipeline: number; fit: number } };
   models: Record<ModelStep, { model: string; reasoning_effort: Effort | null; max_searches: number | null }>;
+  /** Optional: left out, what is stored is kept. */
+  linkedin_sources?: PipelineSettings["linkedin_sources"];
 }
 
 // ── Runs, worker and counts ─────────────────────────────────────────────────
@@ -184,6 +193,8 @@ export interface CompanyRun {
   id: string;
   client_tag: string;
   mode: RunMode;
+  /** Where the companies come from: an AI Ark search of the client's rules, or its LinkedIn search (migration 128). */
+  source: PullSource;
   status: CompanyRunStatus;
   size_requested: number;
   table_id: string | null;
@@ -216,6 +227,8 @@ export interface CompanyWorker {
   companyRuns: boolean;
   /** The worker advertises people_runs: without it nothing works a people run. */
   peopleRuns: boolean;
+  /** The worker advertises linkedin_sources: without it nothing works a LinkedIn pull or people run. */
+  linkedin: boolean;
   /** Provider keys the worker holds (names only). */
   keys: Record<string, boolean>;
   /** The last Reoon balance the worker read for the pipeline's checks. */
@@ -260,6 +273,8 @@ export interface CompaniesSetup {
   credits: Partial<Record<RunMode, { credits: number | null; error: string | null }>>;
   /** Admins only. */
   settings?: SettingsState | null;
+  /** The client's LinkedIn company search (null with no client, or when it can't be read). */
+  linkedin: LinkedinPlanView | null;
 }
 
 export interface CompanyCountResult {
@@ -271,6 +286,9 @@ export interface CompanyCountResult {
   /** The versions the count searched with: a pull needs a count made for the versions on screen. */
   rulesVersion: string | null;
   filtersVersion: string | null;
+  /** A LinkedIn count: its source and the LinkedIn search's version it counted (AI Ark counts leave both out). */
+  source?: PullSource;
+  linkedinVersion?: string | null;
 }
 
 // ── The list (GET /api/companies/list) ──────────────────────────────────────
@@ -370,7 +388,7 @@ export interface ContactsPage {
 
 export type PeopleRunStatus = "queued" | "running" | "looked" | "done" | "stopped" | "error" | "cancelled";
 export const ACTIVE_PEOPLE_RUN_STATUSES: PeopleRunStatus[] = ["queued", "running", "looked"];
-export type CandidateVerdict = "candidate" | "held" | "never_contact" | "bounced" | "outside" | "excluded" | "no_track" | "bought_before";
+export type CandidateVerdict = "candidate" | "held" | "never_contact" | "bounced" | "outside" | "excluded" | "no_track" | "bought_before" | "no_company";
 export type CandidatePick = "none" | "picked" | "reserve" | "bought" | "no_email" | "lost";
 
 export interface PeopleRun {
@@ -469,11 +487,14 @@ export interface PeopleSetup {
   spend: { reoon: { used: number; cap: number }; openaiPipeline: { used: number; cap: number }; openaiFit: { used: number; cap: number } };
   /** Steps that wait for a key we may not hold, and whether the worker holds it (null: the worker does not say). */
   keys: { key: string; vendor: string; holds: string; held: boolean | null; built: boolean }[];
+  /** The client's LinkedIn people search (null when it can't be read). */
+  linkedin: LinkedinPlanView | null;
 }
 
 export interface Candidate {
   person_id: string;
-  company_row_id: number;
+  /** Null for a LinkedIn candidate whose company is not in the client's table yet (brought in when the person is bought). */
+  company_row_id: number | null;
   company: string | null;
   first_name: string | null;
   /** Masked by the Preview ("Ba***e"). */

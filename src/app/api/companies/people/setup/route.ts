@@ -10,8 +10,10 @@ import { peopleSetup } from "@/lib/companies/people";
 // client, the tracks and their phrases (read only, from the Clay originals'
 // seed), the excluded titles, the companies a run would take and those left
 // out, the estimate, its newest runs, the Clay originals loaded, today's spend
-// against the caps, and the steps that wait for a key. No paid call, nothing
-// stored. Manager and up.
+// against the caps, the steps that wait for a key, and the client's LinkedIn
+// people search (`linkedin`: searches, places sent and not searched, keywords
+// sent and checked after the pull, blockers, the switch and the version a
+// LinkedIn run sends back). No paid call, nothing stored. Manager and up.
 
 export const dynamic = "force-dynamic";
 

@@ -22,13 +22,17 @@ import {
   workerView,
 } from "@/lib/companies/server";
 import type { CompaniesSetup } from "@/lib/companies/types";
+import { linkedinPlanViewSafe, readSettingsNow } from "@/lib/linkedin/server";
 
 // GET /api/companies/setup?tag=ABC: everything the Companies tab shows for a
 // client. Its rules (client_targeting), its company filters (the size and
 // industries saved on the AI Ark tab, or a cleaning client's standard ones),
 // what AI Ark would be asked, its pulls, the counts on its list, the worker,
-// the settings' switch and caps (the stored settings too, for admins) and the
-// AI Ark balance, a free call. No paid call, nothing stored. Manager and up.
+// the settings' switch and caps (the stored settings too, for admins), the
+// client's LinkedIn company search (its places sent and not searched, keywords
+// sent and checked after the pull, searches, blockers, the switch and the
+// version a LinkedIn count or pull sends back; null when it can't be read) and
+// the AI Ark balance, a free call. No paid call, nothing stored. Manager and up.
 
 export const dynamic = "force-dynamic";
 
@@ -43,7 +47,7 @@ async function setupFor(c: PoolClient, tag: string | null, admin: boolean) {
     settings: admin ? settings : null,
   };
   if (!tag) {
-    return { ...base, client: null, targeting: null, filters: companyFiltersFor(null, null), plan: null, runs: [], counts: null };
+    return { ...base, client: null, targeting: null, filters: companyFiltersFor(null, null), plan: null, runs: [], counts: null, linkedin: null };
   }
   const client = await clientInfo(c, tag);
   const targeting = await targetingOf(c, tag);
@@ -64,6 +68,7 @@ async function setupFor(c: PoolClient, tag: string | null, admin: boolean) {
     plan: companyPlanView(targeting, filters.value, await geo(c), client?.client_type ?? null),
     runs: await companyRunsFor(c, tag),
     counts: await countsFor(c, tag),
+    linkedin: client ? await linkedinPlanViewSafe(c, { tag, kind: "companies", settings: await readSettingsNow(c), g: await geo(c) }) : null,
   };
 }
 

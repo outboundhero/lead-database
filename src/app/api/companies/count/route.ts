@@ -18,9 +18,13 @@ import {
 } from "@/lib/companies/server";
 import type { CompanyCountResult } from "@/lib/companies/types";
 import type { RunMode } from "@/lib/aiark/types";
+import type { PullSource } from "@/lib/linkedin/types";
+import { changedText, linkedinPlanOf, readSettingsNow, switchRefusal } from "@/lib/linkedin/server";
+import { linkedinSettingsFor } from "../../../../../scripts/lib/aiark/linkedin-settings.mjs";
 import { settingsFrom } from "../../../../../scripts/lib/enrich/settings.mjs";
 
-// POST /api/companies/count {tag, mode, rulesVersion, filtersVersion}: how
+// POST /api/companies/count {tag, mode, rulesVersion, filtersVersion, source,
+// linkedinVersion}: how
 // many companies AI Ark has for a client's rules and company filters. One
 // Company Search page per search: 5 companies on the first (shown as examples),
 // 1 on each other (its totalElements is the count). AI Ark charges 0.1 credit
@@ -34,6 +38,14 @@ import { settingsFrom } from "../../../../../scripts/lib/enrich/settings.mjs";
 // for the versions on screen. Refused while company pulls are switched off,
 // and for a client not on their client list (company_pipeline.tags): a live
 // count spends credits. Manager and up.
+//
+// source "linkedin" (migration 128; "ai_ark" when left out) counts the
+// client's LinkedIn company search instead: its own places narrowed to its
+// sending rules, the standard filters and keywords, its own keywords
+// (linkedinCompanyRequests). Also refused (409) while the LinkedIn searches
+// are off or the client is not on their list, and with `changed` when
+// linkedinVersion (the LinkedIn search's version the tab loaded) differs from
+// now. The answer carries the source and the version it counted.
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -45,7 +57,7 @@ const round = (n: number) => Math.round(n * 100) / 100;
 export async function POST(req: NextRequest) {
   const auth = await requireRole("manager");
   if ("error" in auth) return auth.error;
-  let body: { tag?: unknown; mode?: unknown; rulesVersion?: unknown; filtersVersion?: unknown };
+  let body: { tag?: unknown; mode?: unknown; rulesVersion?: unknown; filtersVersion?: unknown; source?: unknown; linkedinVersion?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -55,57 +67,68 @@ export async function POST(req: NextRequest) {
   if (!TAG_RE.test(tag)) return NextResponse.json({ error: "tag is not a client tag" }, { status: 400 });
   const mode = body.mode === "live" || body.mode === "demo" ? (body.mode as RunMode) : null;
   if (!mode) return NextResponse.json({ error: "mode must be live or demo" }, { status: 400 });
+  const source: PullSource | null = body.source === undefined || body.source === null ? "ai_ark" : body.source === "ai_ark" || body.source === "linkedin" ? body.source : null;
+  if (!source) return NextResponse.json({ error: "source must be ai_ark or linkedin" }, { status: 400 });
   const ready = companyModes()[mode];
   if (!ready.ready) return NextResponse.json({ error: ready.why, needsKey: mode === "live" }, { status: 409 });
 
   let requests: object[];
-  let rulesVersion: string | null;
-  let filtersVersion: string | null;
-  try {
-    const p = await withTx(
-      async (c) => {
-        const settings = await readPipelineSettings(c);
-        const { rows: settingRows } = await c.query<{ key: string; value: unknown }>(`SELECT key, value FROM enrich_settings`);
-        const client = await clientInfo(c, tag);
-        const targeting = await targetingOf(c, tag);
-        const saved = await savedPeople(c, tag);
-        const filters = companyFiltersFor(saved, client?.client_type ?? null);
-        return {
-          enabled: settings.value.company_pipeline.enabled,
-          listed: settingsFrom(settingRows).flagOn("company_pipeline", tag),
-          ...companyPlan(targeting, filters.value, await geo(c), client?.client_type ?? null),
-          rulesVersion: (targeting?.version as string | undefined) ?? null,
-          filtersVersion: (saved?.version as string | undefined) ?? null,
-        };
-      },
-      { readOnly: true, timeoutMs: 10_000 }
-    );
-    if (!p.enabled) {
-      return NextResponse.json({ error: "Company pulls are off, so nothing was counted. An admin can switch them on in the settings." }, { status: 409 });
-    }
-    if (!p.listed) {
-      return NextResponse.json(
-        { error: `${tag} is not on the company pipeline's client list, so nothing was counted. An admin adds it in the settings.` },
-        { status: 409 }
-      );
-    }
-    const rulesChanged = body.rulesVersion !== undefined && p.rulesVersion !== body.rulesVersion;
-    const filtersChanged = body.filtersVersion !== undefined && p.filtersVersion !== body.filtersVersion;
-    if (rulesChanged || filtersChanged) {
-      const what = rulesChanged ? "rules (locations and exclusions)" : "company filters (size and industries, on the AI Ark tab)";
-      return NextResponse.json(
-        { error: `${tag}'s ${what} changed since this page loaded them, so nothing was counted. Reload to see them.`, changed: true },
-        { status: 409 }
-      );
-    }
-    if (p.blockers.length) return NextResponse.json({ error: p.blockers.join(" ") }, { status: 400 });
+  let rulesVersion: string | null = null;
+  let filtersVersion: string | null = null;
+  let linkedinVersion: string | null = null;
+  if (source === "linkedin") {
+    const p = await linkedinCountPlan(tag, body.linkedinVersion);
+    if ("error" in p) return NextResponse.json({ error: p.error, ...(p.changed ? { changed: true } : {}) }, { status: p.status });
     requests = p.requests;
-    rulesVersion = p.rulesVersion;
-    filtersVersion = p.filtersVersion;
-  } catch (err) {
-    console.error("companies/count plan:", err);
-    return NextResponse.json({ error: "Could not work out the search" }, { status: 500 });
+    linkedinVersion = p.version;
+  } else {
+    try {
+      const p = await withTx(
+        async (c) => {
+          const settings = await readPipelineSettings(c);
+          const { rows: settingRows } = await c.query<{ key: string; value: unknown }>(`SELECT key, value FROM enrich_settings`);
+          const client = await clientInfo(c, tag);
+          const targeting = await targetingOf(c, tag);
+          const saved = await savedPeople(c, tag);
+          const filters = companyFiltersFor(saved, client?.client_type ?? null);
+          return {
+            enabled: settings.value.company_pipeline.enabled,
+            listed: settingsFrom(settingRows).flagOn("company_pipeline", tag),
+            ...companyPlan(targeting, filters.value, await geo(c), client?.client_type ?? null),
+            rulesVersion: (targeting?.version as string | undefined) ?? null,
+            filtersVersion: (saved?.version as string | undefined) ?? null,
+          };
+        },
+        { readOnly: true, timeoutMs: 10_000 }
+      );
+      if (!p.enabled) {
+        return NextResponse.json({ error: "Company pulls are off, so nothing was counted. An admin can switch them on in the settings." }, { status: 409 });
+      }
+      if (!p.listed) {
+        return NextResponse.json(
+          { error: `${tag} is not on the company pipeline's client list, so nothing was counted. An admin adds it in the settings.` },
+          { status: 409 }
+        );
+      }
+      const rulesChanged = body.rulesVersion !== undefined && p.rulesVersion !== body.rulesVersion;
+      const filtersChanged = body.filtersVersion !== undefined && p.filtersVersion !== body.filtersVersion;
+      if (rulesChanged || filtersChanged) {
+        const what = rulesChanged ? "rules (locations and exclusions)" : "company filters (size and industries, on the AI Ark tab)";
+        return NextResponse.json(
+          { error: `${tag}'s ${what} changed since this page loaded them, so nothing was counted. Reload to see them.`, changed: true },
+          { status: 409 }
+        );
+      }
+      if (p.blockers.length) return NextResponse.json({ error: p.blockers.join(" ") }, { status: 400 });
+      requests = p.requests;
+      rulesVersion = p.rulesVersion;
+      filtersVersion = p.filtersVersion;
+    } catch (err) {
+      console.error("companies/count plan:", err);
+      return NextResponse.json({ error: "Could not work out the search" }, { status: 500 });
+    }
   }
+  const what = source === "linkedin" ? "LinkedIn count: " : "";
 
   const got = await aiArkFor(mode, { env: process.env, db: enrichPool() });
   if (!got.client) return NextResponse.json({ error: got.why, needsKey: mode === "live" }, { status: 409 });
@@ -127,7 +150,7 @@ export async function POST(req: NextRequest) {
       await logAudit({
         action: "companies_count",
         performedBy: auth.user.id,
-        details: `${tag}: stopped after ${round(credits)} credits: ${err?.message ?? "error"}`,
+        details: `${tag}: ${what}stopped after ${round(credits)} credits: ${err?.message ?? "error"}`,
       });
     }
     return NextResponse.json({ error: err?.message ?? "AI Ark did not answer", credits: round(credits) }, { status });
@@ -137,9 +160,43 @@ export async function POST(req: NextRequest) {
     await logAudit({
       action: "companies_count",
       performedBy: auth.user.id,
-      details: `${tag}: ${total} companies in ${perSearch.length} searches, ${round(credits)} credits`,
+      details: `${tag}: ${what}${total} companies in ${perSearch.length} searches, ${round(credits)} credits`,
     });
   }
-  const out: CompanyCountResult = { mode, total, perSearch, credits: round(credits), sample, rulesVersion, filtersVersion };
+  const out: CompanyCountResult = {
+    mode, total, perSearch, credits: round(credits), sample, rulesVersion, filtersVersion,
+    ...(source === "linkedin" ? { source, linkedinVersion } : {}),
+  };
   return NextResponse.json(out);
+}
+
+/**
+ * The LinkedIn company search to count, read in one transaction: refused while
+ * the switch or company pulls are off for the client, when the search changed
+ * since the page loaded it, or while its plan is blocked.
+ */
+async function linkedinCountPlan(
+  tag: string,
+  loadedVersion: unknown
+): Promise<{ requests: object[]; version: string } | { status: number; error: string; changed?: boolean }> {
+  try {
+    return await withTx(
+      async (c) => {
+        const why = switchRefusal(await readSettingsNow(c), tag, "companies", "counted");
+        if (why) return { status: 409, error: why };
+        if (!(await clientInfo(c, tag))) return { status: 404, error: `${tag} is not a client` };
+        const effective = await linkedinSettingsFor(c, { tag, kind: "companies" });
+        if (loadedVersion !== undefined && loadedVersion !== effective.version) {
+          return { status: 409, error: changedText(tag, "companies", "counted"), changed: true };
+        }
+        const built = linkedinPlanOf(effective, await geo(c));
+        if (built.blockers.length) return { status: 400, error: built.blockers.join(" ") };
+        return { requests: built.requests, version: effective.version };
+      },
+      { readOnly: true, timeoutMs: 10_000 }
+    );
+  } catch (err) {
+    console.error("companies/count LinkedIn plan:", err);
+    return { status: 500, error: "Could not work out the LinkedIn search" };
+  }
 }

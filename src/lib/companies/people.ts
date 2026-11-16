@@ -7,6 +7,8 @@ import { normTag, settingsFrom } from "../../../scripts/lib/enrich/settings.mjs"
 import { capFor, spentToday } from "../../../scripts/lib/enrich/spend.mjs";
 import { variantName } from "../../../scripts/lib/enrich/templates.mjs";
 import type { WorkerState } from "@/lib/enrich/types";
+import { geo } from "@/lib/aiark/server";
+import { linkedinPlanViewSafe } from "@/lib/linkedin/server";
 import {
   TRACK_LABELS,
   TRACKS,
@@ -134,10 +136,15 @@ export function keysView(worker: WorkerState | null): PeopleSetup["keys"] {
   return out;
 }
 
-/** The people setup: the plan, the runs, the originals loaded, today's spend and the keyed steps. */
+/**
+ * The people setup: the plan, the runs, the originals loaded, today's spend,
+ * the keyed steps, and the client's LinkedIn people search (migration 128;
+ * null when it can't be read).
+ */
 export async function peopleSetup(c: PoolClient, tag: string, worker: WorkerState | null): Promise<PeopleSetup> {
   const s = await readSettingsFresh(c);
   const spent = await spentToday(c);
+  const { rows: [client] } = await c.query(`SELECT 1 FROM client_tags WHERE tag = $1`, [normTag(tag)]);
   return {
     plan: await peoplePlan(c, tag, s),
     runs: await peopleRunsFor(c, tag),
@@ -148,6 +155,7 @@ export async function peopleSetup(c: PoolClient, tag: string, worker: WorkerStat
       openaiFit: { used: spent.openai_usd_fit, cap: capFor("openai_usd_fit", s) },
     },
     keys: keysView(worker),
+    linkedin: client ? await linkedinPlanViewSafe(c, { tag: normTag(tag), kind: "people", settings: s, g: await geo(c) }) : null,
   };
 }
 
@@ -345,7 +353,10 @@ export const CANDIDATES_PAGE = 100;
 
 /**
  * One run's candidates and their screen verdicts, by company then person id:
- * keyset pages of 100, no OFFSET. A Preview's last name stays masked.
+ * keyset pages of 100, no OFFSET. A Preview's last name stays masked. A
+ * LinkedIn candidate whose company is not in the client's table yet has no
+ * company row: those come first (as row 0), the order of an AI Ark run's
+ * candidates is unchanged.
  */
 export async function candidatesPage(c: PoolClient, { runId, after }: { runId: string; after: string | null }): Promise<CandidatesPage | null> {
   const cur = after ? decode(after, ["number", "string"]) : null;
@@ -354,21 +365,23 @@ export async function candidatesPage(c: PoolClient, { runId, after }: { runId: s
   let where = "";
   if (cur) {
     params.push(cur[0], cur[1]);
-    where = `AND (k.company_row_id, k.person_id) > ($3::bigint, $4::text)`;
+    where = `AND (coalesce(k.company_row_id, 0), k.person_id) > ($3::bigint, $4::text)`;
   }
-  const { rows } = await c.query<Candidate & { company_row_id: string; row_id: string | null }>(
+  const { rows } = await c.query<Candidate & { company_row_id: string | null; row_id: string | null }>(
     `SELECT k.person_id, k.company_row_id::bigint AS company_row_id, e.company, k.first_name, k.last_name, k.title, k.city, k.region,
             k.country, k.seniority, k.track, k.rank, k.verdict, k.pick, k.row_id::bigint AS row_id
        FROM aiark_people_candidates k
        LEFT JOIN enrich_companies e ON e.row_id = k.company_row_id
       WHERE k.run_id = $1 ${where}
-      ORDER BY k.company_row_id, k.person_id
+      ORDER BY coalesce(k.company_row_id, 0), k.person_id
       LIMIT $2`,
     params
   );
-  const page = rows.slice(0, CANDIDATES_PAGE).map((r) => ({ ...r, company_row_id: Number(r.company_row_id), row_id: r.row_id == null ? null : Number(r.row_id) }));
+  const page = rows
+    .slice(0, CANDIDATES_PAGE)
+    .map((r) => ({ ...r, company_row_id: r.company_row_id == null ? null : Number(r.company_row_id), row_id: r.row_id == null ? null : Number(r.row_id) }));
   const last = page[page.length - 1];
-  return { rows: page, next: rows.length > CANDIDATES_PAGE && last ? encode([last.company_row_id, last.person_id]) : null };
+  return { rows: page, next: rows.length > CANDIDATES_PAGE && last ? encode([last.company_row_id ?? 0, last.person_id]) : null };
 }
 
 /** The plan's note on the estimate, as words. */

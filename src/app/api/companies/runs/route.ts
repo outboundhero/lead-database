@@ -23,6 +23,9 @@ import {
   workerView,
 } from "@/lib/companies/server";
 import type { RunMode } from "@/lib/aiark/types";
+import type { PullSource } from "@/lib/linkedin/types";
+import { changedText, createLinkedinCompanyRun, linkedinPlanOf, linkedinPullFilters, switchRefusal } from "@/lib/linkedin/server";
+import { linkedinSettingsFor } from "../../../../../scripts/lib/aiark/linkedin-settings.mjs";
 import { settingsFrom } from "../../../../../scripts/lib/enrich/settings.mjs";
 import { hasRetiredV1, variantFor } from "../../../../../scripts/lib/enrich/templates.mjs";
 import { originalsSummary } from "../../../../../scripts/lib/enrich/compile-original.mjs";
@@ -43,6 +46,13 @@ import { originalsSummary } from "../../../../../scripts/lib/enrich/compile-orig
 //      a client that still has a phase 1 (companies_v1) table (D24), without a
 //      count, or when the rules or filters changed. The size is at most the
 //      settings' largest pull. Manager and up: a live pull spends AI Ark credits.
+//      source "linkedin" {..., source, linkedinVersion} (migration 128; "ai_ark"
+//      when left out) queues the client's LinkedIn company pull instead: the
+//      same refusals, and also while the LinkedIn searches are off or the client
+//      is not on their list, with a worker that doesn't do LinkedIn searches
+//      (linkedin_sources), and with `changed` when its LinkedIn search changed
+//      since the page loaded it. One pull per client, of either source. The
+//      pull keeps what it was asked in filters.linkedin.
 
 export const dynamic = "force-dynamic";
 
@@ -73,7 +83,9 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await requireRole("manager");
   if ("error" in auth) return auth.error;
-  let body: { tag?: unknown; mode?: unknown; size?: unknown; matchCount?: unknown; rulesVersion?: unknown; filtersVersion?: unknown };
+  let body: {
+    tag?: unknown; mode?: unknown; size?: unknown; matchCount?: unknown; rulesVersion?: unknown; filtersVersion?: unknown; source?: unknown; linkedinVersion?: unknown;
+  };
   try {
     body = await req.json();
   } catch {
@@ -87,6 +99,9 @@ export async function POST(req: NextRequest) {
   if (!Number.isInteger(size) || size < 1 || size > PULL_SIZE_LIMIT) {
     return NextResponse.json({ error: `size must be a whole number from 1 to ${fmt(PULL_SIZE_LIMIT)}` }, { status: 400 });
   }
+  const source: PullSource | null = body.source === undefined || body.source === null ? "ai_ark" : body.source === "ai_ark" || body.source === "linkedin" ? body.source : null;
+  if (!source) return NextResponse.json({ error: "source must be ai_ark or linkedin" }, { status: 400 });
+  const linkedinVersion = typeof body.linkedinVersion === "string" ? body.linkedinVersion : null;
   const ready = companyModes()[mode];
   if (!ready.ready) return NextResponse.json({ error: ready.why, needsKey: mode === "live" }, { status: 409 });
   const matchCount = typeof body.matchCount === "number" && Number.isSafeInteger(body.matchCount) && body.matchCount >= 0 ? body.matchCount : null;
@@ -106,11 +121,16 @@ export async function POST(req: NextRequest) {
           return { status: 409, error: "Company pulls are off, so nothing was started. An admin can switch them on in the settings." };
         }
         const { rows: settingRows } = await c.query<{ key: string; value: unknown }>(`SELECT key, value FROM enrich_settings`);
-        if (!settingsFrom(settingRows).flagOn("company_pipeline", tag)) {
+        const all = settingsFrom(settingRows);
+        if (!all.flagOn("company_pipeline", tag)) {
           return {
             status: 409,
             error: `${tag} is not on the company pipeline's client list, so nothing was started. An admin adds it in the settings.`,
           };
+        }
+        if (source === "linkedin") {
+          const why = switchRefusal(all, tag, "companies", "started");
+          if (why) return { status: 409, error: why };
         }
         if (size > settings.max_pull_size) {
           return { status: 400, error: `A pull takes at most ${fmt(settings.max_pull_size)} companies for now (the largest pull in the settings).` };
@@ -135,6 +155,9 @@ export async function POST(req: NextRequest) {
             error: "The worker that is running doesn't run the pipeline's Clay originals yet, so nothing was started. Deploy the latest worker first.",
           };
         }
+        if (source === "linkedin" && !worker.linkedin) {
+          return { status: 409, error: "The worker that is running doesn't do LinkedIn searches yet, so nothing was started. Deploy the latest worker first." };
+        }
         if (await hasRetiredV1(c, tag)) {
           return {
             status: 409,
@@ -151,6 +174,29 @@ export async function POST(req: NextRequest) {
         }
         const client = await clientInfo(c, tag);
         if (!client) return { status: 404, error: `${tag} is not a client` };
+        if (source === "linkedin") {
+          const effective = await linkedinSettingsFor(c, { tag, kind: "companies" });
+          if (effective.version !== linkedinVersion) return { status: 409, error: changedText(tag, "companies", "started"), changed: true };
+          const built = linkedinPlanOf(effective, await geo(c));
+          const blocked = [...built.blockers, ...built.pullBlockers];
+          if (blocked.length) return { status: 400, error: blocked.join(" ") };
+          // As createCompanyRun below, plus the source: the copy matches the LinkedIn places, the bought rows are kind linkedin.
+          const run = await createLinkedinCompanyRun(c, {
+            tag,
+            mode,
+            size,
+            filters: linkedinPullFilters(effective, built),
+            requests: built.requests,
+            matchCount,
+            createdBy: auth.user.id,
+            targeting: built.targeting,
+          });
+          const { rows } = await c.query(
+            `SELECT ${COMPANY_RUN_FIELDS} FROM aiark_company_runs r LEFT JOIN user_profiles up ON up.id = r.created_by WHERE r.id = $1`,
+            [run.id]
+          );
+          return { run: rows[0] };
+        }
         const targeting = await targetingOf(c, tag);
         const saved = await savedPeople(c, tag);
         const filtersChanged = (saved?.version ?? null) !== filtersVersion;
@@ -198,11 +244,12 @@ export async function POST(req: NextRequest) {
     await logAudit({
       action: "companies_run",
       performedBy: auth.user.id,
-      details: `${tag}: ${mode} pull of ${size} companies queued (run ${out.run.id})`,
+      details: `${tag}: ${mode} ${source === "linkedin" ? "LinkedIn " : ""}pull of ${size} companies queued (run ${out.run.id})`,
     });
     return NextResponse.json({ run: out.run }, { status: 201 });
   } catch (err) {
     const name = err instanceof Error ? err.name : "";
+    if (name === "LinkedinPullRefused") return NextResponse.json({ error: (err as Error).message }, { status: 409 });
     if (name === "RetiredV1Table" || name === "OriginalsMissing") {
       return NextResponse.json(
         { error: name === "OriginalsMissing" ? "The Clay originals are not loaded, so nothing was started." : (err as Error).message },

@@ -17,9 +17,10 @@ export const VERDICT: Record<CandidateVerdict, { label: string; cls: string; hin
   never_contact: { label: "Never contact", cls: "bg-destructive/12 text-destructive", hint: "On the never-contact list." },
   bounced: { label: "Bounced", cls: "bg-destructive/12 text-destructive", hint: "A lead of theirs bounced." },
   outside: { label: "Outside the area", cls: "bg-muted text-muted-foreground", hint: "Their own place is outside the client's area." },
-  excluded: { label: "Excluded", cls: "bg-muted text-muted-foreground", hint: "The company or the title matches the client's exclusions." },
+  excluded: { label: "Excluded", cls: "bg-muted text-muted-foreground", hint: "The company or the title matches the client's exclusions (or, on a LinkedIn run, its LinkedIn keywords)." },
   no_track: { label: "No track", cls: "bg-muted text-muted-foreground", hint: "Their title holds none of the tracks' phrases." },
   bought_before: { label: "Bought before", cls: "bg-[var(--warning)]/15 text-[var(--warning)]", hint: "Another run bought them: copied free with their email, if they had one." },
+  no_company: { label: "No company", cls: "bg-muted text-muted-foreground", hint: "AI Ark gives no company for them (LinkedIn runs), so they are never picked." },
 };
 
 export const PICK: Record<CandidatePick, string> = {
@@ -90,7 +91,9 @@ export function CandidatesList({ runId }: { runId: string }) {
             <tbody>
               {rows.map((c) => (
                 <tr key={c.person_id} className="border-t border-border/40 align-top">
-                  <td className="px-3 py-1.5">{c.company || <span className="text-muted-foreground">row {c.company_row_id}</span>}</td>
+                  <td className="px-3 py-1.5">
+                    {c.company || <span className="text-muted-foreground">{c.company_row_id != null ? `row ${c.company_row_id}` : "not in the table yet"}</span>}
+                  </td>
                   <td className="px-3 py-1.5">
                     <p className="font-medium">{[c.first_name, c.last_name].filter(Boolean).join(" ") || "(no name)"}</p>
                     <p className="text-[12px] text-muted-foreground">{[c.title, place(c)].filter(Boolean).join(" · ")}</p>
