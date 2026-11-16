@@ -18,7 +18,8 @@ import {
   type PeopleRunStatus,
   type PeopleSetup,
 } from "@/lib/companies/types";
-import { Card, cr, fmt, Row } from "./pull-panel";
+import type { PullSource } from "@/lib/linkedin/types";
+import { Card, cr, fmt, LinkedinPlanBox, linkedinWhyNot, Row, SourcePicker } from "./pull-panel";
 import { CandidatesList } from "./candidates-list";
 
 // The Companies tab's people side (phase 2): the people at a client's
@@ -27,7 +28,10 @@ import { CandidatesList } from "./candidates-list";
 // own place, the client's exclusions, the track) and picks one person a track
 // at each company; then, on a first run, it waits for a manager's Buy (Export
 // Single per pick, 1 credit with an email). The tracks and their phrases come
-// from the Clay originals; the excluded titles are the AI Ark tab's.
+// from the Clay originals; the excluded titles are the AI Ark tab's. A LinkedIn
+// people run (migration 128) looks over the client's LinkedIn places instead,
+// with the standard titles, picks up to the settings' people a company, and
+// brings each bought person's company into the client's table.
 
 /** Export Single's price for a person with no email: 0 by AI Ark's docs, not yet seen live, so the estimate allows this. */
 const MISS = 0.5;
@@ -102,6 +106,7 @@ export function PeoplePanel({
 }) {
   const { modes, worker } = setup;
   const [mode, setMode] = useState<RunMode>(() => (modes.demo.ready ? "demo" : "live"));
+  const [source, setSource] = useState<PullSource>("ai_ark");
   const [maxPeople, setMaxPeople] = useState<number>(() => Math.min(30, people?.plan.settings.max_people_per_run ?? 30));
   const [starting, setStarting] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -110,6 +115,13 @@ export function PeoplePanel({
   useEffect(() => {
     setMode((m) => (modes[m].ready ? m : modes.demo.ready ? "demo" : "live"));
   }, [modes]);
+
+  // LinkedIn while it can be used for this client; back to AI Ark when it can't any more.
+  const li = people?.linkedin ?? null;
+  const liWhy = people ? linkedinWhyNot(li, tag, worker) : null;
+  useEffect(() => {
+    if (liWhy) setSource("ai_ark");
+  }, [liWhy]);
 
   if (!people) {
     return (
@@ -124,8 +136,11 @@ export function PeoplePanel({
   const e = plan.estimate;
   const current = runs.find((r) => r.client_tag === tag && isPeopleActive(r)) ?? null;
   const max = plan.settings.max_people_per_run;
+  const linkedin = source === "linkedin" && li ? li : null;
+  // A LinkedIn Look: each search to its page cap at most; a Buy: the run's most people, at most people a company at one company.
+  const liLook = linkedin ? { min: linkedin.searches, max: linkedin.searches * plan.settings.pages_per_search } : null;
   const startWhyNot =
-    plan.blockers[0] ??
+    (linkedin ? (liWhy ?? linkedin.blockers[0]) : plan.blockers[0]) ??
     (!modes[mode].ready ? modes[mode].why ?? "Not available" :
     !worker?.online ? "The service that runs people runs is off" :
     !worker.peopleRuns ? "The worker that is running doesn't do people runs yet" :
@@ -134,17 +149,21 @@ export function PeoplePanel({
     null);
 
   const start = async () => {
+    const which = linkedin ? "LinkedIn " : "";
+    const look = liLook ?? { min: e.lookMin, max: e.lookMax };
     const what =
       mode === "demo"
-        ? `a DEMO people run for ${tag}? The people are made up, and nothing is bought from AI Ark.`
-        : `a LIVE people run for ${tag}? The Look costs at least ${fmt(e.lookMin)} and at most ${fmt(e.lookMax)} AI Ark credits. Nothing is bought until you click Buy.`;
+        ? `a DEMO ${which}people run for ${tag}? The people are made up, and nothing is bought from AI Ark.`
+        : `a LIVE ${which}people run for ${tag}? The Look costs at least ${fmt(look.min)} and at most ${fmt(look.max)} AI Ark credits. Nothing is bought until you click Buy.`;
     if (!window.confirm(`Start ${what}`)) return;
     setStarting(true);
     try {
       const res = await fetch("/api/companies/people/runs", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tag, mode, source: "ai_ark", maxPeople }),
+        body: JSON.stringify(
+          linkedin ? { tag, mode, source: "linkedin", maxPeople, linkedinVersion: linkedin.version } : { tag, mode, source: "ai_ark", maxPeople }
+        ),
       });
       const j = await res.json();
       if (!res.ok) {
@@ -188,7 +207,11 @@ export function PeoplePanel({
   return (
     <Card
       title="People at these companies"
-      sub="One person a track at each company, from AI Ark: operations, then facility and office, then CEO or owner. Each email is checked as the originals check it."
+      sub={
+        linkedin
+          ? `People in the client's LinkedIn places, from AI Ark, up to ${fmt(linkedin.switch.peoplePerCompany)} at a company. Each email is checked as the originals check it.`
+          : "One person a track at each company, from AI Ark: operations, then facility and office, then CEO or owner. Each email is checked as the originals check it."
+      }
       right={
         <span className={cn("rounded-full px-2.5 py-1 text-[12px] font-medium", plan.on ? "bg-[var(--success)]/15 text-[var(--success)]" : "bg-muted text-muted-foreground")}>
           {plan.on ? "On for this client" : !plan.switchOn ? "People runs off" : "Not on the list"}
@@ -196,7 +219,12 @@ export function PeoplePanel({
       }
     >
       <div className="space-y-4 text-[13px]">
-        {plan.blockers.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="w-20 text-[12.5px] text-muted-foreground">Search</span>
+          <SourcePicker value={source} onChange={setSource} linkedinWhy={liWhy} />
+        </div>
+        {linkedin && <LinkedinPlanBox tag={tag} plan={linkedin} />}
+        {!linkedin && plan.blockers.length > 0 && (
           <ul className="space-y-1 rounded-xl bg-[var(--warning)]/12 px-3 py-2 text-[12.5px]">
             {plan.blockers.map((b) => (
               <li key={b} className="flex gap-2">
@@ -206,58 +234,71 @@ export function PeoplePanel({
           </ul>
         )}
 
-        <div className="space-y-2">
-          <Row label="Companies">
-            <b>{fmt(plan.companies.eligible)}</b> ready for a run
-            <span className="block text-[12px] text-muted-foreground">
-              {fmt(plan.companies.passing)} pass the client&apos;s rules; {fmt(plan.companies.held)} skipped because someone usable is already held
-              {plan.companies.looked ? `; ${fmt(plan.companies.looked)} looked at in the last ${plan.settings.recheck_days} days` : ""}
-              {plan.companies.notChecked ? `; ${fmt(plan.companies.notChecked)} not checked against the database yet` : ""}
-              {plan.companies.noId ? `; ${fmt(plan.companies.noId)} with no AI Ark id` : ""}.
-            </span>
-          </Row>
-          <Row label="Tracks">
-            {plan.tracks ? (
-              <span className="flex flex-col gap-1.5">
-                {plan.tracks.map((t) => (
-                  <span key={t.track} className="block" title={t.from.length ? `From the originals: ${t.from.join(", ")}` : undefined}>
-                    <span className="mr-1 font-medium">{t.label}:</span>
-                    <Phrases phrases={t.phrases} />
-                  </span>
-                ))}
-                <span className="text-[12px] text-muted-foreground">Read only: the phrases come from the original role steps. A title holding one, as whole words, belongs to that track.</span>
+        {!linkedin && (
+          <div className="space-y-2">
+            <Row label="Companies">
+              <b>{fmt(plan.companies.eligible)}</b> ready for a run
+              <span className="block text-[12px] text-muted-foreground">
+                {fmt(plan.companies.passing)} pass the client&apos;s rules; {fmt(plan.companies.held)} skipped because someone usable is already held
+                {plan.companies.looked ? `; ${fmt(plan.companies.looked)} looked at in the last ${plan.settings.recheck_days} days` : ""}
+                {plan.companies.notChecked ? `; ${fmt(plan.companies.notChecked)} not checked against the database yet` : ""}
+                {plan.companies.noId ? `; ${fmt(plan.companies.noId)} with no AI Ark id` : ""}.
               </span>
-            ) : (
-              <span className="text-[var(--warning)]">Not loaded: the Clay originals&apos; seed writes them.</span>
-            )}
-          </Row>
-          <Row label="Titles left out">
-            {plan.excludedTitles.titles.length ? (
-              <span>
-                {fmt(plan.excludedTitles.titles.length)} {plan.excludedTitles.from === "cleaning" ? "(the cleaning defaults)" : "(saved for this client)"}
-              </span>
-            ) : (
-              <span className="text-muted-foreground">None</span>
-            )}{" "}
-            <Link className="font-medium text-primary hover:underline" href={`/leads/ai-ark?client=${encodeURIComponent(tag)}`}>
-              Edit on the AI Ark tab
-            </Link>
-          </Row>
-        </div>
+            </Row>
+            <Row label="Tracks">
+              {plan.tracks ? (
+                <span className="flex flex-col gap-1.5">
+                  {plan.tracks.map((t) => (
+                    <span key={t.track} className="block" title={t.from.length ? `From the originals: ${t.from.join(", ")}` : undefined}>
+                      <span className="mr-1 font-medium">{t.label}:</span>
+                      <Phrases phrases={t.phrases} />
+                    </span>
+                  ))}
+                  <span className="text-[12px] text-muted-foreground">Read only: the phrases come from the original role steps. A title holding one, as whole words, belongs to that track.</span>
+                </span>
+              ) : (
+                <span className="text-[var(--warning)]">Not loaded: the Clay originals&apos; seed writes them.</span>
+              )}
+            </Row>
+            <Row label="Titles left out">
+              {plan.excludedTitles.titles.length ? (
+                <span>
+                  {fmt(plan.excludedTitles.titles.length)} {plan.excludedTitles.from === "cleaning" ? "(the cleaning defaults)" : "(saved for this client)"}
+                </span>
+              ) : (
+                <span className="text-muted-foreground">None</span>
+              )}{" "}
+              <Link className="font-medium text-primary hover:underline" href={`/leads/ai-ark?client=${encodeURIComponent(tag)}`}>
+                Edit on the AI Ark tab
+              </Link>
+            </Row>
+          </div>
+        )}
 
-        <div className="space-y-1 rounded-xl bg-muted/60 px-3 py-2 text-[12.5px] leading-relaxed">
-          <p>
-            <b>Look:</b> at least {fmt(e.lookMin)} credit{e.lookMin === 1 ? "" : "s"} ({fmt(e.searches)} search{e.searches === 1 ? "" : "es"} of {fmt(plan.settings.ids_per_search)} companies, one page each), at most {fmt(e.lookMax)} (every search to {fmt(plan.settings.pages_per_search)} pages).
-          </p>
-          <p>
-            <b>Buy:</b> at most {fmt(Math.min(e.buyMax, maxPeople || 0))} people (one a track, 3 a company, at most {fmt(maxPeople || 0)} this run): 1 credit each with an email, plus {MISS} a miss if a miss is charged (not yet seen live).
-          </p>
-          {plan.aiSearches && (
+        {linkedin && liLook ? (
+          <div className="space-y-1 rounded-xl bg-muted/60 px-3 py-2 text-[12.5px] leading-relaxed">
             <p>
-              <b>AI searches:</b> on, at most about {usd(e.aiSearchUsd)} of OpenAI for these companies, against today&apos;s cap of {usd(people.spend.openaiPipeline.cap)} ({usd(people.spend.openaiPipeline.used)} used).
+              <b>Look:</b> at least {fmt(liLook.min)} credit{liLook.min === 1 ? "" : "s"} ({fmt(linkedin.searches)} search{linkedin.searches === 1 ? "" : "es"} of the client&apos;s places, one page each), at most {fmt(liLook.max)} (every search to {fmt(plan.settings.pages_per_search)} pages). People outside the client&apos;s sending rules or matching its keywords are left out for free.
             </p>
-          )}
-        </div>
+            <p>
+              <b>Buy:</b> at most {fmt(maxPeople || 0)} people this run, up to {fmt(linkedin.switch.peoplePerCompany)} at one company: 1 credit each with an email, plus {MISS} a miss if a miss is charged (not yet seen live). Each bought person&apos;s company is brought into the client&apos;s Companies table.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-1 rounded-xl bg-muted/60 px-3 py-2 text-[12.5px] leading-relaxed">
+            <p>
+              <b>Look:</b> at least {fmt(e.lookMin)} credit{e.lookMin === 1 ? "" : "s"} ({fmt(e.searches)} search{e.searches === 1 ? "" : "es"} of {fmt(plan.settings.ids_per_search)} companies, one page each), at most {fmt(e.lookMax)} (every search to {fmt(plan.settings.pages_per_search)} pages).
+            </p>
+            <p>
+              <b>Buy:</b> at most {fmt(Math.min(e.buyMax, maxPeople || 0))} people (one a track, 3 a company, at most {fmt(maxPeople || 0)} this run): 1 credit each with an email, plus {MISS} a miss if a miss is charged (not yet seen live).
+            </p>
+            {plan.aiSearches && (
+              <p>
+                <b>AI searches:</b> on, at most about {usd(e.aiSearchUsd)} of OpenAI for these companies, against today&apos;s cap of {usd(people.spend.openaiPipeline.cap)} ({usd(people.spend.openaiPipeline.used)} used).
+              </p>
+            )}
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-3">
           <IosSegmentedControl
@@ -281,6 +322,7 @@ export function PeoplePanel({
           </label>
           <Button onClick={start} disabled={!!startWhyNot || starting} title={startWhyNot ?? undefined}>
             {starting ? <Loader2 className="animate-spin" /> : <Play />} {mode === "demo" ? "Start demo Look" : "Start Look"}
+            {linkedin ? " (LinkedIn)" : ""}
           </Button>
         </div>
         {startWhyNot && <p className="-mt-2 text-[12px] text-muted-foreground">{startWhyNot}.</p>}
@@ -289,6 +331,7 @@ export function PeoplePanel({
           <div className="space-y-2 rounded-xl border border-border/70 p-3">
             <div className="flex flex-wrap items-center gap-2">
               <span className={cn("rounded-full px-2 py-0.5 text-[12px] font-medium", PEOPLE_RUN_STATUS[current.status].cls)}>{PEOPLE_RUN_STATUS[current.status].label}</span>
+              {current.source === "linkedin" && <span className="rounded-full bg-primary/12 px-2 py-0.5 text-[12px] font-medium text-primary">LinkedIn</span>}
               <span className="text-[12.5px]">{lookSummary(current)}</span>
               {current.mode === "demo" && <span className="text-[12px] text-muted-foreground">demo</span>}
             </div>
@@ -419,6 +462,7 @@ function PeopleRunsList({ runs, onShow, shown }: { runs: PeopleRun[]; onShow: (i
           <li key={r.id} className="space-y-1 px-3 py-2 text-[12.5px]">
             <div className="flex flex-wrap items-center gap-2">
               <span className={cn("rounded-full px-2 py-0.5 text-[12px] font-medium", PEOPLE_RUN_STATUS[r.status].cls)}>{PEOPLE_RUN_STATUS[r.status].label}</span>
+              {r.source === "linkedin" && <span className="rounded-full bg-primary/12 px-2 py-0.5 text-[12px] font-medium text-primary">LinkedIn</span>}
               <span>{when(r.created_at)}</span>
               <span className="text-muted-foreground">
                 {lookSummary(r)}; {fmt(r.bought)} bought, {fmt(r.with_email)} with an email, {fmt(r.copied)} copied free; {cr(r.credits_used)} credits
