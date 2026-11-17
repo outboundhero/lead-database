@@ -7,7 +7,9 @@ import { normalizeFilterState } from "@/types/filters";
 import { buildRpcFilters } from "@/lib/filters/build-rpc-filters";
 import { bisonInstances, normalizeDomain } from "@/lib/bison/keys";
 import { getPool } from "@/lib/db/pool";
+import { logAudit } from "@/lib/api/log-audit";
 import { gateEnabled, scoringStatusFor } from "../../../../../scripts/lib/enrich/fit-push.mjs";
+import { BISON_GROUPS, sideCampaignsByInstall } from "../../../../../scripts/lib/bison-groups.mjs";
 
 // Queue an async Bison push batch. Unlike the synchronous /api/bison/push
 // (kept for targeted client "pulls"), this only validates + inserts a
@@ -207,6 +209,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "emailSide must be 'b2b' or 'b2c'" }, { status: 400 });
   }
   let clientTag: string | null = null;
+  // The client's saved group as read below, and the group this push's installs
+  // resolved when the saved one did not cover them (saved after queueing).
+  let savedMapping: { group: number | null; b2b: string; b2c: string } | null = null;
+  let resolvedGroup: number | null = null;
   if (body.clientTag !== undefined) {
     if (typeof body.clientTag !== "string" || !body.clientTag.trim()) {
       return NextResponse.json({ error: "clientTag must be a non-empty string" }, { status: 400 });
@@ -214,7 +220,7 @@ export async function POST(request: NextRequest) {
     clientTag = body.clientTag.trim();
     const { data: tagRow, error: tagErr } = await admin
       .from("client_tags")
-      .select("tag, b2b_instance, b2c_instance")
+      .select("tag, group_no, b2b_instance, b2c_instance")
       .eq("tag", clientTag)
       .maybeSingle();
     if (tagErr) {
@@ -240,6 +246,7 @@ export async function POST(request: NextRequest) {
     //            the wizard's explicit choice is never overridden.
     const b2b = normalizeDomain(String(tagRow.b2b_instance ?? ""));
     const b2c = normalizeDomain(String(tagRow.b2c_instance ?? ""));
+    savedMapping = { group: (tagRow.group_no as number | null) ?? null, b2b, b2c };
     for (const c of campaigns) {
       if (!c.bucket) {
         const guess = suggestBucketFromName(c.name);
@@ -280,11 +287,19 @@ export async function POST(request: NextRequest) {
   //
   // The worker refuses to guess (push-side.mjs): a lead in a two-install batch
   // whose campaigns carry no side would otherwise land in both workspaces, the
-  // 2026-09-24 incident. Refusing at push time is the right safety net, but it
-  // is a bad place to find out: on 2026-10-05 four exports (CVJCIN, SCAS, RICS,
-  // TTT — 148,550 leads) were queued for clients whose B2B/B2C install mapping
-  // had not been synced yet, gathered in full, and then every lead was skipped.
-  // Fail here instead, with what to do about it.
+  // 2026-09-24 incident. On 2026-10-05 four exports (CVJCIN, SCAS, RICS, TTT —
+  // 148,550 leads) were queued for clients whose B2B/B2C install mapping had not
+  // been synced yet, gathered in full, and then every lead was skipped — so this
+  // is settled HERE, before anything is queued.
+  //
+  // Campaigns on the client's saved installs were sided above. The rest take
+  // their install's own side (an install never changes side: OutboundHero and
+  // FacilityReach are B2B, CleaningOutbound and OutboundClean are B2C), but only
+  // when every install in the batch belongs to ONE group, so a business lead can
+  // never reach B2B campaigns in both groups. The group is then saved on the
+  // client. Until 2026-11-18 this refused with "has no B2B/B2C mapping" and asked
+  // for a sheet fix + "Sync groups"; the Nov-15 clients (ATOH, JMBCS, CCGSOR, SG,
+  // LBJ, JATL) were in no group sheet and could not push at all.
   const installs = new Set(campaigns.map((c) => c.instance_url));
   if (installs.size > 1) {
     if (!clientTag) {
@@ -297,17 +312,20 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
-    const unsided = campaigns.filter((c) => !c.side);
-    if (unsided.length > 0) {
-      const where = [...new Set(unsided.map((c) => c.instance_url))].join(", ");
-      return NextResponse.json(
-        {
-          error:
-            `${clientTag} has no B2B/B2C mapping for ${where}, so leads could not be routed and every one would be refused. ` +
-            "On the Clients page run “Sync groups” (or fix the client's group in the sheet), then export again.",
-        },
-        { status: 400 }
-      );
+    if (campaigns.some((c) => !c.side)) {
+      const { group } = sideCampaignsByInstall(campaigns);
+      if (group === null) {
+        return NextResponse.json(
+          {
+            error:
+              `These campaigns are on ${[...installs].join(", ")}, which are not the two installs of one Bison group, ` +
+              `so the leads could not be split into B2B and B2C. Pick ${clientTag}'s campaigns from one group: ` +
+              "OutboundHero + CleaningOutbound, or FacilityReach + OutboundClean.",
+          },
+          { status: 400 }
+        );
+      }
+      resolvedGroup = group;
     }
   }
 
@@ -448,6 +466,39 @@ export async function POST(request: NextRequest) {
     } as Record<string, unknown>,
   }).then(() => {}, () => {});
 
+  // Save the group this batch's installs resolved, so the client is mapped from
+  // now on (Clients page, previews, single-install pushes). Only after the batch
+  // is queued — a refused push changes nothing — and best-effort: the batch
+  // already carries its sides, so a failed save cannot misroute it.
+  let clientGroupSet: { tag: string; group: number; previous: number | null } | null = null;
+  if (clientTag && resolvedGroup !== null) {
+    const pair = (BISON_GROUPS as Record<number, { b2b: string; b2c: string }>)[resolvedGroup];
+    const changed = !savedMapping || savedMapping.group !== resolvedGroup ||
+      savedMapping.b2b !== pair.b2b || savedMapping.b2c !== pair.b2c;
+    if (changed) {
+      const { error: groupErr } = await admin
+        .from("client_tags")
+        .update({ group_no: resolvedGroup, b2b_instance: pair.b2b, b2c_instance: pair.b2c, source: "push" })
+        .eq("tag", clientTag);
+      if (groupErr) {
+        console.error(`[push-batch] could not save group ${resolvedGroup} for ${clientTag}: ${groupErr.message}`);
+      } else {
+        const previous = savedMapping?.group ?? null;
+        clientGroupSet = { tag: clientTag, group: resolvedGroup, previous };
+        await logAudit({
+          action: "Client Group Set From Push",
+          performedBy: user.email ?? user.id,
+          details: `${clientTag}: group ${resolvedGroup} (was ${previous ?? "none"}), from the installs of push batch ${batch.id}`,
+        });
+      }
+    }
+  }
+
   // A batch waiting for fit scoring says so; otherwise the answer is as it always was.
-  return NextResponse.json(startStatus === "scoring" ? { batchId: batch.id, queued: true, waitsForScoring: true } : { batchId: batch.id, queued: true });
+  return NextResponse.json({
+    batchId: batch.id,
+    queued: true,
+    ...(startStatus === "scoring" ? { waitsForScoring: true } : {}),
+    ...(clientGroupSet ? { clientGroupSet } : {}),
+  });
 }

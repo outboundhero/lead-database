@@ -851,12 +851,21 @@ whole Bison row through; nothing displayed it.
 "N new since last sync" after a manual sync. The wizard's step 3 has its own
 Sync that re-runs `send-preview` and keeps choices that still exist.
 
-⚠ **A two-install batch is refused at queue time** (`push-batch` 400) when the
-client tag is missing or any campaign could not be given a side. The worker
-would refuse every lead later anyway (push-side.mjs), but on 2026-10-05 four
+⚠ **A two-install batch is settled at queue time** (`push-batch`): the worker
+would refuse every unsided lead later (push-side.mjs) — on 2026-10-05 four
 exports (CVJCIN, SCAS, RICS, TTT — 148,550 leads) were queued for clients whose
 B2B/B2C mapping had not been synced yet, gathered in full, then skipped
-entirely. The error names the client and says to run **Sync groups** first.
+entirely. Campaigns on the client's saved installs take that side; since
+2026-11-18 the rest take **their install's fixed side** (OutboundHero and
+FacilityReach = B2B, CleaningOutbound and OutboundClean = B2C;
+[scripts/lib/bison-groups.mjs](scripts/lib/bison-groups.mjs)) when every install
+in the batch belongs to ONE group, and that group is saved on the client
+(`source = 'push'`, audit "Client Group Set From Push") after the batch is
+queued. Installs spanning both groups are still refused (400), and so is a
+two-install batch with no client tag. Before this, a client in no group sheet
+could not push at all: the Nov-15 clients (ATOH, JMBCS, CCGSOR, SG, LBJ, JATL)
+all got "has no B2B/B2C mapping". Tested by `scripts/test-bison-groups.mts`
+(includes the worker's own routing on install-sided campaigns).
 
 ⚠ **`sent` overstates what Bison holds.** Bison does not add a lead to a
 campaign while the lead is "In Sequence" in another campaign on that install
@@ -1223,8 +1232,17 @@ status flips that had accumulated in the sheet — that is normal, not a bug.
 
 `POST /api/clients/sync-groups` (owner/admin/manager) re-reads the **Groups tab**
 of the tracker workbook (gid `239723744`) and applies Bison group changes on
-demand, instead of waiting for the 6-hourly `client-sync` cron — which reads a
-*different* workbook (`CLIENTS_SHEET_ID` → `Sheet1`) that has drifted.
+demand, instead of waiting for the 6-hourly `client-sync` cron.
+
+**Since 2026-11-18 the cron and "Sync with sheet" read the Groups tab too**: it
+decides the group of every roster tag it lists, and `CLIENTS_SHEET_ID` →
+`Sheet1` (which had drifted) only fills tags the tab does not list. Until then
+every cron run wrote Sheet1's group back over a Sync-groups move — CCGNWA and
+CCHS were group 1 in the tab and in Bison but group 2 in Sheet1. If the tab
+cannot be read, a sync writes **no** group at all (COALESCE keeps every saved
+one) rather than falling back to Sheet1. All three read the tab through the same
+parser (`parseGroupsTab` in scripts/lib/bison-groups.mjs); the cron's `--dry-run`
+prints the group changes a real run would make.
 
 Groups only: it updates `group_no` / `b2b_instance` / `b2c_instance`, never
 inserts a tag (roster stays the cron's job), and never clears an existing

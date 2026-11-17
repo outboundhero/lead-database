@@ -8,13 +8,16 @@ import {
   tabTitleByGid,
   readRange,
 } from "@/lib/google/sheets";
+import {
+  BISON_GROUPS, GROUPS_TAB_GID, ONBOARDING_SHEET_DEFAULT, parseGroupsTab,
+} from "../../../../../scripts/lib/bison-groups.mjs";
 
 // POST /api/clients/sync-groups — on-demand Bison group re-sync.
 //
-// Clients get moved between the two Bison groups in the tracker's "Groups" tab,
-// but client_tags only picks that up on the 6-hourly client-sync cron (which
-// reads a DIFFERENT workbook that has drifted out of date). This button reads
-// the Groups tab the team actually maintains and applies group changes now.
+// Clients get moved between the two Bison groups in the tracker's "Groups" tab.
+// Since 2026-11-18 the 6-hourly client-sync cron reads this tab too (over the
+// drifted Sheet1 of the allocation workbook, which used to undo moves every run);
+// this button applies the tab now instead of at the next cron run.
 //
 // GROUPS-ONLY, by design:
 //   * updates group_no / b2b_instance / b2c_instance / synced_at and nothing else
@@ -34,24 +37,12 @@ import {
 
 export const maxDuration = 60;
 
-const SHEET_ID =
-  process.env.ONBOARDING_SHEET_ID || "1MGqSgGNoeN6WgjZnT7_Ij_nZftyyj7Z9DT77rVYLKuQ";
-const GROUPS_TAB_GID = 239723744;
+const SHEET_ID = process.env.ONBOARDING_SHEET_ID || ONBOARDING_SHEET_DEFAULT;
 
-// group -> instance pair. Bare domains, matching EMAILBISON_KEYS / bisonAuthFor.
-// Same mapping as scripts/sync-clients-from-sheet.mjs.
-const GROUPS: Record<number, { b2b: string; b2c: string }> = {
-  1: { b2b: "app.outboundhero.co", b2c: "personal.cleaningoutbound.com" },
-  2: { b2b: "app.facilityreach.com", b2c: "personal.outboundclean.com" },
-};
-
-const cleanTag = (v: unknown) => String(v ?? "").trim().toUpperCase();
-
-// Reject blanks, header fragments, and — critically — the values that live in
-// the Status/Plan columns, so a layout change can never turn one into a client.
-const NOT_A_TAG =
-  /^(true|false|missing in group|owner|status|notes|active|churned|paused|plan|churn date|not found|healthy|confirmed churn|tier .*)$/i;
-const isTag = (v: string) => !!v && !NOT_A_TAG.test(v) && !/^b2[bc]\b/i.test(v);
+// group -> instance pair, and the tab parser (header discovery + the filter that
+// rejects Status/Plan values), shared with the client-sync cron and "Sync with
+// sheet" so all three read the Groups tab identically (scripts/lib/bison-groups.mjs).
+const GROUPS = BISON_GROUPS as Record<number, { b2b: string; b2c: string }>;
 
 export async function POST() {
   const server = await createClient();
@@ -88,41 +79,17 @@ export async function POST() {
       { status: 502 }
     );
   }
-  if (rows.length < 2) {
-    return NextResponse.json({ error: "The Groups tab returned no data rows." }, { status: 502 });
-  }
-
-  // ── locate the two tag columns by header, not by position ──────────────────
-  const header = rows[0].map((h) => String(h ?? ""));
-  const colOf = (re: RegExp) => header.findIndex((h) => re.test(h));
-  const g1Col = colOf(/b2b\s*#?\s*1/i);
-  const g2Col = colOf(/b2b\s*#?\s*2/i);
-  if (g1Col < 0 || g2Col < 0) {
+  // ── tag -> group, columns located by header (scripts/lib/bison-groups.mjs) ──
+  // First occurrence wins; a tag listed in both columns keeps group 1.
+  const parsed = parseGroupsTab(rows);
+  if (parsed.error || !parsed.groups) {
+    const msg = parsed.error ?? "no groups parsed";
     return NextResponse.json(
-      {
-        error:
-          "Could not find the group columns in the Groups tab. Expected headers containing " +
-          `"B2B #1" and "B2B #2"; got: ${header.filter(Boolean).join(" | ")}`,
-      },
+      { error: msg.startsWith("0 client tags") ? `Refusing to sync: ${msg}` : msg },
       { status: 502 }
     );
   }
-
-  // tag -> group number. First occurrence wins; a tag listed in both columns
-  // keeps group 1 (same precedence as the cron).
-  const sheetGroups = new Map<string, number>();
-  for (const row of rows.slice(1)) {
-    for (const [col, group] of [[g1Col, 1], [g2Col, 2]] as const) {
-      const tag = cleanTag(row[col]);
-      if (isTag(tag) && !sheetGroups.has(tag)) sheetGroups.set(tag, group);
-    }
-  }
-  if (sheetGroups.size === 0) {
-    return NextResponse.json(
-      { error: "Refusing to sync: 0 client tags parsed from the Groups tab." },
-      { status: 502 }
-    );
-  }
+  const sheetGroups = parsed.groups as Map<string, number>;
 
   // ── compare against client_tags ───────────────────────────────────────────
   const { data: existing, error: readErr } = await admin

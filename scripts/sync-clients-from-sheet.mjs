@@ -14,25 +14,29 @@
 // Also merges the "Client Tracker" tab of CLIENT_TRACKER_SHEET_ID (col A =
 // Company Name, col B = Client Abbreviation — may hold "&"-joined tags, col H =
 // Health). This adds the FULL client roster (incl. churned clients, which have
-// no instance mapping) so the send-wizard knows every tag; instance pairs still
-// come only from the groups sheet.
+// no instance mapping) so the send-wizard knows every tag.
 //
-// Env: GOOGLE_SERVICE_ACCOUNT_B64, CLIENTS_SHEET_ID, CLIENT_TRACKER_SHEET_ID, DATABASE_URL
+// GROUPS (2026-11-18): the tracker's "Groups" tab (ONBOARDING_SHEET_ID, the tab
+// the team keeps current and the "Sync groups" button reads) decides the group of
+// every roster tag it lists; Sheet1 only fills tags the tab does not list. Sheet1
+// had drifted — CCGNWA and CCHS were group 2 there but group 1 in the tab and in
+// Bison — and every run of this cron put the old group back.
+//
+// Env: GOOGLE_SERVICE_ACCOUNT_B64, CLIENTS_SHEET_ID, CLIENT_TRACKER_SHEET_ID, DATABASE_URL,
+//      ONBOARDING_SHEET_ID (optional; defaults to the tracker workbook)
 // Usage:
 //   node scripts/sync-clients-from-sheet.mjs
-//   node scripts/sync-clients-from-sheet.mjs --dry-run
+//   node scripts/sync-clients-from-sheet.mjs --dry-run   (also prints the group changes a real run would make)
 
 import crypto from "node:crypto";
 import pg from "pg";
+import { BISON_GROUPS, GROUPS_TAB_GID, ONBOARDING_SHEET_DEFAULT, parseGroupsTab } from "./lib/bison-groups.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Group -> instance pair. Bare domains (match bisonAuthFor / EMAILBISON_KEYS keys).
-const GROUPS = {
-  1: { b2b: "app.outboundhero.co", b2c: "personal.cleaningoutbound.com" },
-  2: { b2b: "app.facilityreach.com", b2c: "personal.outboundclean.com" },
-};
+const GROUPS = BISON_GROUPS;
 
 function b64url(buf) {
   return Buffer.from(buf).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
@@ -200,11 +204,59 @@ async function main() {
     console.warn("  CLIENT_TRACKER_SHEET_ID not set — skipping roster merge (instance-mapped tags only).");
   }
 
+  // ── Groups tab: the group the team keeps current wins over Sheet1 ──────────
+  // Tags only in the tab are not added (the roster stays Sheet1 + Client
+  // Tracker, as with the "Sync groups" button). If the tab cannot be read, NO
+  // group is written this run: the COALESCE upsert below then keeps every saved
+  // group instead of restoring Sheet1's stale ones.
+  const groupsSheetId = process.env.ONBOARDING_SHEET_ID || ONBOARDING_SHEET_DEFAULT;
+  try {
+    const meta = await sheetsGet(token, `${groupsSheetId}?fields=sheets.properties(sheetId,title)`);
+    const title = (meta.sheets ?? []).map((s) => s.properties).find((p) => p?.sheetId === GROUPS_TAB_GID)?.title;
+    if (!title) throw new Error(`no tab with gid ${GROUPS_TAB_GID}`);
+    const gv = await sheetsGet(token, `${groupsSheetId}/values/${encodeURIComponent(`'${title.replace(/'/g, "''")}'!A1:L400`)}`);
+    const parsed = parseGroupsTab(gv.values ?? []);
+    if (parsed.error) throw new Error(parsed.error);
+    const overrides = [], filled = [], notInRoster = [];
+    for (const [tag, group] of parsed.groups) {
+      const c = clients.get(tag);
+      if (!c) { notInRoster.push(tag); continue; }
+      if (c.group_no == null) filled.push(tag);
+      else if (c.group_no !== group) overrides.push(`${tag} ${c.group_no}→${group}`);
+      Object.assign(c, { group_no: group, ...GROUPS[group], source: "groups_tab" });
+    }
+    console.log(
+      `Groups tab "${title}": ${parsed.groups.size} tags — overrides Sheet1 for ${overrides.length} (${overrides.join(", ") || "none"}), ` +
+      `maps ${filled.length} tracker-only tags, ${notInRoster.length} not in any roster (${notInRoster.join(", ") || "none"}).`
+    );
+  } catch (e) {
+    for (const c of clients.values()) { c.group_no = null; c.b2b = null; c.b2c = null; }
+    console.warn(`  Groups tab unreadable (${e.message}) — writing NO groups this run; every saved group is kept.`);
+  }
+
   const list = [...clients.values()].sort((a, b) => a.tag.localeCompare(b.tag));
   const mapped = list.filter((c) => c.group_no != null).length;
   console.log(`${list.length} client tags total — ${mapped} instance-mapped, ${list.length - mapped} roster-only (churned/unmapped).`);
 
   if (DRY) {
+    // Read-only preview of what a real run would change in client_tags.
+    const db = new pg.Client({ connectionString: process.env.DATABASE_URL });
+    await db.connect();
+    try {
+      await db.query("begin read only");
+      const { rows } = await db.query("select tag, group_no from client_tags");
+      const saved = new Map(rows.map((r) => [r.tag, r.group_no]));
+      const listed = new Set(list.map((c) => c.tag));
+      const moves = list.filter((c) => c.group_no != null && saved.has(c.tag) && saved.get(c.tag) !== c.group_no)
+        .map((c) => `${c.tag} ${saved.get(c.tag) ?? "-"}→${c.group_no}`);
+      const added = list.filter((c) => !saved.has(c.tag)).map((c) => c.tag);
+      const stale = rows.filter((r) => !listed.has(r.tag)).map((r) => r.tag);
+      console.log(`--dry-run: a real run would change ${moves.length} group(s): ${moves.join(", ") || "none"}`);
+      console.log(`--dry-run: add ${added.length} tag(s): ${added.join(", ") || "none"}; remove ${stale.length} stale: ${stale.join(", ") || "none"}`);
+      await db.query("rollback");
+    } finally {
+      await db.end();
+    }
     console.log("--dry-run: no DB writes.");
     return;
   }

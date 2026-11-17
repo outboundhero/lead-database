@@ -3,7 +3,10 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getPool } from "@/lib/db/pool";
 import { logAudit } from "@/lib/api/log-audit";
-import { parseServiceAccount, getAccessToken, sheetsGet, readRange } from "@/lib/google/sheets";
+import { parseServiceAccount, getAccessToken, sheetsGet, readRange, tabTitleByGid } from "@/lib/google/sheets";
+import {
+  BISON_GROUPS, GROUPS_TAB_GID, ONBOARDING_SHEET_DEFAULT, parseGroupsTab,
+} from "../../../../../scripts/lib/bison-groups.mjs";
 
 // POST /api/clients/sync-sheet — on-demand FULL client sync, same merge as the
 // 6-hourly client-sync cron (scripts/sync-clients-from-sheet.mjs), so a client
@@ -14,6 +17,9 @@ import { parseServiceAccount, getAccessToken, sheetsGet, readRange } from "@/lib
 //   2. optional owner/status tab (same book)    -> owner, status
 //   3. tracker "Client Tracker" tab             -> full roster + name + health
 //   4. tracker "Onboarding Form Responses" tab  -> status (authoritative) + type
+//   5. tracker "Groups" tab (2026-11-18)        -> the group of every roster tag it
+//      lists, over Sheet1's (Sheet1 had drifted: CCGNWA/CCHS). Unreadable -> no
+//      group is written at all, so saved groups are kept.
 // Then one transaction: upsert-with-COALESCE (a roster-only row never clears an
 // instance mapping) and delete tags absent from every sheet — identical
 // semantics to the cron, so running both concurrently converges to the same row.
@@ -24,10 +30,7 @@ const cleanTag = (v: unknown) => String(v ?? "").trim().toUpperCase();
 const isTag = (v: string) =>
   !!v && !/^(true|false|missing in group|owner|status|notes)$/i.test(v) && !/^b2[bc]\b/i.test(v);
 
-const GROUPS: Record<number, { b2b: string; b2c: string }> = {
-  1: { b2b: "app.outboundhero.co", b2c: "personal.cleaningoutbound.com" },
-  2: { b2b: "app.facilityreach.com", b2c: "personal.outboundclean.com" },
-};
+const GROUPS = BISON_GROUPS as Record<number, { b2b: string; b2c: string }>;
 
 interface ClientRow {
   tag: string;
@@ -141,6 +144,22 @@ export async function POST() {
       }
     } else {
       warnings.push("CLIENT_TRACKER_SHEET_ID not set — roster/status merge skipped.");
+    }
+
+    // 5. Groups tab: the group the team keeps current wins over Sheet1.
+    try {
+      const groupsSheetId = process.env.ONBOARDING_SHEET_ID || ONBOARDING_SHEET_DEFAULT;
+      const title = await tabTitleByGid(token, groupsSheetId, GROUPS_TAB_GID);
+      const parsed = parseGroupsTab(await readRange(token, groupsSheetId, `'${title.replace(/'/g, "''")}'!A1:L400`));
+      if (parsed.error || !parsed.groups) throw new Error(parsed.error ?? "no groups parsed");
+      for (const [tag, group] of parsed.groups as Map<string, number>) {
+        const c = clients.get(tag);
+        if (!c) continue;   // the tab never adds a tag; the roster stays Sheet1 + Client Tracker
+        Object.assign(c, { group_no: group, ...GROUPS[group], source: "groups_tab" });
+      }
+    } catch (e) {
+      for (const c of clients.values()) { c.group_no = null; c.b2b = null; c.b2c = null; }
+      warnings.push(`Groups tab unreadable (${e instanceof Error ? e.message : e}) — no groups written this run.`);
     }
   } catch (e) {
     return NextResponse.json(
