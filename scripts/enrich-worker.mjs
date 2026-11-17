@@ -41,6 +41,13 @@
 // Enrichley step was skipped for a key the worker now holds are queued again;
 // answers already held are reused, so only those cells pay.
 //
+// Google Maps places sent to a client's inbound URL (migration 129) arrive in
+// its Companies (pipeline) table as held rows, which are never claimed. Once a
+// minute, beside the stale sweep, the worker turns them into queued rows,
+// oldest first, for the clients on the company_pipeline switch only
+// (scripts/lib/enrich/held.mjs; the database checks the switch, and its guard
+// refuses any other release while a client is off).
+//
 // Settings (enrich_settings: the switches and their client lists, the models,
 // the spend caps, how long paid answers are remembered) are read at most every
 // 30 s and handed to the actions, so a model is swapped without a deploy.
@@ -60,7 +67,9 @@
 // without one, the columns that need it show "Needs key" and the row waits.
 // FINDYMAIL_API_KEY, PROSPEO_API_KEY, ANYMAIL_FINDER_API_KEY, ENRICHLEY_API_KEY:
 // optional; without one, its steps show "Needs <KEY> (not held)" and the row
-// never waits for them.
+// never waits for them. With one, each call first takes one of the vendor's
+// calls for the day (enrich_settings.spend_caps.vendor_calls_per_day, 129); no
+// cap set (0, the default) or none left, and the step waits, as Reoon's does.
 // ENRICH_REOON_API_KEY: the company pipeline's Reoon key (in production the
 // validation worker's account, sharing its daily credits), spent on daily credits only;
 // ENRICH_REOON_THREADS (4, at most 5) Reoon checks at once.
@@ -95,6 +104,7 @@ import { fitLoopOnce, fitLoopStatus, refreshBlockedOnce } from "./lib/enrich/fit
 import { advanceScoringBatch } from "./lib/enrich/fit-push.mjs";
 import { advanceBackfill } from "./lib/enrich/fit-backfill.mjs";
 import { promoteAutoConfig, promoteDue, requestPromote } from "./lib/enrich/promote.mjs";
+import { releaseHeldRows } from "./lib/enrich/held.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname, quiet: true });
 
 const env = process.env;
@@ -119,7 +129,9 @@ const SEARCH_KEYS = [
 // pipeline_v2: the Clay originals' templates (companies_v2, inboxes_v1, people_v1).
 // linkedin_sources: LinkedIn company pulls and LinkedIn people runs (migration 128), claimed from the same two
 // run tables by the same slices (a people run's source says whether it looks by company or by area).
-const CAPABILITIES = ["company_runs", "pipeline_v2", "people_runs", "linkedin_sources"];
+// held_release: held Google Maps rows (migration 129) are released once a minute for clients switched on; the
+// Clay tab warns while the worker running lacks it.
+const CAPABILITIES = ["company_runs", "pipeline_v2", "people_runs", "linkedin_sources", "held_release"];
 const SWEEP_WAITING_MS = 3600_000;
 
 if (!env.DATABASE_URL) {
@@ -206,6 +218,29 @@ async function reclaimStale() {
     [STALE_MIN]
   );
   if (rowCount) log(`re-queued ${rowCount} row(s) stuck in 'running' for over ${STALE_MIN} min`);
+}
+
+let heldUnreadyLogged = false;
+
+/**
+ * Held Google Maps rows of the clients on the company_pipeline switch become
+ * queued (held.mjs). Never throws: a failure here is logged and must not stop
+ * the queue.
+ */
+async function releaseHeld() {
+  try {
+    const { released, tables, refused } = await releaseHeldRows(pool);
+    if (released) log(`released ${released} held row(s) in ${tables} Companies (pipeline) table(s): their clients are on the company_pipeline switch`);
+    if (refused) log(`${refused} table(s) kept their held rows: the client was switched off before the release`);
+  } catch (e) {
+    // 42883: fn_enrich_company_switch_on is missing, so migration 129 is not applied yet.
+    if (e?.code === "42883") {
+      if (!heldUnreadyLogged) log("held rows are not released: migration 129 is not applied");
+      heldUnreadyLogged = true;
+      return;
+    }
+    log(`releasing held rows: ${e.message}`);
+  }
 }
 
 /** Writes cells and run records, but only while this worker still holds the row. */
@@ -380,7 +415,8 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
     capabilities: CAPABILITIES,
     // The Clay originals loaded (default variant), for the tab's "originals loaded" pill.
     originals,
-    // What the pipeline spent today (UTC): Reoon checks and OpenAI dollars, against enrich_settings.spend_caps.
+    // What the pipeline spent today (UTC): Reoon checks, OpenAI dollars, and the calls to the email finders and
+    // Enrichley (spend.mjs SPEND_KINDS), against enrich_settings.spend_caps.
     spend_today: spend,
     // The pipeline's Reoon account as last read (daily credits, instant credits, when): the Companies tab shows the checks left today.
     reoon: reoonBalanceInfo(),
@@ -639,6 +675,7 @@ async function main() {
       }
       if (Date.now() - lastSweep > 60_000) {
         await reclaimStale();
+        await releaseHeld();
         lastSweep = Date.now();
       }
       if (Date.now() - lastBeat > 10_000) {
