@@ -2938,7 +2938,42 @@ scraper: a URL is pasted on the client's card there like a Clay URL.
   the spend caps; optional in `PUT /api/companies/settings` (left out, the stored caps
   are kept; sent, all four are checked, 400 with the reason), one audit line per
   change ("Findymail calls a day 0 to 200").
-<!-- INTEGRATOR: add B1's worker notes here (releaseHeldRows and the held_release capability, the vendor caps on each keyed step and the notes on a waiting cell, the hourly sweep's clearance of those notes, the heartbeat's spend_today), then remove this comment. -->
+- **The release** (`scripts/lib/enrich/held.mjs`, `releaseHeldRows()`): the worker's
+  60-second block runs it right after the stale sweep. Held rows become queued in
+  pages of 5,000, oldest first, at most 20 pages a minute, and only in `companies_v2`
+  tables whose client `fn_enrich_company_switch_on()` says is on. The database reads
+  the switch live, so the worker's 30-second settings play no part. A client switched
+  off just before its page makes the guard refuse that page (23514): the worker
+  catches it and releases nothing more for that table this round. Paused tables are
+  released too, and the claim still skips them. Before 129 is applied the worker logs
+  once that held rows are not released. The worker reports `held_release` in its
+  heartbeat's `info.capabilities`; the Clay tab warns while the worker running lacks
+  it.
+- ⚠ **`UPDATE ... WHERE id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)` can update
+  more than n rows.** The planner may run the pick again for each row, and rows the
+  statement already updated are skipped as locked, so the page keeps growing (a page
+  of 2 released 3 rows locally). `held.mjs` picks its page in a `MATERIALIZED` CTE
+  instead.
+- **The caps on each keyed step** (`email-vendors.mjs`, `spend.mjs`
+  `takeVendorCall()`): right before each request to Findymail, Prospeo, Anymail Finder
+  or Enrichley, one call is counted in `enrich_spend_daily` (`findymail_calls`,
+  `prospeo_calls`, `anymail_finder_calls`, `enrichley_calls`) in one statement, so two
+  workers can't both take the last one. The originals' "Anymail Finder validate"
+  steps (P#49, P#54) are Enrichley calls and count against Enrichley's cap. A step that
+  sends nothing (no input, no key, an answer already remembered, the lost-send
+  refusal) counts nothing. With no cap set the cell waits, noted "No daily cap is set
+  for Findymail yet (Companies settings)" (the same for the other three); with
+  today's calls used up, "Today's Findymail calls are used up" (Prospeo, Anymail
+  Finder alike) or "Today's Enrichley checks are used up". The hourly sweep
+  (`requeueWaitingTemplateRows`) knows these notes: it queues such a row again once
+  the vendor's calls have room (the next UTC day, or a higher cap), never while the cap
+  is 0. The heartbeat's `spend_today` carries the four counts beside Reoon and OpenAI.
+  `test-pipeline-v2`'s `HIGH_CAPS` sets the four caps high, since its section E calls
+  the vendors' stand-ins.
+- **Maps rows in the steps:** the office check (`clientOffice`, T#17, which reads
+  `place_id`) judges a Maps row by the place itself, its one office, and its notes
+  speak of "the place" and "Google Maps gave ..."; `hq_only` is ignored on a Maps row.
+  The Companies tab shows its source as "Google Maps" (`project-company.mjs`).
 - **Removed:** the shared-key route `POST /api/enrich/intake` (Bearer
   `ENRICH_INTAKE_KEY`, never set, never called) and `scripts/test-enrich-intake.mjs`.
   `intakeKeyStatus()` stays: it is the `AIARK_AUTO_ADD_KEY` check of `POST
@@ -2968,9 +3003,16 @@ scraper: a URL is pasted on the client's card there like a Clay URL.
   the end; the settings it changes are put back; about 25 s, one check waits out the
   15 s statement timeout). No network: `fetch` refuses every address. The routes run
   for real through the TypeScript loader (`routeLoader`), whose `call()` passes a
-  route's `params` and gives the request `text()`. `test-companies.mjs` lost its E1
-  (the shared-key intake), so it counts 167; the seven suites of phases 2 to 4 must
-  still pass.
+  route's `params` and gives the request `text()`. The worker's side: `node
+  --env-file=.env.local scripts/test-held-caps.mjs` (local database only, 129 applied;
+  made-up `IBTEST_HA` and `IBTEST_HB` clients; the worker is not started for it: its
+  claim runs in a transaction that is rolled back, the release and the sweeps as
+  exported). It covers held rows, the guard, the switch check against `flagOn()`, the
+  release, Maps rows in the template and the vendor caps. It writes the
+  `company_pipeline` switch and today's spend for the run and puts both back, and it
+  refuses to run while any row is held or any client is on the switch's list.
+  `test-companies.mjs` lost its E1 (the shared-key intake), so it counts 167; the seven
+  suites of phases 2 to 4 must still pass.
 
 ## Known issues / TODO
 
