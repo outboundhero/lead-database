@@ -29,10 +29,13 @@ export async function requireRole(min: UserRole) {
 const MIN_KEY_LENGTH = 32;
 
 /**
- * Bearer ENRICH_INTAKE_KEY for the GMaps intake, checked the way the costing
- * feed checks its key (src/lib/costing/feed.ts): constant time over sha256
- * hashes, the configured value trimmed, and unset or shorter than 32
- * characters = not configured, which fails closed.
+ * A Bearer key for the routes the enrichment worker calls (AIARK_AUTO_ADD_KEY:
+ * POST /api/aiark/add/auto and POST /api/companies/promote/auto), checked the
+ * way the costing feed checks its key (src/lib/costing/feed.ts): constant time
+ * over sha256 hashes, the configured value trimmed, and unset or shorter than
+ * 32 characters = not configured, which fails closed. The name is older than
+ * those routes: the shared-key Maps intake it was made for is gone
+ * (migration 129 gave each client its own inbound URL).
  */
 export function intakeKeyStatus(
   authorization: string | null,
