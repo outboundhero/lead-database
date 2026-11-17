@@ -143,6 +143,26 @@ export const INTAKE_ANSWERS = Object.freeze({
   failed: "intake failed",
 });
 
+/** Postgres codes of a passing problem: a statement or lock timeout, a deadlock, a serialization failure, too many connections, a shutdown or start-up. */
+const PASSING_CODES = new Set(["57014", "55P03", "40P01", "40001", "53300", "57P01", "57P02", "57P03"]);
+const PASSING_NET = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE"]);
+
+/**
+ * Is this a passing database problem, which the receiving route answers 429
+ * (the scraper app sends the chunk again later and uses no try)? Only the
+ * codes above, any connection error (class 08), the network errors
+ * ECONNREFUSED, ECONNRESET, ETIMEDOUT and EPIPE, the pool's 10-second wait for
+ * a connection, and a connection ended under the query. Anything else is a
+ * bug (500), so a chunk that always fails still parks instead of looping.
+ */
+export function isPassingDbError(e: unknown): boolean {
+  const err = e as { code?: unknown; message?: unknown } | null;
+  const code = typeof err?.code === "string" ? err.code : "";
+  if (PASSING_CODES.has(code) || code.startsWith("08") || PASSING_NET.has(code)) return true;
+  const msg = typeof err?.message === "string" ? err.message : "";
+  return /timeout exceeded when trying to connect|Connection terminated/i.test(msg);
+}
+
 /** Why a chunk was refused, as enrich_inbound_urls.last_refused notes it for the Clay tab: plain words, never a body, a token or a URL. */
 export const REFUSED_NOTES = Object.freeze({
   revoked: "A chunk came to this URL after it was revoked",
