@@ -83,6 +83,21 @@ export const MODEL_STEPS: { key: ModelStep; label: string; hint: string; tool: "
   { key: "inbox_question_ai", label: "Personalisation question (inboxes)", hint: "Personalisation switch. No web search.", tool: "none", table: "General inboxes" },
 ];
 
+/**
+ * The email finders and Enrichley, each with a daily cap of paid calls
+ * (spend_caps.vendor_calls_per_day, migration 129), in the order and with the
+ * names of scripts/lib/enrich/settings.mjs (VENDOR_CAP_KEYS, VENDOR_CAP_LABELS).
+ * 0, the default, means not set: no call is made and those steps wait.
+ */
+export type VendorCapKey = "findymail" | "prospeo" | "anymail_finder" | "enrichley";
+export type VendorCalls = Record<VendorCapKey, number>;
+export const VENDOR_CAPS: { key: VendorCapKey; label: string; hint: string }[] = [
+  { key: "findymail", label: "Findymail", hint: "Finds a person's email by name or LinkedIn." },
+  { key: "prospeo", label: "Prospeo", hint: "Finds a person's email by name or LinkedIn." },
+  { key: "anymail_finder", label: "Anymail Finder", hint: "Finds and checks a person's email." },
+  { key: "enrichley", label: "Enrichley", hint: "Checks a general inbox or a person's email." },
+];
+
 /** The reasoning efforts the settings sheet takes. Left out, none is sent. A Luna model refuses "minimal". */
 export const EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type Effort = (typeof EFFORTS)[number];
@@ -130,6 +145,8 @@ export interface PipelineSettings {
   spend_caps: {
     reoon_checks_per_day: number;
     openai_usd_per_day: { pipeline: number; fit: number };
+    /** Paid calls a day of each email finder and Enrichley; 0 is not set, and those steps wait. */
+    vendor_calls_per_day: VendorCalls;
     /** Dollars per 1M tokens per model, and web_search_call per search. Not edited on the sheet. */
     openai_prices: Record<string, ModelPrice | number>;
   };
@@ -181,7 +198,12 @@ export interface SettingsInput {
   };
   people_pipeline: PipelineSettings["people_pipeline"];
   personalisation: PipelineSettings["personalisation"];
-  spend_caps: { reoon_checks_per_day: number; openai_usd_per_day: { pipeline: number; fit: number } };
+  spend_caps: {
+    reoon_checks_per_day: number;
+    openai_usd_per_day: { pipeline: number; fit: number };
+    /** Optional: left out, what is stored is kept. */
+    vendor_calls_per_day?: VendorCalls;
+  };
   models: Record<ModelStep, { model: string; reasoning_effort: Effort | null; max_searches: number | null }>;
   /** Optional: left out, what is stored is kept. */
   linkedin_sources?: PipelineSettings["linkedin_sources"];

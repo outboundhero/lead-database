@@ -13,7 +13,10 @@ import type { SettingsState } from "@/lib/companies/types";
 //     personalisation, spend_caps, models, linkedin_sources?}: saves the
 //     settings sheet's edits. linkedin_sources (the switch, its client list and
 //     the people a LinkedIn run buys at one company, 1 to 100) is optional:
-//     left out, what is stored is kept.
+//     left out, what is stored is kept. So is spend_caps.vendor_calls_per_day
+//     (migration 129: { findymail, prospeo, anymail_finder, enrichley }, the
+//     paid calls a day of each, 0 to 100,000; 0 is not set, and those steps
+//     wait): left out, the stored caps are kept; sent, all four are checked.
 //     Every switch keeps its client list (tags, upper case; an empty list
 //     covers no client). Numbers must be whole and in range, model ids match
 //     ^[a-z0-9][a-z0-9.\-]{1,60}$, a reasoning effort is none, minimal, low,

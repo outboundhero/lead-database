@@ -12,17 +12,20 @@ import { TagInput } from "@/components/ui/ios/tag-input";
 import {
   EFFORTS,
   MODEL_STEPS,
+  VENDOR_CAPS,
   type Effort,
   type ModelStep,
   type PipelineSettings,
   type SettingsInput,
   type SettingsState,
+  type VendorCapKey,
 } from "@/lib/companies/types";
 
 // The pipeline's settings (enrich_settings), admins only: company pulls, people
 // runs, the LinkedIn searches and personalisation, each switch with its client
-// list (an empty list covers no client), their caps, the daily spend caps, and
-// for each original Clay AI step its model, reasoning effort and most searches.
+// list (an empty list covers no client), their caps, the daily spend caps
+// (OpenAI, Reoon, and the calls of each email finder and Enrichley), and for
+// each original Clay AI step its model, reasoning effort and most searches.
 // Saved through PUT /api/companies/settings; the worker reads them every 30 s,
 // so a model is swapped with no deploy. Fit scoring, promotion and the gate
 // have their own panel; each client's LinkedIn places and keywords are edited
@@ -48,7 +51,11 @@ function toInput(v: PipelineSettings): SettingsInput {
     },
     people_pipeline: { ...v.people_pipeline, tags: [...v.people_pipeline.tags] },
     personalisation: { ...v.personalisation, tags: [...v.personalisation.tags] },
-    spend_caps: { reoon_checks_per_day: v.spend_caps.reoon_checks_per_day, openai_usd_per_day: { ...v.spend_caps.openai_usd_per_day } },
+    spend_caps: {
+      reoon_checks_per_day: v.spend_caps.reoon_checks_per_day,
+      openai_usd_per_day: { ...v.spend_caps.openai_usd_per_day },
+      vendor_calls_per_day: { ...v.spend_caps.vendor_calls_per_day },
+    },
     models,
     linkedin_sources: { ...v.linkedin_sources, tags: [...v.linkedin_sources.tags] },
   };
@@ -158,6 +165,10 @@ export function SettingsSheet({
           }
         : f
     );
+  const setVendorCap = (k: VendorCapKey, v: number) =>
+    setForm((f) =>
+      f?.spend_caps.vendor_calls_per_day ? { ...f, spend_caps: { ...f.spend_caps, vendor_calls_per_day: { ...f.spend_caps.vendor_calls_per_day, [k]: v } } } : f
+    );
   const setStep = <K extends keyof SettingsInput["models"][ModelStep]>(step: ModelStep, k: K, v: SettingsInput["models"][ModelStep][K]) =>
     setForm((f) => (f ? { ...f, models: { ...f.models, [step]: { ...f.models[step], [k]: v } } } : f));
   type LinkedinInput = NonNullable<SettingsInput["linkedin_sources"]>;
@@ -231,7 +242,11 @@ export function SettingsSheet({
               <Section>
                 <Switch
                   label="Company pulls"
-                  hint={cp.enabled ? "On, for the clients listed below: managers can count and pull their companies." : "Off: nothing can be counted or pulled. A pull already going carries on until it is cancelled."}
+                  hint={
+                    cp.enabled
+                      ? "On, for the clients listed below: managers can count and pull their companies, and the Google Maps places their inbound URL holds are worked."
+                      : "Off: nothing can be counted or pulled, and Google Maps places from a client's inbound URL wait, held. A pull already going carries on until it is cancelled."
+                  }
                   checked={cp.enabled}
                   onChange={(v) => set("company_pipeline", "enabled", v)}
                 />
@@ -343,6 +358,27 @@ export function SettingsSheet({
                   <NumberField label="OpenAI dollars, pipeline" hint="The company, inbox and people AI steps, 0 to 10,000." value={form.spend_caps.openai_usd_per_day.pipeline} min={0} max={10000} step={0.5} onChange={(n) => setCaps("pipeline", n)} />
                   <NumberField label="OpenAI dollars, fit scoring" hint="The scorer and its runs, 0 to 10,000." value={form.spend_caps.openai_usd_per_day.fit} min={0} max={10000} step={0.5} onChange={(n) => setCaps("fit", n)} />
                 </div>
+                {form.spend_caps.vendor_calls_per_day && (
+                  <>
+                    <p className="text-[12.5px] font-medium">Email finders and Enrichley: paid calls a day</p>
+                    <div className="flex flex-wrap gap-3">
+                      {VENDOR_CAPS.map((v) => (
+                        <NumberField
+                          key={v.key}
+                          label={v.label}
+                          hint={`${v.hint} 0 to 100,000.`}
+                          value={form.spend_caps.vendor_calls_per_day![v.key]}
+                          min={0}
+                          max={100000}
+                          onChange={(n) => setVendorCap(v.key, n)}
+                        />
+                      ))}
+                    </div>
+                    <p className="text-[12px] leading-relaxed text-muted-foreground">
+                      0 means not set: that vendor gets no call, and its steps wait until a number is set, as when today&apos;s Reoon share is used up. Past a cap, its steps wait for the next day.
+                    </p>
+                  </>
+                )}
               </Section>
 
               {MODEL_STEPS.map((step) => {
