@@ -1,7 +1,9 @@
 // The Companies tab's rows (enrich_companies, migrations 124 and 125): one
 // summary per row of a client's Companies (pipeline) table (companies_v2),
 // written by the worker when the row finishes (scripts/enrich-worker.mjs),
-// fenced on the row's claim token.
+// fenced on the row's claim token. Its source says where the row came from:
+// an AI Ark pull, a LinkedIn pull, or a Google Maps place sent to the
+// client's inbound URL (migration 129).
 //
 // The company row's own fields are written here: its office, domain and
 // website, whether it passes the client's rules, whether it is on the
@@ -19,6 +21,7 @@ import { cityKey } from "../aiark/geo.mjs";
 import { isLinkedinSource, LINKEDIN_LABELS } from "../aiark/linkedin-labels.mjs";
 import { COMPANY_TEMPLATE_V2 } from "./company-template-v2.mjs";
 import { bareDomain } from "./domain.mjs";
+import { MAPS_SOURCE } from "./maps-place.mjs";
 import { ERROR_OUTCOME, relist, WAITING_OUTCOME } from "./project-contacts.mjs";
 
 export { ERROR_OUTCOME, WAITING_OUTCOME };
@@ -49,7 +52,8 @@ export function companySummaryV2(values, { waiting = false, failed = false } = {
   const company = str(v.company);
   return {
     // A LinkedIn pull's row, or a LinkedIn person's company brought in (its source input says which): LinkedIn (AI Ark).
-    source: isLinkedinSource(v.source) ? LINKEDIN_LABELS.projection : "AI Ark",
+    // A Google Maps place (maps-place.mjs writes its source input): Google Maps.
+    source: isLinkedinSource(v.source) ? LINKEDIN_LABELS.projection : str(v.source) === MAPS_SOURCE ? MAPS_SOURCE : "AI Ark",
     template: COMPANY_TEMPLATE_V2,
     aiark_id: str(v.aiark_id),
     company,

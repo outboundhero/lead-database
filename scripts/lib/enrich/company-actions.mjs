@@ -5,7 +5,9 @@
 //   client_office       free   the office in the client's area: every office of
 //                              the company judged as client_area judges a person
 //                              (judgePlace), the head office first; on a LinkedIn
-//                              pull's row (hq_only) the head office alone
+//                              pull's row (hq_only) the head office alone; on a
+//                              Google Maps row (place_id set, migration 129) the
+//                              place itself, its one office, and the notes say so
 //   held_general_email  free   a general inbox for this company the database
 //                              already holds: role addresses at its domain, then
 //                              general-inbox leads at the same company and office
@@ -49,15 +51,23 @@ function parseOffices(v) {
 /** Is a cell's value the text "true" (or true)? */
 const isTrue = (v) => v === true || text(v).toLowerCase() === "true";
 
+/** judgePlace's note for a Google Maps place: Google Maps gave the place, not AI Ark, and it is placed, not a person. */
+const placeNote = (note) => text(note).replace(/^AI Ark gave /, "Google Maps gave ").replace(/ this person$/, " it");
+
 async function clientOffice({ inputs, table, row, db }) {
   const t = await targetingFor(db, table.client_tag, row?.next_run_at);
   if (!t) return { status: "error", note: `${table.client_tag} has no targeting rules`, retryable: false };
+  // A Google Maps row (maps-place.mjs: its place id is set) has one office, the place itself.
+  const mapsRow = Boolean(text(inputs.place_id));
   const offices = parseOffices(inputs.offices);
   if (!offices.length) {
-    const why = "AI Ark gave no office for this company, so the lead database couldn't place it";
+    const why = mapsRow
+      ? "Google Maps gave no address for this place, so the lead database couldn't place it"
+      : "AI Ark gave no office for this company, so the lead database couldn't place it";
     return { status: "done", value: { inside: false, hq: false, office: null, why, offices_inside: 0 }, display: "Can't tell", note: why };
   }
-  const hqOnly = isTrue(inputs.hq_only);
+  // Only a LinkedIn pull writes hq_only, and only on its own AI Ark rows.
+  const hqOnly = !mapsRow && isTrue(inputs.hq_only);
   if (hqOnly && !offices.some((o) => o.hq)) {
     const why = "AI Ark gave no head office for this company, and a LinkedIn pull keeps head offices only, so the lead database couldn't place it";
     return { status: "done", value: { inside: false, hq: false, office: null, why, offices_inside: 0 }, display: "Can't tell", note: why };
@@ -98,6 +108,15 @@ async function clientOffice({ inputs, table, row, db }) {
     };
   }
   if (chosen) {
+    if (mapsRow) {
+      const why = placeNote(chosen.verdict.note);
+      return {
+        status: "done",
+        value: { inside: true, hq: Boolean(chosen.office.hq), office, why, offices_inside: inside.length },
+        display: "Inside",
+        note: `The place is in the client's area: ${why}.`,
+      };
+    }
     const which = chosen.office.hq ? (hqOnly ? "The head office (a LinkedIn pull keeps head offices only)" : "The head office") : "A branch (the head office is not inside)";
     return {
       status: "done",
@@ -107,6 +126,15 @@ async function clientOffice({ inputs, table, row, db }) {
     };
   }
   const cantTell = shown.verdict.display === "Can't tell";
+  if (mapsRow) {
+    const why = placeNote(shown.verdict.note);
+    return {
+      status: "done",
+      value: { inside: false, hq: false, office, why, offices_inside: 0 },
+      display: cantTell ? "Can't tell" : "Outside",
+      note: `${cantTell ? "Can't tell whether the place is in the client's area" : "The place is not in the client's area"}: ${why}`,
+    };
+  }
   return {
     status: "done",
     value: { inside: false, hq: false, office, why: shown.verdict.note, offices_inside: 0 },
