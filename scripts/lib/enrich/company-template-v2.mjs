@@ -328,8 +328,8 @@ const PHASE1 = {
   call_category: { name: "Searched category", kind: "input", provider: MAPS, hidden: true, description: "The category the scrape searched, from the scraper app's chunk (C#68)." },
   office: {
     name: "Office in the client's area", kind: "action", action: "client_office", data_type: "json", provider: "Client rules",
-    inputs: { offices: "{{offices}}", hq_only: "{{hq_only}}" },
-    description: "Checks every office against the client's places and excluded places, exactly as the send gate would place a lead there. The head office when it is inside, else the first office inside. Outside: no office is. Can't tell: AI Ark gave no state the lead database could place. On a LinkedIn pull's row only the head office counts: Outside (head office) when it is not inside.",
+    inputs: { offices: "{{offices}}", hq_only: "{{hq_only}}", place_id: "{{place_id}}" },
+    description: "Checks every office against the client's places and excluded places, exactly as the send gate would place a lead there. The head office when it is inside, else the first office inside. Outside: no office is. Can't tell: AI Ark gave no state the lead database could place. On a LinkedIn pull's row only the head office counts: Outside (head office) when it is not inside. On a Google Maps row (its place id is set) the place itself is the one office.",
   },
   use_city: { name: "City", kind: "formula", formula: "{{office}}?.office?.city", description: "The office's city (in C#7's place)." },
   use_state: { name: "State", kind: "formula", formula: "{{office}}?.office?.state", description: "The office's state, as a code (in C#8's place)." },
