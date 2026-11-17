@@ -2092,8 +2092,10 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   definitions (Clay's formulas, waterfalls, run conditions, verbatim) are loaded
   with `node scripts/enrich-seed-table.mjs <spec.json>`; specs hold a client's
   exclusion lists and prompts, so they live in the git-ignored `enrich-specs/`,
-  never in this public repo. Rows arrive from the GMaps Scraper
-  (`POST /api/enrich/intake`, Bearer `ENRICH_INTAKE_KEY`) or a CSV.
+  never in this public repo. A hand-seeded table takes rows from a CSV only. A
+  client's Google Maps places come from the GMaps Scraper app through the
+  client's own inbound URL into its Companies (pipeline) table (see "Inbound
+  URLs (migration 129)").
 - **AI Ark tab** (`/leads/ai-ark`): pick a client, see what AI Ark will be asked
   (locations and exclusion terms from `client_targeting`, job titles / seniority /
   company size from `client_people_filters`), count (People Preview, 1 credit a
@@ -2338,7 +2340,9 @@ fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`,
   there is no count, or the rules or filters changed since the page loaded them.
   The routes read `enrich_settings` fresh, never through the worker's 30-second
   cache, so a saved switch applies at once. In the Clay section a template table
-  comes first, takes no CSV (409), and the Maps intake never writes into it.
+  comes first and takes no CSV (409). Since migration 129 the client's Google Maps
+  places land in its Companies (pipeline) table through its inbound URL, held until
+  the client is switched on (see "Inbound URLs (migration 129)").
 - ⚠ **A company can still be bought twice in one case:** AI Ark matched it to a
   client's place, but the lead database places all its offices elsewhere. It is
   then neither copied to another client of that place nor on that client's
@@ -2438,7 +2442,9 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   (`spend_caps.openai_usd_per_day`: pipeline $20, fit $25), counted after each answer
   from its usage at `spend_caps.openai_prices` (an unknown model at the dearest prices
   held). Past a cap the cell waits ("Today's Reoon share is used up", "Today's OpenAI
-  cap for the pipeline is reached") until the next day's sweep.
+  cap for the pipeline is reached") until the next day's sweep. The email finders and
+  Enrichley have daily caps of paid calls too, since migration 129
+  (`spend_caps.vendor_calls_per_day`, see "Inbound URLs (migration 129)").
 - **Listing** (`enrich_contacts`, `relist()` in `project-contacts.mjs`): one summary
   per inbox and People row; a company is listed when it passes the client's rules, is
   not never-contact or in error, and has a usable general or person email (approved,
@@ -2823,6 +2829,148 @@ spends nothing.
   and keywords, removed at the end; every setting put back). No network: AI Ark answers
   through the demo transport and `fetch` refuses every address. Part R runs the routes for
   real through the TypeScript loader. The six suites of phases 2 and 3 must still pass.
+
+### Inbound URLs (migration 129)
+
+Each client has its own address for the GMaps Scraper app's chunks: `POST
+/api/enrich/intake/<token>`. The token decides the client. A chunk's Google Maps
+places land in the client's Companies (pipeline) table as **held** rows: nothing runs
+or is spent on them until the client is on the Company pulls switch. Decided with the
+owner on 2026-11-18. Nothing changed in the scraper app (gmaps-UI) or the external
+scraper: a URL is pasted on the client's card there like a Clay URL.
+
+- **The URLs** (`enrich_inbound_urls`, server-only: RLS on, no policy): one live URL per
+  client and target (`companies` only; People and General inboxes get one when
+  something sends to them). The token is 32 random bytes made on the server
+  (`makeToken()`, base64url, 43 characters), kept in plain text as `api_tokens` are, so
+  the Clay tab can show the URL again. The full URL is `NEXT_PUBLIC_SITE_URL` +
+  `/api/enrich/intake/` + the token, never the request's origin; without the site
+  address no URL is made or shown. A rotation revokes the old URL at once (it answers
+  404) and carries its accepted names over. Each row also keeps the last delivery
+  (`last_used_at`, written at most once a minute), the last Test (time and the name it
+  sent, if any), the last refusal (time and why, in plain words) and `refused_name`,
+  the client name of the last chunk refused for its name. Shared helpers:
+  `src/lib/enrich/inbound.ts` (token, URL, mask, the name check, the answer texts).
+- **Receiving** (`src/app/api/enrich/intake/[token]/route.ts`; the session
+  middleware lets every path under `/api/enrich/intake` through): the token's shape
+  first (a malformed token is refused before any query), then the size (5 MB, by
+  Content-Length and by the bytes read), then one of 3 intake slots in the web
+  process (a 2 s wait), then one transaction with a 15 s statement timeout: the URL by
+  token, the JSON, the Test, the chunk's shape, the name check, the client's Companies
+  (pipeline) table (made or brought up to date under a per-client lock when it is
+  missing or older than the Maps inputs), the places, then `last_used_at`. Every place of every task and result becomes one row
+  (`placeInputs`, `scripts/lib/enrich/maps-place.mjs`): name, place id, website,
+  domain, phone, the Maps category as `industry`, one office (the place itself, as
+  the head office), `source` "Google Maps", the client tag, and the inputs
+  `actual_city`, `actual_state` (the place's own) and `call_city`, `call_state`,
+  `call_category` (what the scrape searched). The row key is `maps:` and the place id,
+  so a place is stored once per client and never meets an `aiark:` row; a place with
+  no place id is skipped and counted. A blank search city, state or category is fine.
+  Each chunk is one `enrich_sources` row of kind `maps`, with `inbound_url_id`; its
+  repeat key is the scraper app's `<task>-<chunk>` taskId (or taskId and chunkIndex,
+  or taskId), so a chunk delivered twice adds nothing. The 200 comes only after the
+  commit. Receiving writes no audit line.
+- **The answers**, chosen for what the scraper app does with each (gmaps-UI
+  `src/lib/clay-pool.ts`): it counts a try for every failed answer except 429, parks
+  a chunk after 10 tries, disables a URL for good on 404 or 410, and keeps an answer's
+  first 200 characters on the card.
+
+  | Status | When | What the scraper app does |
+  |---|---|---|
+  | 200 | stored now, or a delivery seen before (`duplicate_delivery`); or a Test | deletes its copy; Test passes |
+  | 404 | a malformed, unknown or revoked token | disables the URL for good |
+  | 413 | a body over 5 MB | one try used |
+  | 422 | not JSON, or no `postbackData.tasks` list | one try used |
+  | 429 | no slot within 2 s, or a passing database problem (`isPassingDbError`) | no try used, sent again later |
+  | 429 | the chunk's client name does not fit the URL, or there is none | no try used: the chunk waits |
+  | 429 | the client's Companies table can't be made (originals missing, a companies_v1 table) | no try used: the chunk waits |
+  | 500 | anything else (logged without the token, a URL or the body) | one try used |
+
+  Never 410. No answer holds the scraper app's "full" phrases, the chunk's client name
+  or the token. A 429 keeps the client's queue at the head in the scraper app, so a URL
+  on the wrong card holds that client's chunks until the card is fixed or a manager
+  accepts the name.
+- **The name check** (`checkName`): every chunk carries the scraper app's own name for
+  the client (`extra.client`), which is not always the tag. It fits when it is the tag,
+  a name a manager accepted for the URL (at most 20), or when one of its parts is the
+  tag (split on `&`, `/` and the word AND, as the targeting sync splits a sheet tag).
+  No name, or no `extra` block, does not fit.
+- **The Test**: the scraper app's Test sends `{ test: true }` and shows only the status.
+  The intake answers 200 with the client tag, the table and whether the client is
+  switched on, notes the time (and a client name, if one is ever sent), and makes
+  nothing. So after Test, check that the Clay tab's Inbound URLs show it on this
+  client's row: on another client's row, the URL is on the wrong card; on no row, the
+  URL is wrong, even though the card said the Test passed (the scraper app follows
+  redirects).
+- **Held rows** (`enrich_rows.run_status = 'held'`): the worker claims queued rows
+  only, so a held row is never worked and costs nothing. Only the worker releases
+  held rows (to queued), and only in `companies_v2` tables whose client
+  `fn_enrich_company_switch_on(tag)` says is on: the `company_pipeline` switch read
+  exactly as `flagOn("company_pipeline", tag)` reads it (each listed tag trimmed and
+  upper-cased, as `settingsFrom()` keeps them). The guard
+  `trg_enrich_rows_release_guard` refuses any other change from held while the client
+  is off (SQLSTATE 23514), whatever code sends it, so every statement that requeues
+  rows in bulk must leave held rows out itself: the Run route does, and says how many
+  it left alone (`skippedHeld`). Changing other columns of a held row, and deleting
+  it, are allowed. A place already in the table is a duplicate and stays as it is.
+  Switching a client off later: new places arrive held again, and rows already
+  released finish, as AI Ark rows do.
+- **The Clay tab** (manager and up): "Inbound URLs" in the header opens a sheet
+  (`src/components/clay/inbound-urls.tsx`) listing every client, Active first, with
+  its URL masked (the address, the path and the token's first 6 characters), Eye and
+  Copy, Rotate and Revoke behind a confirm, when it was made, last delivered to and
+  last tested, its last refusal with "Accept this name" when a chunk's name did not
+  fit, the accepted names, "Switched off: places wait, held" or "Switched on" with
+  the held count, a warning when the client has no targeting rules (its places stop
+  at the area check), and Create, which also makes the client's three pipeline tables
+  (free, as a first pull does). Above a Companies (pipeline) table a strip shows the
+  URL, the held places and why, and the 10 newest Maps deliveries. "Held" is a row
+  status pill, and a held row's steps show "Held". Routes: `GET
+  /api/enrich/inbound[?tag=]` and `POST /api/enrich/inbound { action, tag, name? }`
+  with `create`, `rotate`, `revoke`, `reveal`, `accept_name`, `drop_name`. Each change
+  writes one audit line naming the tag, never a token or a URL.
+- **The daily caps of the email finders and Enrichley** (decision 9):
+  `enrich_settings.spend_caps.vendor_calls_per_day` `{ findymail, prospeo,
+  anymail_finder, enrichley }`, whole paid calls a day, 0 to 100,000, counted in
+  `enrich_spend_daily` under `<vendor>_calls`. **0, the default, means not set: no
+  call is made and those steps wait**, as when today's Reoon share is used up, until
+  an admin sets a number. Edited on the Companies tab's settings sheet (admin), under
+  the spend caps; optional in `PUT /api/companies/settings` (left out, the stored caps
+  are kept; sent, all four are checked, 400 with the reason), one audit line per
+  change ("Findymail calls a day 0 to 200").
+<!-- INTEGRATOR: add B1's worker notes here (releaseHeldRows and the held_release capability, the vendor caps on each keyed step and the notes on a waiting cell, the hourly sweep's clearance of those notes, the heartbeat's spend_today), then remove this comment. -->
+- **Removed:** the shared-key route `POST /api/enrich/intake` (Bearer
+  `ENRICH_INTAKE_KEY`, never set, never called) and `scripts/test-enrich-intake.mjs`.
+  `intakeKeyStatus()` stays: it is the `AIARK_AUTO_ADD_KEY` check of `POST
+  /api/aiark/add/auto` and `POST /api/companies/promote/auto`. A hand-seeded Companies
+  table takes CSV imports only.
+- **Per client, by hand:** create the URL on the Clay tab; add it on the client's card
+  in the scraper app and click Test; check the Test shows on this client's row; then
+  delete the client's Clay URLs from the card at once (while both are there, the
+  scraper app splits the client's chunks between them, it never copies). Places then
+  arrive held. To work them, switch the client on (Company pulls on, the client on its
+  list).
+- ⚠ **A chunk that still reaches 10 failed tries** (an outage of several minutes, or a
+  bug) stays parked in the scraper app's buffer, and nothing on its screens puts it
+  back: that takes one SQL statement in the scraper app's database, with the owner's
+  OK. Never set the external scraper's fallback `WEBHOOK_URL` to an inbound URL: its
+  chunks come with `extra: null` and are refused. A scraper app name that holds two
+  tags fits either client's URL.
+- ⚠ **"Maps companies get the company side only"** holds only while the client is off
+  people runs with AI searches: C#48 needs no AI Ark people data, so with those
+  switches on a Maps row also runs C#48 to C#51, as an AI Ark row does.
+- ⚠ **Migration 129 must be in the database before this code runs:** the Clay tab and
+  the table route read `enrich_inbound_urls` and `enrich_sources.inbound_url_id`, and
+  the intake writes held rows.
+- **Tests:** stop the worker, then `node --env-file=.env.local scripts/test-inbound.mjs`
+  (local database only, 129 applied; made-up `IBTEST_A` to `IBTEST_C` clients with the
+  made-up Clay originals as their own variants, `.ibtest.example` places, removed at
+  the end; the settings it changes are put back; about 25 s, one check waits out the
+  15 s statement timeout). No network: `fetch` refuses every address. The routes run
+  for real through the TypeScript loader (`routeLoader`), whose `call()` passes a
+  route's `params` and gives the request `text()`. `test-companies.mjs` lost its E1
+  (the shared-key intake), so it counts 167; the seven suites of phases 2 to 4 must
+  still pass.
 
 ## Known issues / TODO
 
