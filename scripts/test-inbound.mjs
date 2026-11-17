@@ -449,7 +449,8 @@ async function partT3() {
   check("... the Maps inputs: actual and searched city and state, and the searched category",
     cells.actual_city?.value === "Springfield" && cells.actual_state?.value === "Illinois" && cells.call_city?.value === "Springfield" &&
       cells.call_state?.value === "IL" && cells.call_category?.value === "dentist");
-  check("... the delivery is noted on the URL (last_used_at)", (await urlRow(A)).last_used_at !== null);
+  const used1 = (await urlRow(A)).last_used_at;
+  check("... the delivery is noted on the URL (last_used_at)", used1 instanceof Date);
 
   const again = await post(tok[A], first);
   check("the same chunk again: 200, a delivery seen before, nothing new",
@@ -458,6 +459,13 @@ async function partT3() {
     JSON.stringify(again.body));
   const seen = await post(tok[A], chunk([place(1), place(4)]));
   check("a place already in the table, from another chunk: a duplicate, left as it is", seen.status === 200 && seen.body.created === 1 && seen.body.duplicates === 1);
+  const used2 = (await urlRow(A)).last_used_at;
+  await pool.query(`UPDATE enrich_inbound_urls SET last_used_at = now() - interval '2 minutes' WHERE id = $1`, [urlA.id]);
+  const aged = (await urlRow(A)).last_used_at;
+  await post(tok[A], chunk([place(14)]));
+  const used3 = (await urlRow(A)).last_used_at;
+  check("last_used_at is written at most once a minute: kept for a delivery soon after, renewed once older",
+    used2?.getTime() === used1?.getTime() && used3?.getTime() > aged?.getTime(), JSON.stringify({ used1, used2, aged, used3 }));
 
   const plain = chunk([place(5)], { rewrite: false, task: `ibtest-plain-${RUN}`, index: 3 });
   const noIndex = { ...chunk([place(6)], { rewrite: false, task: `ibtest-noindex-${RUN}` }), chunkIndex: undefined };
