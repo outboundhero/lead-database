@@ -1432,7 +1432,10 @@ async function partC(routes) {
     T.worker = heartbeat();
     await endTestRuns();
     await pool.query(`DELETE FROM enrich_rows WHERE table_id = $1`, [tB.companies]);
-    const co = findCompany("partc", "Partc Widget Co", (ps) => ps.length >= 2 && ps.every(inside));
+    // Everyone at the company has a track and an email (the demo gives about 1 person in 4 none), so the
+    // run always buys someone with an address to work. Picked by place alone, nobody bought had one in
+    // about 1 run in 11, which failed the check below by chance.
+    const co = findCompany("partc", "Partc Widget Co", (ps) => normal(2)(ps) && ps.every((p) => p.email.found));
     const rowId = await addCompanyRow(B2, tB.companies, { record: co.record });
     const r = await call(routes.runs.POST, { body: { tag: B2, mode: "demo", maxPeople: 5 } });
     const compiled = (await one(`SELECT count(*)::int AS n FROM enrich_columns WHERE table_id = $1`, [tB.people])).n;
