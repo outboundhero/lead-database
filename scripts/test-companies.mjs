@@ -35,7 +35,8 @@
 //      missing keys and Reoon credits, errors, a model swap, and the real worker
 //   D. the tab's data: the projection, keyset paging over 2,500 companies, the
 //      counts, deletes, nothing written to leads
-//   E. shared code: the Maps intake, CSV imports, the tables list, settings
+//   E. shared code: CSV imports, the tables list, settings (the Maps intake's
+//      checks are in scripts/test-inbound.mjs)
 
 import pg from "pg";
 import { createHash, randomUUID } from "node:crypto";
@@ -1353,24 +1354,16 @@ async function partD(routes, c) {
 const J = tag("J"); // a hand-seeded Companies table beside a template table
 
 async function partE(routes, c) {
-  const { intake, rows: rowsRoute, tables, settings } = routes;
+  const { rows: rowsRoute, tables, settings } = routes;
   const { tG } = c;
   await addClient(J, { places: [IL("Springfield")] });
   const { rows: [hand] } = await pool.query(`INSERT INTO enrich_tables (client_tag, kind, name) VALUES ($1, 'companies', 'Companies (hand-seeded test)') RETURNING id`, [J]);
   await pool.query(`INSERT INTO enrich_columns (table_id, key, name, position, kind) VALUES ($1, 'company', 'Company', 1, 'input'), ($1, 'place_id', 'Place id', 2, 'input')`, [hand.id]);
   const tJ = (await ensureTemplateTable(pool, J)).id;
 
-  section("E1. The Maps intake");
-  const postback = {
-    extra: { city: "Springfield", state: "IL", category: "dentist" },
-    postbackData: { tasks: [{ result: [{ items: [{ title: "Intake Test Dental", place_id: `cptest-place-${RUN}`, url: `https://www.${dom("intake")}`, domain: dom("intake"), address: "1 Main Street, Springfield, IL", phone: "(217) 555-0101", category: "Dentist", address_info: { city: "Springfield", region: "Illinois" } }] }] }] },
-  };
-  const headers = (t) => ({ authorization: `Bearer ${T.intakeKey}`, "x-client-tag": t });
+  // E1 (the shared-key Maps intake) is gone: migration 129's per-client URLs put Maps places in the
+  // Companies (pipeline) table, and scripts/test-inbound.mjs checks them.
   const gRows = await rowsIn(tG);
-  const toJ = await call(intake.POST, { body: postback, headers: headers(J) });
-  check("Maps places go to the hand-seeded Companies table, never the template table", toJ.status === 200 && toJ.body.table === hand.id && (await rowsIn(hand.id)) === 1 && (await rowsIn(tJ)) === 0, JSON.stringify(toJ.body));
-  const toG = await call(intake.POST, { body: postback, headers: headers(G) });
-  check("a client with only a template table has no table for them (404)", toG.status === 404 && (await rowsIn(tG)) === gRows);
 
   section("E2. CSV imports");
   const csv = (table) => call(rowsRoute.POST, { body: { table, label: "test.csv", rows: [{ inputs: { company: "CSV Test Dental" }, reference: "1" }] } });
@@ -1480,7 +1473,6 @@ try {
     settings: await route("companies/settings"),
     rows: await route("enrich/rows"),
     tables: await route("enrich/tables"),
-    intake: await route("enrich/intake"),
   };
   await setPipeline(true);
   await partB(routes);
