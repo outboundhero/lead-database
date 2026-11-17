@@ -1,8 +1,13 @@
 // Shapes shared by the Clay tab's routes and its page.
 
 export type CellStatus = "done" | "empty" | "skipped" | "error" | "needs_key" | "running";
-export type RowStatus = "queued" | "running" | "done" | "waiting" | "error";
-export const ROW_STATUSES: RowStatus[] = ["queued", "running", "done", "waiting", "error"];
+/**
+ * held (migration 129): a Google Maps place from the client's inbound URL,
+ * stored and never worked until the worker releases it, which it does only
+ * while the client is on the company_pipeline switch.
+ */
+export type RowStatus = "queued" | "running" | "done" | "waiting" | "error" | "held";
+export const ROW_STATUSES: RowStatus[] = ["queued", "running", "done", "waiting", "error", "held"];
 
 export interface EnrichColumn {
   key: string;
