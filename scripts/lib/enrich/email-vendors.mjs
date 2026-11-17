@@ -14,8 +14,17 @@
 // the originals read, and never puts the key in a note, an error or a run
 // record. A field name a vendor's docs left unconfirmed is read in one place,
 // so a wrong one is a one-line fix.
+//
+// Daily caps (migration 129): right before each request the adapter takes one
+// of the vendor's calls for the day (spend.mjs takeVendorCall, under
+// enrich_settings.spend_caps.vendor_calls_per_day). With no cap set (0, the
+// default) or the day's calls used up, nothing is sent and the cell waits
+// ("needs_key", as when Reoon's share is used up); the hourly sweep queues the
+// row again once the cap allows it. A step that sends nothing (no input, no
+// key, an answer already held) takes no call.
 
 import { capped, httpJson } from "./http.mjs";
+import { takeVendorCall, vendorWaitNote } from "./spend.mjs";
 
 const text = (v) => (v == null ? "" : String(v).replace(/\s+/g, " ").trim());
 const TIMEOUT_MS = 60_000;
@@ -53,6 +62,18 @@ function address(v) {
   return /^[^\s@*]+@[^\s@*]+\.[a-z]{2,}$/.test(s) ? s : null;
 }
 
+/**
+ * One of today's calls to the vendor, taken right before its request. Null
+ * when the request may go; else the cell to write, which waits.
+ *
+ * @param {"findymail" | "prospeo" | "anymail_finder" | "enrichley"} vendor  settings.mjs VENDOR_CAP_KEYS
+ * @param {{ db?: any, settings?: any }} ctx  the step's context: the database and the settings in force
+ */
+async function dayCall(vendor, { db, settings }) {
+  const taken = await takeVendorCall(db, vendor, settings);
+  return taken === "ok" ? null : { status: "needs_key", note: vendorWaitNote(vendor, taken) };
+}
+
 // ── Findymail ───────────────────────────────────────────────────────────────
 // Docs: https://app.findymail.com/docs/ (read 2026-11-14).
 //   Find from name:     POST https://app.findymail.com/api/search/name {"name", "domain"}
@@ -63,8 +84,10 @@ function address(v) {
 
 const FINDYMAIL = "https://app.findymail.com/api/search";
 
-async function findymail(path, payload, { env, request }) {
-  const key = text(env?.FINDYMAIL_API_KEY);
+async function findymail(path, payload, ctx, request) {
+  const key = text(ctx.env?.FINDYMAIL_API_KEY);
+  const wait = await dayCall("findymail", ctx);
+  if (wait) return wait;
   const r = await send({
     url: `${FINDYMAIL}/${path}`,
     headers: { authorization: `Bearer ${key}`, "content-type": "application/json", accept: "application/json" },
@@ -82,18 +105,20 @@ async function findymail(path, payload, { env, request }) {
 }
 
 /** P#46: Findymail by full name and the company's domain. Value { email, contact }: P#47 and P#50 read .email. */
-export async function findymailByName({ inputs, env }) {
+export async function findymailByName(ctx) {
+  const { inputs } = ctx;
   const name = text(inputs.full_name);
   const domain = text(inputs.company_domain);
   if (!name || !domain) return { status: "empty", note: "No full name and domain to search with" };
-  return findymail("name", { name, domain }, { env, request: { full_name: name, company_domain: domain } });
+  return findymail("name", { name, domain }, ctx, { full_name: name, company_domain: domain });
 }
 
 /** P#51: Findymail by the person's LinkedIn URL. Value { email, contact }: P#52, P#53 and P#55 read .email. */
-export async function findymailByLinkedin({ inputs, env }) {
+export async function findymailByLinkedin(ctx) {
+  const { inputs } = ctx;
   const url = text(inputs.profile_url);
   if (!url) return { status: "empty", note: "No LinkedIn URL" };
-  return findymail("business-profile", { linkedin_url: url }, { env, request: { profile_url: url } });
+  return findymail("business-profile", { linkedin_url: url }, ctx, { profile_url: url });
 }
 
 // ── Prospeo ─────────────────────────────────────────────────────────────────
@@ -107,8 +132,10 @@ export async function findymailByLinkedin({ inputs, env }) {
 
 const PROSPEO = "https://api.prospeo.io/enrich-person";
 
-async function prospeo(data, { env, onlyVerified, request }) {
-  const key = text(env?.PROSPEO_API_KEY);
+async function prospeo(data, ctx, { onlyVerified, request }) {
+  const key = text(ctx.env?.PROSPEO_API_KEY);
+  const wait = await dayCall("prospeo", ctx);
+  if (wait) return { fail: wait };
   const r = await send({
     url: PROSPEO,
     headers: { "x-key": key, "content-type": "application/json", accept: "application/json" },
@@ -128,13 +155,14 @@ async function prospeo(data, { env, onlyVerified, request }) {
 }
 
 /** P#47: Prospeo by full name and the company's domain. Value { email, status, person }: P#48 and P#50 read .email. */
-export async function prospeoByName({ inputs, env }) {
+export async function prospeoByName(ctx) {
+  const { inputs } = ctx;
   const name = text(inputs.full_name);
   const domain = text(inputs.company_domain);
   if (!name || !domain) return { status: "empty", note: "No full name and domain to search with" };
   // Clay's include_catch_all, unset in the original: only verified addresses then.
   const onlyVerified = inputs.include_catch_all !== true && text(inputs.include_catch_all).toLowerCase() !== "true";
-  const out = await prospeo({ full_name: name, company_website: domain }, { env, onlyVerified, request: { full_name: name, company_domain: domain, only_verified_email: onlyVerified } });
+  const out = await prospeo({ full_name: name, company_website: domain }, ctx, { onlyVerified, request: { full_name: name, company_domain: domain, only_verified_email: onlyVerified } });
   if (out.fail) return out.fail;
   if (!out.found) return { status: "empty", note: "Prospeo found no email", run: out.r.run };
   return {
@@ -147,10 +175,11 @@ export async function prospeoByName({ inputs, env }) {
 }
 
 /** P#52: Prospeo by the person's LinkedIn URL. Value: Prospeo's person, whose email is { email, status }: P#53 and P#55 read .email.email. */
-export async function prospeoByLinkedin({ inputs, env }) {
+export async function prospeoByLinkedin(ctx) {
+  const { inputs } = ctx;
   const url = text(inputs.personal_linkedin_url);
   if (!url) return { status: "empty", note: "No LinkedIn URL" };
-  const out = await prospeo({ linkedin_url: url }, { env, onlyVerified: true, request: { personal_linkedin_url: url, only_verified_email: true } });
+  const out = await prospeo({ linkedin_url: url }, ctx, { onlyVerified: true, request: { personal_linkedin_url: url, only_verified_email: true } });
   if (out.fail) return out.fail;
   if (!out.found) return { status: "empty", note: "Prospeo found no email", run: out.r.run };
   return {
@@ -172,7 +201,8 @@ export async function prospeoByLinkedin({ inputs, env }) {
 export const ANYMAIL_HOST = "api.anymailfinder.com";
 
 /** P#48 and P#53. Value: Anymail Finder's answer as sent. */
-export async function anymailFinder({ inputs, config, env }) {
+export async function anymailFinder(ctx) {
+  const { inputs, config, env } = ctx;
   const key = text(env?.ANYMAIL_FINDER_API_KEY);
   let u;
   try {
@@ -192,6 +222,8 @@ export async function anymailFinder({ inputs, config, env }) {
   } catch {
     request = { ...request, body: body ?? null };
   }
+  const wait = await dayCall("anymail_finder", ctx);
+  if (wait) return wait;
   const r = await send({ url: u.href, method, headers, body: method === "GET" ? undefined : body, key, request });
   if (r.status === 404) return { status: "empty", note: "Anymail Finder found no email", run: r.run };
   if (!r.ok) return failure("Anymail Finder", "ANYMAIL_FINDER_API_KEY", r);
@@ -211,10 +243,13 @@ export async function anymailFinder({ inputs, config, env }) {
 const ENRICHLEY = "https://api.enrichley.io/api/v1/validate-single-email";
 
 /** G#41, P#13, P#49 and P#54. Value: Enrichley's answer, with the address checked as .email. */
-export async function enrichleyVerify({ inputs, env }) {
+export async function enrichleyVerify(ctx) {
+  const { inputs, env } = ctx;
   const email = text(inputs.email).toLowerCase();
   if (!email) return { status: "empty", note: "No address to check" };
   const key = text(env?.ENRICHLEY_API_KEY);
+  const wait = await dayCall("enrichley", ctx);
+  if (wait) return wait;
   const r = await send({
     url: ENRICHLEY,
     headers: { "x-api-key": key, "content-type": "application/json", accept: "application/json" },
