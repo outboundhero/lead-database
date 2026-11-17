@@ -140,7 +140,12 @@ function settingsWith(over = {}) {
   const rows = BASE_ROWS.filter((r) => !(r.key in over)).concat(Object.entries(over).map(([key, value]) => ({ key, value })));
   return settingsFrom(rows);
 }
-const HIGH_CAPS = { reoon_checks_per_day: 100_000, openai_usd_per_day: { pipeline: 10_000, fit: 10_000 } };
+// The email finders' and Enrichley's daily calls too (129): at 0, the default, section E's steps would wait instead of calling.
+const HIGH_CAPS = {
+  reoon_checks_per_day: 100_000,
+  openai_usd_per_day: { pipeline: 10_000, fit: 10_000 },
+  vendor_calls_per_day: { findymail: 100_000, prospeo: 100_000, anymail_finder: 100_000, enrichley: 100_000 },
+};
 let SA;
 let SP;
 let SQ;

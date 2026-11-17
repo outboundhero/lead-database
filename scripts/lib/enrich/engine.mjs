@@ -31,6 +31,7 @@
 // while that key is on the worker. Without it the cell is skipped, noted
 // "Needs <KEY> (not held)", read as empty, with no call and no run record, and
 // the row never waits for it (unlike needs_env, which makes the cell wait).
+// With it, the step's vendor cap decides (email-vendors.mjs, migration 129).
 //
 // Memory keys: a compiled AI column remembers by its rendered prompt, so for
 // an ai_web column the model in force is put in front of the key (a swapped
@@ -39,9 +40,10 @@
 // is a number of days, or the name of one of company_pipeline.memory_days.
 //
 // Waiting: only keys we hold (needs_env: OpenAI, Reoon) and the day's caps
-// make a cell wait. The caps are the actions' own answers (ai_web and
-// reoon_verify answer needs_key with spend.mjs's CAP_REACHED words); the
-// hourly sweep resumes the row once the reason has cleared.
+// make a cell wait. The caps are the actions' own answers (ai_web,
+// reoon_verify and the keyed steps answer needs_key with spend.mjs's
+// CAP_REACHED words, or CAP_NOT_SET while a vendor has no cap); the hourly
+// sweep resumes the row once the reason has cleared.
 //
 // Phases: a column of a later phase is shown and never run. Every pipeline
 // column that may run is phase 1, its switches and keys deciding (the fit

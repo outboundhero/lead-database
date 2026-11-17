@@ -14,7 +14,8 @@
 //   waiting             free   a step waiting for the original (D38): never run
 //   the keyed steps     paid   the email finders (P#46 to P#54) and Enrichley (G#41,
 //                              P#13, P#49, P#54), each run only while its key is on
-//                              the worker (KEYED_STEPS)
+//                              the worker, and within its vendor's daily calls
+//                              (KEYED_STEPS)
 //
 // Each run() resolves to { status, value, display, note, retryable, run }, as
 // in actions.mjs. No message ever carries a key or a request URL with a key.
@@ -26,6 +27,13 @@
 // kept); each keyed action checks again. When a key arrives, the rows whose
 // cells say "Needs <KEY> (not held)" are queued again by the hourly sweep
 // (requeueRowsForHeldKeys, company-actions.mjs).
+//
+// With its key held, a keyed step takes one of its vendor's calls for the day
+// right before each request (email-vendors.mjs, spend.mjs takeVendorCall;
+// enrich_settings.spend_caps.vendor_calls_per_day, migration 129). With no cap
+// set (0, the default) or none left, nothing is sent and the cell waits, as
+// reoon_verify's does past the Reoon share; the hourly sweep
+// (requeueWaitingTemplateRows) queues the row again once the cap allows it.
 
 import { normTag, TRACKS } from "./settings.mjs";
 import { capped, httpJson, lostSendGuard, retryableStatus } from "./http.mjs";
@@ -52,9 +60,11 @@ export function keyHeld(env, key) {
 }
 
 /**
- * The keyed steps: the action, the key it runs with, the vendor, the original
- * columns compiled to it, its inputs (the originals' input names, compiled
- * verbatim) and the fields of its value the originals read.
+ * The keyed steps: the action, the key it runs with, the vendor, the daily
+ * cap its calls count against (cap: settings.mjs VENDOR_CAP_KEYS; the ledger
+ * kind is "<cap>_calls"), the original columns compiled to it, its inputs (the
+ * originals' input names, compiled verbatim) and the fields of its value the
+ * originals read.
  *
  * The finders run in the originals' order with their run conditions verbatim:
  * by name and domain (P#46 Findymail, P#47 Prospeo, P#48 Anymail Finder, P#49
@@ -64,27 +74,27 @@ export function keyHeld(env, key) {
  */
 export const KEYED_STEPS = Object.freeze({
   findymail_find_work_email: {
-    key: "FINDYMAIL_API_KEY", vendor: "Findymail", originals: ["P#46"], inputs: ["full_name", "company_domain"],
+    key: "FINDYMAIL_API_KEY", vendor: "Findymail", cap: "findymail", originals: ["P#46"], inputs: ["full_name", "company_domain"],
     reads: "email",
   },
   prospeo_find_work_email: {
-    key: "PROSPEO_API_KEY", vendor: "Prospeo", originals: ["P#47"], inputs: ["full_name", "company_domain", "include_catch_all"],
+    key: "PROSPEO_API_KEY", vendor: "Prospeo", cap: "prospeo", originals: ["P#47"], inputs: ["full_name", "company_domain", "include_catch_all"],
     reads: "email",
   },
   anymail_finder: {
-    key: "ANYMAIL_FINDER_API_KEY", vendor: "Anymail Finder", originals: ["P#48", "P#53"], inputs: ["method", "url", "body"],
+    key: "ANYMAIL_FINDER_API_KEY", vendor: "Anymail Finder", cap: "anymail_finder", originals: ["P#48", "P#53"], inputs: ["method", "url", "body"],
     host: "api.anymailfinder.com", reads: "results.email, results.validation",
   },
   enrichley_verify_email: {
-    key: "ENRICHLEY_API_KEY", vendor: "Enrichley", originals: ["G#41", "P#13", "P#49", "P#54"], inputs: ["email"],
+    key: "ENRICHLEY_API_KEY", vendor: "Enrichley", cap: "enrichley", originals: ["G#41", "P#13", "P#49", "P#54"], inputs: ["email"],
     reads: "valid, result, email",
   },
   findymail_find_work_email_from_linkedin: {
-    key: "FINDYMAIL_API_KEY", vendor: "Findymail", originals: ["P#51"], inputs: ["profile_url"],
+    key: "FINDYMAIL_API_KEY", vendor: "Findymail", cap: "findymail", originals: ["P#51"], inputs: ["profile_url"],
     reads: "email",
   },
   prospeo_linkedin_email_search: {
-    key: "PROSPEO_API_KEY", vendor: "Prospeo", originals: ["P#52"], inputs: ["personal_linkedin_url"],
+    key: "PROSPEO_API_KEY", vendor: "Prospeo", cap: "prospeo", originals: ["P#52"], inputs: ["personal_linkedin_url"],
     reads: "email.email",
   },
 });
@@ -107,7 +117,9 @@ export const KEYED_STEPS = Object.freeze({
 /**
  * A keyed step's run(): skipped without its key, refused after two sends with
  * no answer, else the vendor's adapter (email-vendors.mjs, one call an attempt;
- * the compiled column keeps a memory of answers per step, by its inputs).
+ * the compiled column keeps a memory of answers per step, by its inputs). The
+ * adapter takes one of the vendor's daily calls right before its request, so
+ * neither refusal here counts a call.
  */
 function keyed(action, adapter) {
   const { key } = KEYED_STEPS[action];

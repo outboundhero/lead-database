@@ -1,6 +1,7 @@
 // Run-time settings for the Clay tab's pipeline (enrich_settings, migrations
-// 124 to 126 and 128): the switches and their client lists, the caps, how long
-// paid answers are remembered, the people runs, the spend caps, the fit
+// 124 to 126, 128 and 129): the switches and their client lists, the caps, how
+// long paid answers are remembered, the people runs, the spend caps (with the
+// daily calls of the email finders and Enrichley, 129), the fit
 // scorer, promotion and the gate, the LinkedIn sources and their starter
 // keywords, and the model for each AI step, so a model is swapped without a
 // deploy. The worker reads them through readSettings(),
@@ -61,6 +62,24 @@ export const FLAGS = [
 
 /** LinkedIn people runs buy at most this many people a company (D-P4-6): the newest Clay template's limit. */
 export const PEOPLE_PER_COMPANY = 13;
+
+/**
+ * The paid email steps with a daily cap of calls (spend_caps.vendor_calls_per_day,
+ * migration 129): the three email finders and Enrichley. Each paid call counts
+ * one in enrich_spend_daily under the kind "<vendor>_calls" (spend.mjs). A cap
+ * of 0, the default, allows no call: the step waits, as when Reoon's share is
+ * used up, until an admin sets a number on the Companies tab's settings.
+ */
+export const VENDOR_CAP_KEYS = Object.freeze(["findymail", "prospeo", "anymail_finder", "enrichley"]);
+/** Their names, as the settings sheet and the audit log say them. */
+export const VENDOR_CAP_LABELS = Object.freeze({
+  findymail: "Findymail",
+  prospeo: "Prospeo",
+  anymail_finder: "Anymail Finder",
+  enrichley: "Enrichley",
+});
+/** The most calls a day a vendor cap takes (as reoon_checks_per_day). */
+export const VENDOR_CALLS_MAX = 100_000;
 /** The starter list's limits (enrich_settings.linkedin_starter_keywords, written by scripts/linkedin-seed.mjs). */
 const STARTER_MAX = 2000;
 const KEYWORD_MAX = 120;
@@ -108,6 +127,8 @@ export const SETTINGS_DEFAULTS = frozen({
   spend_caps: {
     reoon_checks_per_day: 1500,
     openai_usd_per_day: { pipeline: 20, fit: 25 },
+    /** Not set until an admin sets them: 0 allows no call (VENDOR_CAP_KEYS). */
+    vendor_calls_per_day: { findymail: 0, prospeo: 0, anymail_finder: 0, enrichley: 0 },
     openai_prices: {
       "gpt-4o-mini": { in: 0.15, out: 0.6, search_tokens: 8000 },
       [LUNA]: { in: 0.1, out: 0.5 },
@@ -220,6 +241,45 @@ function pricesOf(v) {
 }
 
 /**
+ * The daily caps of the email finders and Enrichley as stored: each a whole
+ * number of calls from 0 to VENDOR_CALLS_MAX. A missing or invalid one reads as
+ * 0, so a vendor with no number set makes no call.
+ *
+ * @param {unknown} v  spend_caps.vendor_calls_per_day as stored
+ * @returns {{ findymail: number, prospeo: number, anymail_finder: number, enrichley: number }}
+ */
+function vendorCapsOf(v) {
+  const stored = objectOr(v);
+  const d = SETTINGS_DEFAULTS.spend_caps.vendor_calls_per_day;
+  return /** @type {any} */ (Object.fromEntries(VENDOR_CAP_KEYS.map((k) => [k, whole(stored[k], 0, VENDOR_CALLS_MAX, d[k])])));
+}
+
+/**
+ * The settings sheet's vendor caps checked for a save (the save path of
+ * PUT /api/companies/settings): an object with every key of VENDOR_CAP_KEYS,
+ * each a whole number from 0 to VENDOR_CALLS_MAX. Anything else is refused
+ * with its reason, never quietly replaced, as the route refuses every other
+ * setting. 0 means no call is allowed.
+ *
+ * @param {unknown} input
+ * @returns {{ value: { findymail: number, prospeo: number, anymail_finder: number, enrichley: number } | null, errors: string[] }}
+ */
+export function cleanVendorCaps(input) {
+  if (!isObject(input)) {
+    return { value: null, errors: ["Daily calls of the email finders and Enrichley: must be a number for each of them."] };
+  }
+  const v = /** @type {Record<string, unknown>} */ (input);
+  const errors = [];
+  /** @type {Record<string, number>} */
+  const out = {};
+  for (const k of VENDOR_CAP_KEYS) {
+    if (wholeIn(v[k], 0, VENDOR_CALLS_MAX)) out[k] = /** @type {number} */ (v[k]);
+    else errors.push(`${VENDOR_CAP_LABELS[k]} calls a day must be a whole number from 0 to ${VENDOR_CALLS_MAX.toLocaleString("en-US")}.`);
+  }
+  return errors.length ? { value: null, errors } : { value: /** @type {any} */ (out), errors };
+}
+
+/**
  * The starter list of excluded keywords (enrich_settings.linkedin_starter_keywords)
  * as the LinkedIn seed wrote it: the items trimmed, once each (case aside), at
  * most 120 characters each and 2,000 in all; anything malformed reads as not
@@ -283,6 +343,7 @@ function tracksOf(v) {
  *                      skip_company_when_held: boolean, min_balance: number },
  *   personalisation: { enabled: boolean, tags: string[], shared_text_ok: boolean },
  *   spend_caps: { reoon_checks_per_day: number, openai_usd_per_day: { pipeline: number, fit: number },
+ *                 vendor_calls_per_day: { findymail: number, prospeo: number, anymail_finder: number, enrichley: number },
  *                 openai_prices: Record<string, any> },
  *   models: Record<string, ModelSetting | null>,
  *   people_tracks: PeopleTracks | null,
@@ -355,6 +416,7 @@ export function settingsFrom(rows) {
       pipeline: amount(usd.pipeline, 0, 10_000, D.spend_caps.openai_usd_per_day.pipeline),
       fit: amount(usd.fit, 0, 10_000, D.spend_caps.openai_usd_per_day.fit),
     },
+    vendor_calls_per_day: vendorCapsOf(sc.vendor_calls_per_day),
     openai_prices: pricesOf(sc.openai_prices),
   };
 

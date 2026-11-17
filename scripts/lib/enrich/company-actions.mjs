@@ -5,7 +5,9 @@
 //   client_office       free   the office in the client's area: every office of
 //                              the company judged as client_area judges a person
 //                              (judgePlace), the head office first; on a LinkedIn
-//                              pull's row (hq_only) the head office alone
+//                              pull's row (hq_only) the head office alone; on a
+//                              Google Maps row (place_id set, migration 129) the
+//                              place itself, its one office, and the notes say so
 //   held_general_email  free   a general inbox for this company the database
 //                              already holds: role addresses at its domain, then
 //                              general-inbox leads at the same company and office
@@ -22,7 +24,7 @@ import { findState } from "../aiark/geo.mjs";
 import { stateHalves } from "../aiark/company-filters.mjs";
 import { companyAsHeld, FREE_MAIL, geoFor, heldAddresses, judgePlace, targetingFor } from "./client-checks.mjs";
 import { bareDomain } from "./domain.mjs";
-import { CAP_REACHED, spendAllowed } from "./spend.mjs";
+import { CAP_NOT_SET, CAP_REACHED, spendAllowed, VENDOR_SPEND_KINDS } from "./spend.mjs";
 
 const text = (v) => (v == null ? "" : String(v).replace(/\s+/g, " ").trim());
 const plural = (n, one, many) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
@@ -49,15 +51,23 @@ function parseOffices(v) {
 /** Is a cell's value the text "true" (or true)? */
 const isTrue = (v) => v === true || text(v).toLowerCase() === "true";
 
+/** judgePlace's note for a Google Maps place: Google Maps gave the place, not AI Ark, and it is placed, not a person. */
+const placeNote = (note) => text(note).replace(/^AI Ark gave /, "Google Maps gave ").replace(/ this person$/, " it");
+
 async function clientOffice({ inputs, table, row, db }) {
   const t = await targetingFor(db, table.client_tag, row?.next_run_at);
   if (!t) return { status: "error", note: `${table.client_tag} has no targeting rules`, retryable: false };
+  // A Google Maps row (maps-place.mjs: its place id is set) has one office, the place itself.
+  const mapsRow = Boolean(text(inputs.place_id));
   const offices = parseOffices(inputs.offices);
   if (!offices.length) {
-    const why = "AI Ark gave no office for this company, so the lead database couldn't place it";
+    const why = mapsRow
+      ? "Google Maps gave no address for this place, so the lead database couldn't place it"
+      : "AI Ark gave no office for this company, so the lead database couldn't place it";
     return { status: "done", value: { inside: false, hq: false, office: null, why, offices_inside: 0 }, display: "Can't tell", note: why };
   }
-  const hqOnly = isTrue(inputs.hq_only);
+  // Only a LinkedIn pull writes hq_only, and only on its own AI Ark rows.
+  const hqOnly = !mapsRow && isTrue(inputs.hq_only);
   if (hqOnly && !offices.some((o) => o.hq)) {
     const why = "AI Ark gave no head office for this company, and a LinkedIn pull keeps head offices only, so the lead database couldn't place it";
     return { status: "done", value: { inside: false, hq: false, office: null, why, offices_inside: 0 }, display: "Can't tell", note: why };
@@ -98,6 +108,15 @@ async function clientOffice({ inputs, table, row, db }) {
     };
   }
   if (chosen) {
+    if (mapsRow) {
+      const why = placeNote(chosen.verdict.note);
+      return {
+        status: "done",
+        value: { inside: true, hq: Boolean(chosen.office.hq), office, why, offices_inside: inside.length },
+        display: "Inside",
+        note: `The place is in the client's area: ${why}.`,
+      };
+    }
     const which = chosen.office.hq ? (hqOnly ? "The head office (a LinkedIn pull keeps head offices only)" : "The head office") : "A branch (the head office is not inside)";
     return {
       status: "done",
@@ -107,6 +126,15 @@ async function clientOffice({ inputs, table, row, db }) {
     };
   }
   const cantTell = shown.verdict.display === "Can't tell";
+  if (mapsRow) {
+    const why = placeNote(shown.verdict.note);
+    return {
+      status: "done",
+      value: { inside: false, hq: false, office, why, offices_inside: 0 },
+      display: cantTell ? "Can't tell" : "Outside",
+      note: `${cantTell ? "Can't tell whether the place is in the client's area" : "The place is not in the client's area"}: ${why}`,
+    };
+  }
   return {
     status: "done",
     value: { inside: false, hq: false, office, why: shown.verdict.note, offices_inside: 0 },
@@ -299,11 +327,20 @@ const REOON_WAIT = /^(?:Reoon|The Reoon account)\b/;
 const NEEDS_ON_WORKER = /^Needs (.+) on the worker$/;
 /** Templates no longer worked (templates.mjs RETIRED_TEMPLATES; repeated here to keep this module free of the templates). */
 const RETIRED = ["companies_v1"];
+/** The notes of a step waiting on its vendor's daily calls (used up, or no cap set yet), to the ledger kind they wait on (129). */
+const VENDOR_WAITS = new Map(
+  VENDOR_SPEND_KINDS.flatMap((k) => [
+    [CAP_REACHED[/** @type {keyof typeof CAP_REACHED} */ (k)], k],
+    [CAP_NOT_SET[/** @type {keyof typeof CAP_NOT_SET} */ (k)], k],
+  ])
+);
 
 /**
  * Why a waiting row may run now: every note of its waiting cells must have
  * cleared. "Waiting for <column>" follows from another cell and is not a
- * reason of its own. A reason this sweep doesn't know keeps the old rule:
+ * reason of its own. A step waiting on its vendor's daily calls clears once
+ * the day's calls have room again: the next UTC day, or a higher cap; a cap
+ * of 0 never clears. A reason this sweep doesn't know keeps the old rule:
  * both paid keys set and Reoon may be spent.
  */
 function clearance(env, db, settings) {
@@ -315,6 +352,7 @@ function clearance(env, db, settings) {
   const reoonGate = () => once("reoon", () => reoonMayCheck(env));
   const share = () => once("share", () => spendAllowed(db, "reoon_checks", settings));
   const openai = () => once("openai", () => spendAllowed(db, "openai_usd_pipeline", settings));
+  const vendor = (kind) => once(`vendor:${kind}`, () => spendAllowed(db, kind, settings));
   /** @returns {Promise<string | null>} why it still waits, or null */
   return async (notes) => {
     const reasons = (notes ?? []).filter((n) => n && !/^Waiting for /.test(n) && !/^Not worked out|not worked out/.test(n));
@@ -327,6 +365,12 @@ function clearance(env, db, settings) {
       }
       if (n === CAP_REACHED.openai_usd_pipeline) {
         const a = await openai();
+        if (!a.ok) return a.why;
+        continue;
+      }
+      const kind = VENDOR_WAITS.get(n);
+      if (kind) {
+        const a = await vendor(kind);
         if (!a.ok) return a.why;
         continue;
       }
@@ -354,9 +398,11 @@ function clearance(env, db, settings) {
  * The worker's hourly sweep: template rows waiting on a key or a day's cap are
  * queued again in pages (oldest first), and only when what made each one wait
  * has cleared: the key is set, Reoon may be spent and the day's Reoon share
- * has room, or the day's OpenAI cap has room. Answers already held are reused,
- * so only the waiting cells call a provider. A row whose step needs a key we
- * do not hold never waits (it is skipped), so it never comes here.
+ * has room, the day's OpenAI cap has room, or the day's calls of an email
+ * finder or Enrichley have room (never while its cap is 0). Answers already
+ * held are reused, so only the waiting cells call a provider. A row whose
+ * step needs a key we do not hold never waits (it is skipped), so it never
+ * comes here.
  *
  * @param {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[], rowCount?: number | null }> }} db
  * @param {Record<string, string | undefined>} env
