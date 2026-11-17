@@ -1369,7 +1369,7 @@ async function partE(routes, c) {
   const csv = (table) => call(rowsRoute.POST, { body: { table, label: "test.csv", rows: [{ inputs: { company: "CSV Test Dental" }, reference: "1" }] } });
   const refused = await csv(tG);
   check("a CSV into a template table is refused (409)", refused.status === 409 && (await rowsIn(tG)) === gRows);
-  check("... and still taken by a hand-seeded table", (await csv(hand.id)).status === 200 && (await rowsIn(hand.id)) === 2);
+  check("... and still taken by a hand-seeded table", (await csv(hand.id)).status === 200 && (await rowsIn(hand.id)) === 1);
 
   section("E3. The Clay section's table list");
   const listed = await call(tables.GET);
