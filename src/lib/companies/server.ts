@@ -2,13 +2,14 @@ import type { PoolClient } from "pg";
 import { buildCompanyRequests } from "../../../scripts/lib/aiark/company-filters.mjs";
 import { standardFor } from "../../../scripts/lib/aiark/standard-filters.mjs";
 import { bareDomain } from "../../../scripts/lib/enrich/domain.mjs";
-import { MODEL_ID, normTag, settingsFrom } from "../../../scripts/lib/enrich/settings.mjs";
+import { cleanVendorCaps, MODEL_ID, normTag, settingsFrom } from "../../../scripts/lib/enrich/settings.mjs";
 import { geo, modes, peopleOrDefaults } from "@/lib/aiark/server";
 import type { RowStatus, WorkerState } from "@/lib/enrich/types";
 import { contactsFor } from "./people";
 import {
   EFFORTS,
   MODEL_STEPS,
+  VENDOR_CAPS,
   type CompaniesPage,
   type CompanyCountResult,
   type CompanyCounts,
@@ -29,6 +30,7 @@ import {
   type PipelineView,
   type SettingsInput,
   type SettingsState,
+  type VendorCalls,
 } from "./types";
 
 export {
@@ -247,7 +249,10 @@ const PEOPLE_PER_COMPANY_MAX = 100;
  * to save, or the errors; `changes` says what changed, for the audit log.
  * Validation as phase 1: anything out of range is refused with its reason,
  * never quietly replaced. linkedin_sources (migration 128) is optional: left
- * out, the stored row is kept and not written.
+ * out, the stored row is kept and not written. So is spend_caps'
+ * vendor_calls_per_day (migration 129: the daily calls of the email finders
+ * and Enrichley, checked with cleanVendorCaps): left out, the stored caps are
+ * kept.
  */
 export function cleanSettingsInput(
   input: unknown,
@@ -310,6 +315,13 @@ export function cleanSettingsInput(
       fit: amount(usd.fit, 0, 10_000, "OpenAI dollars a day for fit scoring"),
     },
   };
+  // Left out (an older sheet, or a save that doesn't touch them): the stored caps are kept.
+  let vendor: VendorCalls | null = null;
+  if (sc.vendor_calls_per_day !== undefined) {
+    const v = cleanVendorCaps(sc.vendor_calls_per_day);
+    if (v.value) vendor = v.value;
+    else errors.push(...v.errors);
+  }
   const steps = MODEL_STEPS.map((step) => ({ step, m: cleanModel(modelsIn[step.key], step, errors) }));
   // Left out (an older sheet, or a save that doesn't touch it): kept as stored, not written.
   let linkedin: { enabled: boolean; tags: string[]; people_per_company: number } | null = null;
@@ -361,6 +373,9 @@ export function cleanSettingsInput(
   diff("Reoon checks a day", k0.reoon_checks_per_day, caps.reoon_checks_per_day, fmt);
   diff("OpenAI dollars a day (pipeline)", k0.openai_usd_per_day.pipeline, caps.openai_usd_per_day.pipeline);
   diff("OpenAI dollars a day (fit)", k0.openai_usd_per_day.fit, caps.openai_usd_per_day.fit);
+  if (vendor) {
+    for (const { key, label } of VENDOR_CAPS) diff(`${label} calls a day`, k0.vendor_calls_per_day[key], vendor[key], fmt);
+  }
   if (linkedin) {
     const l0 = current.linkedin_sources;
     diff("LinkedIn searches", l0.enabled, linkedin.enabled, said);
@@ -391,7 +406,12 @@ export function cleanSettingsInput(
       company_pipeline: { ...obj(stored.company_pipeline), ...company },
       people_pipeline: { ...obj(stored.people_pipeline), ...people },
       personalisation: { ...obj(stored.personalisation), ...personal },
-      spend_caps: { ...obj(stored.spend_caps), reoon_checks_per_day: caps.reoon_checks_per_day, openai_usd_per_day: { ...obj(obj(stored.spend_caps).openai_usd_per_day), ...caps.openai_usd_per_day } },
+      spend_caps: {
+        ...obj(stored.spend_caps),
+        reoon_checks_per_day: caps.reoon_checks_per_day,
+        openai_usd_per_day: { ...obj(obj(stored.spend_caps).openai_usd_per_day), ...caps.openai_usd_per_day },
+        ...(vendor ? { vendor_calls_per_day: { ...obj(obj(stored.spend_caps).vendor_calls_per_day), ...vendor } } : {}),
+      },
       models,
       ...(linkedin ? { linkedin_sources: { ...obj(stored.linkedin_sources), ...linkedin } } : {}),
     },
@@ -428,7 +448,11 @@ export function settingsInputOf(v: PipelineSettings): SettingsInput {
     },
     people_pipeline: { ...v.people_pipeline },
     personalisation: { ...v.personalisation },
-    spend_caps: { reoon_checks_per_day: v.spend_caps.reoon_checks_per_day, openai_usd_per_day: { ...v.spend_caps.openai_usd_per_day } },
+    spend_caps: {
+      reoon_checks_per_day: v.spend_caps.reoon_checks_per_day,
+      openai_usd_per_day: { ...v.spend_caps.openai_usd_per_day },
+      vendor_calls_per_day: { ...v.spend_caps.vendor_calls_per_day },
+    },
     models,
     linkedin_sources: { ...v.linkedin_sources, tags: [...v.linkedin_sources.tags] },
   };

@@ -23,6 +23,10 @@ const STATUS: Record<CellStatus, { label: string; variant: "success" | "secondar
   running: { label: "Running", variant: "tinted" },
 };
 
+/** A held row (migration 129): only the worker starts it, once its client is switched on. */
+const HELD_NOTE =
+  "Held: a Google Maps place from the client's inbound URL. Nothing runs or is spent on it until the client is switched on (Company pulls, in the Companies tab's settings); then the worker starts it.";
+
 function Section({ title, children, className }: { title: string; children: React.ReactNode; className?: string }) {
   return (
     <section className={cn("space-y-1.5", className)}>
@@ -141,7 +145,7 @@ export function CellPanel({
                 ) : col!.phase > 1 ? (
                   <Badge variant="secondary">Phase {col!.phase} — not built yet</Badge>
                 ) : (
-                  <Badge variant="secondary">{shown.row.run_status === "done" ? "Not set" : "Queued"}</Badge>
+                  <Badge variant="secondary">{shown.row.run_status === "done" ? "Not set" : shown.row.run_status === "held" ? "Held" : "Queued"}</Badge>
                 )}
                 {shown.cell && shown.cell.runs > 0 && (
                   <span className="text-[11px] text-muted-foreground">
@@ -154,6 +158,7 @@ export function CellPanel({
               {shown.row.last_error && shown.row.run_status !== "done" && (
                 <p className="text-[12.5px] text-destructive">Row: {shown.row.last_error}</p>
               )}
+              {shown.row.run_status === "held" && <p className="text-[12.5px] text-muted-foreground">{HELD_NOTE}</p>}
             </Section>
 
             {shown.row.reference !== null && shown.row.reference !== undefined && (
@@ -249,12 +254,24 @@ export function CellPanel({
         {shown && canRun && col!.phase === 1 && (
           <div className="flex gap-2 border-t border-border/60 p-3">
             {col!.kind !== "input" && (
-              <Button size="sm" variant="tinted" disabled={!!busy || shown.row.run_status === "running"} onClick={() => run("cell")}>
+              <Button
+                size="sm"
+                variant="tinted"
+                disabled={!!busy || shown.row.run_status === "running" || shown.row.run_status === "held"}
+                title={shown.row.run_status === "held" ? HELD_NOTE : undefined}
+                onClick={() => run("cell")}
+              >
                 {busy === "cell" ? <Loader2 className="animate-spin" /> : <RotateCcw />}
                 Re-run this cell
               </Button>
             )}
-            <Button size="sm" variant="outline" disabled={!!busy || shown.row.run_status === "running"} onClick={() => run("row")}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!!busy || shown.row.run_status === "running" || shown.row.run_status === "held"}
+              title={shown.row.run_status === "held" ? HELD_NOTE : undefined}
+              onClick={() => run("row")}
+            >
               {busy === "row" ? <Loader2 className="animate-spin" /> : <Play />}
               Re-run row
             </Button>

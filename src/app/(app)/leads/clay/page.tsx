@@ -18,6 +18,7 @@ import {
   Trash2,
   Upload,
   UserSearch,
+  Webhook,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -39,7 +40,9 @@ import { useHasPermission } from "@/lib/context/role-context";
 import { ClayGrid, FILTER_LABELS, type GridFilter } from "@/components/clay/clay-grid";
 import { CellPanel } from "@/components/clay/cell-panel";
 import { ImportDialog } from "@/components/clay/import-dialog";
-import { ROW_STATUSES, type EnrichColumn, type EnrichTableSummary, type RowsPage, type RowStatus, type TableDetail, type WorkerState } from "@/lib/enrich/types";
+import { InboundStrip, InboundUrlsSheet } from "@/components/clay/inbound-urls";
+import { ROW_STATUSES, type EnrichColumn, type EnrichTableSummary, type RowsPage, type RowStatus, type WorkerState } from "@/lib/enrich/types";
+import type { TableDetailView } from "@/app/api/enrich/table/route";
 import type { AddState } from "@/lib/aiark/types";
 
 // The Clay tab: a client's Clay tables, rebuilt inside the lead database.
@@ -85,6 +88,7 @@ const STATUS_PILLS: { value: RowStatus | ""; label: string }[] = [
   { value: "done", label: "Done" },
   { value: "waiting", label: "Waiting on a key" },
   { value: "error", label: "Errors" },
+  { value: "held", label: "Held" },
 ];
 
 // Keys whose steps make a row wait until the key is on the worker.
@@ -100,7 +104,8 @@ const SKIPPED_KEY_LABELS: Record<string, string> = {
 
 // A client's pipeline table (enrich_tables.template), by kind: where its rows come from.
 const TEMPLATE_NOTE: Partial<Record<EnrichTableSummary["kind"], string>> = {
-  companies: "Companies arrive from pulls on the Companies tab.",
+  companies:
+    "Companies arrive from pulls on the Companies tab, and Google Maps places from the client's inbound URL (Inbound URLs, at the top). The places wait, held, until the client is switched on.",
   people:
     "People arrive from people runs on the Companies tab: one person a track at each company, bought from AI Ark after a manager's click, or copied free when another run bought them. With the AI searches switched on, the Companies table writes the people its searches find here too.",
   inboxes:
@@ -109,7 +114,11 @@ const TEMPLATE_NOTE: Partial<Record<EnrichTableSummary["kind"], string>> = {
 const templateNote = (t: EnrichTableSummary) => TEMPLATE_NOTE[t.kind] ?? TEMPLATE_NOTE.companies!;
 
 // Where a template table's rows come from, as its picker label says.
-const FROM_LABEL: Partial<Record<EnrichTableSummary["kind"], string>> = { companies: "from pulls", people: "from people runs", inboxes: "from the Companies table" };
+const FROM_LABEL: Partial<Record<EnrichTableSummary["kind"], string>> = {
+  companies: "from pulls and Google Maps",
+  people: "from people runs",
+  inboxes: "from the Companies table",
+};
 
 /** One of a client's tables of a kind (its pipeline table, or a hand-seeded copy), as the table picker shows it. */
 const kindTableLabel = (t: EnrichTableSummary) => `${t.name} · ${fmt(t.row_count)} rows${t.template ? ` · ${FROM_LABEL[t.kind] ?? "pipeline"}` : ""}`;
@@ -141,11 +150,12 @@ function filterLabel(state: string) {
   return FILTER_LABELS[state] ?? state;
 }
 
-// Where an empty table's rows will come from, as in Clay's workbook: Maps
-// places land in Companies, and the Companies steps write the people and inboxes.
+// Where an empty hand-seeded table's rows will come from: a CSV only. Google
+// Maps places go to the client's Companies (pipeline) table through its
+// inbound URL (migration 129).
 const EMPTY_NOTE: Record<EnrichTableSummary["kind"], (tag: string) => string> = {
   companies: (tag) =>
-    `Rows arrive from the GMaps Scraper once ${tag} is switched to "Database" or "Both" there, or from a CSV — for example the client's Clay table exported as CSV, which also lets every cell be compared with Clay's own result.`,
+    `Rows arrive from a CSV only, for example the client's Clay table exported as CSV, which also lets every cell be compared with Clay's own result. Google Maps places go to ${tag}'s Companies (pipeline) table, through its inbound URL.`,
   people: () =>
     "A copy of the client's own Clay People table, for reading its columns. The pipeline writes people into the client's People (pipeline) table, made by its first pull or people run on the Companies tab.",
   inboxes: () =>
@@ -172,6 +182,9 @@ function ClayTab() {
   const [tables, setTables] = useState<EnrichTableSummary[] | null>(null);
   const [tablesError, setTablesError] = useState(false);
   const [worker, setWorker] = useState<WorkerState | null>(null);
+  const [inboundOpen, setInboundOpen] = useState(false);
+  // Bumped by every change in the Inbound URLs sheet, so a table's strip reads its URL again.
+  const [inboundTick, setInboundTick] = useState(0);
 
   // A failed refresh keeps the tables already on screen; only a first load that
   // fails says so, rather than reading as "No Clay tables yet".
@@ -271,6 +284,9 @@ function ClayTab() {
           </Select>
         )}
         <div className="ml-auto flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={() => setInboundOpen(true)}>
+            <Webhook /> Inbound URLs
+          </Button>
           <WorkerPill worker={worker} />
           {worker?.online &&
             missingKeys.map((k) => (
@@ -402,9 +418,19 @@ function ClayTab() {
             link={link}
             onWorker={setWorker}
             onRowsChanged={loadTables}
+            inboundTick={inboundTick}
+            onOpenInbound={() => setInboundOpen(true)}
           />
         </>
       )}
+      <InboundUrlsSheet
+        open={inboundOpen}
+        onOpenChange={setInboundOpen}
+        onChanged={() => {
+          setInboundTick((n) => n + 1);
+          loadTables();
+        }}
+      />
     </div>
   );
 }
@@ -514,19 +540,24 @@ function TableView({
   link,
   onWorker,
   onRowsChanged,
+  inboundTick,
+  onOpenInbound,
 }: {
   table: EnrichTableSummary;
   /** Filters from the page's address (?q=, ?status=, ?f=), applied when the table opens. */
   link: { q: string; status: string; f: string };
   onWorker: (w: WorkerState | null) => void;
   onRowsChanged: () => void;
+  /** Changes when the Inbound URLs sheet changed something. */
+  inboundTick: number;
+  onOpenInbound: () => void;
 }) {
   const canDelete = useHasPermission("admin");
   // An AI Ark run's table: its rows come from AI Ark, never from a CSV.
   const isRun = table.kind === "ai_ark";
   // A template table (the Companies tab's pulls) takes no CSV either.
   const takesCsv = !isRun && !table.template;
-  const [detail, setDetail] = useState<TableDetail | null>(null);
+  const [detail, setDetail] = useState<TableDetailView | null>(null);
   const [page, setPage] = useState<RowsPage | null>(null);
   const [shownQuery, setShownQuery] = useState<string | null>(null);
   const [pageNo, setPageNo] = useState(1);
@@ -562,7 +593,7 @@ function TableView({
     const giveUp = setTimeout(() => ctl.abort(), GIVE_UP_MS);
     fetch(`/api/enrich/table?id=${table.id}`, { signal: ctl.signal })
       .then((r) => r.json())
-      .then((j: TableDetail & { error?: string }) => {
+      .then((j: TableDetailView & { error?: string }) => {
         if (j.error) throw new Error(j.error);
         setDetail(j);
         onWorker(j.worker);
@@ -637,7 +668,8 @@ function TableView({
       }
       toast.success(
         (success?.(j.queued) ?? `${fmt(j.queued)} row${j.queued === 1 ? "" : "s"} queued`) +
-          (j.skippedRunning ? ` (${fmt(j.skippedRunning)} running now were left alone)` : "")
+          (j.skippedRunning ? ` (${fmt(j.skippedRunning)} running now were left alone)` : "") +
+          (j.skippedHeld ? ` (${fmt(j.skippedHeld)} held were left alone: they start once the client is switched on)` : "")
       );
       refresh();
     },
@@ -674,6 +706,15 @@ function TableView({
   return (
     <>
       {isRun && table.run && <AddToDatabase table={table} onAdded={refresh} />}
+      {table.template === "companies_v2" && detail && (
+        <InboundStrip
+          tag={table.client_tag}
+          held={detail.statuses.held ?? 0}
+          deliveries={detail.deliveries ?? []}
+          refreshKey={inboundTick}
+          onOpenUrls={onOpenInbound}
+        />
+      )}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative w-64">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -772,7 +813,9 @@ function TableView({
               <DropdownMenuItem
                 disabled={!rowCount}
                 onClick={() => {
-                  if (window.confirm(`Re-run all ${fmt(rowCount)} rows? Formulas are recomputed; paid answers whose inputs are unchanged are reused.`)) {
+                  const held = detail?.statuses.held ?? 0;
+                  const heldNote = held ? ` The ${fmt(held)} held rows are left alone: they start once the client is switched on.` : "";
+                  if (window.confirm(`Re-run all ${fmt(rowCount)} rows? Formulas are recomputed; paid answers whose inputs are unchanged are reused.${heldNote}`)) {
                     run({ scope: "all" });
                   }
                 }}
