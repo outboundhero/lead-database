@@ -94,7 +94,8 @@ const STATUS_PILLS: { value: RowStatus | ""; label: string }[] = [
 // Keys whose steps make a row wait until the key is on the worker.
 const KEY_LABELS: Record<string, string> = { OPENAI_API_KEY: "OpenAI", CLEARBIT_API_KEY: "Clearbit", ENRICH_REOON_API_KEY: "Reoon" };
 // Keys of the pipeline's keyed steps (the email finders and Enrichley): without one its steps are
-// skipped ("Needs <KEY> (not held)") and read as empty, and no row waits for them.
+// skipped ("Needs <KEY> (not held)") and read as empty, and no row waits for them. With one, each
+// call takes one of the vendor's calls for the day (Companies settings); with no cap set, they wait.
 const SKIPPED_KEY_LABELS: Record<string, string> = {
   FINDYMAIL_API_KEY: "Findymail",
   PROSPEO_API_KEY: "Prospeo",
@@ -300,7 +301,7 @@ function ClayTab() {
             ))}
           {worker?.online && skippedKeys.length > 0 && (
             <span
-              title={`The worker holds no ${skippedKeys.map((k) => k.key).join(", ")}, so those steps (the email finders, Enrichley) show "Needs <KEY> (not held)", are read as empty, and no row waits for them. Once a key is on the worker, the rows those steps skipped are queued again.`}
+              title={`The worker holds no ${skippedKeys.map((k) => k.key).join(", ")}, so those steps (the email finders, Enrichley) show "Needs <KEY> (not held)", are read as empty, and no row waits for them. Once a key is on the worker, the rows those steps skipped are queued again, and each call then counts against that vendor's daily cap in the Companies tab's settings: with no cap set (0), those steps wait.`}
               className="flex items-center gap-1 rounded-full bg-muted px-2.5 py-1 text-[11.5px] font-medium text-muted-foreground"
             >
               <KeyRound className="size-3" /> Skipped without a key: {skippedKeys.map((k) => k.label).join(", ")}

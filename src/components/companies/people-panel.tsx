@@ -426,7 +426,9 @@ export function PipelinePills({ people }: { people: PeopleSetup | null }) {
 /**
  * The steps that wait for a key: each vendor, the original columns it holds
  * back, and whether the worker holds its key. A keyed step without its key is
- * skipped ("Needs <KEY> (not held)") and never makes a row wait.
+ * skipped ("Needs <KEY> (not held)") and never makes a row wait. With its key,
+ * each call counts against the vendor's daily cap (migration 129), and with no
+ * cap set (0) the step waits.
  */
 export function KeysList({ people }: { people: PeopleSetup | null }) {
   if (!people) return null;
@@ -441,7 +443,7 @@ export function KeysList({ people }: { people: PeopleSetup | null }) {
           className="flex items-center gap-1 text-muted-foreground"
           title={
             k.built
-              ? `${k.key} on the enrichment worker turns these on. Until then they show "Needs ${k.key} (not held)", are read as empty, and rows don't wait for them.${k.held === null ? " The worker does not say whether it holds this key." : ""}`
+              ? `${k.key} on the enrichment worker turns these on. Until then they show "Needs ${k.key} (not held)", are read as empty, and rows don't wait for them. With the key, each call counts against ${k.vendor}'s daily cap in the settings: with no cap set (0), these steps wait.${k.held === null ? " The worker does not say whether it holds this key." : ""}`
               : `Not built: no key for ${k.vendor} is held, and its place is filled another way.`
           }
         >
