@@ -302,6 +302,15 @@ export default function LeadsPage() {
             } | null;
           })
         : { targeting: null };
+      // The client may have changed while the rules were loading: a second pick
+      // made quickly, or a focus re-check of the OLD client still in flight when
+      // the operator switched. Applying now would add the old client's cities and
+      // exclusions to the new client's view, and nothing would take them back out
+      // (removal runs only when the selected client changes). 2026-11-18: CCGSOR
+      // left on under SG showed 102,161 leads against a clean 28.4k; the push,
+      // gated server-side by SG's own rules, took 28k. Measured: CCGSOR + SG
+      // patches together count 101,974.
+      if (filtersRef.current.clientTag !== tag) return;
       const isCleaning = clientTypeRef.current.get(tag) === "Cleaning";
       // The patch records the client's FULL targeting (apply dedupes against
       // current state), so two selected clients sharing a value each claim it
