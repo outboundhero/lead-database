@@ -12,6 +12,8 @@
 //
 // Nothing here reads or writes leads.
 
+import { UPLOAD_FOUND_BY } from "./upload-people.mjs";
+
 export const WAITING_OUTCOME = "Waiting for a key";
 export const ERROR_OUTCOME = "Error";
 
@@ -143,7 +145,9 @@ const UPSERT = `
 /**
  * Writes one inbox or People row's summary, only while the worker still holds
  * the row, then lists or unlists its company. A row with no company_row input
- * is not written.
+ * is not written, and neither is an upload's row (found_by upload, migration
+ * 130), whatever its inputs: its found email goes to leads through the
+ * upload's own import, so promotion and the Companies tab never take it.
  *
  * @param {Db} db
  * @param {{ rowId: number | string, claimToken: string, tableId: string, clientTag: string, kind: "general" | "person",
@@ -151,6 +155,7 @@ const UPSERT = `
  * @returns {Promise<{ written: boolean, listed: boolean | null, why?: string }>}  listed: the company's listing after this write
  */
 export async function projectContact(db, { rowId, claimToken, tableId, clientTag, kind, values, waiting = false, failed = false }) {
+  if (str(values?.found_by) === UPLOAD_FOUND_BY) return { written: false, listed: null, why: "An upload's row" };
   const s = contactSummary(kind, values, { waiting, failed });
   if (!s.company_row_id) return { written: false, listed: null, why: "The row has no company_row input" };
   const { rows } = await db.query(UPSERT, [rowId, claimToken, JSON.stringify({ ...s, table_id: tableId, client_tag: clientTag, kind })]);
