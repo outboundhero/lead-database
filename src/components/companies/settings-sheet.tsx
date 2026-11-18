@@ -273,7 +273,11 @@ export function SettingsSheet({
               <Section>
                 <Switch
                   label="People runs"
-                  hint={pp.enabled ? "On, for the clients listed below: managers can look for the people at their companies and buy them." : "Off: no people run can start, and a run going stops before its next paid call."}
+                  hint={
+                    pp.enabled
+                      ? "On, for the clients listed below: managers can look for the people at their companies and buy them. It also starts the no-email rows of those clients' uploads, held in their People tables, within the daily caps."
+                      : "Off: no people run can start, and a run going stops before its next paid call. The no-email rows of uploads stay held in the People tables."
+                  }
                   checked={pp.enabled}
                   onChange={(v) => set("people_pipeline", "enabled", v)}
                 />

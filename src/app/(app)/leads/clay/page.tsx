@@ -41,6 +41,7 @@ import { ClayGrid, FILTER_LABELS, type GridFilter } from "@/components/clay/clay
 import { CellPanel } from "@/components/clay/cell-panel";
 import { ImportDialog } from "@/components/clay/import-dialog";
 import { InboundStrip, InboundUrlsSheet } from "@/components/clay/inbound-urls";
+import { UploadRowsStrip } from "@/components/clay/upload-rows";
 import { ROW_STATUSES, type EnrichColumn, type EnrichTableSummary, type RowsPage, type RowStatus, type WorkerState } from "@/lib/enrich/types";
 import type { TableDetailView } from "@/app/api/enrich/table/route";
 import type { AddState } from "@/lib/aiark/types";
@@ -108,7 +109,7 @@ const TEMPLATE_NOTE: Partial<Record<EnrichTableSummary["kind"], string>> = {
   companies:
     "Companies arrive from pulls on the Companies tab, and Google Maps places from the client's inbound URL (Inbound URLs, at the top). The places wait, held, until the client is switched on.",
   people:
-    "People arrive from people runs on the Companies tab: one person a track at each company, bought from AI Ark after a manager's click, or copied free when another run bought them. With the AI searches switched on, the Companies table writes the people its searches find here too.",
+    "People arrive from people runs on the Companies tab: one person a track at each company, bought from AI Ark after a manager's click, or copied free when another run bought them. With the AI searches switched on, the Companies table writes the people its searches find here too. The no-email rows of the client's uploads arrive here as well, held until the client is on People runs.",
   inboxes:
     "General inboxes arrive from the Companies table: each general email its steps find becomes a row here, up to the settings' number of inboxes per company, and is checked as the originals check it.",
 };
@@ -117,7 +118,7 @@ const templateNote = (t: EnrichTableSummary) => TEMPLATE_NOTE[t.kind] ?? TEMPLAT
 // Where a template table's rows come from, as its picker label says.
 const FROM_LABEL: Partial<Record<EnrichTableSummary["kind"], string>> = {
   companies: "from pulls and Google Maps",
-  people: "from people runs",
+  people: "from people runs and uploads",
   inboxes: "from the Companies table",
 };
 
@@ -714,6 +715,15 @@ function TableView({
           deliveries={detail.deliveries ?? []}
           refreshKey={inboundTick}
           onOpenUrls={onOpenInbound}
+        />
+      )}
+      {table.template === "people_v1" && detail && (
+        <UploadRowsStrip
+          tag={table.client_tag}
+          held={detail.statuses.held ?? 0}
+          uploads={detail.uploads ?? []}
+          switchedOn={detail.people_switch === true}
+          worker={detail.worker}
         />
       )}
       <div className="flex flex-wrap items-center gap-2">

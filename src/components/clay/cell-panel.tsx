@@ -23,9 +23,15 @@ const STATUS: Record<CellStatus, { label: string; variant: "success" | "secondar
   running: { label: "Running", variant: "tinted" },
 };
 
-/** A held row (migration 129): only the worker starts it, once its client is switched on. */
-const HELD_NOTE =
-  "Held: a Google Maps place from the client's inbound URL. Nothing runs or is spent on it until the client is switched on (Company pulls, in the Companies tab's settings); then the worker starts it.";
+/** A held row: only the worker starts it, once its client is on the switch of its table (129, 130). */
+const HELD_NOTES: Record<string, string> = {
+  companies_v2:
+    "Held: a Google Maps place from the client's inbound URL. Nothing runs or is spent on it until the client is switched on (Company pulls, in the Companies tab's settings); then the worker starts it.",
+  people_v1:
+    "Held: a no-email row of an upload. It is worked once its client is on People runs (in the Companies tab's settings); nothing runs or is spent on it until then.",
+};
+const heldNote = (template: string | null | undefined) =>
+  (template && HELD_NOTES[template]) || "Held: nothing runs or is spent on this row until the worker releases it.";
 
 function Section({ title, children, className }: { title: string; children: React.ReactNode; className?: string }) {
   return (
@@ -158,7 +164,7 @@ export function CellPanel({
               {shown.row.last_error && shown.row.run_status !== "done" && (
                 <p className="text-[12.5px] text-destructive">Row: {shown.row.last_error}</p>
               )}
-              {shown.row.run_status === "held" && <p className="text-[12.5px] text-muted-foreground">{HELD_NOTE}</p>}
+              {shown.row.run_status === "held" && <p className="text-[12.5px] text-muted-foreground">{heldNote(shown.row.template)}</p>}
             </Section>
 
             {shown.row.reference !== null && shown.row.reference !== undefined && (
@@ -258,7 +264,7 @@ export function CellPanel({
                 size="sm"
                 variant="tinted"
                 disabled={!!busy || shown.row.run_status === "running" || shown.row.run_status === "held"}
-                title={shown.row.run_status === "held" ? HELD_NOTE : undefined}
+                title={shown.row.run_status === "held" ? heldNote(shown.row.template) : undefined}
                 onClick={() => run("cell")}
               >
                 {busy === "cell" ? <Loader2 className="animate-spin" /> : <RotateCcw />}
@@ -269,7 +275,7 @@ export function CellPanel({
               size="sm"
               variant="outline"
               disabled={!!busy || shown.row.run_status === "running" || shown.row.run_status === "held"}
-              title={shown.row.run_status === "held" ? HELD_NOTE : undefined}
+              title={shown.row.run_status === "held" ? heldNote(shown.row.template) : undefined}
               onClick={() => run("row")}
             >
               {busy === "row" ? <Loader2 className="animate-spin" /> : <Play />}
