@@ -125,6 +125,16 @@ export interface UploadBatch {
   error_log: Record<string, unknown> | string[] | null;
   created_at: string;
   completed_at: string | null;
+  /** leads (an upload, an AI Ark add, a promotion, a round of found emails) or bounces. */
+  batch_type: "leads" | "bounces";
+  /** Null on an upload; "AI Ark", the promotion's label, or "Emails found" on batches made in code. */
+  source_label: string | null;
+  /** The tags the upload stamped on its rows (130); a round of found emails stamps them too. Null before 130, and on AI Ark adds and promotions. */
+  add_tags: string[] | null;
+  /** The fields the upload's replace rule chose (130), kept by its rounds of found emails. Null before 130. */
+  override_fields: string[] | null;
+  /** On a round of found emails: the upload whose no-email rows they were (130). */
+  source_batch_id: string | null;
 }
 
 export interface ExportJob {

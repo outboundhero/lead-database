@@ -6,7 +6,9 @@ import type { CellDetail, EnrichColumn } from "@/lib/enrich/types";
 // GET /api/enrich/cell?row=<id>&col=<key> — everything the cell panel shows:
 // the column's Clay formula / run condition, the cell's full value and note,
 // the values of the cells it reads, the client's own Clay value (CSV import)
-// and every provider call made for it.
+// and every provider call made for it. The row comes with its table's
+// template, so a held row's note can say what it waits for (a Maps place in a
+// Companies table, an upload's no-email row in a People table, migration 130).
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +27,7 @@ export async function GET(req: NextRequest) {
       async (c) => {
         const { rows: [row] } = await c.query(
           `SELECT r.id, r.table_id, r.run_status, r.last_error, r.created_at, r.reference ->> $2 AS reference, s.label AS source_label,
+                  t.template,
                   coalesce(
                     -- An AI Ark person: "Name · Company"; a company row: its name.
                     (SELECT n.display || coalesce(' · ' || co.display, '')
@@ -32,8 +35,15 @@ export async function GET(req: NextRequest) {
                        LEFT JOIN enrich_cells co ON co.row_id = n.row_id AND co.column_key = 'company'
                       WHERE n.row_id = r.id AND n.column_key = 'full_name'),
                     (SELECT e.display FROM enrich_cells e WHERE e.row_id = r.id AND e.column_key = 'company'),
+                    -- A People row not worked yet (a held upload row): the name and company it was given.
+                    (SELECT n.display || coalesce(' · ' || co.display, '')
+                       FROM enrich_cells n
+                       LEFT JOIN enrich_cells co ON co.row_id = n.row_id AND co.column_key = 'written_company'
+                      WHERE n.row_id = r.id AND n.column_key = 'written_full_name'),
                     r.row_key) AS title
-             FROM enrich_rows r LEFT JOIN enrich_sources s ON s.id = r.source_id
+             FROM enrich_rows r
+             LEFT JOIN enrich_sources s ON s.id = r.source_id
+             LEFT JOIN enrich_tables t ON t.id = r.table_id
             WHERE r.id = $1`,
           [rowId, col]
         );
@@ -72,6 +82,7 @@ export async function GET(req: NextRequest) {
             created_at: row.created_at,
             source_label: row.source_label,
             reference: row.reference,
+            template: row.template ?? null,
           },
           reads: readKeys
             .map((k) => ({ key: k, name: columnNames[k], display: byKey.get(k)?.display ?? null, status: byKey.get(k)?.status ?? null }))
