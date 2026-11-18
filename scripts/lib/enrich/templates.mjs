@@ -222,6 +222,19 @@ export async function syncTemplateColumns(db, ids, originals, { settings = null,
 }
 
 /**
+ * The per-client lock under which a client's pipeline tables are made, held to
+ * the end of the caller's transaction: the same one the Maps intake and the
+ * Clay tab's Create take (src/lib/enrich/gmaps.ts lockPipelineTables), so two
+ * of them never make one client's tables at once.
+ *
+ * @param {Db} db  a client inside the caller's transaction
+ * @param {string} tag
+ */
+export async function lockPipelineTables(db, tag) {
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext('enrich-pipeline-tables:' || $1))`, [normTag(tag)]);
+}
+
+/**
  * The client's three pipeline tables, made or brought up to date, compiled
  * from its variant of the originals. Runs inside the caller's transaction.
  * Throws RetiredV1Table (D24) or OriginalsMissing; the routes answer 409 to
