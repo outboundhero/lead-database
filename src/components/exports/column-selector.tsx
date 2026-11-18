@@ -11,6 +11,7 @@ import {
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { isNurtureCampaign } from "@/lib/bison/campaigns";
+import { autoPickCampaigns, isClientCampaign, type ClientInstalls } from "@/lib/bison/campaign-autopick";
 import {
   byNewestCampaign, campaignLeadCount, campaignStatus, campaignStatusLabel,
   formatCampaignDate, isArchivedCampaign,
@@ -164,7 +165,7 @@ export function ColumnSelector({
   const [campaignSync, setCampaignSync] = useState<CampaignSync | null>(null);
   // The last list loaded and the scope it was loaded for, so a Sync can say
   // what is new. A ref, because loadCampaigns is memoised with no dependencies.
-  const lastLoadRef = useRef<{ term: string; list: BisonCampaign[] }>({ term: "", list: [] });
+  const lastLoadRef = useRef<{ term: string; list: BisonCampaign[]; at: number }>({ term: "", list: [], at: 0 });
   // Archived campaigns cannot send, so they are hidden unless asked for.
   const [showArchived, setShowArchived] = useState(false);
   // Campaign-picker upgrades (client req #7)
@@ -172,6 +173,13 @@ export function ColumnSelector({
   const [clientTagOptions, setClientTagOptions] = useState<string[]>([]);
   const [presets, setPresets] = useState<{ id: string; name: string; campaign_keys: string[] }[]>([]);
   const [presetName, setPresetName] = useState("");
+  // Each client's saved installs (from the roster), for the campaign
+  // pre-selection. null until the roster has been read.
+  const [clientInstalls, setClientInstalls] = useState<Map<string, ClientInstalls> | null>(null);
+  // The pre-selection runs once per opening, on a list loaded after the opening.
+  const autoPickDoneRef = useRef(false);
+  const openedAtRef = useRef(0);
+  const [autoPickNote, setAutoPickNote] = useState<{ picked: boolean; text: string } | null>(null);
   // The Tags-filter value that matches a known client — drives auto-scoping,
   // per-tag push stats, and rides on the queued push for dedupe/eligibility.
   const scopeTouchedRef = useRef(false);
@@ -234,7 +242,7 @@ export function ColumnSelector({
         const added = force && prev.term === term && prev.list.length > 0
           ? next.filter((c) => !before.has(campaignKey(c))).length
           : null;
-        lastLoadRef.current = { term, list: next };
+        lastLoadRef.current = { term, list: next, at: Date.now() };
         setCampaigns(next);
         const s = d.sync;
         setCampaignSync(
@@ -256,10 +264,16 @@ export function ColumnSelector({
     fetch("/api/bison/client-tags")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        const tags = (d?.tags ?? []).map((t: { tag?: string }) => t?.tag).filter(Boolean) as string[];
+        const rows = ((d?.tags ?? []) as Array<{ tag?: string } & ClientInstalls>).filter((t) => t?.tag);
+        const tags = rows.map((t) => t.tag as string);
         setClientTagOptions([...new Set(tags)].sort());
+        setClientInstalls(new Map(rows.map((t) => [
+          t.tag as string,
+          { b2b_instance: t.b2b_instance ?? null, b2c_instance: t.b2c_instance ?? null },
+        ])));
       })
-      .catch(() => {});
+      // Unknown installs: the pre-selection then requires one Bison group.
+      .catch(() => setClientInstalls(new Map()));
   }, []);
 
   // The component stays mounted across open/close (parent only toggles the
@@ -279,6 +293,9 @@ export function ColumnSelector({
     setTagScope("");
     setPresetName("");
     scopeTouchedRef.current = false;
+    autoPickDoneRef.current = false;
+    openedAtRef.current = Date.now();
+    setAutoPickNote(null);
     setIncludeAlreadyPushed(false);
     setPushStats(null);
   }, [open]);
@@ -310,6 +327,33 @@ export function ColumnSelector({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, detectedTag]);
+
+  // Pre-select the client's campaigns (client request 2026-11-18: "have them
+  // already selected so I just press the push button"). Once per opening, on
+  // the client's own list loaded after the popup opened (the component stays
+  // mounted, so an older list may still be in state), and only while nothing
+  // is ticked. All or none, with the reason shown: see campaign-autopick.ts.
+  useEffect(() => {
+    if (!open || destination !== "bison" || !detectedTag || autoPickDoneRef.current) return;
+    if (campaignsLoading || campaignsError || clientInstalls === null || tagScope !== detectedTag) return;
+    const load = lastLoadRef.current;
+    if (load.term !== detectedTag || load.at < openedAtRef.current) return;
+    autoPickDoneRef.current = true;
+    if (selectedCampaignKeys.size > 0) return;
+    const { picked, blocked } = autoPickCampaigns(load.list, detectedTag, clientInstalls.get(detectedTag));
+    if (picked.length > 0) {
+      setSelectedCampaignKeys(new Set(picked.map(campaignKey)));
+      const installs = new Set(picked.map((c) => c.instance_url)).size;
+      setAutoPickNote({
+        picked: true,
+        text: `Pre-selected ${detectedTag}'s ${picked.length} campaign${picked.length === 1 ? "" : "s"}` +
+          `${installs > 1 ? ` on ${installs} installs` : ""}. Untick any you don't want.`,
+      });
+    } else {
+      setAutoPickNote({ picked: false, text: `Not pre-selected: ${blocked}.` });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, destination, detectedTag, campaigns, campaignsLoading, campaignsError, clientInstalls, tagScope]);
 
   // Per-tag "already exported" stats for the confirm summary.
   useEffect(() => {
@@ -507,7 +551,10 @@ export function ColumnSelector({
               const inScope = campaigns.filter((c) => {
                 const name = (c.name ?? "").toLowerCase();
                 if (isNurtureCampaign(c.name)) return false;
-                if (tagScope && !name.startsWith(tagScope.toLowerCase())) return false;
+                // "TAG: …" exactly. A bare prefix also listed other clients'
+                // campaigns: JPC showed JPCA's, JPC&A's and five more, SI showed
+                // SINY's, and "All" would have ticked them.
+                if (tagScope && !isClientCampaign(c.name, tagScope)) return false;
                 if (!q) return true;
                 return (
                   name.includes(q) ||
@@ -577,6 +624,11 @@ export function ColumnSelector({
                     </button>
                   )}
                 </div>
+                {autoPickNote && (autoPickNote.picked ? selectedCampaignKeys.size > 0 : selectedCampaignKeys.size === 0) && (
+                  <p className={`text-[11px] ${autoPickNote.picked ? "text-muted-foreground" : "text-amber-600"}`}>
+                    {autoPickNote.text}
+                  </p>
+                )}
                 {(presets.length > 0 || selectedCampaignKeys.size > 0) && (
                   <div className="flex flex-wrap items-center gap-1.5">
                     {presets.map((p) => (

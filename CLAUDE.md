@@ -846,6 +846,19 @@ B2B set (JPCA: `818` active, 60,916 leads vs `146` draft, 2,918 leads), and
 name-only rows made them indistinguishable. Both routes already passed the
 whole Bison row through; nothing displayed it.
 
+**The export popup pre-selects the client's campaigns (2026-11-18, client
+request).** With a client selected, the popup ticks ALL of its campaigns or
+NONE, and says why it ticked none
+([campaign-autopick.ts](src/lib/bison/campaign-autopick.ts), covered by
+`scripts/test-campaign-autopick.mts`): name `TAG: …` exactly, not Nurture or
+archived, on the client's saved installs (else one Bison group), at most one
+campaign per install and ESP bucket (two would each get the same leads, and
+Bison refuses the second). Checked on the 396 pushes of the 60 days before: it
+ticks exactly the operator's choice for 388; the 8 others fall back to manual.
+The client scope of the list matches `TAG:` exactly too: the old bare prefix
+listed other clients' campaigns (JPC showed JPCA's, JPC&A's and five more; SI
+showed SINY's), and "All" would have ticked them. No push ever did.
+
 "Sync campaigns" now reports what it did: `/api/bison/campaigns` returns a
 `sync` block (`fetchedAt`, `total`, `perInstance`) and the popup shows it plus
 "N new since last sync" after a manual sync. The wizard's step 3 has its own
