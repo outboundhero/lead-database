@@ -14,7 +14,9 @@
 // client_tags (client decision 2026-09-18: the file name says who the list was
 // sourced for). Byte-identical duplicate files are skipped. A file whose header
 // row lacks the email column is skipped with an error line. NUL bytes are
-// stripped as the upload route does.
+// stripped as the upload route does. Each batch records the tag it stamped
+// (upload_batches.add_tags, migration 130 first): a file stamped with one
+// client tag sends its no-email rows to that client's People table too.
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -86,10 +88,12 @@ for (let i = 0; i < files.length; i++) {
   console.log(`${stamp()} ${i + 1}. ${name}: ${rows.length.toLocaleString()} rows, ${mapped.size} fields mapped${tag ? `, tag ${tag}` : ""}${missing.length ? `, header(s) not in file: ${missing.join(", ")}` : ""}${DRY ? " [DRY]" : ""}`);
 
   const c0 = await pool.connect();
+  // add_tags and override_fields (migration 130): the tag stamped on the file's rows and the replace fields (none),
+  // so the worker knows which client's People table takes the file's no-email rows.
   const { rows: [b] } = await c0.query(
-    `insert into upload_batches (filename, total_rows, status, duplicate_strategy, field_mapping, source_headers, batch_type)
-     values ($1, $2, 'processing', $3, $4, $5, 'leads') returning id`,
-    [DRY ? `DRY ${name}` : name, rows.length, STRATEGY, JSON.stringify(mapping), JSON.stringify(headers)]
+    `insert into upload_batches (filename, total_rows, status, duplicate_strategy, field_mapping, source_headers, batch_type, add_tags, override_fields)
+     values ($1, $2, 'processing', $3, $4, $5, 'leads', $6, '{}') returning id`,
+    [DRY ? `DRY ${name}` : name, rows.length, STRATEGY, JSON.stringify(mapping), JSON.stringify(headers), tag ? [tag] : []]
   );
   c0.release();
   const batchId = b.id as string;
