@@ -60,9 +60,12 @@ export const LEAD_FIELDS: LeadField[] = [
   { key: "google_maps_url", label: "Google Maps URL", aliases: ["google_maps_url", "google maps url", "maps_url", "gmaps"] },
   // The person's profile link, kept on every lead an upload stores (client
   // request 2026-10-23; the columns existed, uploads skipped them) and offered
-  // as an export column. Rows with NO email never become leads: the upload's
-  // "No-email rows" download returns them as uploaded, LinkedIn included —
-  // that file is the one to run through an email finder.
+  // as an export column. A row with NO email does not become a lead at upload:
+  // the upload's "No-email rows" download returns it as uploaded, LinkedIn
+  // included, and since migration 130 the worker also copies it into the
+  // People table of the upload's client, where the email finders look for its
+  // email (by name and website, then by this link). A found email is added
+  // through this import with the upload's tags and fields.
   { key: "person_linkedin", label: "Person LinkedIn", aliases: ["person_linkedin", "linkedin", "linkedin_url", "linkedin profile", "person linkedin", "person linkedin url", "personal linkedin"] },
   { key: "company_linkedin", label: "Company LinkedIn", aliases: ["company_linkedin", "company linkedin", "company linkedin url"] },
   { key: "question", label: "Personalization Question", aliases: ["question", "custom_question", "personalization"] },

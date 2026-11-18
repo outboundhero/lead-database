@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { CheckCircle2, AlertCircle, Loader2, Download } from "lucide-react";
 import type { UploadBatch } from "@/types/database";
 import { HOLDBACK_PART_SIZE } from "@/lib/uploads/constants";
+import { PeopleBox } from "@/components/uploads/upload-people";
 
 interface UploadProgressProps {
   batchId: string;
@@ -95,8 +96,12 @@ export function UploadProgress({ batchId, onDone }: UploadProgressProps) {
         {tile("New leads", batch.inserted_rows, "Emails that did not exist yet")}
         {tile("Merged", batch.merged_rows, "Existing leads: blank fields filled in")}
         {tile("Replaced", batch.replaced_rows, "Existing leads: chosen fields overwritten")}
-        {tile("Locations added", batch.locations_added, "Same person, different city/state — added as an extra location")}
-        {tile("No email", batch.no_email_rows, "Empty or unusable email (e.g. 'N/A'); kept verbatim — download below")}
+        {tile("Locations added", batch.locations_added, "Same person at a different city or state: added as an extra location")}
+        {tile(
+          "No email",
+          batch.no_email_rows,
+          "Empty or unusable email (for example 'N/A'). Kept exactly as uploaded: the download below has every one, and they also go to the People table of the upload's client"
+        )}
         {tile("Duplicate rows in file", batch.in_file_duplicates, "Same email appearing more than once in this file")}
         {tile("ESP detected", batch.esp_detected, "Mail provider found via MX lookup and stored")}
         {tile("Skipped", batch.skipped_rows, "Existing leads left untouched, no extra location added (Skip strategy)")}
@@ -106,12 +111,15 @@ export function UploadProgress({ batchId, onDone }: UploadProgressProps) {
       {batch.no_email_rows > 0 && (
         <div className="rounded-md border border-dashed p-3 text-xs">
           <p className="mb-1">
-            <span className="font-medium">{batch.no_email_rows.toLocaleString()} rows had no usable email</span> and were not imported.
-            They are kept exactly as uploaded — download, run your email waterfall, and re-upload.
+            <span className="font-medium">{batch.no_email_rows.toLocaleString()} rows had no usable email</span>, so they were not imported as leads.
+            The download below has every one, exactly as uploaded. They also go to the People table of the upload&apos;s client, where the
+            email finders look for their emails once the client is on People runs; a found email is added as a lead with this upload&apos;s tags and fields.
           </p>
           <HoldbackLinks batch={batch} />
         </div>
       )}
+
+      {(isComplete || isError) && batch.no_email_rows > 0 && <PeopleBox batchId={batch.id} filename={batch.filename} />}
 
       {errorLines.length > 0 && (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
