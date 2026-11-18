@@ -382,6 +382,21 @@ const leadId = async (email) => (await one(`SELECT id FROM leads WHERE email = $
 const sameEntries = (a, b) => same(Object.entries(a ?? {}).map(([k, v]) => [String(k), v]).sort(), Object.entries(b ?? {}).map(([k, v]) => [String(k), v]).sort());
 
 /** A lead as these checks compare it: every column but its id and times, and its extra locations. */
+/**
+ * A lead that was in the database long before any round: its 'created'
+ * history line moved five hours back (a dead round here is four hours old). A
+ * round reads a lead as its own by that line, so a lead made here a moment
+ * before a round must not hang on the database clock between two
+ * transactions: the local database's clock was seen to step back about 0.2 s
+ * every few seconds.
+ */
+async function madeLongAgo(email) {
+  await pool.query(
+    `UPDATE lead_history SET created_at = now() - interval '5 hours' WHERE event_type = 'created' AND lead_id = (SELECT id FROM leads WHERE email = $1)`,
+    [email]
+  );
+}
+
 async function leadState(db, email) {
   const { rows: [l] } = await db.query(`SELECT * FROM leads WHERE email = $1`, [email]);
   if (!l) return null;
@@ -465,6 +480,7 @@ async function partR() {
   // U1: merge, tags with the client's tag in lower case beside another tag.
   const e1 = mail("bob");
   await pool.query(`INSERT INTO leads (email, first_name, company, tags, city) VALUES ($1, 'Bob', 'Bob Co', 'Outlook', NULL)`, [e1]);
+  await madeLongAgo(e1);
   const u1 = await makeUpload("u1", {
     strategy: "merge",
     tags: ["uptest_c", "Q4 list"],
@@ -606,6 +622,7 @@ async function partA() {
   section("A2. A round the worker asks for (skip), and its people");
   const e2 = mail("kim");
   await pool.query(`INSERT INTO leads (email, first_name, last_name, title, company, tags) VALUES ($1, 'Kim', 'Old', 'Old Title', 'Kim Old Co', 'Outlook')`, [e2]);
+  await madeLongAgo(e2);
   const u2 = await makeUpload("u2", {
     strategy: "skip",
     tags: [UC],
@@ -661,10 +678,7 @@ async function partA() {
   });
   // The dead round made Max's lead before it died; Oli's lead was there long before it.
   await pool.query(`INSERT INTO leads (email, first_name, company) VALUES ($1, 'Max', 'Max Co'), ($2, 'Oli', 'Oli Co')`, [mail("max"), mail("oli")]);
-  await pool.query(
-    `UPDATE lead_history SET created_at = now() - interval '5 hours' WHERE event_type = 'created' AND lead_id = (SELECT id FROM leads WHERE email = $1)`,
-    [mail("oli")]
-  );
+  await madeLongAgo(mail("oli"));
   r = await call(auto.POST, { body: { batch: u3.id }, headers: bearer });
   const max = await addCell(m3.rowIds[0]);
   const deadAfter = await one(`SELECT status, error_log FROM upload_batches WHERE id = $1`, [dead.id]);
