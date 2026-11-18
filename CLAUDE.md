@@ -3076,8 +3076,8 @@ the owner's OK. Everything ships off.
   says what the copy waits for: `originals_missing`, `retired_v1`), `moved`, or
   `not_sent` (with its reason, and no client). `table_id` and `source_id` are set null
   when the People table is deleted; `sent_by` is the admin who sent it by hand.
-- **The move, the People release and the template gates** (the worker; B1's notes
-  below have the detail). The worker decides each new upload, then copies its
+- **The move, the People release and the template gates** (the worker; the detail
+  follows). The worker decides each new upload, then copies its
   kept-back rows into the client's People table in chunks of 1,000 (at most 5 a
   minute), each a held row keyed `upload:<batch id>:<seq>` with `found_by` "upload",
   `stage` "uploaded", the Source "Upload: <file>" and the person, company and place
@@ -3093,10 +3093,61 @@ the owner's OK. Everything ships off.
   The worker reports `upload_people` in its heartbeat's capabilities, and
   `info.upload_people.found_auto` when it asks for found emails by itself.
 
-<!-- B1-NOTES: the worker side of migration 130 (upload-move.mjs, releaseHeldPeopleRows(),
-     the People template's gates, upload-found.mjs and the worker's found-email timer,
-     project-contacts.mjs, the folder script, test-upload-people.mjs parts E and on).
-     The integrator folds B1's notes in here. -->
+- **The move** (`moveUploadRows()`, `scripts/lib/enrich/upload-move.mjs`), in the
+  worker's 60-second block right after the Maps release:
+  - **Deciding:** at most 50 finished uploads a round, oldest first. An upload is
+    decided when it is `leads`, has no `source_label`, has a field mapping, records
+    `add_tags`, is `complete` or `error`, has kept-back rows and has no `upload_people`
+    row. With exactly one client tag among its tags (`routeTagOf()`) it becomes
+    `moving`; otherwise `not_sent` with `no_tag`, `not_client` or `several`. The worker
+    never decides an upload made before 130 (no `add_tags`).
+  - **Copying:** the kept-back rows go in as held rows, one chunk of 1,000 a
+    transaction, at most 5 chunks a minute, each row with the `uploadPeopleInputs()`
+    cells that are input columns of the table. One source row per upload and table
+    (kind `upload`, "Upload: <file>", `external_id` the batch id) counts the rows
+    received, created and duplicates. `next_seq` marks how far the copy got: a
+    deleted row is never put back, and a repeat inserts nothing.
+  - **The client's tables** are made or brought up to date once a round per client,
+    under the per-client lock and in a savepoint, before any of its rows go in, so the
+    upload gates are in the People table's columns before an upload row is worked.
+    When they can't be made, the upload stays `moving` with `originals_missing` or
+    `retired_v1` and is tried again after 10 minutes, and the other uploads go on. A
+    chunk that fails for any other reason is logged and tried again after 10 minutes.
+  - It queues nothing, pays nothing and writes no leads.
+- **The People release** (`releaseHeldPeopleRows()`, `scripts/lib/enrich/held.mjs`),
+  right after the move: People (pipeline) tables whose client
+  `fn_enrich_people_switch_on()` says is on, the oldest held row first, pages of 500,
+  at most 20 pages a minute, and only while the table has fewer than 2,000 rows
+  queued, running or waiting (every row of the table counts, AI Ark rows too). A
+  client switched off mid-round makes the guard refuse (23514); the release catches it
+  and leaves that table for the round. `releaseHeldRows()` is unchanged and never
+  takes a People row.
+- **The upload gates** (`people-template.mjs`): a new change on a run condition,
+  `{ in: "run_if", and: <clause> }` (`applyChanges()`), makes it `(<original>) &&
+  <clause>`, so the clause can't bind to the last term of an original whose top level
+  has `||`. Reoon, Enrichley and the six finder steps (`UPLOAD_AREA_GATED`) run on an
+  upload row only for a person inside the client's area and clear of its rules; P#27,
+  P#58, P#60 and P#61 (`UPLOAD_NEVER`) never run on one. On every other row the
+  clause is true without reading the area or the rules: an AI Ark row works as before
+  (test-upload-enrich W3). An upload row's `in_database` looks for likely addresses at
+  its own website's domain. P#51 never runs on an upload row: its original run
+  condition needs the company row lookup.
+- **On an upload row:** a person outside the area, excluded by the rules, or with no
+  state the check can place ends with no paid call (a row of placeholders only has no
+  place, so it ends "Outside the client's area"). A person nobody finds ends "No email
+  yet" and stays in the table. `projectContact()` writes nothing for an upload row, so
+  the Companies tab and promotion never take one. lead_lookup's notes now say "This
+  person came with no usable email" on every row (they named AI Ark before).
+- **The hand-off, worker side** (`scripts/lib/enrich/upload-found.mjs`): with
+  `AIARK_AUTO_ADD_URL` and `AIARK_AUTO_ADD_KEY` (32 characters or more) set, every
+  minute the worker runs `FOUND_DUE_SQL` (uploads with an approved person still to add
+  and no live round), then POSTs `{batch}` to the URL's origin +
+  `/api/uploads/found/auto`, the key as a Bearer token, waiting at most 30 s. It asks
+  at most once per upload every 10 minutes, whatever the answer, so a failed request
+  is asked again 10 minutes later. The web's `add_to_database` cell is the once-only
+  mark per person. One log line per request; off while either variable is missing.
+- **On a database without 130** the worker logs once for each of its three new steps
+  (the move, the People release, the found-email timer) and the Maps release goes on.
 
 - **Adding the found emails** (`src/lib/uploads/found.ts`, `src/lib/uploads/found-run.ts`):
   one round of an upload at a time (an advisory lock on the upload). A round takes the
@@ -3202,8 +3253,9 @@ the owner's OK. Everything ships off.
   Uploads page and the Clay tab show its rows held, then put the client on People runs.
   Press "Add the found emails now", or set the auto-add variables.
 - ⚠ **Migration 130 must be in the database before this code runs:** the upload route
-  writes `add_tags` and `override_fields` (an upload fails without them), the Uploads
-  page's history filters on `source_batch_id`, and the routes read `upload_people`.
+  and the folder script write `add_tags` and `override_fields` (an upload fails
+  without them), the Uploads page's history filters on `source_batch_id`, and the
+  routes read `upload_people`.
 - **Tests:** stop the worker, then `node --env-file=.env.local
   scripts/test-upload-enrich-web.mjs` (local database only, 129 and 130 applied; made-up
   `UPTEST_C` and `UPTEST_D` clients, users, uploads and People tables, people under
@@ -3216,8 +3268,17 @@ the owner's OK. Everything ships off.
   nobody, a dead round, the button taking again those not stored, Send, the counts, the
   manager rule, the Clay tab's routes, and the history's query through the local
   Supabase API. No network: fetch refuses every address but the local Supabase API, DNS
-  is refused, and the mail provider lookup is a stub. The worker side and the shared
-  module: `scripts/test-upload-people.mjs`.
+  is refused, and the mail provider lookup is a stub. The worker side:
+  `scripts/test-upload-enrich.mjs` (87 checks: the move, the release per template,
+  upload rows worked against stubbed vendors, the hand-off against stand-ins, the
+  worker's wiring; made-up `UPTEST_A` and `UPTEST_B`, uploads named `upenrich-…`,
+  people under `.uptest.example`; it refuses to run while any row is held, any client
+  is on either switch's list, or any upload is in `upload_people` or waiting to be
+  decided, and it needs the local `default` originals, as test-people part C does).
+  The shared module, 130's objects, the found-email SQL and the same import path:
+  `scripts/test-upload-people.mjs` (54 checks). Run the three one at a time: the two
+  worker-side suites remove leads under `.uptest.example`, which takes in the web
+  suite's.
 
 ## Known issues / TODO
 
