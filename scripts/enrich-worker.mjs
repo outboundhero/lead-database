@@ -48,6 +48,22 @@
 // (scripts/lib/enrich/held.mjs; the database checks the switch, and its guard
 // refuses any other release while a client is off).
 //
+// An upload's no-email rows (migration 130) go to the client's People table.
+// In the same minute the worker decides where each finished upload's kept-back
+// rows go (the one client tag among the upload's tags, else not sent) and
+// copies them into that client's People (pipeline) table as held rows, a
+// chunk at a time (scripts/lib/enrich/upload-move.mjs). Then it releases held
+// People rows for the clients on the people_pipeline switch, while the table
+// has fewer than 2,000 rows queued, running or waiting (held.mjs). On an
+// upload row the finders and Enrichley run only for a person inside the
+// client's area and clear of its rules, and OpenAI never runs. Every minute,
+// with AIARK_AUTO_ADD_URL and AIARK_AUTO_ADD_KEY set, it asks the web app to
+// add an upload's approved found emails to leads (POST /api/uploads/found/auto
+// { batch }), at most once per upload every 10 minutes
+// (scripts/lib/enrich/upload-found.mjs); without them the Uploads page's
+// button does it. None of this costs anything until a client is switched on
+// and the caps are set.
+//
 // Settings (enrich_settings: the switches and their client lists, the models,
 // the spend caps, how long paid answers are remembered) are read at most every
 // 30 s and handed to the actions, so a model is swapped without a deploy.
@@ -77,7 +93,8 @@
 // people (AIARK_DEMO_CREDITS, 25000); AIARK_WEBHOOK_URL — needed only for the
 // export strategy; AIARK_RPS (4). AIARK_AUTO_ADD_URL and AIARK_AUTO_ADD_KEY — a
 // finished pull's people with an email go to the database with no button (this
-// app's /api/aiark/add/auto; the same key on the web service).
+// app's /api/aiark/add/auto; the same key on the web service). The same pair
+// has the worker ask for uploads' found emails to be added (/api/uploads/found/auto).
 // ENRICH_CONCURRENCY (6), ENRICH_POLL_MS (2000), ENRICH_STALE_MIN (15),
 // ENRICH_WORKER_ID ("enrich-worker"), ENRICH_ONCE=1 (drain the queue, then exit).
 
@@ -104,7 +121,10 @@ import { fitLoopOnce, fitLoopStatus, refreshBlockedOnce } from "./lib/enrich/fit
 import { advanceScoringBatch } from "./lib/enrich/fit-push.mjs";
 import { advanceBackfill } from "./lib/enrich/fit-backfill.mjs";
 import { promoteAutoConfig, promoteDue, requestPromote } from "./lib/enrich/promote.mjs";
-import { releaseHeldRows } from "./lib/enrich/held.mjs";
+import { releaseHeldPeopleRows, releaseHeldRows } from "./lib/enrich/held.mjs";
+import { moveUploadRows } from "./lib/enrich/upload-move.mjs";
+import { askForFound, foundAutoConfig } from "./lib/enrich/upload-found.mjs";
+import { UPLOAD_CAPABILITY } from "./lib/enrich/upload-people.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname, quiet: true });
 
 const env = process.env;
@@ -131,7 +151,9 @@ const SEARCH_KEYS = [
 // run tables by the same slices (a people run's source says whether it looks by company or by area).
 // held_release: held Google Maps rows (migration 129) are released once a minute for clients switched on; the
 // Clay tab warns while the worker running lacks it.
-const CAPABILITIES = ["company_runs", "pipeline_v2", "people_runs", "linkedin_sources", "held_release"];
+// upload_people (UPLOAD_CAPABILITY): uploads' no-email rows are copied into the People tables and released under
+// people_pipeline (migration 130), and found emails are asked to be added; the Uploads page warns without it.
+const CAPABILITIES = ["company_runs", "pipeline_v2", "people_runs", "linkedin_sources", "held_release", UPLOAD_CAPABILITY];
 const SWEEP_WAITING_MS = 3600_000;
 
 if (!env.DATABASE_URL) {
@@ -240,6 +262,58 @@ async function releaseHeld() {
       return;
     }
     log(`releasing held rows: ${e.message}`);
+  }
+}
+
+// What a database without migration 130 answers: no upload_people (42P01), no add_tags (42703), no switch function (42883).
+const UPLOADS_UNREADY = new Set(["42P01", "42703", "42883"]);
+let uploadsUnreadyLogged = false;
+let peopleUnreadyLogged = false;
+let peopleFullBefore = 0;
+
+/**
+ * Uploads' no-email rows into their clients' People tables as held rows
+ * (upload-move.mjs): free, nothing queued. Never throws.
+ */
+async function moveUploads() {
+  try {
+    const settings = await readSettings(pool);
+    const { decided, notSent, moved, batches, waiting } = await moveUploadRows(pool, { settings, log });
+    if (decided || moved || waiting) {
+      log(`uploads' no-email rows: ${decided} upload(s) decided (${notSent} not sent), ${moved} row(s) copied held into People tables from ${batches} upload(s)` +
+        (waiting ? `, ${waiting} upload(s) waiting for their client's tables` : ""));
+    }
+  } catch (e) {
+    if (UPLOADS_UNREADY.has(e?.code)) {
+      if (!uploadsUnreadyLogged) log("uploads' no-email rows are not moved: migration 130 is not applied");
+      uploadsUnreadyLogged = true;
+      return;
+    }
+    log(`moving uploads' no-email rows: ${e.message}`);
+  }
+}
+
+/**
+ * Held People rows of the clients on the people_pipeline switch become queued
+ * (held.mjs releaseHeldPeopleRows), within each table's room. Never throws;
+ * the Maps release above runs whatever happens here.
+ */
+async function releaseHeldPeople() {
+  try {
+    const { released, tables, refused, full } = await releaseHeldPeopleRows(pool);
+    if (released || refused || full !== peopleFullBefore) {
+      log(`released ${released} held People row(s) in ${tables} table(s): their clients are on the people_pipeline switch` +
+        (refused ? `; ${refused} table(s) kept them: the client was switched off before the release` : "") +
+        (full ? `; ${full} table(s) have 2,000 rows in work or waiting, the rest stay held for now` : ""));
+    }
+    peopleFullBefore = full;
+  } catch (e) {
+    if (UPLOADS_UNREADY.has(e?.code)) {
+      if (!peopleUnreadyLogged) log("held People rows are not released: migration 130 is not applied");
+      peopleUnreadyLogged = true;
+      return;
+    }
+    log(`releasing held People rows: ${e.message}`);
   }
 }
 
@@ -432,6 +506,8 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
     },
     // The fit loop (phase 3): what the scorer is doing and why, and the loop's counters.
     fit: { ...fitLoopStatus(), loop: { ...fitState }, promote_auto: Boolean(promoteAuto) },
+    // Uploads' no-email rows (130): whether found emails are added with no button.
+    upload_people: { found_auto: Boolean(foundAuto) },
     host: os.hostname(),
     pid: process.pid,
     stopped: stopping,
@@ -593,6 +669,32 @@ async function promoteWaiting() {
   }
 }
 
+// An upload's approved found emails into leads: the web app runs the import
+// (TypeScript); the worker only asks, at most once per upload every 10 minutes
+// (FOUND_EVERY_MS, upload-found.mjs). Off without the auto-add address and key.
+const FOUND_CHECK_MS = 60_000;
+const foundAuto = foundAutoConfig(env);
+const foundAskedAt = new Map();
+let foundBusy = false;
+let foundUnreadyLogged = false;
+
+async function addFoundEmails() {
+  if (!foundAuto || foundBusy) return;
+  foundBusy = true;
+  try {
+    await askForFound(pool, { config: foundAuto, askedAt: foundAskedAt, log });
+  } catch (e) {
+    if (UPLOADS_UNREADY.has(e?.code)) {
+      if (!foundUnreadyLogged) log("found emails are not added: migration 130 is not applied");
+      foundUnreadyLogged = true;
+      return;
+    }
+    log(`adding found emails: ${e.message}`);
+  } finally {
+    foundBusy = false;
+  }
+}
+
 // ── Template rows waiting on a key or a cap: queued again once it cleared ───
 
 let sweepBusy = false;
@@ -659,6 +761,7 @@ async function main() {
   let lastAdd = 0;
   let lastWaitingSweep = 0;
   let lastPromote = 0;
+  let lastFound = 0;
   while (!shuttingDown) {
     try {
       if (Date.now() - lastAdd > AUTO_ADD_EVERY_MS) {
@@ -669,6 +772,10 @@ async function main() {
         lastPromote = Date.now();
         promoteWaiting();
       }
+      if (Date.now() - lastFound > FOUND_CHECK_MS) {
+        lastFound = Date.now();
+        addFoundEmails();
+      }
       if (Date.now() - lastWaitingSweep > SWEEP_WAITING_MS) {
         lastWaitingSweep = Date.now();
         sweepWaitingTemplateRows();
@@ -676,6 +783,8 @@ async function main() {
       if (Date.now() - lastSweep > 60_000) {
         await reclaimStale();
         await releaseHeld();
+        await moveUploads();
+        await releaseHeldPeople();
         lastSweep = Date.now();
       }
       if (Date.now() - lastBeat > 10_000) {

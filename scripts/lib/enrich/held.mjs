@@ -18,10 +18,22 @@
 //
 // Switching a client off later: new places arrive held again; rows already
 // released are not put back (decision 2).
+//
+// People rows (migration 130): an upload's no-email rows are copied into the
+// client's People (pipeline) table (people_v1) as held rows (upload-move.mjs).
+// releaseHeldPeopleRows releases them the same way, under the people_pipeline
+// switch (fn_enrich_people_switch_on), and only while the table has fewer than
+// RELEASE_OPEN_MAX rows queued, running or waiting: a big upload never fills
+// the worker's queue, and rows waiting on a daily cap hold the rest back. The
+// guard (130) answers per table: a Companies row to company_pipeline, a People
+// row to people_pipeline, a row of any other table never. Each release is its
+// own query, so a database without 130 (42883) still releases Maps rows.
 
 import { COMPANY_TEMPLATE_V2 } from "./company-template-v2.mjs";
+import { PEOPLE_TEMPLATE } from "./people-template.mjs";
+import { RELEASE_OPEN_MAX, RELEASE_PAGE as PEOPLE_PAGE_SIZE } from "./upload-people.mjs";
 
-/** The guard's SQLSTATE: the client is not (or no longer) on the company_pipeline switch. */
+/** The guard's SQLSTATE: the client is not (or no longer) on its table's switch (company_pipeline, or people_pipeline for a People row). */
 export const HELD_REFUSED = "23514";
 
 /**
@@ -97,4 +109,79 @@ export async function releaseHeldRows(db, { pageSize = 5000, maxPages = 20 } = {
     released += fromThis;
   }
   return { released, tables: touched, refused };
+}
+
+// ── People (pipeline) rows (130) ────────────────────────────────────────────
+
+// The People (pipeline) tables with a held row whose client is on the
+// people_pipeline switch, the table with the oldest held row first.
+const PEOPLE_TABLES = `
+  SELECT t.id, t.client_tag
+    FROM enrich_tables t
+   WHERE t.template = $1
+     AND EXISTS (SELECT 1 FROM enrich_rows r WHERE r.table_id = t.id AND r.run_status = 'held')
+     AND public.fn_enrich_people_switch_on(t.client_tag)
+   ORDER BY (SELECT min(r.id) FROM enrich_rows r WHERE r.table_id = t.id AND r.run_status = 'held'), t.id`;
+
+// A table's rows in work or waiting (enrich_rows_status_idx), counted no further than $2.
+const OPEN_ROWS = `
+  SELECT count(*)::int AS n
+    FROM (SELECT 1 FROM enrich_rows WHERE table_id = $1 AND run_status IN ('queued', 'running', 'waiting') LIMIT $2) x`;
+
+const HAS_HELD = `SELECT EXISTS (SELECT 1 FROM enrich_rows WHERE table_id = $1 AND run_status = 'held') AS held`;
+
+/**
+ * Releases held People (pipeline) rows for the clients on the people_pipeline
+ * switch: the oldest held row first, in pages, while the table has fewer than
+ * openMax rows queued, running or waiting (each page at most the room left).
+ * At most maxPages pages in all per call. A client switched off before its
+ * page runs makes the guard refuse the page (23514): counted in refused, and
+ * that table is left this round. Rows of any other template are never
+ * touched. Each page is its own statement, so give it a pool.
+ *
+ * @param {Db} db  a pool (each page is its own statement)
+ * @param {{ pageSize?: number, maxPages?: number, openMax?: number }} [opts]  defaults RELEASE_PAGE, 20, RELEASE_OPEN_MAX
+ * @returns {Promise<{ released: number, tables: number, refused: number, full: number }>}
+ *   full: tables with held rows left held because RELEASE_OPEN_MAX rows are queued, running or waiting there
+ */
+export async function releaseHeldPeopleRows(db, { pageSize = PEOPLE_PAGE_SIZE, maxPages = 20, openMax = RELEASE_OPEN_MAX } = {}) {
+  const size = Math.max(1, Math.min(50_000, Math.trunc(Number(pageSize)) || PEOPLE_PAGE_SIZE));
+  const budget = Math.max(1, Math.trunc(Number(maxPages)) || 20);
+  const most = Math.max(1, Math.trunc(Number(openMax)) || RELEASE_OPEN_MAX);
+  const { rows: tables } = await db.query(PEOPLE_TABLES, [PEOPLE_TEMPLATE]);
+  let released = 0;
+  let pages = 0;
+  let refused = 0;
+  let touched = 0;
+  let full = 0;
+  for (const t of tables) {
+    if (pages >= budget) break;
+    const { rows: [open] } = await db.query(OPEN_ROWS, [t.id, most]);
+    let room = most - Number(open?.n ?? 0);
+    let fromThis = 0;
+    let stopped = false;
+    while (room > 0 && pages < budget) {
+      pages++;
+      const want = Math.min(size, room);
+      let n = 0;
+      try {
+        n = (await db.query(RELEASE_PAGE, [t.id, want])).rowCount ?? 0;
+      } catch (e) {
+        if (/** @type {{ code?: string }} */ (e)?.code !== HELD_REFUSED) throw e;
+        refused++;
+        stopped = true;
+        break;
+      }
+      fromThis += n;
+      room -= n;
+      if (n < want) {
+        stopped = true; // no more held rows (or the rest is being released by another worker)
+        break;
+      }
+    }
+    if (fromThis) touched++;
+    released += fromThis;
+    if (!stopped && room <= 0 && (await db.query(HAS_HELD, [t.id])).rows[0]?.held === true) full++;
+  }
+  return { released, tables: touched, refused, full };
 }
