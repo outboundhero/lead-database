@@ -325,9 +325,12 @@ export function urlHost(def) {
 // ── The compiler ───────────────────────────────────────────────────────────
 
 /**
- * @typedef {{ in: string, find?: string, replace?: string, append?: string, why: string }} ColumnChange
+ * @typedef {{ in: string, find?: string, replace?: string, append?: string, and?: string, why: string }} ColumnChange
  *   An exact change to one compiled field ("run_if", "formula", "waterfall[i]" or "inputs.<name>"):
- *   find replaced by replace (find must occur once), or append added at the end.
+ *   find replaced by replace (find must occur once), or append added at the end. On "run_if" only,
+ *   and: a clause that must also hold. The run condition becomes "(<compiled>) && <clause>"
+ *   (runIfAnd), or the clause alone when there was none, so the clause can't bind to the last term
+ *   of an original whose top level has "||".
  * @typedef {{ key: string, from?: string | null, kind: "input" | "formula" | "waterfall" | "action", action?: string,
  *             model_setting?: string, tool?: "web_search" | "none", flag?: string[], key_env?: string,
  *             written?: boolean, change?: boolean, phase?: number, name?: string, formula?: string,
@@ -360,10 +363,31 @@ const KEYED = Object.freeze({
 const SECRET_HEADER = /^authorization$/i;
 const REDACTED = /\[redacted\]/i;
 
+/**
+ * A run condition with one more clause that must hold: "(<run_if>) && <clause>",
+ * or the clause alone when there was none. The newline before the closing
+ * bracket keeps a trailing line comment in the original from swallowing it, as
+ * formula.mjs wraps every expression it evaluates.
+ *
+ * @param {string | null | undefined} runIf
+ * @param {string} clause
+ * @returns {string}
+ */
+export function runIfAnd(runIf, clause) {
+  const extra = String(clause ?? "").trim();
+  if (!extra) throw new Error("A run condition change has no clause to add");
+  return runIf == null || !String(runIf).trim() ? extra : `(${runIf}\n) && ${extra}`;
+}
+
 /** Applies a column's changes to its compiled fields. */
 function applyChanges(row, changes) {
   for (const c of changes ?? []) {
     const where = String(c.in ?? "");
+    if (c.and != null) {
+      if (where !== "run_if") throw new Error(`${row.key}: a clause to add ("and") is only for the run condition, not "${where}"`);
+      row.run_if = runIfAnd(row.run_if, c.and);
+      continue;
+    }
     const edit = (text) => {
       if (c.append != null) return `${String(text ?? "")}${c.append}`;
       return applyChange(text, { find: c.find, replace: c.replace ?? "", in: `${row.key}.${where}`, why: c.why });
