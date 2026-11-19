@@ -26,8 +26,8 @@ import type { ColumnCounts, EnrichColumn, GridCell, RowStatus } from "@/lib/enri
 
 // How one Clay-tab cell and column header look. The states follow Clay's own:
 // a value, "Run condition not met", no result, an error, plus two of ours —
-// "Needs key" (the worker has no key for that provider yet) and later-phase
-// columns that are shown but not built. A held row (a Google Maps place
+// "Needs key" (the worker has no key for that provider yet) and columns a
+// table never runs (see notRunHere). A held row (a Google Maps place
 // waiting for its client to be switched on, migration 129) shows "Held" in
 // the steps it has not run.
 
@@ -72,9 +72,30 @@ export const KIND_LABEL: Record<EnrichColumn["kind"], string> = {
 
 const fmt = (n: number | undefined) => (n ?? 0).toLocaleString("en-US");
 
-/** The small count line under a column name. */
-export function HeaderStats({ col, counts, rows }: { col: EnrichColumn; counts?: ColumnCounts; rows: number }) {
-  if (col.phase > 1) return <span className="text-muted-foreground/60">Phase {col.phase} · not built yet</span>;
+/**
+ * The one column the engine never works but other steps fill: an AI Ark add,
+ * promotion and an upload's found-email round write add_to_database
+ * (scripts/lib/aiark/add.mjs, scripts/lib/enrich/promote.mjs,
+ * src/lib/uploads/found.ts). It keeps a later phase only so the engine leaves it alone.
+ */
+export const ADDED_COLUMN = "add_to_database";
+
+/** Filled by another step: its cells are shown as that step worded them. */
+export const writtenElsewhere = (col: EnrichColumn) => col.phase > 1 && col.key === ADDED_COLUMN;
+
+/**
+ * A column this table never runs. On a hand-seeded copy of a client's Clay
+ * table (122) these are Clay's later columns, kept for reading; their work runs
+ * in the client's pipeline tables or was replaced. Anywhere else it is a step
+ * not built yet. enrich_columns.phase holds the October plan's number, which
+ * is not the Clay section restart's phases, so the screen never shows it.
+ */
+export const notRunHere = (col: EnrichColumn) => col.phase > 1 && col.key !== ADDED_COLUMN;
+
+/** The small count line under a column name. copy: the table is a hand-seeded copy of the client's Clay table. */
+export function HeaderStats({ col, counts, rows, copy }: { col: EnrichColumn; counts?: ColumnCounts; rows: number; copy?: boolean }) {
+  if (notRunHere(col)) return <span className="text-muted-foreground/60">{copy ? "Clay copy · not run here" : "Not built yet"}</span>;
+  const added = writtenElsewhere(col);
   const c = counts ?? {};
   const parts: React.ReactNode[] = [];
   if (col.data_type === "boolean") {
@@ -83,13 +104,14 @@ export function HeaderStats({ col, counts, rows }: { col: EnrichColumn; counts?:
   } else if (col.kind === "input") {
     parts.push(<span key="d">{fmt(c.done)} of {fmt(rows)}</span>);
   } else {
-    if (c.done) parts.push(<span key="d" className="text-[var(--success)]">{fmt(c.done)} found</span>);
+    if (c.done) parts.push(<span key="d" className="text-[var(--success)]">{fmt(c.done)} {added ? "done" : "found"}</span>);
     if (c.empty && col.kind === "action") parts.push(<span key="e">{fmt(c.empty)} none</span>);
     if (c.skipped) parts.push(<span key="s">{fmt(c.skipped)} skipped</span>);
   }
   if (c.needs_key) parts.push(<span key="k" className="text-[var(--warning)]">{fmt(c.needs_key)} need key</span>);
   if (c.error) parts.push(<span key="x" className="text-destructive">{fmt(c.error)} error{c.error === 1 ? "" : "s"}</span>);
-  if (c.running) parts.push(<span key="r" className="text-primary">{fmt(c.running)} running</span>);
+  if (c.running) parts.push(<span key="r" className="text-primary">{fmt(c.running)} {added ? "adding" : "running"}</span>);
+  if (!parts.length && added) return <span className="text-muted-foreground/60">Nothing added yet</span>;
   if (!parts.length) return <span className="text-muted-foreground/60">{rows ? "—" : "No rows"}</span>;
   return (
     <span className="flex min-w-0 items-center gap-1.5 truncate">
@@ -124,13 +146,17 @@ export function ClayCell({
   cell,
   rowStatus,
   reference,
+  copy,
 }: {
   col: EnrichColumn;
   cell: GridCell | undefined;
   rowStatus: RowStatus;
   reference?: string;
+  /** The table is a hand-seeded copy of the client's Clay table. */
+  copy?: boolean;
 }) {
-  if (col.phase > 1) return <span className="text-[11px] italic text-muted-foreground/40">Phase {col.phase}</span>;
+  if (notRunHere(col)) return <span className="text-[11px] italic text-muted-foreground/40">{copy ? "Not run here" : "Not built yet"}</span>;
+  if (writtenElsewhere(col)) return <AddedValue cell={cell} />;
   if (!cell) {
     if (rowStatus === "queued") return <Muted icon={Clock} className="opacity-60">Queued</Muted>;
     if (rowStatus === "held") return <Muted icon={CirclePause} className="opacity-60">Held</Muted>;
@@ -150,6 +176,27 @@ export function ClayCell({
       )}
     </span>
   );
+}
+
+/**
+ * An add_to_database cell, in the words of the step that wrote it: Adding…,
+ * Added, Already in the database, On the never-contact list, Held back or
+ * Not added. A row nothing has added yet stays blank.
+ */
+function AddedValue({ cell }: { cell: GridCell | undefined }) {
+  if (!cell) return <span />;
+  const text = cell.d || (cell.s === "running" ? "Adding…" : cell.s === "error" ? "Not added" : "");
+  if (cell.s === "running") return <Muted icon={Loader2} spin className="text-primary">{text}</Muted>;
+  if (cell.s === "error") return <Muted icon={AlertTriangle} className="text-destructive">{text}</Muted>;
+  if (cell.s === "done" && cell.d === "Added") {
+    return (
+      <span className="flex items-center gap-1 font-medium text-[var(--success)]">
+        <Check className="size-3.5" strokeWidth={2.5} />
+        {text}
+      </span>
+    );
+  }
+  return <Muted>{text}</Muted>;
 }
 
 function CellValue({ col, cell }: { col: EnrichColumn; cell: GridCell }) {

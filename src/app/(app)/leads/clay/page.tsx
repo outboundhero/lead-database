@@ -39,6 +39,7 @@ import { AccessDenied } from "@/components/layout/access-denied";
 import { useHasPermission } from "@/lib/context/role-context";
 import { ClayGrid, FILTER_LABELS, type GridFilter } from "@/components/clay/clay-grid";
 import { CellPanel } from "@/components/clay/cell-panel";
+import { notRunHere } from "@/components/clay/clay-cell";
 import { ImportDialog } from "@/components/clay/import-dialog";
 import { InboundStrip, InboundUrlsSheet } from "@/components/clay/inbound-urls";
 import { UploadRowsStrip } from "@/components/clay/upload-rows";
@@ -509,7 +510,7 @@ function AddToDatabase({ table, onAdded }: { table: EnrichTableSummary; onAdded:
     state.added ? `${fmt(state.added)} added` : "",
     state.skipped ? `${fmt(state.skipped)} skipped` : "",
     state.failed ? `${fmt(state.failed)} not stored` : "",
-    state.pipeline ? `${fmt(state.pipeline)} no email, waiting in the pipeline` : "",
+    state.pipeline ? `${fmt(state.pipeline)} no email, not worked yet` : "",
   ].filter(Boolean);
   const why = !state.run.finished
     ? "Add its people once the pull has finished"
@@ -559,6 +560,9 @@ function TableView({
   const isRun = table.kind === "ai_ark";
   // A template table (the Companies tab's pulls) takes no CSV either.
   const takesCsv = !isRun && !table.template;
+  // A hand-seeded copy of the client's own Clay table (122): kept for reading and
+  // comparing with Clay; its later columns never run in it.
+  const isCopy = !isRun && !table.template;
   const [detail, setDetail] = useState<TableDetailView | null>(null);
   const [page, setPage] = useState<RowsPage | null>(null);
   const [shownQuery, setShownQuery] = useState<string | null>(null);
@@ -695,10 +699,10 @@ function TableView({
   };
 
   const visible = (detail?.columns ?? []).filter((c) => !c.hidden);
-  const laterCount = visible.filter((c) => c.phase > 1).length;
-  // A table with nothing built yet always shows its columns: hiding them would leave nothing.
+  const laterCount = visible.filter(notRunHere).length;
+  // A table that runs none of its columns always shows them: hiding them would leave nothing.
   const canHideLater = laterCount > 0 && laterCount < visible.length;
-  const columns: EnrichColumn[] = visible.filter((c) => showLater || !canHideLater || c.phase === 1);
+  const columns: EnrichColumn[] = visible.filter((c) => showLater || !canHideLater || !notRunHere(c));
   const rowCount = detail?.table.row_count ?? table.row_count;
   const total = page?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / size));
@@ -788,8 +792,8 @@ function TableView({
         <div className="ml-auto flex items-center gap-2">
           {canHideLater && (
             <label className="flex items-center gap-2 text-[12.5px] text-muted-foreground">
-              <IosToggle size="sm" checked={showLater} onCheckedChange={setShowLater} aria-label="Show steps from later phases" />
-              Later steps ({laterCount})
+              <IosToggle size="sm" checked={showLater} onCheckedChange={setShowLater} aria-label="Show the columns this table does not run" />
+              Not run here ({laterCount})
             </label>
           )}
           <Button size="sm" variant="outline" onClick={refresh} aria-label="Refresh">
@@ -877,6 +881,7 @@ function TableView({
               }
               activeCell={openCell}
               onCellClick={(row, col) => setOpenCell({ row, col })}
+              copy={isCopy}
               sort={sort}
               onSort={(s) => {
                 setSort(s);
@@ -964,6 +969,7 @@ function TableView({
       <CellPanel
         target={openCell}
         onClose={() => setOpenCell(null)}
+        copy={isCopy}
         canRun
         onRun={(rowId, column) =>
           run({ scope: "rows", rows: [rowId], column, force: true }, () =>

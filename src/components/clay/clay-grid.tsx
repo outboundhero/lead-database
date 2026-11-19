@@ -15,7 +15,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { ColumnCounts, EnrichColumn, GridRow } from "@/lib/enrich/types";
-import { ClayCell, ColumnIcon, HeaderStats, KIND_LABEL } from "./clay-cell";
+import { ClayCell, ColumnIcon, HeaderStats, KIND_LABEL, notRunHere } from "./clay-cell";
 
 // The Clay-like grid: one row per company, one column per Clay column, sticky
 // header and first column, a menu per column (sort, filter, re-run). Paging,
@@ -67,6 +67,8 @@ interface ClayGridProps {
   onRunColumn: (col: EnrichColumn, only?: string) => void;
   canRun: boolean;
   loading: boolean;
+  /** The table is a hand-seeded copy of the client's Clay table: its later columns read "not run here". */
+  copy?: boolean;
 }
 
 export function ClayGrid(props: ClayGridProps) {
@@ -132,7 +134,7 @@ export function ClayGrid(props: ClayGridProps) {
                     style={i === 0 ? { left: ROW_HEAD, height: 36 } : { height: 36 }}
                   >
                     <div className="min-w-0 overflow-hidden whitespace-nowrap">
-                      <ClayCell col={col} cell={row.cells[col.key]} rowStatus={row.run_status} reference={row.reference?.[col.key]} />
+                      <ClayCell col={col} cell={row.cells[col.key]} rowStatus={row.run_status} reference={row.reference?.[col.key]} copy={props.copy} />
                     </div>
                   </td>
                 );
@@ -145,7 +147,7 @@ export function ClayGrid(props: ClayGridProps) {
   );
 }
 
-function HeaderCell({ col, sticky, counts, rowCount, sort, onSort, filters, onFilter, onRunColumn, canRun }: ClayGridProps & { col: EnrichColumn; sticky: boolean }) {
+function HeaderCell({ col, sticky, counts, rowCount, sort, onSort, filters, onFilter, onRunColumn, canRun, copy }: ClayGridProps & { col: EnrichColumn; sticky: boolean }) {
   const sorted = sort?.col === col.key ? sort.dir : null;
   const filtered = filters.some((f) => f.col === col.key);
   const states =
@@ -163,7 +165,7 @@ function HeaderCell({ col, sticky, counts, rowCount, sort, onSort, filters, onFi
       className={cn(
         "top-0 border-b border-r border-border/70 bg-muted px-0 text-left align-top font-normal",
         sticky ? "sticky z-30" : "sticky z-20",
-        col.phase > 1 && "bg-muted/70"
+        notRunHere(col) && "bg-muted/70"
       )}
       style={sticky ? { left: ROW_HEAD } : undefined}
     >
@@ -176,14 +178,14 @@ function HeaderCell({ col, sticky, counts, rowCount, sort, onSort, filters, onFi
           >
             <span className="flex w-full min-w-0 items-center gap-1.5">
               <ColumnIcon col={col} />
-              <span className={cn("truncate text-[12.5px] font-semibold", col.phase > 1 && "text-muted-foreground")}>{col.name}</span>
+              <span className={cn("truncate text-[12.5px] font-semibold", notRunHere(col) && "text-muted-foreground")}>{col.name}</span>
               {sorted === "asc" && <ArrowUp className="size-3 shrink-0 text-primary" />}
               {sorted === "desc" && <ArrowDown className="size-3 shrink-0 text-primary" />}
               {filtered && <Filter className="size-3 shrink-0 text-primary" />}
               <ChevronDown className="ml-auto size-3 shrink-0 text-muted-foreground/60" />
             </span>
             <span className="flex min-w-0 text-[10.5px] text-muted-foreground">
-              <HeaderStats col={col} counts={counts[col.key]} rows={rowCount} />
+              <HeaderStats col={col} counts={counts[col.key]} rows={rowCount} copy={copy} />
             </span>
           </button>
         </DropdownMenuTrigger>
@@ -196,7 +198,7 @@ function HeaderCell({ col, sticky, counts, rowCount, sort, onSort, filters, onFi
             <span className="block text-[11px] font-normal text-muted-foreground">
               {KIND_LABEL[col.kind]}
               {col.provider ? ` · ${col.provider}` : ""}
-              {col.phase > 1 ? ` · Phase ${col.phase}` : ""}
+              {notRunHere(col) ? (copy ? " · Clay copy, not run here" : " · Not built yet") : ""}
             </span>
             {col.description && <span className="block text-[11px] font-normal leading-snug text-muted-foreground">{col.description}</span>}
           </DropdownMenuLabel>

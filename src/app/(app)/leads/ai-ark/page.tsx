@@ -701,7 +701,7 @@ function AiArkTab() {
 
             <Card
               title="Pull people"
-              sub="People with an email go to the database. People without one go to the enrichment pipeline on the Clay tab, unless the database already holds them, and on to the database once it finds an email."
+              sub="People with an email go to the database. People without one stay in the pull's table on the Clay tab, unless the database already holds them. Finding their emails is not built yet."
             >
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">
@@ -940,7 +940,7 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
             .filter((o) => o.n > 0)
             .map((o) => (
               <span key={o.key} className={cn("rounded-full px-2 py-0.5 text-[11.5px] font-medium tabular-nums", o.cls)}>
-                {fmt(o.n)} {o.key === "No email" ? "no email, in the pipeline" : o.key}
+                {fmt(o.n)} {o.key === "No email" ? "no email, not worked yet" : o.key}
               </span>
             ))}
         </div>

@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { withNames, type CellDetail, type CellStatus } from "@/lib/enrich/types";
-import { ColumnIcon, KIND_LABEL } from "./clay-cell";
+import { ColumnIcon, KIND_LABEL, notRunHere, writtenElsewhere } from "./clay-cell";
 
 // The panel a cell click opens: what the cell holds and why — Clay's formula
 // or run condition for the column (with column names, as Clay shows them), the
@@ -66,11 +66,14 @@ export function CellPanel({
   onClose,
   onRun,
   canRun,
+  copy,
 }: {
   target: { row: number; col: string } | null;
   onClose: () => void;
   onRun: (rowId: number, column: string | null) => Promise<void>;
   canRun: boolean;
+  /** The table is a hand-seeded copy of the client's Clay table. */
+  copy?: boolean;
 }) {
   const [detail, setDetail] = useState<CellDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -146,10 +149,17 @@ export function CellPanel({
           <div className="flex-1 space-y-5 overflow-y-auto p-4">
             <Section title="Value">
               <div className="flex flex-wrap items-center gap-2">
-                {status ? (
+                {status && writtenElsewhere(col!) ? (
+                  // The step that wrote it worded it (Added, Held back, Not added ...); "Run condition not met" would be wrong here.
+                  <Badge variant={status === "done" ? "success" : status === "error" ? "destructive" : status === "running" ? "tinted" : "secondary"}>
+                    {shown.cell?.display || STATUS[status].label}
+                  </Badge>
+                ) : status ? (
                   <Badge variant={STATUS[status].variant}>{STATUS[status].label}</Badge>
-                ) : col!.phase > 1 ? (
-                  <Badge variant="secondary">Phase {col!.phase} — not built yet</Badge>
+                ) : writtenElsewhere(col!) ? (
+                  <Badge variant="secondary">Not added</Badge>
+                ) : notRunHere(col!) ? (
+                  <Badge variant="secondary">{copy ? "Clay copy: not run here" : "Not built yet"}</Badge>
                 ) : (
                   <Badge variant="secondary">{shown.row.run_status === "done" ? "Not set" : shown.row.run_status === "held" ? "Held" : "Queued"}</Badge>
                 )}
