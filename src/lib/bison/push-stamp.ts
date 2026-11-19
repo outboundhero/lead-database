@@ -7,7 +7,7 @@ import { normalizeDomain } from "./keys";
 // and the share push (src/lib/sharing/push.ts), so both route a lead the same
 // way. CLAUDE.md "Campaign routing: side + bucket" explains the two axes.
 //
-//   bucket: from the campaign NAME ("JPCA: SEGs" is seg), unless the caller
+//   bucket: from the campaign NAME ("TAG: SEGs" is seg), unless the caller
 //           gave one; a name that names no bucket gets none.
 //   side:   b2b or b2c, from the campaign's install against the client's saved
 //           installs (client_tags.b2b_instance, b2c_instance). A campaign on

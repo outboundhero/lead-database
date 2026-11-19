@@ -74,10 +74,10 @@ export function dedupeCampaigns(rows: BisonCampaignRow[]): BisonCampaignRow[] {
 // pagination links. A search response's links.next is plain
 // `/api/campaigns?page=2`, so following it walks the ENTIRE UNFILTERED install
 // from page 2 on (meta.total flips 32 -> 1429 mid-walk). That is how the picker
-// ended up showing "JPCA: SEGs" twice: once from the real search page, then
-// again when the unfiltered walk reached it. Page explicitly with search= on
-// every request instead. (JPCA: 1429 rows in 50s following links.next, vs 32
-// rows over 3 pages in ~1s paging explicitly.)
+// once showed one client's SEGs campaign twice: once from the real search page,
+// then again when the unfiltered walk reached it. Page explicitly with search=
+// on every request instead. (For that client: 1429 rows in 50s following
+// links.next, vs 32 rows over 3 pages in ~1s paging explicitly.)
 export async function searchInstances(
   instances: BisonInstance[],
   term: string
