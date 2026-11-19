@@ -1,6 +1,15 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { bisonInstances } from "@/lib/bison/keys";
+import {
+  dedupeCampaigns,
+  INSTANCE_BUDGET_MS,
+  MAX_PAGES,
+  nextUrl,
+  PAGE_CONCURRENCY,
+  PAGE_TIMEOUT_MS,
+  searchInstances,
+} from "@/lib/bison/client-campaigns";
 
 // Live Email Bison campaign read across ALL configured instances: the client
 // runs three separate Bison installs (outboundhero / facilityreach /
@@ -12,118 +21,11 @@ import { bisonInstances } from "@/lib/bison/keys";
 
 const CACHE_TTL_MS = 60_000;          // considered fresh
 const STALE_OK_MS = 15 * 60_000;     // served while a refresh runs behind it
-const MAX_PAGES = 300;               // safety cap per instance (~4,500 campaigns)
-// Per HTTP request. 8s was too tight and produced a false "list incomplete"
-// warning on every client: app.facilityreach.com answers its campaign pages in
-// ~7.1s under load (measured 2026-08-25), so it tripped at random even though
-// nothing was actually missing. The scoped search is only a few pages now, so a
-// longer ceiling costs nothing on the happy path.
-const PAGE_TIMEOUT_MS = 20_000;
-const INSTANCE_BUDGET_MS = 60_000;   // per instance, across all its pages
-const PAGE_CONCURRENCY = 8;          // pages fetched in parallel per instance
-// NOTE: Bison HARD-CAPS a page at 15 rows and ignores per_page/limit entirely
-// (measured 2026-08-25), so page COUNT is the cost driver — hence the parallel
-// page fetch in refresh() and the search path below.
-
-// Server-side search — the escape hatch from that pagination. A client-scoped
-// picker asks for exactly the campaigns it needs instead of enumerating the
-// whole install and silently running out of budget.
-//
-// CAREFUL (measured 2026-08-25): Bison DROPS the search term from its own
-// pagination links. A search response's links.next is plain
-// `/api/campaigns?page=2` — so following it walks the ENTIRE UNFILTERED install
-// from page 2 on (meta.total flips 32 -> 1429 mid-walk). That is how the picker
-// ended up showing "JPCA: SEGs" twice: once from the real search page, then
-// again when the unfiltered walk reached it. Page explicitly with search= on
-// every request instead, driven by meta.last_page. (JPCA: 1429 rows in 50s
-// following links.next, vs 32 rows over 3 pages in ~1s paging explicitly.)
+// The page limits, the pagination helpers and the client-scoped search live in
+// src/lib/bison/client-campaigns.ts, so the share push reads a client's
+// campaigns exactly as this route does. This route keeps its caches.
 const searchCache = new Map<string, { at: number; data: Array<Record<string, unknown>>; errors: string[] }>();
 
-// TWO PAGINATION STYLES, one reader (measured 2026-08-26):
-//   page-cursor : meta = {current_page, last_page, total}, links.next = ?page=2
-//   keyset      : meta = {per_page, next_cursor},          links.next = ?cursor=…
-// app.outboundhero.co served the first style in the morning and the second by
-// the afternoon, so neither can be assumed. Anything that derives page COUNT
-// from meta.last_page silently collapses to ONE page (15 rows) on a keyset
-// install — and meta.total is absent there too, so the "list incomplete"
-// warning cannot fire either. Follow links.next instead: it exists in both.
-function nextUrl(json: unknown): string | null {
-  const links = (json as { links?: { next?: unknown } } | null)?.links;
-  return typeof links?.next === "string" && links.next ? links.next : null;
-}
-
-// Bison drops ?search= from its own next-links in BOTH styles, so page 2 onward
-// silently becomes the whole unfiltered install. Re-apply the term every hop.
-function withSearch(url: string, term: string): string {
-  try {
-    const u = new URL(url);
-    u.searchParams.set("search", term);
-    return u.toString();
-  } catch {
-    return url;
-  }
-}
-
-// Last line of defence against a campaign appearing twice in the picker. Rows
-// are keyed by `instance#id` in the UI, so a duplicate is not merely cosmetic:
-// two rows sharing a React key make both checkboxes toggle as one.
-function dedupeCampaigns(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  const seen = new Set<string>();
-  const out: Array<Record<string, unknown>> = [];
-  for (const c of rows) {
-    const key = `${c.instance_url ?? ""}#${c.id ?? ""}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(c);
-  }
-  return out;
-}
-
-async function searchInstances(
-  instances: ReturnType<typeof bisonInstances>,
-  term: string
-): Promise<{ data: Array<Record<string, unknown>>; errors: string[] }> {
-  const data: Array<Record<string, unknown>> = [];
-  const errors: string[] = [];
-  await Promise.all(
-    instances.map(async ({ domain, key }) => {
-      const startedAt = Date.now();
-      const get = async (url: string) => {
-        const res = await fetch(url, {
-          headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
-          cache: "no-store",
-          signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
-        });
-        if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
-        return res.json();
-      };
-      try {
-        // Follow the install's OWN next-link but re-apply search= to it every
-        // time. That covers both pagination styles Bison serves (see the note
-        // on nextUrl), and both of them drop the search term from their links.
-        let url: string | null = withSearch(`https://${domain}/api/campaigns`, term);
-        for (let page = 0; url && page < MAX_PAGES; page++) {
-          const json = await get(url);
-          const rows = Array.isArray(json?.data) ? json.data : [];
-          for (const c of rows) data.push({ ...c, instance_url: domain });
-          if (rows.length === 0) break;
-          const next = nextUrl(json);
-          url = next ? withSearch(next, term) : null;
-          if (url && Date.now() - startedAt > INSTANCE_BUDGET_MS) {
-            errors.push(`${domain}: partial — stopped after ${Math.round((Date.now() - startedAt) / 1000)}s`);
-            break;
-          }
-        }
-      } catch (err) {
-        const msg = err instanceof Error && err.name === "TimeoutError"
-          ? `timed out after ${PAGE_TIMEOUT_MS / 1000}s`
-          : err instanceof Error ? err.message : "fetch failed";
-        errors.push(`${domain}: ${msg}`);
-      }
-    })
-  );
-  return { data: dedupeCampaigns(data), errors };
-}
 let cache: { at: number; data: Array<Record<string, unknown>>; errors: string[] } | null = null;
 let inFlight: Promise<void> | null = null;
 // Errors from the most recent attempt, kept even when it failed outright — a

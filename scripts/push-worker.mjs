@@ -40,6 +40,7 @@ import dotenv from "dotenv";
 import { campaignsForLead } from "./lib/push-side.mjs";
 import { espBucket } from "./lib/esp-bucket.mjs";
 import { eligibilitySql, enqueueLeadCompanies, fitCheckOn, FIT_SKIP } from "./lib/enrich/fit-push.mjs";
+import { isSharePush } from "./lib/overlap-topup.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname });
 
 const env = process.env;
@@ -474,6 +475,32 @@ const ELIGIBLE =
   `l.email is not null and l.email <> '' and l.is_bounced = false ` +
   `and (l.validation_status in ('valid','catch_all') or l.validation_status is null)`;
 
+// Share and top-up pushes (overlap sharing, migrations 134 and 135): batches
+// the Sharing page's push queues with push_options.source "share" or "topup"
+// and selected_ids. Before any gather, one is cancelled when it lists no lead
+// (an empty list would fall through to the filters path below and gather the
+// client's whole backlog) or when its client can no longer receive
+// (fn_client_receive_block, 132: churn date, status, no group, not on the
+// Groups tab, rules). scripts/test-share-push.mjs runs these statements and
+// shareStopReason() as they are written here.
+const SHARE_CANCEL_SQL =
+  `update push_batches set status = 'cancelled', error = $2, completed_at = now()
+    where id = $1 and status = 'gathering'`;
+const RECEIVE_BLOCK_SQL = `select public.fn_client_receive_block($1) as block`;
+// The "not already sent for this client" check of the filters path below, for
+// a selected-ids batch with push_options.skipAlreadySent ($2 the batch's
+// client tag, $3 the batch).
+const NOT_SENT_FOR_CLIENT =
+  `not exists (select 1 from push_items pi join push_batches pb on pb.id = pi.batch_id
+                where pb.client_tag = $2 and pi.lead_id = l.id and pi.status = 'sent' and pi.batch_id <> $3)`;
+
+/** Why a share or top-up push batch must not be gathered, or null. block: fn_client_receive_block of its client. */
+function shareStopReason(batch, block) {
+  if (!Array.isArray(batch.selected_ids) || batch.selected_ids.length === 0) return "Cancelled: a share push with no lead ids";
+  if (block) return `Cancelled: ${batch.client_tag} cannot receive (${block})`;
+  return null;
+}
+
 async function gatherCycle() {
   const { rows: [batch] } = await pool.query(
     `update push_batches b
@@ -489,11 +516,25 @@ async function gatherCycle() {
   if (!batch) return false;
   console.log(`gathering batch ${batch.id}`);
   try {
+    if (isSharePush(batch.push_options)) {
+      const hasIds = Array.isArray(batch.selected_ids) && batch.selected_ids.length > 0;
+      const block = hasIds ? (await pool.query(RECEIVE_BLOCK_SQL, [batch.client_tag])).rows[0]?.block ?? null : null;
+      const stop = shareStopReason(batch, block);
+      if (stop) {
+        // Fenced on status, as the gather's own finish is.
+        const { rowCount } = await pool.query(SHARE_CANCEL_SQL, [batch.id, stop]);
+        console.warn(rowCount ? `batch ${batch.id}: ${stop}` : `batch ${batch.id} was cancelled during gather`);
+        return true;
+      }
+    }
     let rows;
     if (batch.selected_ids?.length) {
+      // A share or top-up push leaves out leads already sent for its client,
+      // as the filters path's accounting does. Every other batch: as before.
+      const skipSent = batch.push_options?.skipAlreadySent === true && Boolean(batch.client_tag);
       ({ rows } = await pool.query(
-        `select l.id, l.email from leads l where l.id = any($1::uuid[]) and ${ELIGIBLE}`,
-        [batch.selected_ids]
+        `select l.id, l.email from leads l where l.id = any($1::uuid[]) and ${ELIGIBLE}${skipSent ? ` and ${NOT_SENT_FOR_CLIENT}` : ""}`,
+        skipSent ? [batch.selected_ids, batch.client_tag, batch.id] : [batch.selected_ids]
       ));
     } else {
       // fn_lead_filter_conditions returns trusted SQL fragments (the same helper

@@ -27,6 +27,17 @@ import type { SettingsState } from "@/lib/companies/types";
 //     version other than the stored one answers 409 with `changed`. The worker
 //     reads the settings every 30 s, so a change reaches it within that, with
 //     no deploy. Admin and up.
+//     Also optional, each left out = kept as stored (migrations 134 to 136):
+//     overlap_sharing (the switch, its clients, preview or apply, the pools,
+//     the isolated tag endings, the push list, caps and pace, the tag writes,
+//     the go-live time: switched on with none, it is set to now), weekly_topup
+//     (the flag pass, its client types, the default minimum, the pulls and
+//     their budget) and never_contact_inboxes (the switch and the pace only:
+//     it cannot be switched on while the Clay filter is not loaded, and the
+//     filter keys are always kept as the seed wrote them). Checked by
+//     scripts/lib/enrich/settings.mjs (cleanOverlapSharing, cleanWeeklyTopup,
+//     cleanNeverContactInboxes); each row is written only when it changes. The
+//     answer never carries the filter, only whether it is loaded.
 
 export const dynamic = "force-dynamic";
 

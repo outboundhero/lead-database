@@ -24,7 +24,9 @@ export const config = {
      *   pipeline emails into leads: Bearer AIARK_AUTO_ADD_KEY only)
      * - api/uploads/found/auto (the enrichment worker's adding of the emails
      *   found for an upload's no-email rows: Bearer AIARK_AUTO_ADD_KEY only)
+     * - api/sharing/push/auto (the enrichment worker's push of a client's
+     *   queued shares into its campaigns: Bearer SHARE_PUSH_KEY only)
      */
-    "/((?!_next/static|_next/image|favicon.ico|api/uploads/process|api/enrich_email|api/leads/first5|api/leads/search|api/leads/update|api/costing|api/enrich/intake|api/aiark/webhook|api/aiark/add/auto|api/companies/promote/auto|api/uploads/found/auto|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/uploads/process|api/enrich_email|api/leads/first5|api/leads/search|api/leads/update|api/costing|api/enrich/intake|api/aiark/webhook|api/aiark/add/auto|api/companies/promote/auto|api/uploads/found/auto|api/sharing/push/auto|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isNurtureCampaign } from "@/lib/bison/campaigns";
-import { suggestBucketFromName } from "@/lib/bison/esp-bucket";
+import { idsOfSide, stampCampaigns } from "@/lib/bison/push-stamp";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeFilterState } from "@/types/filters";
@@ -10,6 +10,7 @@ import { getPool } from "@/lib/db/pool";
 import { logAudit } from "@/lib/api/log-audit";
 import { gateEnabled, scoringStatusFor } from "../../../../../scripts/lib/enrich/fit-push.mjs";
 import { BISON_GROUPS, sideCampaignsByInstall } from "../../../../../scripts/lib/bison-groups.mjs";
+import { isSharePush } from "../../../../../scripts/lib/overlap-topup.mjs";
 
 // Queue an async Bison push batch. Unlike the synchronous /api/bison/push
 // (kept for targeted client "pulls"), this only validates + inserts a
@@ -41,6 +42,17 @@ interface PushBatchCampaign {
   // Bison's status as the picker read it; only used to refuse "archived" at
   // queue time. Not stored on the batch.
   status?: string;
+}
+
+/** A recent batch of the client, as the double-push guard reads it. */
+interface RecentBatch {
+  id: string;
+  status: string;
+  email_side: string | null;
+  total: number | null;
+  sent: number | null;
+  created_at: string | Date;
+  source: string | null;
 }
 
 interface PushBatchPayload {
@@ -244,20 +256,12 @@ export async function POST(request: NextRequest) {
     //   bucket — which campaign within that workspace, from the campaign NAME
     //            ("JPCA: SEGs" -> seg). A caller-supplied bucket still wins, so
     //            the wizard's explicit choice is never overridden.
-    const b2b = normalizeDomain(String(tagRow.b2b_instance ?? ""));
-    const b2c = normalizeDomain(String(tagRow.b2c_instance ?? ""));
+    // The stamping itself is src/lib/bison/push-stamp.ts, shared with the
+    // share push. No side when the campaign is on neither of this client's
+    // instances: the worker then leaves that campaign open to any lead rather
+    // than silently dropping it.
+    const { b2b, b2c } = stampCampaigns(campaigns, tagRow);
     savedMapping = { group: (tagRow.group_no as number | null) ?? null, b2b, b2c };
-    for (const c of campaigns) {
-      if (!c.bucket) {
-        const guess = suggestBucketFromName(c.name);
-        if (guess) c.bucket = guess;
-      }
-      if (b2b && c.instance_url === b2b) c.side = "b2b";
-      else if (b2c && c.instance_url === b2c) c.side = "b2c";
-      // No side when the campaign is on neither of this client's instances —
-      // the worker then leaves that campaign open to any lead rather than
-      // silently dropping it.
-    }
   }
 
   // FIT GATE (fit scoring, migration 127; shipped OFF). While the gate is on,
@@ -334,16 +338,40 @@ export async function POST(request: NextRequest) {
   // unless the caller explicitly forces — the exact accident that pushed
   // CWSJ-OS twice. Guarded per (client_tag, email_side) since the wizard
   // legitimately queues one batch per side back-to-back.
+  //
+  // Share and top-up pushes (push_options.source "share" or "topup", queued by
+  // the Sharing page's push, migration 134) never clash: they carry no
+  // email_side, like an export popup push, so without this the next popup push
+  // for the client would answer 409 and operators would learn to force it.
+  // They are named in the answer instead (sharePushes, only when there are some).
+  let sharePushes: Array<{ id: string; status: string; created_at: string; total: number | null; source: string }> = [];
   if (clientTag && body.force !== true) {
-    const { data: recent } = await admin
-      .from("push_batches")
-      .select("id, status, email_side, total, sent, created_at")
-      .eq("client_tag", clientTag)
-      .in("status", ["pending", "gathering", "processing", "complete", "scoring"])
-      .gte("created_at", new Date(Date.now() - 24 * 3600 * 1000).toISOString())
-      .order("created_at", { ascending: false })
-      .limit(5);
-    const clash = (recent ?? []).find((b) => (b.email_side ?? null) === (emailSide ?? null));
+    const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+    const recentOf = async (shares: boolean, limit: number) =>
+      (
+        await getPool().query(
+          `select id, status, email_side, total, sent, created_at, push_options->>'source' as source
+             from push_batches
+            where client_tag = $1
+              and status in ('pending', 'gathering', 'processing', 'complete', 'scoring')
+              and created_at >= $2::timestamptz
+              and coalesce(push_options->>'source', '') ${shares ? "in" : "not in"} ('share', 'topup')
+            order by created_at desc
+            limit $3`,
+          [clientTag, since, limit]
+        )
+      ).rows as RecentBatch[];
+    // A failed read finds no clash, as the guard always did (its read's error was never checked).
+    let recent: RecentBatch[] = [];
+    try {
+      recent = await recentOf(false, 5);
+      sharePushes = (await recentOf(true, 10))
+        .filter((b) => isSharePush({ source: b.source }))
+        .map((b) => ({ id: b.id, status: b.status, created_at: new Date(b.created_at).toISOString(), total: b.total, source: b.source as string }));
+    } catch (e) {
+      console.error(`[push-batch] could not read ${clientTag}'s recent pushes: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const clash = recent.find((b) => (b.email_side ?? null) === (emailSide ?? null));
     if (clash) {
       const when = new Date(clash.created_at).toLocaleString();
       return NextResponse.json(
@@ -352,7 +380,8 @@ export async function POST(request: NextRequest) {
             clash.status === "complete"
               ? `A ${clientTag} push already completed ${when} (${clash.sent ?? 0}/${clash.total ?? 0} sent). Queue again anyway?`
               : `A ${clientTag} push is already ${clash.status === "scoring" ? "waiting for fit scoring" : clash.status} (queued ${when}). Queue another anyway?`,
-          duplicateOf: { id: clash.id, status: clash.status, created_at: clash.created_at, total: clash.total, sent: clash.sent },
+          duplicateOf: { id: clash.id, status: clash.status, created_at: new Date(clash.created_at).toISOString(), total: clash.total, sent: clash.sent },
+          ...(sharePushes.length ? { sharePushes } : {}),
         },
         { status: 409 }
       );
@@ -392,15 +421,8 @@ export async function POST(request: NextRequest) {
   // wizard's two pushes disjoint without touching the worker.
   let storedSelectedIds: string[] | null = hasSelectedIds ? selectedIds! : null;
   if (hasSelectedIds && emailSide) {
-    const inOrNot = emailSide === "b2c" ? "in" : "not in";
     try {
-      const { rows } = await getPool().query(
-        `select l.id from leads l
-          where l.id = any($1::uuid[])
-            and split_part(lower(l.email), '@', 2) ${inOrNot} (select domain from freemail_domains)`,
-        [selectedIds]
-      );
-      storedSelectedIds = rows.map((r) => r.id as string);
+      storedSelectedIds = await idsOfSide(getPool(), selectedIds!, emailSide);
     } catch (e) {
       return NextResponse.json(
         { error: `Failed to split selection by email side: ${e instanceof Error ? e.message : String(e)}` },
@@ -500,5 +522,6 @@ export async function POST(request: NextRequest) {
     queued: true,
     ...(startStatus === "scoring" ? { waitsForScoring: true } : {}),
     ...(clientGroupSet ? { clientGroupSet } : {}),
+    ...(sharePushes.length ? { sharePushes } : {}),
   });
 }
