@@ -963,8 +963,24 @@ services deploy from THIS repo. Single replica everywhere.
 | `client-sync` | cron | `0 */6 * * *` | `npm run sync-clients && npm run sync-targeting && npm run coverage-refresh` |
 | `categorize-worker` | cron | `0 3 * * *` | `node scripts/categorize-worker.mjs --keyword-only` |
 | `location-worker` | cron | `*/30 * * * *` | `npm run location-backfill` |
-| `bison-sync` | cron | `0 3 */3 * *` | `npm run sync-bison-leads -- --incremental` |
+| `bison-sync` | cron | `*/30 * * * *` | `npm run bison-sync-cron` (2026-11-20; was `0 3 */3 * *` + `npm run sync-bison-leads -- --incremental`) |
 | `validation-worker` | cron | `17 * * * *` | `npm run validation-worker` (added 2026-09-14) |
+
+**`bison-sync` checks every 30 minutes and usually does nothing** (2026-11-20,
+migration 131). [scripts/bison-sync-cron.mjs](scripts/bison-sync-cron.mjs) runs
+the same incremental sync as before (`sync-bison-leads.mjs --incremental`, as a
+child process) when either the top bar's **Sync now** button left a request in
+`bison_sync_runs`, or no run has started since the regular slot (03:00 UTC on
+days 1, 4, 7 … 31 — the old cron's calendar). Each run is logged there (start,
+heartbeat every minute, finish, rows fetched, new leads, failed shards); a run
+with no heartbeat for 10 minutes is marked failed at the next check; a partial
+unique index allows one `running` row, so two syncs never overlap. The top bar
+(`BisonSyncStatus`, `GET/POST /api/bison/sync`) shows the last run in Pacific
+time. A failed run is not retried automatically — the panel shows it, and Sync
+now re-runs it. `--dry-run` prints the decision only. ⚠ In `--incremental`
+mode a failed shard is only logged and the install's watermark still moves past
+its ids, so later incremental runs never fetch them (a full sync does); the run
+log records such shards as errors.
 
 Also scheduled, but NOT a Railway cron:
 `.github/workflows/daily-dashboard-refresh.yml` POSTs `/api/dashboard/refresh`

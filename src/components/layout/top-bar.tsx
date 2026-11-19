@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "./theme-toggle";
 import { AddLeadModal } from "@/components/leads/add-lead-modal";
+import { BisonSyncStatus } from "./bison-sync-status";
 
 export function TopBar() {
   const [addLeadOpen, setAddLeadOpen] = useState(false);
@@ -40,6 +41,7 @@ export function TopBar() {
         <div id="topbar-slot" className="flex items-center gap-2" />
 
         <div className="ml-auto flex items-center gap-2">
+          <BisonSyncStatus />
           <Button size="sm" onClick={() => setAddLeadOpen(true)}>
             <Plus className="size-4" strokeWidth={2.25} />
             Add lead
