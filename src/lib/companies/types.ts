@@ -158,6 +158,63 @@ export interface PipelineSettings {
    * search people runs.
    */
   linkedin_sources: { enabled: boolean; tags: string[]; people_per_company: number };
+  /** Overlap sharing (migration 134), as settingsFrom reads it. Ships off. */
+  overlap_sharing: OverlapSharingSettings;
+  /** The weekly top-up (migration 135), as settingsFrom reads it. Ships off. */
+  weekly_topup: WeeklyTopupSettings;
+  /** Never-contact inboxes (migration 136): the switch and pace, and whether the Clay filter is loaded. Never the filter itself. */
+  never_contact_inboxes: NeverContactInboxesView;
+}
+
+/**
+ * Overlap sharing (enrich_settings.overlap_sharing, migration 134): the switch
+ * and its client list (as a source and as a receiver), preview or apply, the
+ * sharing pools (a client shares only inside its pool; a type in no pool, or a
+ * tag with an isolated ending, is isolated), the clients whose shares are
+ * pushed into their campaigns with the push caps, and the paced tag writes.
+ * since: the go-live time; set to now when sharing is switched on without one.
+ */
+export interface OverlapSharingSettings {
+  enabled: boolean;
+  tags: string[];
+  mode: "preview" | "apply";
+  pools: Record<string, string[]>;
+  isolated_tag_suffixes: string[];
+  push_tags: string[];
+  push_every_minutes: number;
+  push_max_per_job: number;
+  push_max_per_day: number;
+  held_retry_days: number;
+  write_tags: boolean;
+  tag_rows_per_day: number;
+  since: string | null;
+  wait_location_minutes: number;
+  recheck_days: number;
+}
+
+/** The weekly top-up (enrich_settings.weekly_topup, migration 135): the flag pass, the default minimum, the pulls and their budget. */
+export interface WeeklyTopupSettings {
+  enabled: boolean;
+  client_types: string[];
+  default_minimum: number;
+  pull_mode: "off" | "prepare" | "auto";
+  pull_tags: string[];
+  weekly_credits: number;
+  client_weekly_credits: number;
+  max_pull_size: number;
+  pulls_per_day: number;
+}
+
+/** The part of never_contact_inboxes the settings sheet edits. The filter is written only by the seed. */
+export interface NeverContactInboxesInput {
+  enabled: boolean;
+  rows_per_day: number;
+  chunk_rows: number;
+}
+
+/** never_contact_inboxes as the sheet shows it: the filter as loaded or not, its source, read time and the first 12 of its sha256. */
+export interface NeverContactInboxesView extends NeverContactInboxesInput {
+  filter: { loaded: boolean; source: string | null; read_at: string | null; sha12: string | null };
 }
 
 /** The settings as stored, and their version (sent back with a save). */
@@ -207,6 +264,12 @@ export interface SettingsInput {
   models: Record<ModelStep, { model: string; reasoning_effort: Effort | null; max_searches: number | null }>;
   /** Optional: left out, what is stored is kept. */
   linkedin_sources?: PipelineSettings["linkedin_sources"];
+  /** Optional: left out, what is stored is kept. */
+  overlap_sharing?: OverlapSharingSettings;
+  /** Optional: left out, what is stored is kept. */
+  weekly_topup?: WeeklyTopupSettings;
+  /** Optional: left out, what is stored is kept; the filter keys are always kept as stored. */
+  never_contact_inboxes?: NeverContactInboxesInput;
 }
 
 // ── Runs, worker and counts ─────────────────────────────────────────────────

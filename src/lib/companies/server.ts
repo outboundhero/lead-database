@@ -2,7 +2,15 @@ import type { PoolClient } from "pg";
 import { buildCompanyRequests } from "../../../scripts/lib/aiark/company-filters.mjs";
 import { standardFor } from "../../../scripts/lib/aiark/standard-filters.mjs";
 import { bareDomain } from "../../../scripts/lib/enrich/domain.mjs";
-import { cleanVendorCaps, MODEL_ID, normTag, settingsFrom } from "../../../scripts/lib/enrich/settings.mjs";
+import {
+  cleanNeverContactInboxes,
+  cleanOverlapSharing,
+  cleanVendorCaps,
+  cleanWeeklyTopup,
+  MODEL_ID,
+  normTag,
+  settingsFrom,
+} from "../../../scripts/lib/enrich/settings.mjs";
 import { geo, modes, peopleOrDefaults } from "@/lib/aiark/server";
 import type { RowStatus, WorkerState } from "@/lib/enrich/types";
 import { contactsFor } from "./people";
@@ -26,11 +34,14 @@ import {
   type ListSort,
   type ModelSetting,
   type ModelStep,
+  type NeverContactInboxesInput,
+  type OverlapSharingSettings,
   type PipelineSettings,
   type PipelineView,
   type SettingsInput,
   type SettingsState,
   type VendorCalls,
+  type WeeklyTopupSettings,
 } from "./types";
 
 export {
@@ -123,8 +134,15 @@ export function companyPlanView(...args: Parameters<typeof companyPlan>): Compan
 
 // ── Settings (enrich_settings) ──────────────────────────────────────────────
 
-/** The settings rows this tab reads and its sheet edits (linkedin_sources: migration 128). */
-const SETTING_KEYS = ["company_pipeline", "people_pipeline", "personalisation", "spend_caps", "models", "linkedin_sources"];
+/**
+ * The settings rows this tab reads and its sheet edits (linkedin_sources:
+ * migration 128; overlap_sharing, weekly_topup, never_contact_inboxes:
+ * migrations 134 to 136).
+ */
+const SETTING_KEYS = [
+  "company_pipeline", "people_pipeline", "personalisation", "spend_caps", "models", "linkedin_sources",
+  "overlap_sharing", "weekly_topup", "never_contact_inboxes",
+];
 /** aiark_company_runs.size_requested takes at most 10,000. */
 export const PULL_SIZE_LIMIT = 10_000;
 const MAX_SEARCHES = 5;
@@ -158,6 +176,26 @@ export function normalizeSettings(rows: { key: string; value: unknown }[]): Pipe
     spend_caps: s.spend_caps as PipelineSettings["spend_caps"],
     models: s.models as PipelineSettings["models"],
     linkedin_sources: { enabled: s.linkedin_sources.enabled, tags: [...s.linkedin_sources.tags], people_per_company: s.linkedin_sources.people_per_company },
+    overlap_sharing: {
+      ...s.overlap_sharing,
+      tags: [...s.overlap_sharing.tags],
+      pools: Object.fromEntries(Object.entries(s.overlap_sharing.pools).map(([k, v]) => [k, [...(v as string[])]])),
+      isolated_tag_suffixes: [...s.overlap_sharing.isolated_tag_suffixes],
+      push_tags: [...s.overlap_sharing.push_tags],
+    },
+    weekly_topup: { ...s.weekly_topup, client_types: [...s.weekly_topup.client_types], pull_tags: [...s.weekly_topup.pull_tags] },
+    // The filter itself never leaves the server: only whether it is loaded, where it was read and the first 12 of its sha256.
+    never_contact_inboxes: {
+      enabled: s.never_contact_inboxes.enabled,
+      rows_per_day: s.never_contact_inboxes.rows_per_day,
+      chunk_rows: s.never_contact_inboxes.chunk_rows,
+      filter: {
+        loaded: s.never_contact_inboxes.pattern !== null,
+        source: s.never_contact_inboxes.source,
+        read_at: s.never_contact_inboxes.read_at,
+        sha12: s.never_contact_inboxes.sha256 ? s.never_contact_inboxes.sha256.slice(0, 12) : null,
+      },
+    },
   };
 }
 
@@ -238,6 +276,10 @@ type SettingsRows = {
   models: Record<string, unknown>;
   /** Only when the sheet sent it: left out, the stored row is kept as it is. */
   linkedin_sources?: Record<string, unknown>;
+  /** The three below: only when the sheet sent them and they change. */
+  overlap_sharing?: Record<string, unknown>;
+  weekly_topup?: Record<string, unknown>;
+  never_contact_inboxes?: Record<string, unknown>;
 };
 /** LinkedIn people runs: the most people bought at one company (D-P4-6), as settingsFrom reads it. */
 const PEOPLE_PER_COMPANY_MAX = 100;
@@ -338,6 +380,28 @@ export function cleanSettingsInput(
       };
     }
   }
+  // Overlap sharing, the weekly top-up and never-contact inboxes (134 to 136):
+  // each optional, checked by settings.mjs (cleanOverlapSharing,
+  // cleanWeeklyTopup, cleanNeverContactInboxes), merged over the stored row.
+  let sharing: OverlapSharingSettings | null = null;
+  if (body.overlap_sharing !== undefined) {
+    const v = cleanOverlapSharing(body.overlap_sharing, { previous: current.overlap_sharing });
+    if (v.value) sharing = v.value as OverlapSharingSettings;
+    else errors.push(...v.errors);
+  }
+  let topup: WeeklyTopupSettings | null = null;
+  if (body.weekly_topup !== undefined) {
+    const v = cleanWeeklyTopup(body.weekly_topup);
+    if (v.value) topup = v.value as WeeklyTopupSettings;
+    else errors.push(...v.errors);
+  }
+  let inboxes: NeverContactInboxesInput | null = null;
+  if (body.never_contact_inboxes !== undefined) {
+    // Checked against the row as stored: it can be switched on only while the filter is loaded.
+    const v = cleanNeverContactInboxes(body.never_contact_inboxes, stored.never_contact_inboxes ?? null);
+    if (v.value) inboxes = v.value;
+    else errors.push(...v.errors);
+  }
   if (errors.length) return { value: null, errors, changes: [] };
 
   const changes: string[] = [];
@@ -382,6 +446,55 @@ export function cleanSettingsInput(
     diff("LinkedIn searches' clients", l0.tags, linkedin.tags, listText);
     diff("people a company (LinkedIn)", l0.people_per_company, linkedin.people_per_company);
   }
+  // The three rows below are written only when they change (a save of the
+  // sheet that leaves them alone writes nothing to them).
+  const before = changes.length;
+  const listOf = (v: string[]) => (v.length ? v.join(", ") : "none");
+  const poolsText = (p: Record<string, string[]>) => Object.entries(p).map(([k, v]) => `${k} (${v.join(", ")})`).join("; ") || "none";
+  let sharingChanged = false;
+  if (sharing) {
+    const o0 = current.overlap_sharing;
+    diff("overlap sharing", o0.enabled, sharing.enabled, said);
+    diff("sharing's clients", o0.tags, sharing.tags, listText);
+    diff("sharing mode", o0.mode, sharing.mode);
+    diff("sharing pools", o0.pools, sharing.pools, poolsText);
+    diff("isolated tag endings", o0.isolated_tag_suffixes, sharing.isolated_tag_suffixes, listOf);
+    diff("shares pushed automatically for", o0.push_tags, sharing.push_tags, listText);
+    diff("minutes between a client's share pushes", o0.push_every_minutes, sharing.push_every_minutes, fmt);
+    diff("most shares pushed from one import", o0.push_max_per_job, sharing.push_max_per_job, fmt);
+    diff("most shares pushed a day", o0.push_max_per_day, sharing.push_max_per_day, fmt);
+    diff("days a held share is tried again", o0.held_retry_days, sharing.held_retry_days);
+    diff("writing tags on shared leads", o0.write_tags, sharing.write_tags, said);
+    diff("tags written a day", o0.tag_rows_per_day, sharing.tag_rows_per_day, fmt);
+    diff("sharing's go-live time", o0.since, sharing.since, (v: string | null) => v ?? "none");
+    diff("minutes a share waits for places", o0.wait_location_minutes, sharing.wait_location_minutes, fmt);
+    diff("days leads with no usable place are looked at again", o0.recheck_days, sharing.recheck_days);
+    sharingChanged = changes.length > before;
+  }
+  const beforeTopup = changes.length;
+  let topupChanged = false;
+  if (topup) {
+    const t0 = current.weekly_topup;
+    diff("weekly top-up", t0.enabled, topup.enabled, said);
+    diff("top-up client types", t0.client_types, topup.client_types, listOf);
+    diff("default minimum of good leads a place", t0.default_minimum, topup.default_minimum, fmt);
+    diff("top-up pulls", t0.pull_mode, topup.pull_mode);
+    diff("top-up pulls' clients", t0.pull_tags, topup.pull_tags, listText);
+    diff("AI Ark credits a week for top-up pulls", t0.weekly_credits, topup.weekly_credits, fmt);
+    diff("AI Ark credits a week for one client's top-up pulls", t0.client_weekly_credits, topup.client_weekly_credits, fmt);
+    diff("largest top-up pull", t0.max_pull_size, topup.max_pull_size, fmt);
+    diff("new top-up pulls a day", t0.pulls_per_day, topup.pulls_per_day);
+    topupChanged = changes.length > beforeTopup;
+  }
+  const beforeInboxes = changes.length;
+  let inboxesChanged = false;
+  if (inboxes) {
+    const n0 = current.never_contact_inboxes;
+    diff("never-contact inboxes", n0.enabled, inboxes.enabled, said);
+    diff("general inboxes marked never contact a day", n0.rows_per_day, inboxes.rows_per_day, fmt);
+    diff("general inboxes marked in one step", n0.chunk_rows, inboxes.chunk_rows, fmt);
+    inboxesChanged = changes.length > beforeInboxes;
+  }
 
   const storedModels = obj(stored.models);
   const models: Record<string, unknown> = { ...storedModels };
@@ -414,6 +527,10 @@ export function cleanSettingsInput(
       },
       models,
       ...(linkedin ? { linkedin_sources: { ...obj(stored.linkedin_sources), ...linkedin } } : {}),
+      ...(sharing && sharingChanged ? { overlap_sharing: { ...obj(stored.overlap_sharing), ...sharing } } : {}),
+      ...(topup && topupChanged ? { weekly_topup: { ...obj(stored.weekly_topup), ...topup } } : {}),
+      // The filter keys (pattern, source, sha256, read_at) stay as the seed wrote them.
+      ...(inboxes && inboxesChanged ? { never_contact_inboxes: { ...obj(stored.never_contact_inboxes), ...inboxes } } : {}),
     },
     errors,
     changes,
@@ -455,6 +572,19 @@ export function settingsInputOf(v: PipelineSettings): SettingsInput {
     },
     models,
     linkedin_sources: { ...v.linkedin_sources, tags: [...v.linkedin_sources.tags] },
+    overlap_sharing: {
+      ...v.overlap_sharing,
+      tags: [...v.overlap_sharing.tags],
+      pools: Object.fromEntries(Object.entries(v.overlap_sharing.pools).map(([k, t]) => [k, [...t]])),
+      isolated_tag_suffixes: [...v.overlap_sharing.isolated_tag_suffixes],
+      push_tags: [...v.overlap_sharing.push_tags],
+    },
+    weekly_topup: { ...v.weekly_topup, client_types: [...v.weekly_topup.client_types], pull_tags: [...v.weekly_topup.pull_tags] },
+    never_contact_inboxes: {
+      enabled: v.never_contact_inboxes.enabled,
+      rows_per_day: v.never_contact_inboxes.rows_per_day,
+      chunk_rows: v.never_contact_inboxes.chunk_rows,
+    },
   };
 }
 
