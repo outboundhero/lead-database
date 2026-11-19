@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getPool } from "@/lib/db/pool";
+import { cleanMinimum, coverageSettings } from "../../../../../scripts/lib/coverage.mjs";
 
 // Per-client-tag targeting rules (client spec req 14-16). Location entries are
 // {country, state?, city?}; each is validated against the geo reference before
@@ -27,6 +28,10 @@ export interface TargetingConfig {
   allow_inferred_location: boolean;
   commercial_cleaning: boolean;
   notes: string | null;
+  // The client's minimum of good leads a place (migration 135); null means the
+  // weekly top-up's default (weekly_topup.default_minimum). The sheet sync
+  // never writes it.
+  min_leads_per_place?: number | null;
   // Sheet-sync provenance (read-only here; written by sync-targeting).
   source?: "manual" | "sheet";
   sheet_synced_at?: string | null;
@@ -49,7 +54,9 @@ export async function GET(request: NextRequest) {
     // exclusions the way that client type expects, rather than always to off.
     const { data: tagRow } = await admin
       .from("client_tags").select("client_type").eq("tag", tag).maybeSingle();
-    return NextResponse.json({ targeting: data, client_type: tagRow?.client_type ?? null });
+    // The minimum that applies while the client's own is empty, for the dialog's placeholder.
+    const { defaultMinimum } = await coverageSettings(getPool());
+    return NextResponse.json({ targeting: data, client_type: tagRow?.client_type ?? null, default_min_leads_per_place: defaultMinimum });
   }
   const { data, error } = await admin.from("client_targeting").select("*");
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -149,6 +156,9 @@ export async function PUT(request: NextRequest) {
   }
   const countries = (Array.isArray(body.countries) ? body.countries : ["US"])
     .map((c) => String(c).trim().toUpperCase()).filter(Boolean);
+  // Sent: a whole number from 1 to 100,000, or empty for the default. Left out: kept as stored.
+  const minimum = "min_leads_per_place" in body ? cleanMinimum(body.min_leads_per_place) : null;
+  if (minimum?.error) return NextResponse.json({ error: minimum.error }, { status: 400 });
 
   // source/sheet_raw/sheet_synced_at are deliberately NOT written here, so
   // sheet-sync provenance survives manual saves.
@@ -165,6 +175,7 @@ export async function PUT(request: NextRequest) {
     allow_inferred_location: body.allow_inferred_location !== false,
     commercial_cleaning: !!body.commercial_cleaning,
     notes: typeof body.notes === "string" ? body.notes : null,
+    ...(minimum ? { min_leads_per_place: minimum.value } : {}),
     updated_at: new Date().toISOString(),
   });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
