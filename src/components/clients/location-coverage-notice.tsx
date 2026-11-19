@@ -28,11 +28,14 @@ export interface CoverageRow {
 
 export interface LocationCoverage {
   tag: string;
+  /** The client's own minimum of good leads a place (Rules dialog), else the default. */
   threshold: number;
   hasTargeting: boolean;
   totalAvailable: number | null;
   locations: CoverageRow[];
   low: CoverageRow[];
+  /** Set when general inboxes on the Clay General inboxes filter were left out of the counts. */
+  generalInboxFilter?: string | null;
 }
 
 export function LocationCoverageNotice({
@@ -128,6 +131,11 @@ export function LocationCoverageNotice({
                     <> {coverage.totalAvailable.toLocaleString()} available in total.</>
                   )}
                 </p>
+                {coverage.generalInboxFilter && (
+                  <p className="mt-1 text-[12px] text-muted-foreground">
+                    General inboxes on the Clay General inboxes filter are not counted.
+                  </p>
+                )}
               </div>
               <button type="button" onClick={() => setOpen(false)} className="rounded-full p-1 hover:bg-muted" aria-label="Close">
                 <X className="size-4" />

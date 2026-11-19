@@ -5,6 +5,7 @@ import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { TagInput } from "@/components/ui/ios/tag-input";
 import { IosToggle } from "@/components/ui/ios/ios-toggle";
 import { toast } from "sonner";
@@ -67,6 +68,9 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
   const [allowInferred, setAllowInferred] = useState(true);
   const [commercialCleaning, setCommercialCleaning] = useState(false);
   const [sheetSyncedAt, setSheetSyncedAt] = useState<string | null>(null);
+  // The client's minimum of good leads a place; empty means the default (weekly top-up, 500).
+  const [minimum, setMinimum] = useState("");
+  const [defaultMinimum, setDefaultMinimum] = useState<number | null>(null);
 
   useEffect(() => {
     if (!tag) return;
@@ -79,6 +83,8 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
         // default (client rule 2026-08-25) — every existing cleaning client was
         // backfilled to match, so a brand-new one must not start out different.
         const isCleaning = d.client_type === "Cleaning";
+        setDefaultMinimum(typeof d.default_min_leads_per_place === "number" ? d.default_min_leads_per_place : null);
+        setMinimum(t && typeof t.min_leads_per_place === "number" ? String(t.min_leads_per_place) : "");
         if (!t) { // fresh config defaults
           setCountries(["US"]); setInclude([]); setExclude([]);
           setExcludeTerms([]); setIncludeTerms([]);
@@ -110,6 +116,12 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
 
   async function save() {
     if (!tag) return;
+    const min = minimum.trim();
+    const minValue = min === "" ? null : Number(min);
+    if (minValue !== null && !(Number.isInteger(minValue) && minValue >= 1 && minValue <= 100_000)) {
+      toast.error("The minimum of good leads a place must be a whole number from 1 to 100,000, or empty for the default.");
+      return;
+    }
     setSaving(true);
     try {
       const res = await fetch("/api/clients/targeting", {
@@ -125,6 +137,7 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
           require_location: requireLocation,
           allow_inferred_location: allowInferred,
           commercial_cleaning: commercialCleaning,
+          min_leads_per_place: minValue,
         }),
       });
       const data = await res.json();
@@ -217,6 +230,25 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
               <p className="mt-1 px-1 text-[10px] text-muted-foreground">
                 Optional and empty by default. These never block anyone — they only pre-fill the
                 Category filter when you pick this client on the Leads page.
+              </p>
+            </div>
+
+            <div>
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Minimum good leads a place</p>
+              <Input
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={100000}
+                step={1}
+                value={minimum}
+                placeholder={defaultMinimum != null ? `Default (${defaultMinimum.toLocaleString("en-US")})` : "Default"}
+                onChange={(e) => setMinimum(e.target.value)}
+                className="h-9 w-48 text-[13px]"
+              />
+              <p className="mt-1 px-1 text-[12px] text-muted-foreground">
+                A place with fewer good leads than this shows as low on the Leads page and in the weekly top-up.
+                Empty uses the default. The sheet sync never changes it.
               </p>
             </div>
 

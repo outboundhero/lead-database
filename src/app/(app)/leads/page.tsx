@@ -366,11 +366,13 @@ export default function LeadsPage() {
       // Per-location coverage: which of the client's PREFERRED areas are short
       // of leads. Fetched in the background and never awaited — it is a grouped
       // scan of the client's eligible set (13-30s measured), so blocking the
-      // client switch on it would freeze the page.
+      // client switch on it would freeze the page. No threshold is sent: each
+      // place is measured against the client's own minimum (Rules dialog),
+      // else the default, and the answer says which number it used.
       setCoverage(null);
       setCoverageLoading(true);
       setCoverageError(null);
-      fetch(`/api/clients/location-coverage?tag=${encodeURIComponent(tag)}&threshold=500`)
+      fetch(`/api/clients/location-coverage?tag=${encodeURIComponent(tag)}`)
         .then(async (r) => {
           const d = await r.json().catch(() => null);
           if (!r.ok || d?.error) throw new Error(d?.error ?? `HTTP ${r.status}`);
@@ -997,7 +999,8 @@ export default function LeadsPage() {
           setCoverageError(null);
           const tag = coverage?.tag ?? filters.clientTag;
           if (!tag) { setCoverageLoading(false); return; }
-          fetch(`/api/clients/location-coverage?tag=${encodeURIComponent(tag)}&threshold=${coverage?.threshold ?? 500}&fresh=1`)
+          // Recheck at the client's current minimum (it may have changed since the stored row).
+          fetch(`/api/clients/location-coverage?tag=${encodeURIComponent(tag)}&fresh=1`)
             .then(async (r) => {
               const d = await r.json().catch(() => null);
               if (!r.ok || d?.error) throw new Error(d?.error ?? `HTTP ${r.status}`);

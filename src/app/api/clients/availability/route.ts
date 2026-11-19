@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getPool } from "@/lib/db/pool";
+import { coverageSettings } from "../../../../../scripts/lib/coverage.mjs";
+import { generalInboxExclusionSql } from "../../../../../scripts/lib/overlap-topup.mjs";
 
 // GET /api/clients/availability?tag=X[&fresh=1]
 //
@@ -32,6 +34,11 @@ import { getPool } from "@/lib/db/pool";
 // A client with no coverage row (no location targeting) gets available: null
 // and the page shows no popup: an unbounded live count for such a client is
 // exactly the full-table scan this change removes.
+//
+// General inboxes the Clay General inboxes filter matches are not available
+// leads (client answer 2026-11-20): the stored total leaves them out
+// (scripts/lib/coverage.mjs), and so does the live count, once the filter is
+// loaded.
 
 const ELIGIBLE =
   "l.email is not null and l.email <> '' and l.is_bounced = false " +
@@ -75,6 +82,8 @@ export async function GET(request: NextRequest) {
     let computedAt: string | null = null;
 
     if (fresh) {
+      // Read before the transaction: a settings read that fails must not abort it.
+      const { pattern } = await coverageSettings(getPool());
       const client = await getPool().connect();
       try {
         await client.query("begin");
@@ -85,9 +94,10 @@ export async function GET(request: NextRequest) {
         const notPushed = `not exists (
           select 1 from push_items pi join push_batches pb on pb.id = pi.batch_id
           where pb.client_tag = $1 and pi.lead_id = l.id and pi.status = 'sent')`;
-        const where = [ELIGIBLE, ...conds, notPushed].join(" and ");
+        const notFiltered = pattern ? generalInboxExclusionSql("l", "$2") : null;
+        const where = [ELIGIBLE, ...conds, notPushed, notFiltered].filter(Boolean).join(" and ");
         const { rows } = await client.query(
-          `select count(*)::bigint as n from leads l where ${where}`, [tag]);
+          `select count(*)::bigint as n from leads l where ${where}`, pattern ? [tag, pattern] : [tag]);
         await client.query("commit");
         available = Number(rows[0]?.n ?? 0);
         basis = "live";
