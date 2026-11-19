@@ -12,7 +12,28 @@ import { toast } from "sonner";
 import { useHasPermission } from "@/lib/context/role-context";
 import { ClientTargetingDialog } from "@/components/clients/client-targeting-dialog";
 import { RulesSyncProvider, RulesSyncButton, RulesSyncPanel } from "@/components/clients/rules-sync-panel";
+import { ChurnLine, GroupsTabMark, ReceiveCell } from "@/components/clients/receive-cells";
+import { ReceiveNotice } from "@/components/clients/receive-notice";
 import type { ClientRow } from "@/app/api/clients/route";
+
+/** What a sync's answer says about the Groups tab's churn cells (scripts/lib/bison-groups.mjs churnReport). */
+type GroupsTabAnswer = {
+  read: boolean;
+  unreadable: Array<{ tag: string; cell: string | null }>;
+  duplicates: string[];
+} | null | undefined;
+
+/** Toasts for a sync's Groups tab answer: cells that block a client, tags listed twice, and what was not recorded. */
+function groupsTabToasts(groupsTab: GroupsTabAnswer, warnings: string[] | undefined) {
+  for (const w of warnings ?? []) toast.warning(w, { duration: 8000 });
+  if (groupsTab?.read && groupsTab.unreadable.length) {
+    const cells = groupsTab.unreadable.map((u) => `${u.tag} "${u.cell ?? ""}"`).join(", ");
+    toast.warning(`Churn cells the sync cannot read (these clients cannot receive until fixed): ${cells}`, { duration: 10000 });
+  }
+  if (groupsTab?.duplicates.length) {
+    toast.warning(`Listed twice on the Groups tab: ${groupsTab.duplicates.join(", ")}. The first group and the earliest churn date count.`, { duration: 10000 });
+  }
+}
 
 type Filter = "all" | "active" | "churned" | "mapped" | "unmapped";
 
@@ -21,6 +42,9 @@ export default function ClientsPage() {
   const canRefresh = useHasPermission("manager");
   const [clients, setClients] = useState<ClientRow[]>([]);
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
+  const [groupsTabReadAt, setGroupsTabReadAt] = useState<string | null>(null);
+  const [missingFromTab, setMissingFromTab] = useState<string[]>([]);
+  const [receiveRule, setReceiveRule] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [syncingGroups, setSyncingGroups] = useState(false);
@@ -37,6 +61,9 @@ export default function ClientsPage() {
       if (!res.ok) throw new Error(data.error ?? "Failed to load clients");
       setClients(data.clients ?? []);
       setRefreshedAt(data.refreshedAt ?? null);
+      setGroupsTabReadAt(data.groupsTabReadAt ?? null);
+      setMissingFromTab(data.missingFromTab ?? []);
+      setReceiveRule(data.receiveRule === true);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to load clients");
     } finally {
@@ -64,7 +91,8 @@ export default function ClientsPage() {
 
   // On-demand Bison group re-sync from the tracker's "Groups" tab. Clients get
   // moved between groups there, but client_tags otherwise only catches up on the
-  // 6-hourly cron. Groups only — never touches names, statuses, or the roster.
+  // 6-hourly cron. Groups and the tab's churn dates only: it never touches names,
+  // statuses, or the roster.
   async function syncGroups() {
     setSyncingGroups(true);
     const id = toast.loading("Reading the Groups sheet…");
@@ -84,6 +112,7 @@ export default function ClientsPage() {
         parts.length ? `Groups synced — ${parts.join(" · ")}` : "Groups synced — nothing changed",
         { id, duration: parts.length ? 8000 : 4000 }
       );
+      groupsTabToasts(data.groupsTab, data.warnings);
       await load();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Group sync failed", { id });
@@ -110,7 +139,7 @@ export default function ClientsPage() {
         parts.length ? `Synced ${data.total} clients — ${parts.join(" · ")}` : `Synced ${data.total} clients — nothing changed`,
         { id, duration: parts.length ? 8000 : 4000 }
       );
-      for (const w of data.warnings ?? []) toast.warning(w, { duration: 8000 });
+      groupsTabToasts(data.groupsTab, data.warnings);
       await load();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Sheet sync failed", { id });
@@ -131,6 +160,7 @@ export default function ClientsPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Update failed");
+      load(); // the status decides whether the client can receive: read the reason again
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Update failed");
       load(); // revert to server truth
@@ -160,7 +190,7 @@ export default function ClientsPage() {
 
   return (
     <RulesSyncProvider>
-    <div className="max-w-6xl space-y-5">
+    <div className="max-w-7xl space-y-5">
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-[28px] font-semibold tracking-tight">Clients</h1>
@@ -168,17 +198,20 @@ export default function ClientsPage() {
             Per-client data breakdown, health, and Bison routing. {totals.clients} clients · {totals.active} active ·{" "}
             {totals.leads.toLocaleString()} tagged leads
             {refreshedAt && <> · stats {new Date(refreshedAt).toLocaleString()}</>}
+            {receiveRule && (groupsTabReadAt
+              ? <> · Groups tab read {new Date(groupsTabReadAt).toLocaleString()}</>
+              : <> · Groups tab not read yet</>)}
           </p>
         </div>
         {canRefresh && (
           <div className="flex shrink-0 gap-2">
             <Button variant="outline" size="sm" onClick={syncSheet} disabled={syncingSheet || syncingGroups || refreshing} className="gap-2"
-              title="Runs the full client sync from the sheets right now (same as the 6-hourly cron): new clients, names, active/churned statuses, client types, and group mappings.">
+              title="Runs the full client sync from the sheets right now (same as the 6-hourly cron): new clients, names, active/churned statuses, client types, group mappings, and churn dates from the Groups tab.">
               <RefreshCw className={`h-4 w-4 ${syncingSheet ? "animate-spin" : ""}`} />
               {syncingSheet ? "Syncing…" : "Sync with sheet"}
             </Button>
             <Button variant="outline" size="sm" onClick={syncGroups} disabled={syncingSheet || syncingGroups || refreshing} className="gap-2"
-              title="Re-reads the Groups tab of the Client Tracker sheet and applies Bison group changes now, instead of waiting for the 6-hourly sync. Groups only — never changes names, statuses, or which clients exist, and never removes an existing mapping.">
+              title="Re-reads the Groups tab of the Client Tracker sheet and applies Bison group changes and churn dates now, instead of waiting for the 6-hourly sync. It never changes names, statuses, or which clients exist, and never removes an existing mapping.">
               <Users className={`h-4 w-4 ${syncingGroups ? "animate-pulse" : ""}`} />
               {syncingGroups ? "Syncing…" : "Sync groups"}
             </Button>
@@ -195,6 +228,9 @@ export default function ClientsPage() {
       {/* Live progress for an in-flight rules sync. Runs server-side, so it
           survives a closed tab; dismissing a finished one is permanent. */}
       <RulesSyncPanel />
+
+      {/* Active clients the Groups tab does not list get no shared leads or top-up pulls (migration 132). */}
+      <ReceiveNotice receiveRule={receiveRule} groupsTabReadAt={groupsTabReadAt} missingFromTab={missingFromTab} />
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative">
@@ -226,14 +262,21 @@ export default function ClientsPage() {
               <TableHead className="text-right text-xs">B2B / B2C</TableHead>
               <TableHead className="text-xs">Routing</TableHead>
               <TableHead className="text-xs">Targeting</TableHead>
+              {receiveRule && <TableHead className="text-xs">Sharing</TableHead>}
+              <TableHead className="text-right text-xs" title="Low and unknown places in the latest weekly top-up pass; a - when no finished pass covers this client.">
+                Low places
+              </TableHead>
+              <TableHead className="text-right text-xs" title="Leads shared to this client from other clients' imports in the last 7 days (applied, not undone).">
+                Shared in, last 7 days
+              </TableHead>
               <TableHead className="text-xs">Status</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow><TableCell colSpan={9} className="py-8 text-center text-xs text-muted-foreground">Loading…</TableCell></TableRow>
+              <TableRow><TableCell colSpan={receiveRule ? 12 : 11} className="py-8 text-center text-xs text-muted-foreground">Loading…</TableCell></TableRow>
             ) : filtered.length === 0 ? (
-              <TableRow><TableCell colSpan={9} className="py-8 text-center text-xs text-muted-foreground">No clients match.</TableCell></TableRow>
+              <TableRow><TableCell colSpan={receiveRule ? 12 : 11} className="py-8 text-center text-xs text-muted-foreground">No clients match.</TableCell></TableRow>
             ) : filtered.map((c) => {
               const pct = c.leads > 0 ? Math.round((c.categorized / c.leads) * 100) : 0;
               return (
@@ -256,6 +299,7 @@ export default function ClientsPage() {
                     {c.sendable
                       ? <Badge variant="secondary" className="text-[10px]">grp {c.group_no ?? "?"}</Badge>
                       : <Badge variant="outline" className="text-[10px] text-muted-foreground">unmapped</Badge>}
+                    {receiveRule && <GroupsTabMark c={c} />}
                   </TableCell>
                   <TableCell className="text-xs">
                     <Button
@@ -266,6 +310,19 @@ export default function ClientsPage() {
                     >
                       Rules
                     </Button>
+                  </TableCell>
+                  {receiveRule && (
+                    <TableCell className="text-xs">
+                      <ReceiveCell c={c} />
+                    </TableCell>
+                  )}
+                  <TableCell className="text-right text-xs tabular-nums">
+                    {c.low_places === null
+                      ? <span className="text-muted-foreground" title="No finished top-up pass covers this client.">-</span>
+                      : <span className={c.low_places > 0 ? "font-medium text-[var(--warning)]" : "text-muted-foreground"}>{c.low_places.toLocaleString()}</span>}
+                  </TableCell>
+                  <TableCell className="text-right text-xs tabular-nums">
+                    <span className={c.shared_7d > 0 ? "font-medium" : "text-muted-foreground"}>{c.shared_7d.toLocaleString()}</span>
                   </TableCell>
                   <TableCell className="text-xs">
                     {canEdit ? (
@@ -285,6 +342,7 @@ export default function ClientsPage() {
                         {c.churned ? "Churned" : "Active"}
                       </Badge>
                     )}
+                    {receiveRule && <ChurnLine c={c} />}
                   </TableCell>
                 </TableRow>
               );
