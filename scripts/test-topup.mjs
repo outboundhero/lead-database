@@ -410,6 +410,24 @@ async function partS(routes) {
   check("places that are not a list: refused", (await call(routes.runs.POST, {
     body: { tag: C, mode: "demo", strategy: "single", size: 10, matchCount: 1, ...(await versions(C)), places: "Peoria" },
   })).status === 400);
+
+  section("S4. A pull with neither: as before");
+  const plainCount = await call(routes.count.POST, { body: { tag: C, mode: "demo" } });
+  check("a count with no place list or pull: every place, 1 credit a search", plainCount.status === 200 && plainCount.body.credits >= 1, JSON.stringify(plainCount.body));
+  const noCount = await call(routes.runs.POST, { body: { tag: C, mode: "demo", strategy: "single", size: 10, ...(await versions(C)) } });
+  check("no count first: refused", noCount.status === 400 && /Count the matches first/.test(noCount.body.error));
+  const stale = await call(routes.runs.POST, {
+    body: { tag: C, mode: "demo", strategy: "single", size: 10, matchCount: 1, ...(await versions(C)), rulesVersion: "2000-01-01 00:00:00+00" },
+  });
+  check("rules changed since the page loaded them: refused with changed", stale.status === 409 && stale.body.changed === true && /changed since/.test(stale.body.error));
+  const plain = await call(routes.runs.POST, { body: { tag: C, mode: "demo", strategy: "single", size: 10, matchCount: 1, ...(await versions(C)) } });
+  const pr = plain.status === 201 ? await runOf(plain.body.run.id) : null;
+  check("a plain pull starts as before: no place list, no top-up mark, the run's people and rules recorded",
+    plain.status === 201 && pr && !("places" in pr.filters) && !isTopupRunFilters(pr.filters) && Array.isArray(pr.filters.people?.titles) &&
+      pr.filters.targeting_updated_at && R.audits.some((x) => x.action === "aiark_run" && x.details.includes(plain.body.run.id)), JSON.stringify(plain.body));
+  const busy = await call(routes.runs.POST, { body: { tag: C, mode: "demo", strategy: "single", size: 10, matchCount: 1, ...(await versions(C)) } });
+  check("one run per client: a second is refused", busy.status === 409 && busy.body.code === "run_active" && /already has a run going/.test(busy.body.error));
+  await pool.query(`UPDATE aiark_runs SET status = 'cancelled', finished_at = now() WHERE id = $1`, [pr?.id]);
 }
 
 // ── B. The budget ───────────────────────────────────────────────────────────
