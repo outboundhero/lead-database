@@ -35,6 +35,13 @@ import { LEAD_FIELDS, BLANKISH_VALUES, isBlankish } from "./constants";
 // A chunk that fails on a DATA error (SQLSTATE 22xxx/23xxx) is bisected so a
 // bad row costs ≤ 100 neighbours, not 2,000; anything else (deadlock, timeout,
 // dropped connection, pool wait) is retried and then given up as one block.
+//
+// The lead list (migration 133, overlap sharing): while overlap_sharing is
+// switched on, each chunk also lists the leads it inserted (outcome new) and
+// the ones it changed (outcome updated) in upload_batch_leads, in the same
+// transaction, from the ids its statements already return. The switch and the
+// table are read once per import; any error in that read means no list, so an
+// upload never fails over it. A dry run rolls the list back with the rest.
 
 export interface ImportConfig {
   batchId: string;
@@ -277,6 +284,23 @@ export async function prepareRows(
   return { prepared, holdbacks, extras, counters: { no_email, in_file_duplicates } };
 }
 
+/**
+ * Whether this import lists its leads in upload_batch_leads (migration 133):
+ * only while the table exists and overlap_sharing.enabled is true. Read once
+ * per import, before the chunks; any error reads as no list.
+ */
+export async function leadListOn(pool: Pool): Promise<boolean> {
+  try {
+    const { rows } = await pool.query(
+      `select to_regclass('public.upload_batch_leads') is not null as t,
+              coalesce((select value -> 'enabled' = 'true'::jsonb from enrich_settings where key = 'overlap_sharing'), false) as on`
+    );
+    return rows[0]?.t === true && rows[0]?.on === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Run the whole import: prepare, then process chunks each in its own transaction. */
 export async function importRows(pool: Pool, rows: string[][], cfg: ImportConfig): Promise<ImportCounters> {
   const freshCounters = (): ImportCounters => ({
@@ -286,6 +310,8 @@ export async function importRows(pool: Pool, rows: string[][], cfg: ImportConfig
   let counters = freshCounters();
   const { prepared, holdbacks, extras, counters: pc } = await prepareRows(rows, cfg);
   Object.assign(counters, pc);
+  // Before a dry run takes its one client, so the read never waits on it.
+  const listLeads = await leadListOn(pool);
 
   const dry = !!cfg.dryRun;
   // Dry run: one client, one transaction, savepoints per chunk. Live: a client
@@ -361,7 +387,7 @@ export async function importRows(pool: Pool, rows: string[][], cfg: ImportConfig
     for (let pass = 1; pass <= passes; pass++) {
       if (pass > 1) counters = Object.assign(freshCounters(), pc);
       for (let i = 0; i < prepared.length; i += CHUNK) {
-        await recover(prepared.slice(i, i + CHUNK), (items, client) => processChunk(client, items, extrasByEmail, cfg, types), describeLeads, "180s");
+        await recover(prepared.slice(i, i + CHUNK), (items, client) => processChunk(client, items, extrasByEmail, cfg, types, listLeads), describeLeads, "180s");
         counters.processed = Math.min(i + CHUNK, prepared.length) + counters.no_email + counters.in_file_duplicates;
         if (cfg.onProgress) await cfg.onProgress(counters);
       }
@@ -413,8 +439,18 @@ async function processChunk(
   extrasByEmail: Map<string, ExtraLocation[]>,
   cfg: ImportConfig,
   types: Map<string, string>,
+  listLeads = false,
 ): Promise<Deltas> {
   const d: Required<Deltas> = { inserted: 0, merged: 0, replaced: 0, skipped: 0, locations_added: 0, esp_detected: 0 };
+  // The lead list (133): the ids the statements below return, in this chunk's transaction.
+  const listed = async (ids: string[], outcome: "new" | "updated") => {
+    if (!listLeads || !ids.length) return;
+    await client.query(
+      `insert into upload_batch_leads (batch_id, lead_id, outcome)
+       select $1, unnest($2::uuid[]), $3 on conflict do nothing`,
+      [cfg.batchId, ids, outcome]
+    );
+  };
   const emails = chunk.map((p) => p.email);
   const selectExisting = async (list: string[]) => {
     const { rows } = await client.query(
@@ -443,6 +479,7 @@ async function processChunk(
     const landed = new Set<string>();
     for (const r of ins) { landed.add(r.email as string); idByEmail.set(r.email as string, r.id as string); }
     d.inserted += ins.length;
+    await listed(ins.map((r) => r.id as string), "new");
     // Lost a race to another writer (a second upload, the Bison sync): those
     // emails exist now — treat them as existing from here on.
     const raced = fresh.filter((p) => !landed.has(p.email));
@@ -508,6 +545,7 @@ async function processChunk(
         // $3 (the blank-ish placeholders) only appears in merge expressions;
         // Postgres rejects a bind with more parameters than the statement uses.
         const { rows: changed } = await client.query(sql, sql.includes("$3") ? [JSON.stringify(payload), notes, BLANKISH_VALUES] : [JSON.stringify(payload), notes]);
+        await listed(changed.map((r) => r.id as string), "updated");
         const n = changed.length;
         if (cfg.duplicateStrategy === "merge") d.merged += n; else d.replaced += n;
         if (n && chosen.includes("esp")) {

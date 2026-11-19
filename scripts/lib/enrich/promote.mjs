@@ -537,15 +537,18 @@ export async function beginPromote(db, { tag, kind, userId, limit, settings, but
   }
   if (!toAdd.length) return { ...empty, settled: settled.length, refused: refused.length, held };
 
+  // The batch records the client's tag (add_tags), so overlap sharing knows whose import it is.
   const { rows: [batch] } = await db.query(
-    `INSERT INTO upload_batches (uploaded_by, filename, total_rows, status, duplicate_strategy, field_mapping, source_headers, batch_type, source_label)
-     VALUES ($1, $2, $3, 'processing', 'skip', $4::jsonb, $5::jsonb, 'leads', $6)
+    `INSERT INTO upload_batches (uploaded_by, filename, total_rows, status, duplicate_strategy, field_mapping, source_headers, batch_type, source_label,
+                                 add_tags)
+     VALUES ($1, $2, $3, 'processing', 'skip', $4::jsonb, $5::jsonb, 'leads', $6, ARRAY[$7::text])
      RETURNING id, created_at`,
     [
       userId, filename, toAdd.length,
       JSON.stringify(Object.fromEntries(PROMOTE_COLUMNS.map(([, k], i) => [i, k]))),
       JSON.stringify(PROMOTE_COLUMNS.map(([h]) => h)),
       label,
+      tag,
     ]
   );
   await db.query(
