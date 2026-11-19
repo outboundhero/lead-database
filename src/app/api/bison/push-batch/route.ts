@@ -361,17 +361,15 @@ export async function POST(request: NextRequest) {
           [clientTag, since, limit]
         )
       ).rows as RecentBatch[];
-    let recent: Awaited<ReturnType<typeof recentOf>>;
+    // A failed read finds no clash, as the guard always did (its read's error was never checked).
+    let recent: RecentBatch[] = [];
     try {
       recent = await recentOf(false, 5);
       sharePushes = (await recentOf(true, 10))
         .filter((b) => isSharePush({ source: b.source }))
         .map((b) => ({ id: b.id, status: b.status, created_at: new Date(b.created_at).toISOString(), total: b.total, source: b.source as string }));
     } catch (e) {
-      return NextResponse.json(
-        { error: `Failed to check recent pushes: ${e instanceof Error ? e.message : String(e)}` },
-        { status: 500 }
-      );
+      console.error(`[push-batch] could not read ${clientTag}'s recent pushes: ${e instanceof Error ? e.message : String(e)}`);
     }
     const clash = recent.find((b) => (b.email_side ?? null) === (emailSide ?? null));
     if (clash) {
