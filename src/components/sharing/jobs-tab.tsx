@@ -94,7 +94,7 @@ export function JobsTab({ isAdmin, openJob, onOpenJob }: { isAdmin: boolean; ope
           {sw.since ? ` · imports since ${when(sw.since)}` : ""}
         </p>
       )}
-      {data?.ready && sw?.enabled && (!data.worker || !data.worker.sharing) && (
+      {data?.ready && (!data.worker || !data.worker.sharing) && (
         <p className="flex gap-2 rounded-2xl bg-[var(--warning)]/12 p-4 text-[13px] leading-relaxed">
           <AlertTriangle className="mt-0.5 size-4 shrink-0 text-[var(--warning)]" />
           {data.worker

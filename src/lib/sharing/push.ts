@@ -299,7 +299,9 @@ export async function pushReceiverShares(
             const byBatch = new Map<string, string[]>();
             for (const r of group) {
               const batch = placed.get(r.lead_id)!;
-              byBatch.set(batch, [...(byBatch.get(batch) ?? []), r.id]);
+              const list = byBatch.get(batch);
+              if (list) list.push(r.id);
+              else byBatch.set(batch, [r.id]);
             }
             for (const [batch, shareIds] of byBatch) {
               await c.query(
