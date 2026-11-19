@@ -43,7 +43,8 @@ export async function startAdd(
           [JSON.stringify([`Stalled: no final status after ${STALE_HOURS} hours (server restarted?). Rows imported before that point are kept.`]), STALE_HOURS]
         );
         const filename = `AI Ark pull · ${run.client_tag} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
-        const begun = await beginAdd(c, { tableId: run.table_id, userId, filename });
+        // The batch records the client and the run (133), so overlap sharing knows whose import it is and spots a top-up pull.
+        const begun = await beginAdd(c, { tableId: run.table_id, userId, filename, clientTag: run.client_tag, runId: run.id });
         if (begun.busy) return { status: 409, error: "This pull's people are being added already." };
         return { run, filename, ...begun };
       },

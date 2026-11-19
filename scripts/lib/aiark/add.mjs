@@ -21,6 +21,12 @@
 //   error    {batch_id}                         the import could not store them;
 //                                               the next add tries again
 // The engine never works that column (phase 4), so nothing else writes it.
+//
+// The add's upload batch records the run's client tag (add_tags) and the run
+// (aiark_run_id, migration 133), so overlap sharing knows whose import it was
+// and can tell a weekly top-up pull's batch.
+
+import { normTag } from "../enrich/settings.mjs";
 
 export const ADD_COLUMN = "add_to_database";
 export const SOURCE = "AI Ark";
@@ -244,12 +250,14 @@ export async function emailFound(db, { rowId, email, status = "VALID", domainTyp
  * Takes the people ready to add; settles at once anyone who has since become a
  * lead, reached the Email Bison copy or the never-contact list; creates the
  * upload batch for the rest and marks their cells running. `busy` when another
- * add of this table is still under way.
+ * add of this table is still under way. The batch records the run's client tag
+ * (add_tags, as the tag the import stamps) and the run (aiark_run_id) when
+ * they are given; without them both stay null, as before 133.
  * @param {{ query: Function }} db
- * @param {{ tableId: string, userId: string | null, filename: string }} opts
+ * @param {{ tableId: string, userId: string | null, filename: string, clientTag?: string | null, runId?: string | null }} opts
  * @returns {Promise<{ busy: true } | { busy: false, batchId: string | null, batchAt: string | null, rows: string[][], people: { row_id: number, email: string }[], skipped: number }>}
  */
-export async function beginAdd(db, { tableId, userId, filename }) {
+export async function beginAdd(db, { tableId, userId, filename, clientTag = null, runId = null }) {
   const { rows: live } = await db.query(
     `SELECT 1 FROM enrich_rows r
        JOIN enrich_cells a ON a.row_id = r.id AND a.column_key = $2 AND a.status = 'running'
@@ -312,15 +320,19 @@ export async function beginAdd(db, { tableId, userId, filename }) {
   }
   if (!toAdd.length) return { busy: false, batchId: null, batchAt: null, rows: [], people: [], skipped: settled.length };
 
+  const tag = normTag(clientTag);
   const { rows: [batch] } = await db.query(
-    `INSERT INTO upload_batches (uploaded_by, filename, total_rows, status, duplicate_strategy, field_mapping, source_headers, batch_type, source_label)
-     VALUES ($1, $2, $3, 'processing', 'skip', $4::jsonb, $5::jsonb, 'leads', $6)
+    `INSERT INTO upload_batches (uploaded_by, filename, total_rows, status, duplicate_strategy, field_mapping, source_headers, batch_type, source_label,
+                                 add_tags, aiark_run_id)
+     VALUES ($1, $2, $3, 'processing', 'skip', $4::jsonb, $5::jsonb, 'leads', $6, $7::text[], $8::uuid)
      RETURNING id, created_at`,
     [
       userId, filename, toAdd.length,
       JSON.stringify(Object.fromEntries(IMPORT_COLUMNS.map(([, k], i) => [i, k]))),
       JSON.stringify(IMPORT_COLUMNS.map(([h]) => h)),
       SOURCE,
+      tag ? [tag] : null,
+      runId ?? null,
     ]
   );
   await db.query(
