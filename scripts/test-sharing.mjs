@@ -996,7 +996,8 @@ async function partO() {
     /CAPABILITIES\.push\(SHARING_CAPABILITY\);/.test(ws) && SHARING_CAPABILITY === "sharing" && /const CAPABILITIES = \[[^\]]*"held_release"[^\]]*UPLOAD_CAPABILITY\];/.test(ws));
   ok("its own pool: 2 connections, the 70 s query timeout, 30 s to connect",
     /const sharePool = new pg\.Pool\(\{[^}]*max: 2,[^}]*connectionTimeoutMillis: 30_000,[^}]*query_timeout: 70_000,/.test(ws));
-  ok("every 60 s, not awaited, with a busy flag", /if \(Date\.now\(\) - lastShare > SHARE_EVERY_MS\) \{\s*lastShare = Date\.now\(\);\s*shareInFlight = shareStep\(\);\s*\}/.test(ws) &&
+  ok("every 60 s, not awaited, with a busy flag; a round still busy keeps its promise for the stop",
+    /if \(Date\.now\(\) - lastShare > SHARE_EVERY_MS\) \{\s*lastShare = Date\.now\(\);\s*(\/\/[^\n]*\n\s*)?if \(!shareBusy\) shareInFlight = shareStep\(\);\s*\}/.test(ws) &&
     /async function shareStep\(\) \{\s*if \(shareBusy\) return;\s*shareBusy = true;/.test(ws) && /\} finally \{\s*shareBusy = false;/.test(ws));
   ok("a missing migration is said once and the step stays idle", /if \(SHARE_UNREADY\.has\(e\?\.code\)\) \{\s*if \(!shareUnreadyLogged\)/.test(ws));
   ok("a stopping worker waits for the round in flight, then closes its pool, before the main pool",

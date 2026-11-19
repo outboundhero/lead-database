@@ -833,7 +833,8 @@ async function main() {
       }
       if (Date.now() - lastShare > SHARE_EVERY_MS) {
         lastShare = Date.now();
-        shareInFlight = shareStep();
+        // A round still busy keeps its own promise, so a stopping worker waits for it.
+        if (!shareBusy) shareInFlight = shareStep();
       }
       if (Date.now() - lastPromote > PROMOTE_CHECK_MS) {
         lastPromote = Date.now();
@@ -882,7 +883,7 @@ async function main() {
   await runs;
   // The fit loop's step in flight is waited for too: an OpenAI call already sent is written before the pool closes.
   await fits;
-  // So is the share round in flight (told to stop, it ends after the statement it is on), then its own pool closes.
+  // So is the share round in flight (told to stop, it ends after the step it is on), then its own pool closes.
   await shareInFlight;
   await sharePool.end().catch(() => {});
   await heartbeat({ stopping: true }).catch(() => {});
