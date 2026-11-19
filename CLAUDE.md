@@ -302,6 +302,11 @@ ONBOARDING_SHEET_ID           # optional; Groups-tab workbook for /api/clients/s
 TAXONOMY_SHEET_ID             # category taxonomy workbook
 PUSH_RATE / PUSH_CONCURRENCY / PUSH_CLAIM_BATCH / PUSH_BATCH_FOCUS / PUSH_REFRESH_MS
                               # push-worker throughput knobs (see Push throughput)
+SHARE_PUSH_KEY                # overlap sharing: Bearer key of POST /api/sharing/push/auto, on the web service AND
+                              #   the enrich-worker (32+ chars; unset = share pushes off, rows stay queued)
+SHARE_PUSH_URL                # optional, enrich-worker only: the push route's address when the web origin is not
+                              #   the origin of AIARK_AUTO_ADD_URL
+TOPUP_RUN_MODE                # optional, topup-worker: "demo" makes the pulls it starts demo runs (local work only)
 ```
 
 ⚠ **Env vars are per-service on Railway.** A var the crons have is not
@@ -442,6 +447,23 @@ src/app/api/leads/suppress/route.ts        — never-contact: POST suppress, DEL
 src/app/api/clients/sync-sheet/route.ts    — full on-demand client sheet sync (the cron's merge)
 src/app/api/clients/location-coverage/route.ts — reads precomputed coverage; ?fresh=1 recomputes
 src/components/leads/suppress-leads-dialog.tsx — "Never contact" dialog
+
+── Churn dates, overlap sharing, weekly top-up, never-contact inboxes (132 to 136, 2026-11-20) ──
+scripts/lib/overlap-topup.mjs              - Shared names and small rules: churn cells, share states, push source, top-up marker, inbox SQL
+scripts/lib/enrich/settings.mjs            - Also: overlap_sharing, weekly_topup, never_contact_inboxes defaults, switches, pools, save checks
+scripts/lib/bison-groups.mjs               - Groups tab parser, churn report, recordGroupsTab, the readers' lock
+src/components/clients/receive-cells.tsx   - The Clients page's churn, Groups tab and "can receive" cells (receive-notice.tsx: missing clients)
+scripts/lib/share/                         - The share step: discover, wait, decide, settle, recheck, push timer, tags, prune; actions; seed
+scripts/share-seed.mjs                     - Lists the leads of imports made before lead lists, one share job each, preview only
+src/lib/sharing/push.ts                    - One receiver's share push: receive check, campaign pick, sides, batches
+src/lib/bison/client-campaigns.ts          - The client-scoped live campaign search (export popup and share push)
+src/lib/bison/push-stamp.ts                - Side and bucket stamping and the freemail split (push route and share push)
+src/app/(app)/leads/sharing/page.tsx       - The Sharing page (Jobs, Clients, Held, Low places, General inboxes)
+src/app/api/sharing/push/auto/route.ts     - The worker's share push (Bearer SHARE_PUSH_KEY, outside the session middleware)
+scripts/topup-worker.mjs                   - Hourly cron: top-up cancel, weekly pass, pulls, never-contact sweep (scripts/lib/topup/)
+scripts/lib/coverage.mjs                   - The one per-place coverage count (refresh, route, top-up pass)
+scripts/lib/aiark/start-run.mjs            - The one AI Ark run start (route and topup-worker), places and top-up marker
+scripts/lib/never-contact-inboxes.mjs      - Never-contact inboxes: read the filter, seed, dry run, apply sweep (CLI: scripts/never-contact-inboxes.mjs)
 ```
 
 ⚠ **Legacy vs live scripts.** `scripts/` also holds ~20 one-off and
@@ -841,6 +863,12 @@ pre-filter before the regex conditions (7.6s instead of >180s) inside a
 transaction with `set local statement_timeout`. Failures now surface as a red
 retry pill instead of nothing.
 
+Since 2026-11-20 (migrations 135 and 136) the threshold is the client's own
+minimum (`client_targeting.min_leads_per_place`, else
+`weekly_topup.default_minimum`, 500), and "available" leaves out the general
+inboxes the loaded Clay General inboxes filter matches. The script and the route
+share one computation, scripts/lib/coverage.mjs. Details in "Weekly top-up".
+
 ## Campaign pickers show status, date and size (2026-10-06)
 
 Both pickers (export popup, Send-to-Bison wizard) render each campaign's Bison
@@ -965,6 +993,11 @@ services deploy from THIS repo. Single replica everywhere.
 | `location-worker` | cron | `*/30 * * * *` | `npm run location-backfill` |
 | `bison-sync` | cron | `*/30 * * * *` | `npm run bison-sync-cron` (2026-11-20; was `0 3 */3 * *` + `npm run sync-bison-leads -- --incremental`) |
 | `validation-worker` | cron | `17 * * * *` | `npm run validation-worker` (added 2026-09-14) |
+| `topup-worker` | cron | hourly, for example `23 * * * *` | `npm run topup-worker` (new 2026-11-20, migration 135; the owner creates it, DATABASE_URL only) |
+
+`topup-worker` runs the weekly top-up and the never-contact inboxes sweep; with
+both switched off a firing writes nothing. Like every worker it needs the build
+command override below. See "Weekly top-up" for what a firing does.
 
 **`bison-sync` checks every 30 minutes and usually does nothing** (2026-11-20,
 migration 131). [scripts/bison-sync-cron.mjs](scripts/bison-sync-cron.mjs) runs
@@ -1284,6 +1317,14 @@ prints the group changes a real run would make.
 Groups only: it updates `group_no` / `b2b_instance` / `b2c_instance`, never
 inserts a tag (roster stays the cron's job), and never clears an existing
 mapping (`COALESCE` semantics — a tag missing from the sheet keeps what it has).
+
+Since 2026-11-20 (migration 132) it also records the read, as the cron and "Sync
+with sheet" do: every client's `on_groups_tab` and the churn cell of each listed
+client, in the same pg transaction as the group updates (one `UPDATE ... FROM
+unnest`, through `getPool()`, under the readers' shared lock). So a client the tab
+does not list now reads "not on the Groups tab" and cannot receive shares or
+top-ups, although its group mapping is kept. Its answer adds `warnings` and
+`groupsTab`. See "Churn dates and who can receive" below.
 
 ⚠ **That tab is NOT two adjacent tag columns**:
 
@@ -1923,6 +1964,12 @@ reason** (reasons are free text: "Out of USA" and "out of USA" fold together,
 the most common spelling is shown), with search, per-address restore and
 "Restore all" per group. Checked by `scripts/test-suppress-bulk.mts` (16 cases
 against real rows, rolled back).
+
+Since 2026-11-20 (migration 136) one more reason can appear: `clay_general_filter`,
+general inboxes on the client's Clay General inboxes filter, written only by
+`fn_suppress_general_inboxes` after an approved apply ("Never-contact general
+inboxes" below). ⚠ "Restore all" on that group would also queue a reactivate on
+Bison for every address in it.
 
 ### Suppression reaches Email Bison (2026-09-23)
 
@@ -3345,6 +3392,504 @@ the owner's OK. Everything ships off.
   `scripts/test-upload-people.mjs` (54 checks). Run the three one at a time: the two
   worker-side suites remove leads under `.uptest.example`, which takes in the web
   suite's.
+
+## Churn dates and who can receive (migration 132, 2026-11-20)
+
+Overlap sharing, share pushes and the weekly top-up only ever reach a client that
+can receive, and that is one SQL rule: `fn_client_receive_block(tag)` (132), null
+when the client can receive, else the reason. Built on 2026-11-20 with everything
+off; the decisions it raised wait for the owner's OK in the rollout file.
+
+- **Where churn dates come from.** The tracker's Groups tab (gid `239723744`) has a
+  Churn Date column beside each group's tag column. The client-sync cron
+  (`npm run sync-clients`), "Sync with sheet" and "Sync groups" read that tab with
+  `valueRenderOption=UNFORMATTED_VALUE` and `dateTimeRenderOption=SERIAL_NUMBER`
+  (`GROUPS_TAB_RENDER` in scripts/lib/bison-groups.mjs, passed to
+  `readRange(token, id, a1, options)` in src/lib/google/sheets.ts), so a date cell
+  comes as a day number whatever its display format. Every other tab keeps the
+  formatted read, and `readRange` with no options is unchanged.
+- **Finding the column.** `parseGroupsTab` takes the first header holding "churn
+  date" (any case, a line break counts as a space) right of a group's tag column and
+  left of the next group's tag column. A tab with no such column still gives its
+  groups, but `churn` is null and `churnError` says why.
+- **What a cell means** (`churnCellOf` in scripts/lib/overlap-topup.mjs):
+  - a day number from 2000-01-01 to 2100-12-31, or strict M/D/YYYY text, is a date
+    (state `date`);
+  - a blank cell is no date (`empty`);
+  - dashes (the plain one or the two long dash characters), N/A, NA and none, any
+    case, are no date and are listed (`non_answer`);
+  - anything else (TBD, 2026-12-31, 12/31) is `unreadable`, and blocks the client
+    until the cell is fixed.
+- **A tag listed twice.** The first group keeps the tag, as before. For the cell an
+  unreadable one wins, then the earliest date (`mergeChurnCells`). The duplicate is
+  reported.
+- **Recording a read.** Each good read is recorded in the same transaction as the
+  group writes: `recordGroupsTab` (scripts/lib/bison-groups.mjs) calls
+  `fn_client_groups_tab_record(jsonb)`. Every `client_tags` row gets `on_groups_tab`
+  and `groups_tab_read_at`; listed clients get `churn_date`, `churn_cell` and
+  `churn_cell_state`; unlisted clients have them cleared. It is not a COALESCE, so a
+  cleared cell clears the date. The function refuses a malformed read (a tag twice,
+  an unknown state, a bad date, an empty list) and then writes nothing.
+- **When nothing is recorded.** When the tab cannot be read, or has no Churn Date
+  column, nothing is recorded and the last good read stands. The record runs in a
+  savepoint after a `to_regprocedure` check, so on a database without 132, or for a
+  read the function refuses, the group writes still land and a warning is logged
+  (the cron still exits 0) or returned (`warnings` in the routes' answers). The
+  visible sign of a record that keeps failing is the Clients page's "Groups tab read
+  <time>" going stale.
+- **One lock.** The three readers now rewrite every `client_tags` row, so each one's
+  write transaction starts with `pg_advisory_xact_lock(hashtext('client-tags-sync'))`.
+- **Dry run.** `npm run sync-clients -- --dry-run` also prints the churn dates, the
+  non-answers, the unreadable cells, the tags listed twice, and every Active or
+  Healthy client the tab does not list. It writes nothing.
+- **The receive rule** (`fn_client_receive_block`; the first reason that applies,
+  in this order, exactly these texts): `not a client`; `status <status>` or `status
+  blank` (anything but Active or Healthy, trimmed, any case); `no group`; `not on the
+  Groups tab`; `churn cell unreadable`; `churn date YYYY-MM-DD` (a date on or before
+  today + 15, UTC, past dates included); `no rules row`; `no places`; `a place with
+  no country`; `a country-wide place` (an include entry with no state).
+  `fn_client_can_receive(tag)` is the same as a yes or no, and
+  `fn_client_receive_block_of(...)` holds the rule on plain values for checks. All
+  are server-only. Callers: the share step's receivers, the share push, the push
+  worker's cancel of share and top-up pushes, the top-up pass and pulls, and the AI
+  Ark slice of a top-up run.
+- **Until the first good read** after 132, every client reads "not on the Groups
+  tab" and nothing can receive. That is the safe side: sharing and the top-up ship
+  off.
+- **Clients page.** The churn date shows under the Status badge, red when it blocks;
+  "Groups tab" shows under Routing; a Sharing column shows the pool or "isolated",
+  and "can receive" or "cannot receive: <reason>"; "Low places" (the latest
+  finished top-up pass, "-" when none) and "Shared in, last 7 days" are counts; a
+  notice lists Active clients the tab does not list, or says the tab has not been
+  read yet. `GET /api/clients` reads everything with `getPool()` and adds, per row,
+  `churn_date`, `churn_cell`, `churn_cell_state`, `on_groups_tab`,
+  `groups_tab_read_at`, `receive_block`, `pool`, `low_places` and `shared_7d`, and
+  at the top `groupsTabReadAt`, `missingFromTab` and `receiveRule`. Each newer
+  table or function is checked first (`to_regclass`, `to_regprocedure`), so the
+  page works on a database without it. The page reloads after a status toggle,
+  since the reason depends on the status.
+- **Visibility.** `client_tags` keeps its authenticated SELECT policy, so the churn
+  columns are readable by any logged-in session, like the rest of the table.
+- **Rollout.** Apply 132, deploy the web app and redeploy client-sync, press Sync
+  groups once, then read the notice.
+- **Tests.** `npx tsx scripts/test-bison-groups.mts` (pure, 66 checks; its live pass
+  needs GOOGLE_SERVICE_ACCOUNT_B64 and reaches Google).
+  `node --env-file=.env.local scripts/test-churn-dates.mjs` (local, 137 checks,
+  made-up `CHTEST_` clients): every reader's write path with the sheet stubbed, the
+  receive reasons, a cleared cell, a client dropped from the tab, the Clients
+  route's new fields. It never commits: each reader's begin and commit become
+  savepoints inside one transaction that is rolled back.
+
+## Overlap sharing (migrations 133 and 134, 2026-11-20)
+
+When an import adds new leads for one client, the share step checks them against
+every other client in the same sharing pool that can receive, and logs, per lead and
+receiver, whether the lead is shared and why not. Nothing reaches a lead or a
+campaign until a share is applied; pushes and tag writes have switches of their
+own. Built on 2026-11-20; everything ships off (`overlap_sharing.enabled` false, no
+client listed, mode preview, `since` empty), and the decisions it raised wait for the
+owner's OK in the rollout file.
+
+### The setting and the pools
+
+- **`enrich_settings.overlap_sharing`** (134 seeds it; defaults in
+  `SETTINGS_DEFAULTS`, scripts/lib/enrich/settings.mjs): `enabled` false; `tags` []
+  (the clients taking part, as origin and as receiver); `mode` "preview" (anything
+  but "apply" reads preview); `pools` {"cleaning": ["Cleaning", "Canada
+  Cleaning"]}; `isolated_tag_suffixes` ["-OS"]; `push_tags` [] (receivers whose
+  shares are pushed; must be inside `tags`); `push_every_minutes` 15;
+  `push_max_per_job` 1000; `push_max_per_day` 2000; `held_retry_days` 7;
+  `write_tags` false; `tag_rows_per_day` 20000; `since` null; `wait_location_minutes`
+  180; `recheck_days` 7. A value out of its range reads as its default.
+- **Switches** (`flagOn`, each fails closed): `overlap_sharing` (enabled and the
+  tag on `tags`; the SQL twin is `fn_overlap_sharing_on(tag)`), `share_push` (that,
+  and the tag on `push_tags`), `share_tag_writes` (enabled and `write_tags`).
+- **Pools** (`clientPool(settings, tag, type)`; SQL `fn_client_pool_value` and
+  `fn_client_pool(tag)`, checked to agree on 956 cases). A tag ending in one of
+  `isolated_tag_suffixes` is isolated. Otherwise the client type, trimmed and in any
+  case, is matched against each pool's types, pools taken in code point order of
+  name, and the first match wins. No type, or a type in no pool, is isolated. An
+  isolated client never receives a share and its imports are never shared. An empty
+  `pools` object isolates every client.
+- **Editing.** The Companies settings sheet (admin; `PUT /api/companies/settings`
+  takes `overlap_sharing`, checked by `cleanOverlapSharing(input, { previous, now })`,
+  written only when it changes). Switching on with `since` empty sets `since` to
+  now; with `since` empty the step looks at nothing. A button adds every Active
+  client of one type to the list; a new client never joins by itself.
+
+### The worker side (`scripts/lib/share/`, run by the enrich-worker)
+
+- **Lead lists** (src/lib/uploads/import-rows.ts, 133's `upload_batch_leads`):
+  while `overlap_sharing.enabled` is true and the table exists (read once per import
+  by `leadListOn()`; any error means no list), each chunk lists the leads it
+  inserted (outcome `new`, from the insert's RETURNING, raced emails left out) and
+  the ones it changed (`updated`), in the chunk's own transaction. A dry run rolls
+  them back. With the switch off an import makes one extra read and nothing else.
+- **The batch's client and run.** An AI Ark add's batch records the run's client
+  tag in `add_tags` and the run in `upload_batches.aiark_run_id` (133;
+  `beginAdd(..., { clientTag, runId })`, called so by src/lib/aiark/add-run.ts); a
+  promotion's batch records its client tag. **Apply 133 before deploying this
+  code**: the add writes `aiark_run_id`, and without the column every AI Ark add
+  fails.
+- **cron_runs** (133): scripts/backfill-lead-locations.mjs records
+  `location_backfill`, `started_at` before it reads any lead and, at the end,
+  `finished_run_started_at` (the start of the run that finished, never moved back).
+  Not with `--dry-run`; a database without the table records nothing. Until
+  location-worker runs this code, every share job waits its full limit.
+- **The share step** (scripts/lib/share/step.mjs): every 60 s, not awaited, with a
+  busy flag, on its own pool of 2 connections (70 s query timeout, each statement in
+  a transaction with its own `statement_timeout`). The worker reports the `sharing`
+  capability and `info.sharing.push_auto` in its heartbeat. Off, or with no `since`,
+  it runs no statement. A missing migration (42P01, 42703, 42883) is said once and
+  the step stays idle. Each round, in order:
+  1. **Discover** (`discoverJobs`, jobs.mjs): up to 50 finished `leads` batches with
+     a field mapping, made at or after `since`, with no job (a batch left
+     `processing` 3 hours counts as finished at created_at + 3 hours). Each gets one
+     `share_jobs` row: `skipped` with its reason (`before`, `no_tag`, `not_client`,
+     `several` from `routeTagOf`; `origin_not_on_list`; `origin_isolated`;
+     `no_new_leads`), `no_lead_list` (rows inserted but no list: an old copy of the
+     code, or sharing was off), or `waiting`. A job is `topup` when the batch's AI Ark
+     run has `filters.topup`.
+  2. **Wait** for places: a waiting job is taken once
+     `cron_runs.location_backfill.finished_run_started_at` is later than its
+     `batch_done_at`, or at `place_wait_until` (batch_done_at +
+     `wait_location_minutes`). Taken at the limit, it gets `place_wait_hit_at` (a red
+     notice on the Sharing page) and a log line.
+  3. **Decide** (decide.mjs, `decideJob` in jobs.mjs). The origin is checked again
+     (still a client, on the list, in a pool; else the job is skipped). Receivers are
+     chosen once: listed clients other than the origin, in its pool, that can
+     receive (`fn_client_can_receive`) and have an include entry in a (country,
+     state) of the job's placed new leads; plus the origin for a top-up job
+     (`own_topup`). Leads with no usable place (location status other than resolved
+     or partial) are counted in `leads_no_place` and never written. Receivers are
+     decided a Bison group at a time, each stored in its own transaction
+     (`receivers_done`), so a stop or a crash carries on; a round decides for at most
+     45 s. Per receiver: `fn_share_fits` in chunks of 2,000 ids (always anchored on
+     the ids), then the first reason that applies: `filtered_inbox` (a general inbox
+     the loaded Clay General inboxes filter matches), `already_sent`, `in_flight` (an
+     item pending or pushing in a push being gathered or processed, or a push of the
+     receiver still pending, scoring or gathering whose `selected_ids` hold the
+     lead), `already_shared` (an applied, live share from another job),
+     `already_tagged` (exact, comma bounded, any case; never for `own_topup`),
+     `same_install` (the same push tests, sent included, for any other client of the
+     receiver's group; and, for a receiver in the origin's own group, every lead that
+     fits the origin's own rules: `sameGroupRule()`, kept in one function until Nick
+     answers about shared sending groups), then `also_fits` for all but one receiver
+     of a group (the one whose list names the lead's city, then the one with fewer
+     available leads there in `client_location_coverage`, then tag order; a share
+     already applied, or stored for a receiver decided earlier, keeps the lead), else
+     `shared` (`own_topup` for the origin). `matched_place` is the city entry when
+     the lead's `location_id` is one of its geoname ids, else the state entry. Only
+     leads that fit get a row; `counts[receiver]` = `{checked, fits, <outcome>: n}`.
+     A decide never changes an applied or undone row.
+  4. **Settle.** When the job's mode and the setting are both `apply`, each receiver
+     with open shares is applied, unless its shares are pushed (`share_push`) and it
+     is over `push_max_per_job` or `push_max_per_day` (rows applied with a push state
+     since the UTC day began): then it goes on `receivers_over_cap` for an admin. The
+     job is `applied` when nothing is open in apply mode, else `previewed`. The mode
+     used is kept on the job, so a job decided in preview never applies itself later.
+  5. **Recheck**: once a day while `recheck_until` is ahead, the job's leads with no
+     share row that changed since the last look (`leads.updated_at`) and now have a
+     place are decided against the clients that may receive them now.
+  6. **Push timer** (upkeep.mjs): for each receiver with queued shares, at most once
+     every `push_every_minutes`, `POST /api/sharing/push/auto { receiver }` with
+     Bearer `SHARE_PUSH_KEY`, to `SHARE_PUSH_URL` or the origin of
+     `AIARK_AUTO_ADD_URL`; once a day per receiver with held shares inside
+     `held_retry_days`, with `retryHeld`; at most 10 asks a round, 120 s per answer.
+     A 409 or a failure is tried again after `push_every_minutes`. Without the key
+     and the address the shares stay queued and the step says so once.
+  7. **Tags.** While `write_tags` is on, applied live `shared` rows get the
+     receiver's exact `client_tags.tag` on the lead (`fn_merge_tags`, only where the
+     lead lacks it) with a `lead_history` row ("Shared from AAA to BBB"), in one
+     transaction; `tag_added_at` marks every row looked at, `tag_added` the ones
+     written. Undone shares whose tag was written get it taken off (`fn_remove_tag`)
+     whenever sharing is on, `write_tags` or not. At most 2,000 rows a round and
+     `tag_rows_per_day` a UTC day, adds and removals together.
+  8. **Prune**, at most hourly: lead lists 30 days after their job is done (never a
+     waiting, deciding or error job's, nor while a recheck is ahead), lists of batches
+     with no job after 30 days, and rows that are not shares 90 days after they were
+     decided.
+- **The Sharing page's actions** (scripts/lib/share/actions.mjs, called by the
+  routes, which check the role and write the audit row): `previewShareJob` (decides
+  again and writes nothing: per receiver the stored counts, the counts now, and
+  whether applying would pass a push cap); `applyShareJob` (decides again, stores it,
+  applies in chunks of 2,000, push_state queued for a receiver on `push_tags`; an
+  admin may apply a receiver over a cap; a receiver off the list, in another pool or
+  unable to receive is skipped with the reason; refused while sharing is off);
+  `undoShareJob` (marks the shares undone; queued and held pushes become dropped with
+  note `undone`; a share push still pending, scoring or gathering that holds one is
+  cancelled, its undone shares dropped and other jobs' shares in it queued again;
+  tags written are taken off by the paced writer; answers how many leads were
+  already pushed); `retryShareJob` (a job in error, or one decided at its place
+  limit, goes back to waiting with a fresh limit). They throw `ShareActionError` with
+  400, 404, 409 or 503.
+- **The seed for older imports** (`scripts/share-seed.mjs --tag <ORIGIN> --batch <id>
+  [--batch <id>] [--write]`, plan 1.9): for imports made before their batch could
+  list its leads. Dry by default: per batch, the leads made inside its window
+  (created_at to completed_at) that carry the origin's tag, beside the batch's
+  inserted rows; any difference stops it. Windows that overlap are counted together
+  and go to the first batch's one job. `--write` writes the lists (outcome new) and
+  one share job per batch forced to preview, nothing else. It prints counts only.
+
+### Share pushes (`src/lib/sharing/push.ts`)
+
+- **`POST /api/sharing/push/auto` `{receiver, retryHeld?}`** is the share step's push
+  timer. It is outside the session middleware (src/middleware.ts) and takes a Bearer
+  `SHARE_PUSH_KEY` only: its own key, at least 32 characters, so sharing never turns
+  on AI Ark adds; unset means 503, a wrong key 401. It answers 200 `{receiver,
+  pushed, batches, held, dropped, left, note}`, or 409 `{error, kept}` when sharing is
+  off or the campaign search reported any error; then nothing changes and the rows
+  stay queued.
+- **One receiver's push** (`pushReceiverShares`). Rows: applied, live `shared` or
+  `own_topup` rows with push_state `queued`; with `retryHeld` also held rows whose
+  `held_since` is within `held_retry_days`.
+  - A receiver that cannot receive has its rows held "cannot receive: <reason>"; one
+    off the push list, "not on the push list".
+  - It reads the receiver's campaigns live with the export popup's client search
+    (src/lib/bison/client-campaigns.ts, moved out of the campaigns route, no cache),
+    keeps Active or Draft campaigns, then picks with `autoPickCampaigns`
+    (src/lib/sharing/pick.ts). Nothing picked holds every row with the pick's reason.
+  - A lead goes only to picked campaigns on its own side's install; a side with none
+    holds its leads ("no B2C campaign" or "no B2B campaign"). That is stricter than
+    "every saved install" and avoids the one-install misplacement of 117.
+  - It drops leads the Bison mirror shows in the picked campaigns (`in_campaign`)
+    and leads that are gone or have no email (`no_lead`).
+  - It inserts one push batch per source (`share`, `topup`) and side, at most 25,000
+    ids each, `email_side` set to the side, `push_options` `{source,
+    skipAlreadySent: true}`, the status from `scoringStatusFor`, no creator, and a
+    target_market snapshot. The same transaction marks exactly those rows pushed with
+    their batch. Everything after the Bison read runs in one transaction under
+    `pg_advisory_xact_lock(hashtext('share-push:' || receiver))`, and the switch,
+    the receive rule and the push list are read again under it. At most 100,000 rows
+    a call; the rest stay queued and show in `left`.
+- **push_note**: a held row's note is plain words; a dropped row's is `in_campaign`,
+  `undone` or `no_lead`.
+- **"Push shared"** (`POST /api/sharing/push` `{batchId?, receiver?, held?, dryRun?}`,
+  admin): queues applied, live, never pushed rows (and held ones with `held`) of
+  clients on the push list, then pushes each client at once. `dryRun` gives the
+  counts the confirm names. Audited as "Shares Queued For Push". Adding a client to
+  `push_tags` never queues its older shares; "Push shared" does.
+- **The push route's 24-hour guard** (src/app/api/bison/push-batch/route.ts) leaves
+  out batches whose `push_options.source` is `share` or `topup`, and names them in
+  `sharePushes` (only when there are some, so the answer is otherwise as before).
+  The guard reads with SQL through `getPool()`; a failed read still finds no clash,
+  and is logged.
+- **The push worker** (scripts/push-worker.mjs), right after the claim: a share or
+  top-up batch that lists no lead is cancelled ("a share push with no lead ids"), and
+  so is one whose client cannot receive ("<tag> cannot receive (<reason>)"), both
+  fenced on `gathering`. With `skipAlreadySent` its selected-ids gather leaves out
+  leads already sent for the client, as the filters path does. Nothing else changed.
+  ⚠ Redeploy push-worker and its four install workers before any client is on
+  `push_tags`: an old worker gathers a share batch with no receive check and no
+  skipAlreadySent.
+- ⚠ **Known gap**: share rows of a batch that is cancelled other than by an undo (the
+  push worker's receive check, or an operator on the Exports page) stay `pushed` and
+  are never sent or put back. Undo handles its own cancels.
+- src/lib/bison/push-stamp.ts holds the side and bucket stamping and the freemail
+  split, shared by the push route and the share push.
+
+### The Sharing page and its routes
+
+- `/leads/sharing`, in the sidebar next to Clay and AI Ark. Managers view it; admins
+  apply, undo, push and retry. Tabs: Jobs (state, "no lead list" and "waited the
+  limit" shown, counts per receiver; the detail has a table per receiver, sample rows
+  and a CSV of email, company, city, state, matched place, outcome, receiver, push
+  state, applied and undone, up to 200,000 rows), Clients (pool or "isolated", "cannot
+  receive: <reason>"), Held (age and reason; leads with no usable place, by place
+  text; installs the mirror does not cover), Low places (the weekly top-up) and
+  General inboxes (never-contact inboxes). A warning shows when the running worker
+  lacks the `sharing` capability.
+- Routes under src/app/api/sharing/: `jobs`, `job`, `csv`, `clients`, `held`,
+  `batches?ids=` (the Uploads page's "Shared to N clients"), `lead?id=` (the lead
+  detail's shares) for managers; `apply` (with `preview: true` for the confirm),
+  `undo`, `retry` and `push` for admins (audited "Share Job Applied", "Share Job
+  Undone", "Share Job Retried", "Shares Queued For Push"); `push/auto` for the
+  worker. They read the server-only tables with `getPool()`.
+
+### Keys, tests and rollout
+
+- **Keys** (the owner sets them, never in code): `SHARE_PUSH_KEY` (32 characters or
+  more) on the web service and the enrich-worker; `SHARE_PUSH_URL` on the worker only
+  if the web origin is not the origin of `AIARK_AUTO_ADD_URL`.
+- **Tests.** `node --env-file=.env.local scripts/test-sharing.mjs` (local, 178 checks,
+  `SHTEST_` clients and `.shtest.example` leads, a made-up stand-in filter; it runs
+  the location backfill twice, as test-aiark does, and puts the settings and the
+  `location_backfill` row back; its EXPLAIN checks turn off the planner's
+  small-table shortcuts, because the local leads table is small).
+  `node --env-file=.env.local scripts/test-share-push.mjs` (local, 118 checks,
+  `SPTEST_` clients, the campaign search and Bison stubbed, no network; the push
+  worker's statements and stop rule are read from its file and run in transactions
+  that are rolled back; the settings route's three new keys).
+- **Rollout.** Apply 133 and 134 before deploying. Redeploy location-worker
+  (cron_runs), upload the enrich-worker, redeploy push-worker and its install
+  workers. Update every copy of the repo used for folder imports: an old copy
+  imports fine, and its batches show as "no lead list".
+
+## Weekly top-up (migration 135, 2026-11-20)
+
+Every week the top-up flags each Active cleaning client's places that hold fewer
+good leads than the client's minimum, and can buy more with AI Ark people pulls
+limited to those places, inside a weekly credit budget. What a pull adds reaches
+leads through the automatic AI Ark add, and from there sharing (own_topup into the
+client's own campaigns, behind the same push switch). Built on 2026-11-20;
+everything ships off.
+
+- **The setting** (`enrich_settings.weekly_topup`, 135): `enabled` false;
+  `client_types` ["Cleaning", "Canada Cleaning"] (matched trimmed, any case);
+  `default_minimum` 500; `pull_mode` "off" (prepare or auto; anything else reads
+  off); `pull_tags` []; `weekly_credits` 25000 and `client_weekly_credits` 25000
+  (credits over the last 7 days, in all and per client); `max_pull_size` 1000;
+  `pulls_per_day` 3 (0 to 4). Switches: `weekly_topup` (enabled, and the client's
+  type on `client_types`), `topup_pull` (that, `pull_mode` prepare or auto, and the
+  tag on `pull_tags`). Edited on the Companies settings sheet
+  (`cleanWeeklyTopup`).
+- **The minimum** (`client_targeting.min_leads_per_place`, empty means
+  `default_minimum`). Set in the Rules dialog; `PUT /api/clients/targeting` sets or
+  clears it when sent (a whole number 1 to 100,000, or null) and keeps it when left
+  out; the sheet sync never writes it.
+- **Coverage** (scripts/lib/coverage.mjs, the one computation for the refresh
+  script, the coverage route and the pass): "available" leaves out the general
+  inboxes the loaded Clay General inboxes filter matches (whether or not the
+  never-contact apply has run; nothing changes while no filter is loaded), and the
+  live count of `/api/clients/availability` does the same. The refresh writes each
+  client's own minimum as its `threshold` (`--threshold N` forces one number for
+  all); the coverage route's default is the client's minimum, and the Leads page
+  (Recheck included) no longer sends 500. Before 135 the refresh and the route fall
+  back to the default minimum.
+- **topup-worker** (scripts/topup-worker.mjs, `npm run topup-worker`, hourly Railway
+  cron, build command `echo 'worker service: no next build'`, DATABASE_URL only: it
+  creates AI Ark runs, which the enrich-worker works with its own key). Each firing
+  (scripts/lib/topup/run.mjs) holds a `worker_locks` lease named `topup-worker`, has
+  a 50-minute watchdog and works for at most 40 minutes, in this order:
+  - **(a) Cancel:** queued or running top-up runs (`filters ? 'topup'`) of clients
+    that `fn_client_receive_block` blocks are cancelled, the reason as stop_reason.
+    Runs started by hand are never touched.
+  - **(b) The pass** (scripts/lib/topup/pass.mjs): when `weekly_topup` is on and the
+    last finished pass is 7 or more days old, or someone pressed Run now. It visits
+    every Active or Healthy client. Covered types get flag rows (`topup_flags`):
+    `low` (fewer good leads than the minimum), `unresolved` (a place the geo
+    reference does not know; never bought for), or one row `all_ok`, `no_places` or
+    `no_rules`. Every other client gets one `not_covered` row. Every row carries
+    `receive_block` at pass time. A stored coverage row is used only when it is
+    newer than the rules, under 24 hours old and counted with the current filter
+    (`payload.generalInboxFilter`); otherwise coverage is computed again and stored.
+    A pass carries on across firings through `clients_done`; a client that fails two
+    firings is left out and named in `counts.failed_tries`; a pass still open after
+    3 days ends as error, and after an error the schedule waits 6 hours.
+  - **(c) Pulls** (scripts/lib/topup/pulls.mjs), only for clients with
+    `flagOn("topup_pull")` and no receive block. A pull covers the client's low
+    places the geo reference knows (at most 200); its requests come from
+    `buildRequests` on a copy of the rules holding just those places, exclusions
+    kept. Size is the sum of (minimum minus available), capped by `max_pull_size`;
+    the brake is `brakeFor` (scripts/lib/aiark/runs.mjs). A client that is not
+    exactly "Cleaning" (Canada Cleaning included) needs saved people filters, else
+    the flag says `no_people_filters`. In prepare mode a manager counts and starts
+    the pull on the Low places tab. In auto mode the worker starts it (single
+    strategy, no count, live; `TOPUP_RUN_MODE=demo` for local work). An auto pull
+    that cannot start yet (budget, `pulls_per_day`, a run going, the enrich-worker
+    off) waits as prepared and is tried hourly, and shrinks to fit the budget left;
+    a refusal that will not fix itself sets it to skipped. A new pass expires older
+    pulls nobody started.
+  - **(d) Never contact:** the never-contact inboxes sweep (next section).
+- **Budget** (scripts/lib/topup/budget.mjs; credits over the last 7 days, in all and
+  per client): used is the credits of top-up runs created in the window plus the
+  credits of their counts (`topup_pulls.count_credits`); reserved is, for each
+  top-up run still going, its brake (`topup_pulls.brake`, rewritten to the run's own
+  brake when it starts) minus what it has used. A start needs used + reserved + its
+  brake within both `weekly_credits` and `client_weekly_credits`; a count also adds
+  its searches. `pulls_per_day` counts pulls started since 00:00 UTC, including ones
+  a manager starts. Live and demo runs both count.
+- **AI Ark.** scripts/lib/aiark/start-run.mjs is the one start function (the run
+  route's checks: one run per client, the worker online for live, saved or standard
+  people filters, versions, plan blockers), used by `POST /api/aiark/runs` and the
+  worker; src/lib/aiark/server.ts re-exports its helpers. The runs and count routes
+  take optional `places` (only the client's own include entries) and `topupPullId`
+  (a prepared pull of that client with the same places). A top-up start marks
+  `aiark_runs.filters.topup = {pass, pull, places}` and must run as single and at
+  most its prepared size (a manager may start it smaller). A count for a top-up pull
+  adds its credits to `topup_pulls.count_credits`. runs.mjs cancels a claimed top-up
+  run before any paid call when its client can no longer receive. The runs route's
+  error answers now carry `code`.
+- **Automatic adds** (answers file D-AUTOADD): production already sets
+  AIARK_AUTO_ADD_URL and AIARK_AUTO_ADD_KEY, so finished top-up pulls are added to
+  leads, and reach sharing, on their own.
+- **Low places tab** (on the Sharing page) and its routes: `GET /api/topup`
+  (manager: the latest pass and its flags per client, available against minimum,
+  action, run link, "Copy list", the client's tag count, prepared pulls, the budget
+  used and reserved) and `POST /api/topup/run` (admin, audited `topup_run_now`;
+  refused while the top-up is off or a pass is open). Count and Start of a prepared
+  pull go through the AI Ark count and runs routes with `topupPullId` (manager).
+- **Tests.** `node --env-file=.env.local scripts/test-topup.mjs` (local, 105 checks,
+  `TPTEST_` clients, the AI Ark demo transport only, no paid call). It refuses to
+  run while the database has an open pass, a top-up run or pull, an AI Ark run due or
+  a lease.
+- **Rollout.** Apply 135. Redeploy client-sync (until it runs this code the pass
+  computes every covered client's coverage again once a filter is loaded), upload the
+  enrich-worker (the slice check), and the owner creates the topup-worker service.
+  Flags first; pulls in prepare mode for a few clients before auto.
+
+## Never-contact general inboxes (migration 136, 2026-11-20)
+
+The client's Clay General inboxes table runs its paid and sending steps only for
+inboxes its exclusion filter does not match (legal, complaints, no-reply and the
+like). The client wants those inboxes never contacted and not counted as good leads.
+The filter is the client's own text: it lives only in the database (`enrich_originals`,
+the inboxes kind), is read from there by a seed step and stored in the setting, and
+is never in the repo, a migration or a log. Built on 2026-11-20; ships off, with no
+filter loaded.
+
+- **The setting** (`enrich_settings.never_contact_inboxes`, 136): `enabled` false,
+  `pattern` null, `source`, `sha256`, `read_at`, `rows_per_day` 5000, `chunk_rows` 500.
+  The filter is "loaded" only when `inboxPatternOf()` (scripts/lib/enrich/settings.mjs)
+  and its SQL twin `fn_never_contact_inbox_pattern()` take it: 1 to 4,000 characters
+  of letters, digits, `@ _ . -` and the escape `\.`, alternatives joined by `|`, none
+  empty, and a sha256 that matches. Switch `never_contact_inboxes`: enabled and
+  loaded. The settings sheet edits only `enabled` and the pace
+  (`cleanNeverContactInboxes`, merged over the stored row so the filter keys stay; it
+  refuses switching on while nothing is loaded) and shows the filter as loaded or
+  not, with its source, read time and the first 12 characters of the sha, never the
+  pattern.
+- **Scope.** Only `email_type = 'general'` leads are ever looked at: the filter also
+  matches law-firm domains, so a personal address is never touched.
+- **Seed:** `node scripts/never-contact-inboxes.mjs --seed [--variant v]` (default
+  variant `default`) takes the `!/<re>/i.test(...)` filter that most General inboxes
+  run conditions share. It must contain `customerservice@`; a tie or none is "not
+  loaded". It stores pattern, source, sha256 and read_at, prints the source, the
+  number of parts and the first 12 characters of the sha, never the filter, and
+  leaves the switch and the pace alone. Reading a different filter stops any apply
+  that is going.
+- **Dry run:** `--dry-run`, or "Count now" on the General inboxes tab (admin). It
+  counts matching general inboxes not yet on the list, with a count and up to 5
+  addresses for each part of the filter, and stores a `dry_run` row
+  (`never_contact_inbox_runs`). It writes no mark. The tab and the CLI show each part
+  with its count and sample, never the whole pattern as one string.
+- **Apply** (admin, only after the owner approves the count; never automatic): it
+  must name a dry run of the current filter made within 24 hours, with the switch
+  on. The topup-worker then sweeps leads in `(created_at, id)` order, in windows of
+  20,000 leads, up to the dry run's bound, passing up to `chunk_rows` matching ids a
+  call to `fn_suppress_general_inboxes`, at most `rows_per_day` a UTC day. Once the
+  backlog is done it follows new imports (leads created up to 5 minutes ago) while
+  the switch is on (state `following`). **Stop** is admin only. Dry runs, applies and
+  stops are audited (`never_contact_inboxes_dry_run`, `_apply`, `_stop`).
+- **The one writer.** `fn_suppress_general_inboxes(lead_ids, sha256, run, by,
+  by_name)` is the only writer of the reason `clay_general_filter`; nothing else in
+  this build writes `suppressed_emails`. It refuses while the switch is off, the
+  filter is not loaded or the sha differs, and enforces the daily cap itself. It
+  inserts into `suppressed_emails` (ON CONFLICT DO NOTHING, so an address already on
+  the list keeps its reason), sets `leads.is_suppressed` and queues the Bison
+  unsubscribe with `fn_enqueue_bison_unsubscribe(emails, 'unsubscribe', by)`, as the
+  Never contact action does.
+- ⚠ **Limits.** The Bison unsubscribe is one-way in practice: "Restore all" for the
+  `clay_general_filter` group on the Admin page lifts the block and queues a
+  reactivate on Bison for every address in it. Leads with no created_at are never
+  swept, and leads inserted with an old created_at (only import-bison-drive.mjs does
+  that) land behind the cursor.
+- **Tests.** `node --env-file=.env.local scripts/test-never-contact-inboxes.mjs`
+  (local, 70 checks, `NCTEST_` clients, `.nctest.example` addresses and made-up
+  variants `nctest_a` to `nctest_g` with made-up stand-in filters, never the real
+  `default` variant).
+- **Rollout.** Apply 136; on production the lead runs the seed, then a dry run; the
+  owner approves the count; then the switch goes on and an admin applies.
 
 ## Known issues / TODO
 
