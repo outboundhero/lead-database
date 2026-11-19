@@ -5,7 +5,8 @@ import { getPool } from "@/lib/db/pool";
 import { logAudit } from "@/lib/api/log-audit";
 import { parseServiceAccount, getAccessToken, sheetsGet, readRange, tabTitleByGid } from "@/lib/google/sheets";
 import {
-  BISON_GROUPS, GROUPS_TAB_GID, ONBOARDING_SHEET_DEFAULT, parseGroupsTab,
+  BISON_GROUPS, GROUPS_TAB_GID, GROUPS_TAB_RENDER, ONBOARDING_SHEET_DEFAULT, churnReport, groupsTabA1,
+  lockClientTagsSync, parseGroupsTab, recordGroupsTab,
 } from "../../../../../scripts/lib/bison-groups.mjs";
 
 // POST /api/clients/sync-sheet — on-demand FULL client sync, same merge as the
@@ -23,6 +24,14 @@ import {
 // Then one transaction: upsert-with-COALESCE (a roster-only row never clears an
 // instance mapping) and delete tags absent from every sheet — identical
 // semantics to the cron, so running both concurrently converges to the same row.
+//
+// Churn dates (2026-11-20, migration 132): the Groups tab is read with raw
+// values (a date cell comes as a day number), and a good read is recorded in
+// the same transaction, after the upsert and the delete: which clients the
+// tab lists and each listed client's Churn Date cell (recordGroupsTab). Not
+// when the tab could not be read. The three readers of the tab take one lock,
+// so their writes never cross. The answer's groupsTab says what the churn
+// cells held, and warnings say what was not recorded.
 
 export const maxDuration = 120;
 
@@ -67,6 +76,7 @@ export async function POST() {
 
   const clients = new Map<string, ClientRow>();
   const warnings: string[] = [];
+  let groupsTab: ReturnType<typeof parseGroupsTab> | null = null; // set only when the Groups tab was read
   try {
     const token = await getAccessToken(parseServiceAccount(saB64));
 
@@ -146,20 +156,24 @@ export async function POST() {
       warnings.push("CLIENT_TRACKER_SHEET_ID not set — roster/status merge skipped.");
     }
 
-    // 5. Groups tab: the group the team keeps current wins over Sheet1.
+    // 5. Groups tab: the group the team keeps current wins over Sheet1. Raw
+    //    values, so a churn date cell comes as a day number.
     try {
       const groupsSheetId = process.env.ONBOARDING_SHEET_ID || ONBOARDING_SHEET_DEFAULT;
       const title = await tabTitleByGid(token, groupsSheetId, GROUPS_TAB_GID);
-      const parsed = parseGroupsTab(await readRange(token, groupsSheetId, `'${title.replace(/'/g, "''")}'!A1:L400`));
+      const parsed = parseGroupsTab(await readRange(token, groupsSheetId, groupsTabA1(title), GROUPS_TAB_RENDER));
       if (parsed.error || !parsed.groups) throw new Error(parsed.error ?? "no groups parsed");
       for (const [tag, group] of parsed.groups as Map<string, number>) {
         const c = clients.get(tag);
         if (!c) continue;   // the tab never adds a tag; the roster stays Sheet1 + Client Tracker
         Object.assign(c, { group_no: group, ...GROUPS[group], source: "groups_tab" });
       }
+      groupsTab = parsed;
     } catch (e) {
       for (const c of clients.values()) { c.group_no = null; c.b2b = null; c.b2c = null; }
-      warnings.push(`Groups tab unreadable (${e instanceof Error ? e.message : e}) — no groups written this run.`);
+      warnings.push(
+        `Groups tab unreadable (${e instanceof Error ? e.message : e}): no groups and no churn dates written this run.`
+      );
     }
   } catch (e) {
     return NextResponse.json(
@@ -176,17 +190,20 @@ export async function POST() {
     );
   }
 
-  // Diff base, so the response can say what actually changed.
-  const { data: before, error: readErr } = await admin
-    .from("client_tags").select("tag, status, group_no");
-  if (readErr) return NextResponse.json({ error: readErr.message }, { status: 500 });
-  const beforeByTag = new Map((before ?? []).map((r) => [r.tag as string, r]));
-
   const pool = getPool();
   const conn = await pool.connect();
   let removed = 0;
+  // Diff base, so the response can say what actually changed. Read in the
+  // transaction, after the lock, so another sync cannot slip in between.
+  let beforeByTag = new Map<string, { tag: string; status: string | null; group_no: number | null }>();
+  let record: Awaited<ReturnType<typeof recordGroupsTab>> | null = null;
   try {
     await conn.query("begin");
+    await lockClientTagsSync(conn);
+    const before = await conn.query<{ tag: string; status: string | null; group_no: number | null }>(
+      `select tag, status, group_no from client_tags`
+    );
+    beforeByTag = new Map(before.rows.map((r) => [r.tag, r]));
     await conn.query(
       `insert into client_tags (tag, group_no, b2b_instance, b2c_instance, owner, status, name, client_type, source, synced_at)
        select * from unnest($1::text[], $2::int[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], array_fill(now(), array[$10::int]))
@@ -212,6 +229,11 @@ export async function POST() {
       [list.map((c) => c.tag)]
     );
     removed = del.rowCount ?? 0;
+    // The Groups tab read (132), in this transaction; not when it could not be read.
+    if (groupsTab) {
+      record = await recordGroupsTab(conn, groupsTab);
+      if (record.warning) warnings.push(record.warning);
+    }
     await conn.query("commit");
   } catch (e) {
     await conn.query("rollback").catch(() => {});
@@ -234,12 +256,17 @@ export async function POST() {
     }
   }
 
+  const churn = churnReport(groupsTab);
+  const recorded = record?.recorded ?? null;
   await logAudit({
     action: "Clients Synced From Sheet",
     performedBy: profile.email ?? user.id,
     details:
       `${list.length} tags in sheets · ${added.length} added · ` +
-      `${statusChanged.length} status changes · ${removed} removed`,
+      `${statusChanged.length} status changes · ${removed} removed · ` +
+      (recorded
+        ? `Groups tab: ${recorded.listed} listed, ${churn.dates.length} churn dates, ${churn.unreadable.length} unreadable`
+        : "Groups tab: not recorded"),
   });
 
   return NextResponse.json({
@@ -249,5 +276,6 @@ export async function POST() {
     statusChanged,
     removed,
     warnings,
+    groupsTab: groupsTab ? { ...churn, recorded } : null,
   });
 }

@@ -130,15 +130,42 @@ export async function tabTitleByGid(
   return hit.title;
 }
 
-/** Read a rectangular range as rows of strings. */
+/**
+ * How the values API renders cells. Left out, it gives the text the sheet
+ * shows. The Groups tab is read with UNFORMATTED_VALUE and SERIAL_NUMBER, so a
+ * date cell comes as a day number whatever its display format (churn dates,
+ * scripts/lib/bison-groups.mjs GROUPS_TAB_RENDER).
+ */
+export interface ReadRangeOptions {
+  valueRenderOption?: "FORMATTED_VALUE" | "UNFORMATTED_VALUE" | "FORMULA";
+  dateTimeRenderOption?: "SERIAL_NUMBER" | "FORMATTED_STRING";
+}
+
+/**
+ * Read a rectangular range as rows of strings. With render options, cells may
+ * also be numbers or booleans, so they are typed unknown: String() them where
+ * text is needed.
+ */
+export async function readRange(token: string, sheetId: string, a1: string): Promise<string[][]>;
 export async function readRange(
   token: string,
   sheetId: string,
-  a1: string
-): Promise<string[][]> {
-  const json = await sheetsGet<{ values?: string[][] }>(
+  a1: string,
+  options: ReadRangeOptions
+): Promise<unknown[][]>;
+export async function readRange(
+  token: string,
+  sheetId: string,
+  a1: string,
+  options?: ReadRangeOptions
+): Promise<unknown[][]> {
+  const query = new URLSearchParams();
+  if (options?.valueRenderOption) query.set("valueRenderOption", options.valueRenderOption);
+  if (options?.dateTimeRenderOption) query.set("dateTimeRenderOption", options.dateTimeRenderOption);
+  const qs = query.toString();
+  const json = await sheetsGet<{ values?: unknown[][] }>(
     token,
-    `${sheetId}/values/${encodeURIComponent(a1)}`
+    `${sheetId}/values/${encodeURIComponent(a1)}${qs ? `?${qs}` : ""}`
   );
   return json.values ?? [];
 }
