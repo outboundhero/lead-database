@@ -1,18 +1,20 @@
 import type { PoolClient } from "pg";
 import { enrichPool } from "@/lib/enrich/db";
-import { buildRequests, cleanPeopleFilters, loadGeo } from "../../../scripts/lib/aiark/filters.mjs";
+import { loadGeo } from "../../../scripts/lib/aiark/filters.mjs";
 import { aiArkFor as aiArkClient, webhookFor } from "../../../scripts/lib/aiark/runs.mjs";
-import { filtersFor, standardFor } from "../../../scripts/lib/aiark/standard-filters.mjs";
+import { peopleFor, planFor } from "../../../scripts/lib/aiark/start-run.mjs";
 import type { AiArkModes, AiArkPlan, AiArkRun, PeopleFilters, PlanReport, RunMode } from "./types";
 
 export { cleanPeopleFilters, DEPARTMENT_SUGGESTIONS, INDUSTRY_SUGGESTIONS, SENIORITY } from "../../../scripts/lib/aiark/filters.mjs";
 export { createRun } from "../../../scripts/lib/aiark/runs.mjs";
 export { addState, beginAdd, EXTRA_FIELDS, finishAdd, IMPORT_COLUMNS, STALE_HOURS } from "../../../scripts/lib/aiark/add.mjs";
 export { AiArkError, personInputs } from "../../../scripts/lib/aiark/client.mjs";
+export { clientInfo, savedPeople, startRun, subsetTargeting, targetingOf } from "../../../scripts/lib/aiark/start-run.mjs";
 
-// Server side of the AI Ark tab. The filter mapper, the AI Ark client and the
-// run engine are shared with the worker (scripts/lib/aiark/*.mjs); this file
-// only reads what a route needs and shapes it for the page.
+// Server side of the AI Ark tab. The filter mapper, the AI Ark client, the
+// run engine and the start checks (start-run.mjs, which the weekly top-up's
+// worker calls too) are shared with the worker (scripts/lib/aiark/*.mjs);
+// this file only reads what a route needs and shapes it for the page.
 
 // Real tags hold "&" and "-" (JPC&A, K&LCS) besides letters and digits.
 export const TAG_RE = /^[A-Z0-9][A-Z0-9_&-]{0,39}$/;
@@ -48,73 +50,38 @@ export function modes(): AiArkModes {
   };
 }
 
-export async function clientInfo(c: PoolClient, tag: string) {
-  const { rows } = await c.query(`SELECT tag, name, client_type, status FROM client_tags WHERE tag = $1`, [tag]);
-  return rows[0] ?? null;
-}
-
-// `version` is updated_at as text, exactly as Postgres prints it: the page
-// hands it back with a save or a pull, and a different value means someone
-// changed the row since the page loaded it. Compared as text, never as a Date
-// (a Date drops the microseconds).
-
-export async function targetingOf(c: PoolClient, tag: string) {
-  const { rows } = await c.query(
-    `SELECT client_tag, countries, include_locations, exclude_locations, exclude_terms, commercial_cleaning, updated_at,
-            updated_at::text AS version
-       FROM client_targeting WHERE client_tag = $1`,
-    [tag]
-  );
-  return rows[0] ?? null;
-}
-
-export async function savedPeople(c: PoolClient, tag: string, { lock = false } = {}) {
-  const { rows } = await c.query(
-    `SELECT titles, title_mode, exclude_titles, seniority, departments, employee_bands, industries, exclude_industries,
-            updated_at, updated_at::text AS version
-       FROM client_people_filters WHERE client_tag = $1${lock ? " FOR UPDATE" : ""}`,
-    [tag]
-  );
-  return rows[0] ?? null;
-}
+// clientInfo, targetingOf and savedPeople are start-run.mjs's (re-exported
+// above): the start checks read the client the same way the tab does.
 
 /**
  * The saved filters, or what applies until someone saves: the standard filters
  * for a cleaning client, nothing otherwise. The rule is filtersFor()'s (scope
- * "ai_ark"), the one the LinkedIn sources read too (D-P4-1).
+ * "ai_ark"), the one the LinkedIn sources read too (D-P4-1), through
+ * start-run.mjs's peopleFor().
  */
 export function peopleOrDefaults(saved: Record<string, unknown> | null, clientType: string | null) {
-  const { updated_at, version, ...stored } = saved ?? {};
-  const r = filtersFor(saved ? stored : null, { clientType, scope: "ai_ark" });
-  if (r.from === "saved") {
+  const p = peopleFor(saved, clientType);
+  if (p.saved) {
     return {
       saved: true,
-      updatedAt: updated_at as string,
-      version: version as string,
+      updatedAt: p.updatedAt as string,
+      version: p.version as string,
       defaultsFrom: null,
-      value: cleanPeopleFilters(r.value).value as PeopleFilters,
+      value: p.value as PeopleFilters,
     };
   }
   return {
     saved: false,
     updatedAt: null,
     version: null,
-    defaultsFrom: r.from === "cleaning" ? ("cleaning" as const) : null,
-    value: r.value as PeopleFilters,
+    defaultsFrom: p.defaultsFrom === "cleaning" ? ("cleaning" as const) : null,
+    value: p.value as PeopleFilters,
   };
 }
 
 export function plan(targeting: Record<string, unknown> | null, people: PeopleFilters, g: Geo, clientType: string | null = null): AiArkPlan & { requests: object[] } {
-  const built = buildRequests({ targeting, people, geo: g, cleaning: standardFor(clientType, "ai_ark") });
-  return {
-    requests: built.requests,
-    searches: built.requests.length,
-    report: built.report as PlanReport,
-    notes: built.notes,
-    blockers: built.blockers,
-    pullBlockers: built.pullBlockers,
-    example: built.requests[0] ?? null,
-  };
+  const p = planFor(targeting, people, g, clientType);
+  return { ...p, report: p.report as PlanReport };
 }
 
 /** The plan as the page shows it: everything but the request bodies beyond the first. */

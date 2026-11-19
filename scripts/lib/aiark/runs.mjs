@@ -48,6 +48,7 @@ import {
 } from "./client.mjs";
 import { createDemoTransport, DEMO_TOKEN } from "./demo.mjs";
 import { PERSON_SEARCH_KEYS, RUN_COLUMNS, RUN_INPUT_KEYS } from "./columns.mjs";
+import { isTopupRunFilters } from "../overlap-topup.mjs";
 
 export const LEASE_MIN = 10;
 const MAX_ATTEMPTS = 6;
@@ -79,9 +80,15 @@ const backoffMs = (attempts) => Math.min(30_000 * 2 ** (attempts - 1), BACKOFF_M
 /**
  * The most a run may spend: a brake on a run that keeps paying without gaining
  * people, not a client's budget. Its size at full price, a quarter on top, and
- * a little room for each search.
+ * a little room for each search. The weekly top-up reserves this much for each
+ * of its runs (scripts/lib/topup/budget.mjs).
+ *
+ * @param {number} size  people asked for
+ * @param {number} searches  request bodies
+ * @returns {number} credits
  */
-const spendCeiling = (run) => Math.ceil(run.size_requested * 1.25) + 5 * run.requests.length + 10;
+export const brakeFor = (size, searches) => Math.ceil(size * 1.25) + 5 * searches + 10;
+const spendCeiling = (run) => brakeFor(run.size_requested, run.requests.length);
 const brakeReason = (run, used) =>
   `Stopped by the run's spending brake: ${fmt(used)} credits used against a limit of ${fmt(spendCeiling(run))} for ${fmt(run.size_requested)} people. Going on could pass it, so nothing more was bought.`;
 
@@ -998,6 +1005,26 @@ export async function advanceOneRun({ pool, env = process.env, log = () => {}, c
   }
 
   try {
+    // A weekly top-up run (filters.topup) is cancelled before any paid call once
+    // its client can no longer receive: a churn date within 15 days, a status
+    // other than Active, off the Groups tab, no group, no usable places
+    // (fn_client_receive_block, migration 132). A run someone started by hand
+    // is never stopped here. A job AI Ark has taken is paid for and still read.
+    if (run.status === "running" && isTopupRunFilters(run.filters)) {
+      const { rows: [r] } = await pool.query(`SELECT public.fn_client_receive_block($1) AS block`, [run.client_tag]);
+      if (r?.block) {
+        const why = `Cancelled: ${run.client_tag} can no longer get top-up leads (${r.block}).`;
+        if (!ctx.progress.job) {
+          await finish(ctx, { status: "cancelled", stopReason: why });
+          return run.id;
+        }
+        await pool.query(
+          `UPDATE aiark_runs SET status = 'cancelled', stop_reason = $3 WHERE id = $1 AND claim_token = $2 AND status = 'running'`,
+          [run.id, run.claim_token, why]
+        );
+        log(`AI Ark run ${run.id.slice(0, 8)}: ${why} Its export is paid for, so it is still read.`);
+      }
+    }
     if (run.credits_before == null) {
       // The balance is for the record only: a run never waits on it (a bad key fails the first real call).
       const before = await ctx.client.credits().catch(() => null);
