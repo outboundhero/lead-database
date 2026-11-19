@@ -1179,7 +1179,7 @@ async function partB11() {
   section("B11. The AI Ark tab is unchanged");
   const tabRunsBefore = (await one(`SELECT count(*)::int AS n FROM aiark_runs`)).n;
   check("pullsToAdd() reads only the AI Ark tab's runs", !/aiark_people_runs/.test(source("scripts/lib/aiark/add.mjs")) && (await pullsToAdd(pool, 50)).every((x) => !created.runs.includes(x.id)));
-  check("the tab's run list and its 'already running' check read aiark_runs only", !/aiark_people_runs/.test(source("src/app/api/aiark/runs/route.ts")));
+  check("the tab's run list and its 'already running' check read aiark_runs only", !/aiark_people_runs/.test(source("src/app/api/aiark/runs/route.ts") + source("scripts/lib/aiark/start-run.mjs")));
 
   // A tab export job of the same mode not yet read: the people run waits, buying nothing.
   const tK = world.tK;

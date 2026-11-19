@@ -486,7 +486,7 @@ const dropHeldPeople = () => pool.query(`DELETE FROM aiark_people WHERE person_i
 // What the routes really send, read from their files.
 const cancelSql = /`(UPDATE aiark_runs[\s\S]*?)`/.exec(source("src/app/api/aiark/runs/cancel/route.ts"))[1];
 const cancelRoute = (id) => one(cancelSql, [id]);
-const activeSql = /`(SELECT id, status FROM aiark_runs[\s\S]*?)`/.exec(source("src/app/api/aiark/runs/route.ts"))[1];
+const activeSql = /`(SELECT id, status FROM aiark_runs[\s\S]*?)`/.exec(source("scripts/lib/aiark/start-run.mjs"))[1];
 
 // Scripted answers over the stand-in.
 const ans = (status, json) => ({ status, headers: new Headers(), text: JSON.stringify(json) });
