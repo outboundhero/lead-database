@@ -1308,6 +1308,25 @@ side but uses it only to keep a category out of `exclude_industries`.
 Neither ever gated pushes. The only behaviour change: selecting a client on the
 Leads page no longer pre-fills the Category-search filter.
 
+## Sheet non-answers never change a client's rules (2026-11-20)
+
+A blank or non-answer cell in the onboarding sheet ("N/A", "none", "Already
+Provided", "see above", dashes) never reaches the AI and never changes what is
+stored: the client keeps its places, or its exclusions (`exclude_terms`
+included, so a Rules-dialog edit survives), as they are. The list is
+`isNonAnswer` in scripts/lib/targeting-answers.mjs; only the whole cell counts,
+so "No restaurants" is still an answer.
+
+Two replies are failed passes (stored values stay, `sheet_raw` does not
+advance, the next run tries again): a places reply with no usable place, and a
+reply that only repeats a prompt's worked example (the exclusion prompt's 21
+terms or the location prompt's 16 West Texas towns, read from the prompts
+themselves; `echoesExample`). Before this, "Already Provided" came back as the
+21 example terms and blank places were stored as an empty list, which the send
+gate reads as the whole country. It stops new damage only: clients already
+damaged need a separate repair. Pure test, no AI and no database:
+`node scripts/test-targeting-answers.mjs`.
+
 ## Client locations apply as city+state PAIRS (2026-08-19)
 
 Selecting a client on the Leads page puts its `include_locations` into the

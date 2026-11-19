@@ -17,6 +17,11 @@
 // Change detection: the verbatim L/M/O text is stored in client_targeting.sheet_raw;
 // a client is re-parsed only when that text changes (or --force). Manual Rules-
 // dialog edits therefore survive until the client's sheet row is edited.
+// No answer, no change (2026-11-20): a blank or non-answer cell ("N/A", "none",
+// "Already Provided" ...) never reaches the AI and keeps what is stored for that
+// cell, places or exclusions alike (scripts/lib/targeting-answers.mjs). A places
+// reply with no usable place, and a reply that only repeats a prompt's worked
+// example, are failed passes: stored values stay and the next run tries again.
 // Never touched here: exclude_locations, require_location, allow_inferred_location,
 // commercial_cleaning, notes.
 //
@@ -31,6 +36,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import pg from "pg";
+import { echoesExample, exampleItems, isNonAnswer, said } from "./lib/targeting-answers.mjs";
 
 // Load .env.local when present (local runs); Railway provides real env vars.
 try {
@@ -436,6 +442,14 @@ salon, salons, beauty salon, hair salon, hair studio, hairdresser, barber, barbe
 
 Do not automatically include categories that may still be acceptable unless they are clearly covered by the client's exclusion request.`;
 
+// The prompts' worked examples, read from the prompts themselves so they can
+// never drift. A reply that only repeats one is a failed pass (echoesExample):
+// before 2026-11-20 "Already Provided" came back as the 21 exclusion terms.
+const EXAMPLE_TERMS = exampleItems(CLIENT_EXCLUSION_PROMPT, "such as:\n"); // the 21 exclusion terms
+const EXAMPLE_PLACES = exampleItems(CLIENT_LOCATION_PROMPT, "returns:\n"); // the 16 West Texas towns
+// A client that names Texas may really work the example's towns.
+const TEXAS_WORDS = ["texas", "tx"];
+
 // INCLUDE_KEYWORDS_PROMPT was removed 2026-08-18: include_keywords is no longer
 // derived from the sheet (see the write phase). Recover it from git history if
 // the include side is ever reinstated.
@@ -693,7 +707,7 @@ async function main(job = null) {
     // AI pass can fall back to the client's existing values instead of [].
     const { rows: existing } = await pool.query(
       `SELECT client_tag, countries, include_locations, include_industries, include_keywords,
-              exclude_industries, exclude_keywords, sheet_raw FROM client_targeting`);
+              exclude_industries, exclude_keywords, exclude_terms, sheet_raw FROM client_targeting`);
     const existingByTag = new Map(existing.map((r) => [r.client_tag, r]));
     const rawOf = (c) => ({ target: c.target, exclusion: c.exclusion, locations: c.locations });
     let changed = clients.filter((c) => FORCE || JSON.stringify(existingByTag.get(c.tag)?.sheet_raw ?? null) !== JSON.stringify(rawOf(c)));
@@ -711,9 +725,12 @@ async function main(job = null) {
     }
 
     if (DRY) {
+      const kept = (cell) => (isNonAnswer(cell) ? "  [no answer: stored rules kept]" : "");
       for (const c of changed.slice(0, 15)) {
-        console.log(`\n=== ${c.tag} ===\n  L: ${c.target.slice(0, 150)}\n  M: ${c.exclusion.slice(0, 150)}\n  O: ${c.locations.slice(0, 200)}`);
+        console.log(`\n=== ${c.tag} ===\n  L: ${c.target.slice(0, 150)}\n  M: ${c.exclusion.slice(0, 150)}${kept(c.exclusion)}\n  O: ${c.locations.slice(0, 200)}${kept(c.locations)}`);
       }
+      const noAnswer = changed.filter((c) => isNonAnswer(c.exclusion) || isNonAnswer(c.locations)).map((c) => c.tag);
+      if (noAnswer.length) console.log(`\n${noAnswer.length} changed client(s) with a blank or non-answer cell, kept as stored: ${noAnswer.join(", ")}`);
       if (changed.length > 15) console.log(`\n… and ${changed.length - 15} more changed clients.`);
       console.log("\n--dry-run: no AI calls, no DB writes.");
       return;
@@ -727,17 +744,25 @@ async function main(job = null) {
     // Pass A: locations (one call per client, 4-wide) + geo validation.
     // A parse failure — or a parse whose entries ALL fail geo validation —
     // marks the client failed so its existing locations are kept.
+    // A blank or non-answer cell is never sent (its places stay as stored), and
+    // a reply with no usable place or only the prompt's example towns fails too.
+    if (!EXAMPLE_TERMS.size || !EXAMPLE_PLACES.size) console.warn("  example check is off: a prompt's example line was not found");
     const allDropped = [];
     const locByTag = new Map();
     const locFailed = new Set();
-    await mapConcurrent(changed.filter((c) => c.locations.trim().length > 0), 4, async (c) => {
+    await mapConcurrent(changed.filter((c) => !isNonAnswer(c.locations)), 4, async (c) => {
       try {
         const raw = await parseLocations(c.locations);
+        if (echoesExample(raw.map((e) => e.city).filter(Boolean), EXAMPLE_PLACES, c.locations, { unlessText: TEXAS_WORDS })) {
+          locFailed.add(c.tag);
+          console.error(`  ${c.tag}: the reply repeats the prompt's example towns, keeping existing locations`);
+          return;
+        }
         const { valid, dropped } = await validateLocations(pool, c.tag, raw);
         allDropped.push(...dropped);
-        if (raw.length > 0 && valid.length === 0) {
+        if (valid.length === 0) {
           locFailed.add(c.tag);
-          console.error(`  ${c.tag}: every parsed location failed geo validation — keeping existing locations`);
+          console.error(`  ${c.tag}: ${raw.length ? "every parsed location failed geo validation" : "no location in the reply"}, keeping existing locations`);
           return;
         }
         locByTag.set(c.tag, valid);
@@ -750,9 +775,11 @@ async function main(job = null) {
     });
 
     // Pass B: taxonomy categories, include + exclude together (batches of 15).
-    const catInput = changed.filter((c) => c.target || c.exclusion);
+    // Only for a real exclusion answer: the include side is asked for only to keep
+    // a category out of the excludes, and a non-answer keeps the stored excludes.
+    const catInput = changed.filter((c) => !isNonAnswer(c.exclusion));
     const catRes = await batchedAi(catInput, 15, async (batch) => {
-      const input = batch.map((c) => `${c.tag}:\nINCLUDE: ${c.target || "(none)"}\nEXCLUDE: ${c.exclusion || "(none)"}`).join("\n===\n");
+      const input = batch.map((c) => `${c.tag}:\nINCLUDE: ${said(c.target) || "(none)"}\nEXCLUDE: ${said(c.exclusion) || "(none)"}`).join("\n===\n");
       return aiJson(categoriesPrompt(categoryNames), input);
     });
     const canonCats = (list) =>
@@ -761,7 +788,7 @@ async function main(job = null) {
     // Pass C: exclusion keyword expansion — the client's verbatim prompt, one
     // call per client (its [INSERT] slot is single-client), output is one
     // comma-separated list. Failure keeps existing values, never [].
-    const exclInput = changed.filter((c) => c.exclusion);
+    const exclInput = changed.filter((c) => !isNonAnswer(c.exclusion));
     const exclRes = { out: {}, failed: new Set() };
     await mapConcurrent(exclInput, 4, async (c) => {
       try {
@@ -782,6 +809,7 @@ async function main(job = null) {
           .sort((a, b) => b.length - a.length)[0] ?? "";
         const keywords = line.split(",").map((s) => s.trim()).filter(Boolean);
         if (!keywords.length) throw new Error("empty exclusion list from model");
+        if (echoesExample(keywords, EXAMPLE_TERMS, c.exclusion)) throw new Error("the reply repeats the prompt's example terms");
         exclRes.out[c.tag] = keywords;
       } catch (err) {
         exclRes.failed.add(c.tag);
@@ -829,20 +857,25 @@ async function main(job = null) {
       await client.query("begin");
       for (const c of changed) {
         const ex = existingByTag.get(c.tag);
-        const hasLoc = c.locations.trim().length > 0;
-        const locFail = hasLoc && (locFailed.has(c.tag) || !locByTag.has(c.tag));
-        const bFail = (c.target || c.exclusion) && catRes.failed.has(c.tag);
-        const cFail = c.exclusion && exclRes.failed.has(c.tag);
+        // A blank or non-answer cell keeps what is stored for it (2026-11-20).
+        const keepLoc = isNonAnswer(c.locations);
+        const keepExcl = isNonAnswer(c.exclusion);
+        const locFail = !keepLoc && (locFailed.has(c.tag) || !locByTag.has(c.tag));
+        const bFail = !keepExcl && catRes.failed.has(c.tag);
+        const cFail = !keepExcl && exclRes.failed.has(c.tag);
 
-        const locs = locFail ? (ex?.include_locations ?? []) : (hasLoc ? locByTag.get(c.tag) : []);
+        const locs = keepLoc || locFail ? (ex?.include_locations ?? []) : locByTag.get(c.tag);
         const cats = bFail ? null : (catRes.out[c.tag] ?? {});
         // The model's INCLUDE list is still requested and used HERE ONLY, to
         // guarantee a category is never both included and excluded. It is no
         // longer stored — include_industries/include_keywords are written empty
         // (client request 2026-08-18); set them by hand in the Rules dialog if needed.
         const aiInclude = cats ? canonCats(cats.include) : [];
-        const exclInd = cats ? canonCats(cats.exclude).filter((n) => !aiInclude.includes(n)) : (ex?.exclude_industries ?? []);
-        const exclKw = cFail ? (ex?.exclude_keywords ?? []) : cleanList(c.tag, "exclude_keywords", exclRes.out[c.tag]);
+        const exclInd = keepExcl || !cats ? (ex?.exclude_industries ?? []) : canonCats(cats.exclude).filter((n) => !aiInclude.includes(n));
+        const exclKw = keepExcl || cFail ? (ex?.exclude_keywords ?? []) : cleanList(c.tag, "exclude_keywords", exclRes.out[c.tag]);
+        // The list the send logic reads. Kept whole for a non-answer, so a Rules-
+        // dialog edit (stored only here) survives too.
+        const baseTerms = keepExcl ? (ex?.exclude_terms ?? []) : [...exclInd, ...exclKw];
         const derived = [...new Set(locs.map((l) => l.country))];
         const countries = derived.length ? derived : (ex?.countries?.length ? ex.countries : ["US"]);
         const allOk = !locFail && !bFail && !cFail;
@@ -882,13 +915,15 @@ async function main(job = null) {
           [c.tag, countries, JSON.stringify(locs), [], [], exclInd, exclKw,
            sheetRaw === null ? null : JSON.stringify(sheetRaw),
            [...new Set([
-             ...exclInd, ...exclKw,
+             ...baseTerms,
              // Cleaning clients also exclude their own industry (2026-08-27).
              ...(cleaningTags.has(c.tag) ? CLEANING_INDUSTRY_EXCLUSIONS : []),
            ].map((x) => String(x).trim().toLowerCase()).filter(Boolean))].sort()]
         );
         written++;
-        const line = `${c.tag}: ${locFail ? "locations kept" : `${locs.length} locations`}, ${exclInd.length} excl-cats, ${exclKw.length} excl-keywords${allOk ? "" : "  [PARTIAL — will retry next run]"}`;
+        const placesNote = keepLoc ? "locations kept (no answer in the sheet)" : locFail ? "locations kept" : `${locs.length} locations`;
+        const exclNote = keepExcl ? "exclusions kept (no answer in the sheet)" : `${exclInd.length} excl-cats, ${exclKw.length} excl-keywords`;
+        const line = `${c.tag}: ${placesNote}, ${exclNote}${allOk ? "" : "  [PARTIAL: will retry next run]"}`;
         console.log(`  ${line}`);
         await jobLog(line);
       }
