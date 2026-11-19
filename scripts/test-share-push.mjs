@@ -897,6 +897,19 @@ async function partV() {
   T.worker = heartbeat(["company_runs", "sharing"]);
   check("... and with it", (await call(jobs.GET, { query: { origin: A } })).body.worker?.sharing === true);
   check("a bad state filter is refused (400)", (await call(jobs.GET, { query: { state: "nope" } })).status === 400);
+  // The share step may make many jobs in one statement, all with one created_at: pages must still list each once.
+  await pool.query(`UPDATE share_jobs SET created_at = (SELECT max(created_at) FROM share_jobs WHERE origin_tag = $1) WHERE origin_tag = $1`, [A]);
+  const seen = [];
+  let before = null;
+  for (let i = 0; i < 10; i++) {
+    const page = await call(jobs.GET, { query: { origin: A, limit: "1", ...(before ? { before } : {}) } });
+    seen.push(...page.body.jobs.map((x) => x.batch_id));
+    before = page.body.next;
+    if (!before) break;
+  }
+  const mine = (await all(`SELECT batch_id FROM share_jobs WHERE origin_tag = $1`, [A])).map((r) => r.batch_id);
+  check("pages of one job each list every job once, when they share one created_at", mine.length >= 3 && same(sorted(seen), sorted(mine)), JSON.stringify({ seen, mine }));
+  check("... and a made-up page start is refused (400)", (await call(jobs.GET, { query: { before: "2026-11-20" } })).status === 400);
   const d = await call(jobR.GET, { query: { id: ctx.jobAB } });
   const rb = d.body.receivers?.find((r) => r.tag === B);
   check("a job: per receiver its outcomes, push states, receive check and samples, and the push batches",

@@ -96,21 +96,30 @@ function jobOf(r: Record<string, unknown>): ShareJob {
   };
 }
 
-/** The jobs list, newest first, a page at a time (keyset on created_at). */
+/** A page's place in the jobs list: the last job's created_at (to the microsecond) and id. */
+export const JOBS_CURSOR = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z)\|([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+/**
+ * The jobs list, newest first, a page at a time. Keyset on (created_at, id):
+ * the share step may make many jobs in one statement, all with the same
+ * created_at, so the time alone would lose some at a page's edge.
+ */
 export async function listJobs(
   c: PoolClient,
   { state, origin, before, limit }: { state: string | null; origin: string | null; before: string | null; limit: number }
 ): Promise<Omit<JobsAnswer, "ready">> {
   const settings = await readSettings(c);
+  const cursor = before ? JOBS_CURSOR.exec(before) : null;
   const { rows } = await c.query(
-    `SELECT ${JOB_FIELDS}
+    `SELECT ${JOB_FIELDS},
+            to_char(j.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') || '|' || j.batch_id AS cursor
        FROM share_jobs j LEFT JOIN upload_batches b ON b.id = j.batch_id
       WHERE ($1::text IS NULL OR j.state = $1)
         AND ($2::text IS NULL OR j.origin_tag = $2)
-        AND ($3::timestamptz IS NULL OR j.created_at < $3::timestamptz)
-      ORDER BY j.created_at DESC
-      LIMIT $4`,
-    [state, origin, before, limit + 1]
+        AND ($3::timestamptz IS NULL OR (j.created_at, j.batch_id) < ($3::timestamptz, $4::uuid))
+      ORDER BY j.created_at DESC, j.batch_id DESC
+      LIMIT $5`,
+    [state, origin, cursor?.[1] ?? null, cursor?.[2] ?? null, limit + 1]
   );
   const jobs = rows.slice(0, limit).map(jobOf);
   const { rows: states } = await c.query(`SELECT state, count(*)::int AS n FROM share_jobs GROUP BY state`);
@@ -119,7 +128,7 @@ export async function listJobs(
   );
   return {
     jobs,
-    next: rows.length > limit ? jobs[jobs.length - 1]?.created_at ?? null : null,
+    next: rows.length > limit ? (rows[limit - 1]?.cursor as string) ?? null : null,
     byState: Object.fromEntries(states.map((r) => [r.state, r.n])),
     waitedLimit: hit?.n ?? 0,
     worker: await sharingWorker(c),

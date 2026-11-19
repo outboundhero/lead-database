@@ -76,7 +76,7 @@ export interface JobsAnswer {
   /** False before migration 134 is applied: nothing else is filled. */
   ready: boolean;
   jobs: ShareJob[];
-  /** created_at of the last job listed, for the next page; null when there is none. */
+  /** Where the next page starts (pass it as before); null when there is none. */
   next: string | null;
   byState: Partial<Record<ShareJobState, number>>;
   /** Jobs that decided at the place wait limit in the last 7 days. */
