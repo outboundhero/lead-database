@@ -67,7 +67,6 @@ const F = T("F"); // Cleaning, Paused: not visited
 const G = T("G"); // Canada Cleaning, no saved people filters
 const H = T("H"); // Cleaning, Healthy, a big tag count, low places
 const I = T("I"); // Cleaning, Active, but not listed on the Groups tab: flagged, never pulled for
-const TAGS = [A, B, C, D, E, F, G, H, I];
 const RUN = randomUUID().slice(0, 6);
 const HOST = "tptest.example";
 const USER = randomUUID();
