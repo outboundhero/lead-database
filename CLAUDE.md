@@ -403,6 +403,14 @@ src/app/api/exports/process/route.ts       — Background export (for selected I
 src/app/api/dashboard/refresh/route.ts     — Dashboard refresh
 src/app/api/admin/invite/route.ts          — User invite (uses NEXT_PUBLIC_SITE_URL)
 src/app/api/uploads/process/route.ts       — CSV lead import
+src/app/api/uploads/people/route.ts        - An upload's no-email rows: where they stand, add found emails, send by hand (130)
+src/app/api/uploads/found/auto/route.ts    - The worker's request to add an upload's found emails (Bearer AIARK_AUTO_ADD_KEY, 130)
+src/lib/uploads/found.ts                   - A round of found emails: what it takes, settles and writes (130)
+src/lib/uploads/found-run.ts               - Runs a round: the lock, the round's batch, the import in after(), settling (130)
+src/components/uploads/upload-people.tsx   - The Uploads page's People box, People column and Send (130)
+scripts/lib/enrich/upload-people.mjs       - Shared by the worker and the web: which client, row keys, inputs, found-email SQL (130)
+scripts/lib/enrich/upload-move.mjs         - The worker's copy of an upload's no-email rows into the People table (130)
+scripts/lib/enrich/upload-found.mjs        - The worker's side of the found-email hand-off (130)
 src/app/api/uploads/bounces/route.ts       — CSV bounce import (NEW)
 src/app/auth/callback/route.ts             — Auth callback (uses x-forwarded-host)
 src/components/filters/filter-bar.tsx      — Filter chip UI
@@ -1449,7 +1457,7 @@ per chunk (`SET LOCAL` only), sorted by email / lead_id for lock order:
 
 | Row | Becomes |
 |---|---|
-| no usable email (empty, `N/A`, `--`, no `@…`) | `upload_holdbacks` row, cells verbatim (`raw jsonb`), dense `seq` → `/api/uploads/holdbacks?batch=&part=` streams parts of **49,999** rows (`HOLDBACK_PART_SIZE`, client: "under 50k for Clay"), non-overlapping by construction; one link per part on the Uploads page; managers only for their own batches |
+| no usable email (empty, `N/A`, `--`, no `@…`) | `upload_holdbacks` row, cells verbatim (`raw jsonb`), dense `seq` → `/api/uploads/holdbacks?batch=&part=` streams parts of **49,999** rows (`HOLDBACK_PART_SIZE`, client: "under 50k for Clay"), non-overlapping by construction; one link per part on the Uploads page; managers only for their own batches. Since 130 the worker also copies them into the People table of the upload's client (see "Upload no-email rows (migration 130)"); the download keeps every row |
 | new email | `INSERT … jsonb_populate_recordset(null::leads, …) ON CONFLICT (email) DO NOTHING` |
 | existing email | `skip` (nothing written, no extra location) / `merge` (fill blanks — **placeholder junk counts as blank**, see below) / `replace` (chosen fields). Only rows where a chosen column actually changes are rewritten (`WHERE … IS DISTINCT FROM`, `RETURNING` drives `lead_history` and the counters) — a re-upload of the same file merges 0 |
 | existing email, different city/state | + `lead_locations` row; primary untouched |
@@ -1493,6 +1501,11 @@ never derives a tag from a file name (user decision 2026-09-18: not reliable);
 only the one-off folder driver `scripts/import-csv-folder.mts
 --tag-from-filename` does, and it refuses any tag not present in
 `client_tags`. Used once for the JPDET / CCGHTX / CCGEN / CCGGC delivery.
+Since migration 130 the route also records them on the batch:
+`upload_batches.add_tags` (trimmed, exactly what the engine gets; `[]` for none) and
+`override_fields` (the replace rule's fields); both are null on every batch made
+before 130. The worker sends an upload's no-email rows to the People table of the one
+client tag among them (see "Upload no-email rows (migration 130)").
 
 **LinkedIn links (2026-10-23).** `person_linkedin` / `company_linkedin` existed on
 `leads` but were missing from `LEAD_FIELDS`, so every upload skipped the
@@ -1506,6 +1519,10 @@ export: those rows are held back, and each upload's "No-email rows" download
 streams them exactly as uploaded — LinkedIn column included (2026-10-23: all
 131,787 no-email rows from the 24 uploads since 10-19 had a linkedin.com/in/
 link).
+Since migration 130 those rows also go to the People table of the upload's
+client, where the email finders look for their emails (by name and website, then by
+this link), and a found email comes back through this engine with the upload's own
+rule, tags and fields (see "Upload no-email rows (migration 130)").
 
 **The route returns `{batchId}` (202) at once and runs the import in Next
 `after()`** — ~18 ms/row measured, so a 10k-row file is ~3 min and the 88k set
@@ -2123,8 +2140,11 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   definitions (Clay's formulas, waterfalls, run conditions, verbatim) are loaded
   with `node scripts/enrich-seed-table.mjs <spec.json>`; specs hold a client's
   exclusion lists and prompts, so they live in the git-ignored `enrich-specs/`,
-  never in this public repo. Rows arrive from the GMaps Scraper
-  (`POST /api/enrich/intake`, Bearer `ENRICH_INTAKE_KEY`) or a CSV.
+  never in this public repo. A hand-seeded table takes rows from a CSV only. A
+  client's Google Maps places come from the GMaps Scraper app through the
+  client's own inbound URL into its Companies (pipeline) table (see "Inbound
+  URLs (migration 129)"). The no-email rows of a client's uploads go to its People
+  (pipeline) table, held (see "Upload no-email rows (migration 130)").
 - **AI Ark tab** (`/leads/ai-ark`): pick a client, see what AI Ark will be asked
   (locations and exclusion terms from `client_targeting`, job titles / seniority /
   company size from `client_people_filters`), count (People Preview, 1 credit a
@@ -2355,7 +2375,11 @@ fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`,
   The heartbeat carries `capabilities: ["company_runs", "pipeline_v2", "people_runs",
   "fit_scoring"]` (each route refuses a worker without the one it needs), the last Reoon
   balance read, the originals loaded, today's spend, which optional keys are held, and
-  the fit loop's state.
+  the fit loop's state. Since 129 it also offers `held_release` (it releases held Maps
+  places) and since 130 `upload_people` (it copies an upload's no-email rows and
+  releases held People rows), with `info.upload_people.found_auto` (it asks for found
+  emails to be added by itself); the Clay tab and the Uploads page warn while the
+  worker running lacks them.
 - **The Companies tab** (`/leads/companies`, manager and up; the settings sheet is
   admin): pick a client, see what AI Ark will be asked, its company filters (read
   only: size and industries are saved on the AI Ark tab), count (one Company Search
@@ -2369,7 +2393,9 @@ fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`,
   there is no count, or the rules or filters changed since the page loaded them.
   The routes read `enrich_settings` fresh, never through the worker's 30-second
   cache, so a saved switch applies at once. In the Clay section a template table
-  comes first, takes no CSV (409), and the Maps intake never writes into it.
+  comes first and takes no CSV (409). Since migration 129 the client's Google Maps
+  places land in its Companies (pipeline) table through its inbound URL, held until
+  the client is switched on (see "Inbound URLs (migration 129)").
 - ⚠ **A company can still be bought twice in one case:** AI Ark matched it to a
   client's place, but the lead database places all its offices elsewhere. It is
   then neither copied to another client of that place nor on that client's
@@ -2438,11 +2464,14 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   C#31 then C#32, C#34 (a named stand-in for Clay's tool: emails only) and C#36, which
   writes each address as its own inbox row, at most `company_pipeline.inboxes_per_company`
   (5). An inbox row: the database check, then G#37 to G#44 verbatim. A People row
-  (written by people runs and the AI searches' write-tos, input cells only): P#4 to P#62.
+  (written by people runs, the AI searches' write-tos and, since 130, the worker's copy
+  of an upload's no-email rows; input cells only): P#4 to P#62. Its key says who wrote
+  it: `aiark:<person id>`, `w:<company row id>:<writer column>` or
+  `upload:<batch id>:<seq>` (`found_by` "upload", see "Upload no-email rows (migration 130)").
 - **Switches** (`flagOn()`; a switched-off column is skipped "Switched off: <switch>"
   and read as empty): `company_pipeline` (pulls and counts refuse a client not on
   `company_pipeline.tags`), `people_pipeline` (`people_at_company`, C#41 to C#58, people
-  runs), `people_pipeline.ai_searches` (C#41, C#48, C#50, C#56), `people_pipeline.auto_buy`
+  runs, and since 130 the release of the client's held upload rows), `people_pipeline.ai_searches` (C#41, C#48, C#50, C#56), `people_pipeline.auto_buy`
   (Buy without a manager's click), `company_pipeline.linkedin_profile_reads` (C#50, P#27)
   and `personalisation` (P#57 to P#62, G#45 to G#50; also needs the client's own
   originals unless `shared_text_ok`). A sub-switch needs its parent on for the client.
@@ -2469,7 +2498,9 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   (`spend_caps.openai_usd_per_day`: pipeline $20, fit $25), counted after each answer
   from its usage at `spend_caps.openai_prices` (an unknown model at the dearest prices
   held). Past a cap the cell waits ("Today's Reoon share is used up", "Today's OpenAI
-  cap for the pipeline is reached") until the next day's sweep.
+  cap for the pipeline is reached") until the next day's sweep. The email finders and
+  Enrichley have daily caps of paid calls too, since migration 129
+  (`spend_caps.vendor_calls_per_day`, see "Inbound URLs (migration 129)").
 - **Listing** (`enrich_contacts`, `relist()` in `project-contacts.mjs`): one summary
   per inbox and People row; a company is listed when it passes the client's rules, is
   not never-contact or in error, and has a usable general or person email (approved,
@@ -2637,6 +2668,9 @@ it for every client when it is applied; `test-fit.mjs` counts before and after).
   the worker (`POST /api/companies/promote/auto` with Bearer `AIARK_AUTO_ADD_KEY`; checked
   every minute, at most one round per client every 10 minutes; the path skips the session
   middleware).
+  Promotion never takes an upload row (130): `projectContact()` writes no contact for
+  one, and its found email goes to leads through the upload's own import instead (see
+  "Upload no-email rows (migration 130)").
 - **The gate** (switch `fit_gate.enabled` with `fit_gate.tags`; `threshold` 2,
   `client_types` Cleaning and Canada Cleaning, `require_scored` true). While it applies to
   a client: its eligibility gains the fit condition (counts, availability, the wizard's
@@ -2854,6 +2888,428 @@ spends nothing.
   and keywords, removed at the end; every setting put back). No network: AI Ark answers
   through the demo transport and `fetch` refuses every address. Part R runs the routes for
   real through the TypeScript loader. The six suites of phases 2 and 3 must still pass.
+
+### Inbound URLs (migration 129)
+
+Each client has its own address for the GMaps Scraper app's chunks: `POST
+/api/enrich/intake/<token>`. The token decides the client. A chunk's Google Maps
+places land in the client's Companies (pipeline) table as **held** rows: nothing runs
+or is spent on them until the client is on the Company pulls switch. Decided with the
+owner on 2026-11-18. Nothing changed in the scraper app (gmaps-UI) or the external
+scraper: a URL is pasted on the client's card there like a Clay URL.
+
+- **The URLs** (`enrich_inbound_urls`, server-only: RLS on, no policy): one live URL per
+  client and target (`companies` only; People and General inboxes get one when
+  something sends to them). The token is 32 random bytes made on the server
+  (`makeToken()`, base64url, 43 characters), kept in plain text as `api_tokens` are, so
+  the Clay tab can show the URL again. The full URL is `NEXT_PUBLIC_SITE_URL` +
+  `/api/enrich/intake/` + the token, never the request's origin; without the site
+  address no URL is made or shown. A rotation revokes the old URL at once (it answers
+  404) and carries its accepted names over. Each row also keeps the last delivery
+  (`last_used_at`, written at most once a minute), the last Test (time and the name it
+  sent, if any), the last refusal (time and why, in plain words) and `refused_name`,
+  the client name of the last chunk refused for its name. Shared helpers:
+  `src/lib/enrich/inbound.ts` (token, URL, mask, the name check, the answer texts).
+- **Receiving** (`src/app/api/enrich/intake/[token]/route.ts`; the session
+  middleware lets every path under `/api/enrich/intake` through): the token's shape
+  first (a malformed token is refused before any query), then the size (5 MB, by
+  Content-Length and by the bytes read), then one of 3 intake slots in the web
+  process (a 2 s wait), then one transaction with a 15 s statement timeout: the URL by
+  token, the JSON, the Test, the chunk's shape, the name check, the client's Companies
+  (pipeline) table (made or brought up to date under a per-client lock when it is
+  missing or older than the Maps inputs), the places, then `last_used_at`. Every place of every task and result becomes one row
+  (`placeInputs`, `scripts/lib/enrich/maps-place.mjs`): name, place id, website,
+  domain, phone, the Maps category as `industry`, one office (the place itself, as
+  the head office), `source` "Google Maps", the client tag, and the inputs
+  `actual_city`, `actual_state` (the place's own) and `call_city`, `call_state`,
+  `call_category` (what the scrape searched). The row key is `maps:` and the place id,
+  so a place is stored once per client and never meets an `aiark:` row; a place with
+  no place id is skipped and counted. A blank search city, state or category is fine.
+  Each chunk is one `enrich_sources` row of kind `maps`, with `inbound_url_id`; its
+  repeat key is the scraper app's `<task>-<chunk>` taskId (or taskId and chunkIndex,
+  or taskId), so a chunk delivered twice adds nothing. The 200 comes only after the
+  commit. Receiving writes no audit line.
+- **The answers**, chosen for what the scraper app does with each (gmaps-UI
+  `src/lib/clay-pool.ts`): it counts a try for every failed answer except 429, parks
+  a chunk after 10 tries, disables a URL for good on 404 or 410, and keeps an answer's
+  first 200 characters on the card.
+
+  | Status | When | What the scraper app does |
+  |---|---|---|
+  | 200 | stored now, or a delivery seen before (`duplicate_delivery`); or a Test | deletes its copy; Test passes |
+  | 404 | a malformed, unknown or revoked token | disables the URL for good |
+  | 413 | a body over 5 MB | one try used |
+  | 422 | not JSON, or no `postbackData.tasks` list | one try used |
+  | 429 | no slot within 2 s, or a passing database problem (`isPassingDbError`) | no try used, sent again later |
+  | 429 | the chunk's client name does not fit the URL, or there is none | no try used: the chunk waits |
+  | 429 | the client's Companies table can't be made (originals missing, a companies_v1 table) | no try used: the chunk waits |
+  | 500 | anything else (logged without the token, a URL or the body) | one try used |
+
+  Never 410. No answer holds the scraper app's "full" phrases, the chunk's client name
+  or the token. A 429 keeps the client's queue at the head in the scraper app, so a URL
+  on the wrong card holds that client's chunks until the card is fixed or a manager
+  accepts the name.
+- **The name check** (`checkName`): every chunk carries the scraper app's own name for
+  the client (`extra.client`), which is not always the tag. It fits when it is the tag,
+  a name a manager accepted for the URL (at most 20), or when one of its parts is the
+  tag (split on `&`, `/` and the word AND, as the targeting sync splits a sheet tag).
+  No name, or no `extra` block, does not fit.
+- **The Test**: the scraper app's Test sends `{ test: true }` and shows only the status.
+  The intake answers 200 with the client tag, the table and whether the client is
+  switched on, notes the time (and a client name, if one is ever sent), and makes
+  nothing. So after Test, check that the Clay tab's Inbound URLs show it on this
+  client's row: on another client's row, the URL is on the wrong card; on no row, the
+  URL is wrong, even though the card said the Test passed (the scraper app follows
+  redirects).
+- **Held rows** (`enrich_rows.run_status = 'held'`): the worker claims queued rows
+  only, so a held row is never worked and costs nothing. Only the worker releases
+  held rows (to queued), and only in `companies_v2` tables whose client
+  `fn_enrich_company_switch_on(tag)` says is on: the `company_pipeline` switch read
+  exactly as `flagOn("company_pipeline", tag)` reads it (each listed tag trimmed and
+  upper-cased, as `settingsFrom()` keeps them). The guard
+  `trg_enrich_rows_release_guard` refuses any other change from held while the client
+  is off (SQLSTATE 23514), whatever code sends it, so every statement that requeues
+  rows in bulk must leave held rows out itself: the Run route does, and says how many
+  it left alone (`skippedHeld`). Changing other columns of a held row, and deleting
+  it, are allowed. A place already in the table is a duplicate and stays as it is.
+  Switching a client off later: new places arrive held again, and rows already
+  released finish, as AI Ark rows do.
+  Since 130 the guard reads the switch of the row's own table: a held row of a People
+  (pipeline) table (an upload's no-email row) is released only under `people_pipeline`,
+  and a held row of any other table that is not a Companies (pipeline) table never (see
+  "Upload no-email rows (migration 130)"). `releaseHeldRows()` still releases Companies
+  (pipeline) rows only.
+- **The Clay tab** (manager and up): "Inbound URLs" in the header opens a sheet
+  (`src/components/clay/inbound-urls.tsx`) listing every client, Active first, with
+  its URL masked (the address, the path and the token's first 6 characters), Eye and
+  Copy, Rotate and Revoke behind a confirm, when it was made, last delivered to and
+  last tested, its last refusal with "Accept this name" when a chunk's name did not
+  fit, the accepted names, "Switched off: places wait, held" or "Switched on" with
+  the held count, a warning when the client has no targeting rules (its places stop
+  at the area check), and Create, which also makes the client's three pipeline tables
+  (free, as a first pull does). Above a Companies (pipeline) table a strip shows the
+  URL, the held places and why, and the 10 newest Maps deliveries. "Held" is a row
+  status pill, and a held row's steps show "Held". Routes: `GET
+  /api/enrich/inbound[?tag=]` and `POST /api/enrich/inbound { action, tag, name? }`
+  with `create`, `rotate`, `revoke`, `reveal`, `accept_name`, `drop_name`. Each change
+  writes one audit line naming the tag, never a token or a URL.
+- **The daily caps of the email finders and Enrichley** (decision 9):
+  `enrich_settings.spend_caps.vendor_calls_per_day` `{ findymail, prospeo,
+  anymail_finder, enrichley }`, whole paid calls a day, 0 to 100,000, counted in
+  `enrich_spend_daily` under `<vendor>_calls`. **0, the default, means not set: no
+  call is made and those steps wait**, as when today's Reoon share is used up, until
+  an admin sets a number. Edited on the Companies tab's settings sheet (admin), under
+  the spend caps; optional in `PUT /api/companies/settings` (left out, the stored caps
+  are kept; sent, all four are checked, 400 with the reason), one audit line per
+  change ("Findymail calls a day 0 to 200").
+- **The release** (`scripts/lib/enrich/held.mjs`, `releaseHeldRows()`): the worker's
+  60-second block runs it right after the stale sweep. Held rows become queued in
+  pages of 5,000, oldest first, at most 20 pages a minute, and only in `companies_v2`
+  tables whose client `fn_enrich_company_switch_on()` says is on. The database reads
+  the switch live, so the worker's 30-second settings play no part. A client switched
+  off just before its page makes the guard refuse that page (23514): the worker
+  catches it and releases nothing more for that table this round. Paused tables are
+  released too, and the claim still skips them. Before 129 is applied the worker logs
+  once that held rows are not released. The worker reports `held_release` in its
+  heartbeat's `info.capabilities`; the Clay tab warns while the worker running lacks
+  it.
+- ⚠ **`UPDATE ... WHERE id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)` can update
+  more than n rows.** The planner may run the pick again for each row, and rows the
+  statement already updated are skipped as locked, so the page keeps growing (a page
+  of 2 released 3 rows locally). `held.mjs` picks its page in a `MATERIALIZED` CTE
+  instead.
+- **The caps on each keyed step** (`email-vendors.mjs`, `spend.mjs`
+  `takeVendorCall()`): right before each request to Findymail, Prospeo, Anymail Finder
+  or Enrichley, one call is counted in `enrich_spend_daily` (`findymail_calls`,
+  `prospeo_calls`, `anymail_finder_calls`, `enrichley_calls`) in one statement, so two
+  workers can't both take the last one. The originals' "Anymail Finder validate"
+  steps (P#49, P#54) are Enrichley calls and count against Enrichley's cap. A step that
+  sends nothing (no input, no key, an answer already remembered, the lost-send
+  refusal) counts nothing. With no cap set the cell waits, noted "No daily cap is set
+  for Findymail yet (Companies settings)" (the same for the other three); with
+  today's calls used up, "Today's Findymail calls are used up" (Prospeo, Anymail
+  Finder alike) or "Today's Enrichley checks are used up". The hourly sweep
+  (`requeueWaitingTemplateRows`) knows these notes: it queues such a row again once
+  the vendor's calls have room (the next UTC day, or a higher cap), never while the cap
+  is 0. The heartbeat's `spend_today` carries the four counts beside Reoon and OpenAI.
+  `test-pipeline-v2`'s `HIGH_CAPS` sets the four caps high, since its section E calls
+  the vendors' stand-ins.
+- **Maps rows in the steps:** the office check (`clientOffice`, T#17, which reads
+  `place_id`) judges a Maps row by the place itself, its one office, and its notes
+  speak of "the place" and "Google Maps gave ..."; `hq_only` is ignored on a Maps row.
+  The Companies tab shows its source as "Google Maps" (`project-company.mjs`).
+- **Removed:** the shared-key route `POST /api/enrich/intake` (Bearer
+  `ENRICH_INTAKE_KEY`, never set, never called) and `scripts/test-enrich-intake.mjs`.
+  `intakeKeyStatus()` stays: it is the `AIARK_AUTO_ADD_KEY` check of `POST
+  /api/aiark/add/auto` and `POST /api/companies/promote/auto`. A hand-seeded Companies
+  table takes CSV imports only.
+- **Per client, by hand:** create the URL on the Clay tab; add it on the client's card
+  in the scraper app and click Test; check the Test shows on this client's row; then
+  delete the client's Clay URLs from the card at once (while both are there, the
+  scraper app splits the client's chunks between them, it never copies). Places then
+  arrive held. To work them, switch the client on (Company pulls on, the client on its
+  list).
+- ⚠ **A chunk that still reaches 10 failed tries** (an outage of several minutes, or a
+  bug) stays parked in the scraper app's buffer, and nothing on its screens puts it
+  back: that takes one SQL statement in the scraper app's database, with the owner's
+  OK. Never set the external scraper's fallback `WEBHOOK_URL` to an inbound URL: its
+  chunks come with `extra: null` and are refused. A scraper app name that holds two
+  tags fits either client's URL.
+- ⚠ **"Maps companies get the company side only"** holds only while the client is off
+  people runs with AI searches: C#48 needs no AI Ark people data, so with those
+  switches on a Maps row also runs C#48 to C#51, as an AI Ark row does.
+- ⚠ **Migration 129 must be in the database before this code runs:** the Clay tab and
+  the table route read `enrich_inbound_urls` and `enrich_sources.inbound_url_id`, and
+  the intake writes held rows.
+- **Tests:** stop the worker, then `node --env-file=.env.local scripts/test-inbound.mjs`
+  (local database only, 129 applied; made-up `IBTEST_A` to `IBTEST_C` clients with the
+  made-up Clay originals as their own variants, `.ibtest.example` places, removed at
+  the end; the settings it changes are put back; about 25 s, one check waits out the
+  15 s statement timeout). No network: `fetch` refuses every address. The routes run
+  for real through the TypeScript loader (`routeLoader`), whose `call()` passes a
+  route's `params` and gives the request `text()`. The worker's side: `node
+  --env-file=.env.local scripts/test-held-caps.mjs` (local database only, 129 applied;
+  made-up `IBTEST_HA` and `IBTEST_HB` clients; the worker is not started for it: its
+  claim runs in a transaction that is rolled back, the release and the sweeps as
+  exported). It covers held rows, the guard, the switch check against `flagOn()`, the
+  release, Maps rows in the template and the vendor caps. It writes the
+  `company_pipeline` switch and today's spend for the run and puts both back, and it
+  refuses to run while any row is held or any client is on the switch's list.
+  `test-companies.mjs` lost its E1 (the shared-key intake), so it counts 167; the seven
+  suites of phases 2 to 4 must still pass.
+
+### Upload no-email rows (migration 130)
+
+An upload's rows with no usable email still go to its "No-email rows" download,
+exactly as before. Since 130 they also go into the People (pipeline) table of the
+upload's client as **held** rows: nothing is worked or spent on them until the client
+is on People runs (the `people_pipeline` switch, with the client on its list). The
+email finders then look for each person's email within the daily vendor caps, and a
+person whose Outcome is "Approved email" is added to `leads` through the Uploads page's
+own import, with the upload's rule for duplicates, its tags and its fields. So a found
+person becomes the lead the upload would have made had the row had that email. Built
+on 2026-11-18 at the owner's go ("yes and build"); the decisions below still wait for
+the owner's OK. Everything ships off.
+
+- **What an upload records** (`src/app/api/uploads/process/route.ts`, and
+  `scripts/import-csv-folder.mts`): `upload_batches.add_tags`, the tags the import
+  stamps exactly as `importRows` gets them (trimmed; `[]` for none), and
+  `override_fields`, the replace rule's fields (text only). Both are null on every batch
+  made before 130: unknown, and never guessed from a file name. Nothing else about an
+  upload changed. `source_batch_id` links a round of found emails to its upload.
+- **Which client** (`routeTagOf()`, `scripts/lib/enrich/upload-people.mjs`): the one tag
+  of the upload that is a client tag (`client_tags`, compared trimmed and upper case).
+  No client tag, or two, means not sent (`no_tag`, `not_client`, `several`). Only an
+  upload counts: `batch_type 'leads'`, no `source_label`, a field mapping (an Email
+  Bison export keeps no rows back), a final status and kept-back rows.
+- **`upload_people`** (server-only: RLS on, no policy): one row per upload with
+  kept-back rows. `state` is `moving` (rows being copied from `next_seq` on; `reason`
+  says what the copy waits for: `originals_missing`, `retired_v1`), `moved`, or
+  `not_sent` (with its reason, and no client). `table_id` and `source_id` are set null
+  when the People table is deleted; `sent_by` is the admin who sent it by hand.
+- **The move, the People release and the template gates** (the worker; the detail
+  follows). The worker decides each new upload, then copies its
+  kept-back rows into the client's People table in chunks of 1,000 (at most 5 a
+  minute), each a held row keyed `upload:<batch id>:<seq>` with `found_by` "upload",
+  `stage` "uploaded", the Source "Upload: <file>" and the person, company and place
+  cells of the row (`uploadPeopleInputs()`), and one `enrich_sources` row of kind
+  `upload` per upload (`external_id` the batch id). A row an admin deletes is not put
+  back. Held People rows of clients on People runs are released at most 2,000 of a
+  table queued, running or waiting at once. 130's guard reads the switch of the row's
+  own table: `companies_v2` under `company_pipeline` (as in 129), `people_v1` under
+  `people_pipeline`, any other table never. On an upload row the finders and Enrichley
+  run only for a person inside the client's area and clear of its rules, Current
+  Employer and the personalisation steps never run, Reoon has no email to check, and
+  P#51 (Findymail by LinkedIn) never runs (its original needs the company row lookup).
+  The worker reports `upload_people` in its heartbeat's capabilities, and
+  `info.upload_people.found_auto` when it asks for found emails by itself.
+
+- **The move** (`moveUploadRows()`, `scripts/lib/enrich/upload-move.mjs`), in the
+  worker's 60-second block right after the Maps release:
+  - **Deciding:** at most 50 finished uploads a round, oldest first. An upload is
+    decided when it is `leads`, has no `source_label`, has a field mapping, records
+    `add_tags`, is `complete` or `error`, has kept-back rows and has no `upload_people`
+    row. With exactly one client tag among its tags (`routeTagOf()`) it becomes
+    `moving`; otherwise `not_sent` with `no_tag`, `not_client` or `several`. The worker
+    never decides an upload made before 130 (no `add_tags`).
+  - **Copying:** the kept-back rows go in as held rows, one chunk of 1,000 a
+    transaction, at most 5 chunks a minute, each row with the `uploadPeopleInputs()`
+    cells that are input columns of the table. One source row per upload and table
+    (kind `upload`, "Upload: <file>", `external_id` the batch id) counts the rows
+    received, created and duplicates. `next_seq` marks how far the copy got: a
+    deleted row is never put back, and a repeat inserts nothing.
+  - **The client's tables** are made or brought up to date once a round per client,
+    under the per-client lock and in a savepoint, before any of its rows go in, so the
+    upload gates are in the People table's columns before an upload row is worked.
+    When they can't be made, the upload stays `moving` with `originals_missing` or
+    `retired_v1` and is tried again after 10 minutes, and the other uploads go on. A
+    chunk that fails for any other reason is logged and tried again after 10 minutes.
+  - It queues nothing, pays nothing and writes no leads.
+- **The People release** (`releaseHeldPeopleRows()`, `scripts/lib/enrich/held.mjs`),
+  right after the move: People (pipeline) tables whose client
+  `fn_enrich_people_switch_on()` says is on, the oldest held row first, pages of 500,
+  at most 20 pages a minute, and only while the table has fewer than 2,000 rows
+  queued, running or waiting (every row of the table counts, AI Ark rows too). A
+  client switched off mid-round makes the guard refuse (23514); the release catches it
+  and leaves that table for the round. `releaseHeldRows()` is unchanged and never
+  takes a People row.
+- **The upload gates** (`people-template.mjs`): a new change on a run condition,
+  `{ in: "run_if", and: <clause> }` (`applyChanges()`), makes it `(<original>) &&
+  <clause>`, so the clause can't bind to the last term of an original whose top level
+  has `||`. Reoon, Enrichley and the six finder steps (`UPLOAD_AREA_GATED`) run on an
+  upload row only for a person inside the client's area and clear of its rules; P#27,
+  P#58, P#60 and P#61 (`UPLOAD_NEVER`) never run on one. On every other row the
+  clause is true without reading the area or the rules: an AI Ark row works as before
+  (test-upload-enrich W3). An upload row's `in_database` looks for likely addresses at
+  its own website's domain. P#51 never runs on an upload row: its original run
+  condition needs the company row lookup.
+- **On an upload row:** a person outside the area, excluded by the rules, or with no
+  state the check can place ends with no paid call (a row of placeholders only has no
+  place, so it ends "Outside the client's area"). A person nobody finds ends "No email
+  yet" and stays in the table. `projectContact()` writes nothing for an upload row, so
+  the Companies tab and promotion never take one. lead_lookup's notes now say "This
+  person came with no usable email" on every row (they named AI Ark before).
+- **The hand-off, worker side** (`scripts/lib/enrich/upload-found.mjs`): with
+  `AIARK_AUTO_ADD_URL` and `AIARK_AUTO_ADD_KEY` (32 characters or more) set, every
+  minute the worker runs `FOUND_DUE_SQL` (uploads with an approved person still to add
+  and no live round), then POSTs `{batch}` to the URL's origin +
+  `/api/uploads/found/auto`, the key as a Bearer token, waiting at most 30 s. It asks
+  at most once per upload every 10 minutes, whatever the answer, so a failed request
+  is asked again 10 minutes later. The web's `add_to_database` cell is the once-only
+  mark per person. One log line per request; off while either variable is missing.
+- **On a database without 130** the worker logs once for each of its three new steps
+  (the move, the People release, the found-email timer) and the Maps release goes on.
+
+- **Adding the found emails** (`src/lib/uploads/found.ts`, `src/lib/uploads/found-run.ts`):
+  one round of an upload at a time (an advisory lock on the upload). A round takes the
+  upload's People rows whose Outcome is "Approved email" and whose `add_to_database`
+  cell is not settled (`FOUND_TAKE_SQL`, at most 1,000, oldest first; a row being worked
+  is left for later), and makes one `upload_batches` row for them: `source_label`
+  "Emails found", `source_batch_id` the upload, the upload's `duplicate_strategy`, its
+  tags (the client's added when missing: `foundTags()`) and `override_fields`, its header
+  row and mapping, file name "Emails found · <file> · <time> UTC". The answer comes as
+  soon as that batch exists; the import runs after it (Next `after()`) through
+  `importRows()`, the mail provider lookup on as for uploads. Each row is the kept-back
+  row with the found address (lower case) in every email column and the cells that
+  described the missing address blank (`validation_status`, `is_bounced`, `esp`,
+  `email_type`), so the address gets its own mail provider and email type and no
+  validation status. An upload that mapped no email column gets an "Email" column added.
+  Then each person's cell is settled (3 tries):
+
+  | Cell | Shows | Means |
+  |---|---|---|
+  | running `{batch_id}` | Adding… | a round has them |
+  | done `{added: true, lead_id, batch_id}` | Added | the round made the lead: its 'created' history line is not older than the round |
+  | done `{added: false, reason: "lead", lead_id, batch_id}` | Already in the database | a lead with the address was there; the upload's rule applied to it |
+  | error `{batch_id}` | Not added | the import could not store them; only the button takes them again |
+  | done `{added: false, reason: "address", batch_id: null}` | Not added | the found address is not one the import stores; never taken again |
+  | done `{added: false, reason: "row", batch_id: null}` | Not added | their kept-back row is gone; never taken again |
+
+  "Mine" reads the 'created' history line, not `created_at`: an upload may map a Created
+  Date column. A cell that is done is never written over, and only cells still running
+  for the round are settled, so a round that finished meanwhile keeps its words.
+- **Who starts a round:** the worker (`POST /api/uploads/found/auto {batch}`, Bearer
+  `AIARK_AUTO_ADD_KEY`, outside the session middleware; at most one request an upload
+  every 10 minutes, and only while `AIARK_AUTO_ADD_URL` and `AIARK_AUTO_ADD_KEY` are set
+  on it), or the Uploads page's "Add the found emails now" (`POST /api/uploads/people
+  {action: "add_found", batch}`, manager and up, a manager only for their own upload),
+  which also takes again the people a round could not store. 409 while a round of the
+  upload is live, or when its rows are in no People table (the reason in plain words);
+  404 for no such upload. One audit line `upload_found`
+  (`<tag>: upload <id>, <n> to add, <m> settled, round <id>`; "(automatic)" for the
+  worker's, and none for a worker's round that found nobody). No address is ever logged.
+  ⚠ Setting the two variables also starts the automatic add of finished AI Ark pulls.
+- **Retries:** a round still `processing` after 3 hours is dead: the next round of the
+  upload marks it an error ("Stalled", as the upload route's sweep does), and takes its
+  people again, except those whose lead it had already made, which are settled as added
+  by it. A dead web process loses nothing: the same rows under the same rule add and
+  merge nothing the second time.
+- **Sending by hand** (`POST /api/uploads/people {action: "send", batch, tag}`, admin and
+  up): an upload made before 130, or one marked not sent, goes to the People table of the
+  client the admin picks (a client tag only, compared trimmed and upper case). Never one
+  already sent, never one whose tags the worker has still to read, never a file name.
+  It writes `upload_people` (`moving`, `sent_by`) and the worker copies the rows like
+  any other upload's, held. One audit line `upload_people_send` naming the upload and
+  the tag. The found emails of an upload made before 130 get the client's tag only.
+- **Where the rows stand** (`GET /api/uploads/people?batch=<id>` or `?batches=<id>,…`,
+  at most 20; manager and up, a manager only their own uploads, as the no-email download;
+  read only): per upload the state (`moving`, `moved`, `not_sent`, `undecided` (the
+  worker reads its tags within a minute), `before` (made before 130), `processing`,
+  `none`), the reason and the same in plain words, the client, its People table, whether
+  it is on People runs and has targeting rules, the rows kept back and copied, the
+  People rows by status (held, queued, running, waiting, done, error), found (an approved
+  email, or an add result), not found (worked to the end with none), added, already in
+  the database, being added, not added, and the 5 newest rounds; and the worker: online,
+  whether it copies upload rows, whether it adds found emails by itself. The counts go
+  through the upload's own rows (`enrich_rows_source_status_idx`), the approved-email
+  cells (`enrich_cells_approved_idx`) and the table's `add_to_database` cells, never a
+  whole table.
+- **The Uploads page** (admin, as before): once an upload is final, its progress panel
+  has a People box (where the rows went or why not, the counts, the client's switch, a
+  warning when the client has no targeting rules (its rows stop at the area check, so
+  no finder runs) or the worker can't copy them, the rounds, "Add the found emails now"
+  and Send). The "No email" tile and the box under it say the rows also go to the
+  client's People table and that the download still has every one; the download links
+  are as before. The history leaves the rounds out (no `source_batch_id`, and no
+  "Emails found" label, which a round keeps when its upload is deleted; AI Ark adds and
+  promotions stay listed) and gains a "People table" column with Send for an upload that
+  was not sent. It reads `GET /api/uploads/people` every 2.5 s while something moves and
+  every 10 s otherwise, only while the page is visible.
+- **The Clay tab:** a held row of a People (pipeline) table says "Held: a no-email row
+  of an upload. It is worked once its client is on People runs." (the cell route returns
+  the table's `template`, and a held People row's title is the name and company it was
+  given). Above a People (pipeline) table a strip lists the uploads that fed it (the
+  table route's `uploads`: its 10 newest upload sources, each with its rows still held;
+  `deliveries` stay Maps only), the held rows and why, and a warning while the worker
+  running lacks `upload_people`. The table picker reads "from people runs and uploads".
+  The Companies tab's settings: the People runs hint says the switch also starts the
+  no-email rows of the clients' uploads.
+- **The decisions** (the owner's OK pending): (1) an upload goes to a People table only
+  with exactly one client tag among its tags; (2) none, or two, is not sent, and the page
+  says why; (3) finders and Enrichley run on an upload row only inside the client's area
+  and clear of its rules (a row with no state the check can place is not searched);
+  (4) no OpenAI step runs on an upload row; (5) only "Approved email" goes to leads, and
+  the found address gets no validation status (the alternative: mark it valid); (6) the
+  found address is not checked against never contact or the Bison copy before the import,
+  as an uploaded row isn't; (7) the import uses the upload's own rule, tags and fields,
+  with the address cells blank; (8) at most 2,000 rows of a People table in work or
+  waiting at once; (9) found emails are added by themselves only with the auto-add
+  variables set, else by the button; (10) rows already released finish if the client is
+  switched off; (11) one set of daily caps for everything; (12) every kept-back row goes
+  in; (13) a person in two uploads is two People rows (answers already paid for are
+  reused); (14) a row deleted from the People table is not put back; (15) earlier
+  uploads go in only by an admin's Send, never from a file name.
+- **Per client, by hand:** after 130 and the deploy, set the four vendor caps (see
+  "Inbound URLs (migration 129)"), upload a list with the client's tag, check that the
+  Uploads page and the Clay tab show its rows held, then put the client on People runs.
+  Press "Add the found emails now", or set the auto-add variables.
+- ⚠ **Migration 130 must be in the database before this code runs:** the upload route
+  and the folder script write `add_tags` and `override_fields` (an upload fails
+  without them), the Uploads page's history filters on `source_batch_id`, and the
+  routes read `upload_people`.
+- **Tests:** stop the worker, then `node --env-file=.env.local
+  scripts/test-upload-enrich-web.mjs` (local database only, 129 and 130 applied; made-up
+  `UPTEST_C` and `UPTEST_D` clients, users, uploads and People tables, people under
+  `.upweb.uptest.example`, all removed at the end; it turns `people_pipeline` on for
+  `UPTEST_C` for one check and puts it back, and refuses to run while any row is held or
+  any client is on that switch's list; about 1 s). It runs the upload route (the record
+  of the tags, with a stand-in Supabase client), both found-email routes and the Uploads
+  page's route through the real import: rounds under merge and skip compared field for
+  field with a direct upload of the row with the email typed in, a second round taking
+  nobody, a dead round, the button taking again those not stored, Send, the counts, the
+  manager rule, the Clay tab's routes, and the history's query through the local
+  Supabase API. No network: fetch refuses every address but the local Supabase API, DNS
+  is refused, and the mail provider lookup is a stub. The worker side:
+  `scripts/test-upload-enrich.mjs` (87 checks: the move, the release per template,
+  upload rows worked against stubbed vendors, the hand-off against stand-ins, the
+  worker's wiring; made-up `UPTEST_A` and `UPTEST_B`, uploads named `upenrich-…`,
+  people under `.uptest.example`; it refuses to run while any row is held, any client
+  is on either switch's list, or any upload is in `upload_people` or waiting to be
+  decided, and it needs the local `default` originals, as test-people part C does).
+  The shared module, 130's objects, the found-email SQL and the same import path:
+  `scripts/test-upload-people.mjs` (54 checks). Run the three one at a time: the two
+  worker-side suites remove leads under `.uptest.example`, which takes in the web
+  suite's.
 
 ## Known issues / TODO
 

@@ -2,7 +2,9 @@
 // "Companies (pipeline)"): the only Companies template a pull uses. It keeps
 // phase 1's inputs, client-rule checks and database checks (T#1 to T#26 of
 // company-template.mjs) and compiles every other step from the
-// original Clay Companies table (C#n) in enrich_originals (2A.2).
+// original Clay Companies table (C#n) in enrich_originals (2A.2). Its rows
+// come from AI Ark pulls and, since migration 129, from Google Maps places
+// sent to the client's inbound URL (maps-place.mjs), which arrive held.
 //
 // This public file holds keys, which original each column comes from, our own
 // formulas, the changes and the REFS: no prompt and no list.
@@ -83,11 +85,23 @@ export const AIARK_EMAIL_REOON_APPEND = " && {{passes_filters}} && !{{held_usabl
  * check judges the head office alone) and linkedin_run (the pull's id: the
  * client's exclusion check also reads that pull's LinkedIn keywords). Both are
  * absent on every other row, which is judged as before 128.
+ *
+ * A Google Maps place from the client's inbound URL (migration 129) fills the
+ * shared ones (company, website, domain, phone, industry, offices,
+ * office_count, source, client_tag) and the six Maps inputs below, under the
+ * originals' own keys (C#6, C#60, C#62, C#61, C#63 and C#68), so a compiled
+ * original that reads one sees the place's value on a Maps row and nothing on
+ * an AI Ark row (maps-place.mjs placeInputs).
  */
+export const COMPANY_MAPS_INPUT_KEYS = Object.freeze([
+  "place_id", "actual_city", "actual_state", "call_city", "call_state", "call_category",
+]);
+
 export const COMPANY_INPUT_KEYS_V2 = Object.freeze([
   "company", "aiark_id", "website", "domain", "linkedin", "phone", "aiark_email", "industry", "employees",
   "company_type", "description", "offices", "office_count", "aiark_updated", "pulled_before", "source", "client_tag",
   "hq_only", "linkedin_run",
+  ...COMPANY_MAPS_INPUT_KEYS,
 ]);
 
 /** The switches the people side carries (2A.2). */
@@ -250,45 +264,72 @@ export const LISTED_OUTCOMES_V2 = Object.freeze([
 // ── Phase 1's own columns, kept as they were (T#1 to T#26) ──────────────────
 // Moved here from company-template.mjs, whose v1 columns and prompts are gone.
 // The inputs a pull writes (companyInputs() in company-template.mjs fills them),
-// the office and the client's rules, and the database checks.
+// the office and the client's rules, and the database checks. Each input names
+// who writes it (provider): AI Ark pulls, Google Maps places from the client's
+// inbound URL (maps-place.mjs), or both.
+
+const AI_ARK = "AI Ark";
+const MAPS = "Google Maps";
+const BOTH = "AI Ark or Google Maps";
 
 /** @type {Record<string, Record<string, any>>} */
 const PHASE1 = {
-  company: { name: "Company", kind: "input", description: "The company's name on AI Ark." },
-  aiark_id: { name: "AI Ark id", kind: "input", description: "AI Ark's id for the company. No pull buys a company whose id is already held." },
-  website: { name: "Website (AI Ark)", kind: "input", data_type: "url" },
-  domain: { name: "Domain (AI Ark)", kind: "input", data_type: "url", description: "The bare domain of AI Ark's domain, or of its website." },
-  linkedin: { name: "LinkedIn", kind: "input", data_type: "url" },
-  phone: { name: "Phone", kind: "input" },
-  aiark_email: { name: "Email (AI Ark)", kind: "input", description: "The company email AI Ark lists. Reoon checks it by G#40's rule, only for the head office (D8)." },
-  industry: { name: "Industry", kind: "input" },
-  employees: { name: "Employees", kind: "input", description: "AI Ark's headcount figure and band." },
-  company_type: { name: "Company type", kind: "input", hidden: true },
-  description: { name: "Description", kind: "input", hidden: true },
-  offices: { name: "Offices", kind: "input", hidden: true, description: "The head office first, then the other offices AI Ark lists, at most 25, as AI Ark writes them." },
-  office_count: { name: "Offices listed", kind: "input", hidden: true },
-  aiark_updated: { name: "AI Ark updated", kind: "input", hidden: true, description: "When AI Ark last refreshed the record." },
+  company: { name: "Company", kind: "input", provider: BOTH, description: "The company's name on AI Ark, or the place's name on Google Maps." },
+  aiark_id: { name: "AI Ark id", kind: "input", provider: AI_ARK, description: "AI Ark's id for the company. No pull buys a company whose id is already held." },
+  website: { name: "Website", kind: "input", provider: BOTH, data_type: "url", description: "AI Ark's website for the company, or the place's website on Google Maps." },
+  domain: {
+    name: "Domain", kind: "input", provider: BOTH, data_type: "url",
+    description: "The bare domain of AI Ark's domain, or of its website. On a Google Maps row, of the place's domain, or of its website.",
+  },
+  linkedin: { name: "LinkedIn", kind: "input", provider: AI_ARK, data_type: "url" },
+  phone: { name: "Phone", kind: "input", provider: BOTH },
+  aiark_email: { name: "Email (AI Ark)", kind: "input", provider: AI_ARK, description: "The company email AI Ark lists. Reoon checks it by G#40's rule, only for the head office (D8)." },
+  industry: {
+    name: "Industry", kind: "input", provider: BOTH,
+    description: "AI Ark's industry, or the place's category on Google Maps. C#64 (Category) reads it.",
+  },
+  employees: { name: "Employees", kind: "input", provider: AI_ARK, description: "AI Ark's headcount figure and band." },
+  company_type: { name: "Company type", kind: "input", provider: AI_ARK, hidden: true },
+  description: { name: "Description", kind: "input", provider: AI_ARK, hidden: true },
+  offices: {
+    name: "Offices", kind: "input", provider: BOTH, hidden: true,
+    description: "The head office first, then the other offices AI Ark lists, at most 25, as AI Ark writes them. On a Google Maps row, the place itself, as the head office.",
+  },
+  office_count: { name: "Offices listed", kind: "input", provider: BOTH, hidden: true },
+  aiark_updated: { name: "AI Ark updated", kind: "input", provider: AI_ARK, hidden: true, description: "When AI Ark last refreshed the record." },
   pulled_before: {
-    name: "Bought before", kind: "input",
+    name: "Bought before", kind: "input", provider: AI_ARK,
     description: "Filled when AI Ark returned a company an earlier pull had already bought (past its exclusion lists). It was paid for again and is written once.",
   },
   source: {
-    name: "Source", kind: "input",
-    description: "AI Ark pull: bought by the pull. Copied from an earlier pull: bought for any client before, inside this client's places, and copied for free. LinkedIn companies (AI Ark): bought or copied by a LinkedIn pull. LinkedIn people (AI Ark): the company of a person a LinkedIn people run bought.",
+    name: "Source", kind: "input", provider: BOTH,
+    description: "AI Ark pull: bought by the pull. Copied from an earlier pull: bought for any client before, inside this client's places, and copied for free. LinkedIn companies (AI Ark): bought or copied by a LinkedIn pull. LinkedIn people (AI Ark): the company of a person a LinkedIn people run bought. Google Maps: a place the GMaps Scraper app sent to the client's inbound URL.",
   },
-  client_tag: { name: "Client tag", kind: "input", description: "The table's own client tag, written by the pull on every row (C#9)." },
+  client_tag: { name: "Client tag", kind: "input", provider: BOTH, description: "The table's own client tag, written on every row by the pull or the inbound URL (C#9)." },
   hq_only: {
-    name: "Head office only", kind: "input", hidden: true,
+    name: "Head office only", kind: "input", provider: AI_ARK, hidden: true,
     description: "\"true\" on a LinkedIn pull's rows: only the head office counts for the client's area. Cleared when an AI Ark pull takes the company too, so any office in the area counts again.",
   },
   linkedin_run: {
-    name: "LinkedIn pull", kind: "input", hidden: true,
+    name: "LinkedIn pull", kind: "input", provider: AI_ARK, hidden: true,
     description: "The LinkedIn pull that wrote the row: its excluded keywords (the standard ones and the client's own, all of them, sent to AI Ark or not) are checked with the client's exclusion terms. Cleared with Head office only.",
   },
+  place_id: {
+    name: "Place id", kind: "input", provider: MAPS,
+    description: "Google's id for the place, on a Google Maps row (C#6). The row's key is maps: and this id, so each place is stored once per client.",
+  },
+  actual_city: { name: "Actual city", kind: "input", provider: MAPS, hidden: true, description: "The place's own city on Google Maps (C#60)." },
+  actual_state: {
+    name: "Actual state", kind: "input", provider: MAPS, hidden: true,
+    description: "The place's own state on Google Maps (C#62), as the Maps provider writes it: usually the full name, not a code.",
+  },
+  call_city: { name: "Searched city", kind: "input", provider: MAPS, hidden: true, description: "The city the scrape searched, from the scraper app's chunk (C#61)." },
+  call_state: { name: "Searched state", kind: "input", provider: MAPS, hidden: true, description: "The state the scrape searched, from the scraper app's chunk (C#63)." },
+  call_category: { name: "Searched category", kind: "input", provider: MAPS, hidden: true, description: "The category the scrape searched, from the scraper app's chunk (C#68)." },
   office: {
     name: "Office in the client's area", kind: "action", action: "client_office", data_type: "json", provider: "Client rules",
-    inputs: { offices: "{{offices}}", hq_only: "{{hq_only}}" },
-    description: "Checks every office against the client's places and excluded places, exactly as the send gate would place a lead there. The head office when it is inside, else the first office inside. Outside: no office is. Can't tell: AI Ark gave no state the lead database could place. On a LinkedIn pull's row only the head office counts: Outside (head office) when it is not inside.",
+    inputs: { offices: "{{offices}}", hq_only: "{{hq_only}}", place_id: "{{place_id}}" },
+    description: "Checks every office against the client's places and excluded places, exactly as the send gate would place a lead there. The head office when it is inside, else the first office inside. Outside: no office is. Can't tell: AI Ark gave no state the lead database could place. On a LinkedIn pull's row only the head office counts: Outside (head office) when it is not inside. On a Google Maps row (its place id is set) the place itself is the one office.",
   },
   use_city: { name: "City", kind: "formula", formula: "{{office}}?.office?.city", description: "The office's city (in C#7's place)." },
   use_state: { name: "State", kind: "formula", formula: "{{office}}?.office?.state", description: "The office's state, as a code (in C#8's place)." },
@@ -342,7 +383,8 @@ export function writeToCell(kind, key) {
 /**
  * The Companies template's enrich_columns rows, compiled from a variant's
  * originals: COMPANY_INPUT_KEYS_V2 as inputs (phase 1's definitions plus
- * client_tag), then COMPANY_COLUMNS_V2: phase 1's T# columns as phase 1
+ * client_tag and the Maps inputs, each with the provider its definition
+ * names), then COMPANY_COLUMNS_V2: phase 1's T# columns as phase 1
  * defines them, the C# columns through compileColumn() with COMPANY_REFS and
  * the COMPANY_RUN_IF_CHANGES, the G#38 to G#40 instances with
  * AIARK_EMAIL_INSTANCE_REFS, and our own formulas as written here.
@@ -357,7 +399,8 @@ export function companyColumnsV2(originals) {
   const rows = [];
   for (const key of COMPANY_INPUT_KEYS_V2) {
     const p = PHASE1[key];
-    rows.push(compileColumn({ key, kind: "input", name: p.name, data_type: p.data_type ?? "text", description: p.description, hidden: p.hidden, provider: "AI Ark" }, originals, { own }));
+    if (!p?.provider) throw new Error(`The input ${key} names no provider`);
+    rows.push(compileColumn({ key, kind: "input", name: p.name, data_type: p.data_type ?? "text", description: p.description, hidden: p.hidden, provider: p.provider }, originals, { own }));
   }
   for (const spec of COMPANY_COLUMNS_V2) {
     if (String(spec.from ?? "").startsWith("T#")) {

@@ -175,7 +175,7 @@ function heldAnswer(r, matched = null) {
     status: "done",
     value: { ...value, matched_on: matched, address: r.email },
     display,
-    note: `AI Ark gave no usable email, and ${r.email} ${how}, so this person stays out of the pipeline. ${note}`,
+    note: `This person came with no usable email, and ${r.email} ${how}, so they stay out of the pipeline. ${note}`,
   };
 }
 
@@ -272,12 +272,12 @@ async function leadLookup({ inputs, db }) {
     return { status: "empty", note: email ? "Not in the lead database, its copy of Email Bison or on the never-contact list" : "No email to look up" };
   }
   const [first, last] = names(inputs);
-  if (!first || !last) return { status: "empty", note: "AI Ark gave no usable email and no full name, so there is nothing to look up" };
+  if (!first || !last) return { status: "empty", note: "This person came with no usable email and no full name, so there is nothing to look up" };
   const likely = last.includes("*") ? [] : await byLikelyAddress(db, first, last, inputs.domain);
   if (likely.length) return heldAnswer(strongest(likely), LIKELY_ADDRESS);
   const same = await byNameAndCompany(db, first, last, companyAsHeld(inputs.company));
   if (same.length) return heldAnswer(strongest(same), NAME_AND_COMPANY);
-  return { status: "empty", note: "AI Ark gave no usable email. Nothing in the lead database or its copy of Email Bison matches this person's likely addresses, and no lead has the same name and company" };
+  return { status: "empty", note: "This person came with no usable email. Nothing in the lead database or its copy of Email Bison matches their likely addresses, and no lead has the same name and company" };
 }
 
 // ── client_area ─────────────────────────────────────────────────────────────

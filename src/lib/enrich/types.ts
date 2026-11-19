@@ -1,8 +1,15 @@
 // Shapes shared by the Clay tab's routes and its page.
 
 export type CellStatus = "done" | "empty" | "skipped" | "error" | "needs_key" | "running";
-export type RowStatus = "queued" | "running" | "done" | "waiting" | "error";
-export const ROW_STATUSES: RowStatus[] = ["queued", "running", "done", "waiting", "error"];
+/**
+ * held (migration 129): a row stored and never worked until the worker
+ * releases it. In a Companies (pipeline) table, a Google Maps place from the
+ * client's inbound URL, released while the client is on the company_pipeline
+ * switch; in a People (pipeline) table, a no-email row of an upload (130),
+ * released while the client is on the people_pipeline switch.
+ */
+export type RowStatus = "queued" | "running" | "done" | "waiting" | "error" | "held";
+export const ROW_STATUSES: RowStatus[] = ["queued", "running", "done", "waiting", "error", "held"];
 
 export interface EnrichColumn {
   key: string;
@@ -72,8 +79,14 @@ export interface WorkerState {
     failed?: number;
     keys?: Record<string, boolean>;
     stopped?: boolean;
-    /** What this worker can work: company pulls need "company_runs" (migration 124). */
+    /**
+     * What this worker can work: company pulls need "company_runs" (migration 124);
+     * held Maps places are released by a worker with "held_release" (129); an
+     * upload's no-email rows are copied and released by one with "upload_people" (130).
+     */
     capabilities?: string[];
+    /** Upload no-email rows (130): whether it asks the web app to add found emails by itself (AIARK_AUTO_ADD_URL and _KEY set). */
+    upload_people?: { found_auto?: boolean } | null;
     /** The last Reoon balance the worker read for the company pipeline's checks. */
     reoon?: { daily?: number | null; instant?: number | null; read_at?: string | null } | null;
   };
@@ -159,6 +172,8 @@ export interface CellDetail {
     created_at: string;
     source_label: string | null;
     reference: string | null;
+    /** The row's table's template (companies_v2, people_v1, ...), or null for a hand-seeded or AI Ark table. */
+    template: string | null;
   };
   /** The current values of the cells this column reads. */
   reads: { key: string; name: string; display: string | null; status: CellStatus | null }[];

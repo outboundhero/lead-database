@@ -18,6 +18,7 @@ import { CSVDropzone } from "@/components/uploads/csv-dropzone";
 import { FieldMapper } from "@/components/uploads/field-mapper";
 import { DuplicateStrategy, parseTags } from "@/components/uploads/duplicate-strategy";
 import { UploadProgress, HoldbackLinks } from "@/components/uploads/upload-progress";
+import { PeopleCell, SendDialog, useUploadPeople } from "@/components/uploads/upload-people";
 import { detectDelimiter, type ParseResult } from "@/lib/uploads/parse-csv";
 import type { FieldMapping } from "@/lib/uploads/normalize-row";
 import { detectBisonFormat } from "@/lib/uploads/parse-bison";
@@ -26,6 +27,14 @@ import { useHasPermission } from "@/lib/context/role-context";
 import { AccessDenied } from "@/components/layout/access-denied";
 
 type Step = "drop" | "map" | "strategy" | "processing";
+
+// A round of found emails for an upload's no-email rows (migration 130) is a
+// batch of its own, listed under its upload (the People table column), not as
+// a row of the history: FOUND_SOURCE_LABEL in scripts/lib/enrich/upload-people.mjs.
+const FOUND_LABEL = "Emails found";
+
+/** An upload whose no-email rows may be in a People table: made by the Uploads page or the folder script, with rows kept back. */
+const hasPeople = (b: UploadBatch) => b.batch_type === "leads" && b.source_label == null && (b.no_email_rows ?? 0) > 0;
 
 export default function UploadsPage() {
   const canView = useHasPermission("admin");
@@ -40,16 +49,22 @@ export default function UploadsPage() {
   const [overrideFields, setOverrideFields] = useState<string[]>([]);
   const [batchId, setBatchId] = useState<string | null>(null);
   const [history, setHistory] = useState<UploadBatch[]>([]);
+  const [sendFor, setSendFor] = useState<UploadBatch | null>(null);
 
   const loadHistory = useCallback(async () => {
     const supabase = createClient();
+    // Rounds of found emails are left out: they show under their upload. A
+    // round whose upload was deleted lost its link but keeps its label.
     const { data } = await supabase
       .from("upload_batches")
       .select("*")
+      .is("source_batch_id", null)
+      .or(`source_label.is.null,source_label.neq."${FOUND_LABEL}"`)
       .order("created_at", { ascending: false })
       .limit(20);
     if (data) setHistory(data as UploadBatch[]);
   }, []);
+  const people = useUploadPeople(history.filter(hasPeople).map((b) => b.id));
 
   useEffect(() => {
     loadHistory();
@@ -263,6 +278,7 @@ export default function UploadsPage() {
                     <TableHead>Merged</TableHead>
                     <TableHead>Locations</TableHead>
                     <TableHead>No email</TableHead>
+                    <TableHead>People table</TableHead>
                     <TableHead>Date</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -305,6 +321,13 @@ export default function UploadsPage() {
                           </span>
                         ) : "0"}
                       </TableCell>
+                      <TableCell>
+                        {hasPeople(batch) ? (
+                          <PeopleCell view={people.data?.batches[batch.id]} onSend={() => setSendFor(batch)} />
+                        ) : (
+                          <span className="text-muted-foreground">None</span>
+                        )}
+                      </TableCell>
                       <TableCell className="text-muted-foreground">
                         {new Date(batch.created_at).toLocaleDateString()}
                       </TableCell>
@@ -315,6 +338,16 @@ export default function UploadsPage() {
             </div>
           </CardContent>
         </Card>
+      )}
+      {sendFor && (
+        <SendDialog
+          open
+          onOpenChange={(open) => !open && setSendFor(null)}
+          batchId={sendFor.id}
+          filename={sendFor.filename}
+          rows={sendFor.no_email_rows ?? 0}
+          onSent={people.reload}
+        />
       )}
     </div>
   );

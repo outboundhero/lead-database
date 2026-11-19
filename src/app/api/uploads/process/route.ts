@@ -131,6 +131,12 @@ export async function POST(request: NextRequest) {
       field_mapping: isBison ? null : fieldMapping,
       source_headers: sourceHeaders,
       batch_type: "leads",
+      // What the import stamps and may replace, kept on the batch (migration
+      // 130): the worker sends the batch's no-email rows to the People table
+      // of the one client tag among these tags, and a found email is added
+      // with the same tags and fields. Only text counts as a field to replace.
+      add_tags: addTags.map((t) => t.trim()),
+      override_fields: overrideFields.filter((f): f is string => typeof f === "string"),
     })
     .select()
     .single();

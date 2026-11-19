@@ -16,6 +16,13 @@
 //   - The AI searches' write-tos on the company row (C#43, C#51, C#58): row key
 //     "w:<company row id>:<writer column key>", stage found, no email until a
 //     finder finds one.
+//   - An upload's no-email rows (migration 130, upload-move.mjs): the worker
+//     copies each row an upload kept back for having no usable email into the
+//     client's People table as a held row. Row key "upload:<batch id>:<seq>",
+//     found_by upload, stage uploaded, the Source "Upload: <file>", no company
+//     row and no AI Ark record: the person's name, title, company, website,
+//     LinkedIn link and place are the written values. The worker releases them
+//     only while the client is on the people_pipeline switch.
 // Each writer writes input cells only (PEOPLE_INPUTS); every other column is
 // worked by the engine.
 //
@@ -23,20 +30,28 @@
 // P#49, P#54) are real steps, each run only while its key is on the worker
 // (config.key_env, pipeline-actions.mjs KEYED_STEPS); without it the step is
 // skipped with "Needs <KEY> (not held)", read as empty, and the row never waits.
+//
+// Upload rows (130): every step that can spend runs on one only for a person
+// inside the client's area and clear of its rules (UPLOAD_AREA_GATED), and
+// Current Employer and the personalisation steps never run on one
+// (UPLOAD_NEVER): their answers never reach the lead a found email becomes.
+// The clause is added to the original's run condition (applyChanges "and");
+// on every other row it is true without reading the area or the rules.
 
 import { TRACKS } from "./settings.mjs";
 import { bareDomain } from "./domain.mjs";
 import { compileColumn, parseFrom, refMap } from "./compile-original.mjs";
 import { ORIGINAL_KEYS } from "./original-keys.mjs";
+import { NOT_UPLOAD_ROW, UPLOAD_AREA_GATED, UPLOAD_FOUND_BY, UPLOAD_NEVER, UPLOAD_SPEND_GATE, UPLOAD_STAGE } from "./upload-people.mjs";
 
 export { TRACKS };
 export const PEOPLE_TEMPLATE = "people_v1";
 export const PEOPLE_TABLE_NAME = "People (pipeline)";
 
 /** stage: how the row came. */
-export const PEOPLE_STAGES = Object.freeze(["bought", "no_email", "copied", "found"]);
+export const PEOPLE_STAGES = Object.freeze(["bought", "no_email", "copied", "found", UPLOAD_STAGE]);
 /** found_by: who found the person. */
-export const PEOPLE_FOUND_BY = Object.freeze(["aiark", "linkedin", "facilities_1", "facilities_2", "ceo"]);
+export const PEOPLE_FOUND_BY = Object.freeze(["aiark", "linkedin", "facilities_1", "facilities_2", "ceo", UPLOAD_FOUND_BY]);
 /** The AI searches' write-to columns on the company row, the writer each one is, and its track. */
 export const PEOPLE_WRITERS = Object.freeze({
   person_2_facilities_1_write_to: { found_by: "facilities_1", track: "operations" }, // C#43, from C#41
@@ -75,20 +90,20 @@ export const PEOPLE_INPUTS = Object.freeze([
   { key: "email", from: "P#9", description: "The person's email, lower case: AI Ark's (Export Single, or the registry's on a copy). Empty for a person bought with no email and for write-to people." },
   { key: "client_tag", from: "P#26", description: "The table's own tag (the write-tos' mapping writes it too, and must match)." },
   { key: "additional_category", from: "P#35", description: "Always empty: no source fills it." },
-  { key: "company_website", from: "P#36", description: "The company row's use_website (C#26), as the write-tos write it. P#37 normalises it into P#38 use_domain." },
+  { key: "company_website", from: "P#36", description: "The company row's use_website (C#26), as the write-tos write it; on an upload's row, the uploaded website as a bare domain. P#37 normalises it into P#38 use_domain." },
   ...PEOPLE_WRITTEN_KEYS.map((k) => ({
     key: writtenKey(k), from: null,
-    description: `A value a writer gave ${k}: the write-tos map into it; people runs write only written_city and written_state (D13: an AI Ark person's own place, a LinkedIn person's office in the client's area).`,
+    description: `A value a writer gave ${k}: the write-tos map into it; people runs write only written_city and written_state (D13: an AI Ark person's own place, a LinkedIn person's office in the client's area); an upload's row takes it from the uploaded file.`,
   })),
   { key: "company_row", from: null, description: "The company row's id (enrich_rows.id of the client's Companies (pipeline) table), as text." },
   { key: "company_aiark_id", from: null, description: "AI Ark's company id." },
   { key: "person_aiark_id", from: null, description: "AI Ark's person id. Empty for write-to people." },
-  { key: "found_by", from: null, description: "aiark, linkedin, facilities_1, facilities_2 or ceo." },
-  { key: "stage", from: null, description: "bought, no_email, copied or found." },
+  { key: "found_by", from: null, description: "aiark, linkedin, facilities_1, facilities_2, ceo, or upload (a row an upload kept back for having no usable email)." },
+  { key: "stage", from: null, description: "bought, no_email, copied, found, or uploaded (an upload's row)." },
   { key: "track", from: null, description: "operations, facility_office or ceo: the candidate's track, or the writer's." },
   { key: "rank", from: null, description: "The candidate's rank in its track (the index of the first phrase its title holds), as text." },
-  { key: "person_first_name", from: null, description: "AI Ark's first name." },
-  { key: "person_last_name", from: null, description: "AI Ark's last name; a Preview's is masked (\"Ba***e\")." },
+  { key: "person_first_name", from: null, description: "AI Ark's first name, or the uploaded one on an upload's row." },
+  { key: "person_last_name", from: null, description: "AI Ark's last name; a Preview's is masked (\"Ba***e\"). The uploaded one on an upload's row." },
   { key: "seniority", from: null, description: "AI Ark's seniority." },
   { key: "department", from: null, description: "AI Ark's departments, up to 3, joined with \", \"." },
   { key: "person_city", from: null, description: "The person's own city, as AI Ark has it." },
@@ -97,17 +112,34 @@ export const PEOPLE_INPUTS = Object.freeze([
   { key: "aiark_email_status", from: null, description: "AI Ark's own check of the email: VALID, INVALID (reason) or PENDING." },
   { key: "aiark_email_domain_type", from: null, description: "SMTP, CATCH_ALL or UNKNOWN, as AI Ark reports the mailbox." },
   { key: "pulled_before", from: null, description: "Filled when the person was bought before by another run (copies)." },
-  { key: "source", from: null, description: "Where the row came from, shown on the Clay tab (\"AI Ark people run\", \"LinkedIn people run (AI Ark)\", \"Copied from an earlier run (no charge)\", \"AI search (write-to)\")." },
+  { key: "source", from: null, description: "Where the row came from, shown on the Clay tab (\"AI Ark people run\", \"LinkedIn people run (AI Ark)\", \"Copied from an earlier run (no charge)\", \"AI search (write-to)\", \"Upload: <file name>\")." },
 ]);
 
 export const PEOPLE_INPUT_KEYS = Object.freeze(PEOPLE_INPUTS.map((c) => c.key));
+
+/**
+ * The upload gates (130), as changes to a column's run condition: a paid step
+ * on an upload row only inside the client's area and clear of its rules; a
+ * step whose answer never reaches the lead, never on one. Every key named in
+ * UPLOAD_AREA_GATED and UPLOAD_NEVER (upload-people.mjs) gets its gate here.
+ */
+const UPLOAD_GATES = Object.freeze({
+  area: Object.freeze({ in: "run_if", and: UPLOAD_SPEND_GATE, why: "On an upload row: only for a person inside the client's area and clear of its rules (130)." }),
+  never: Object.freeze({ in: "run_if", and: NOT_UPLOAD_ROW, why: "Never on an upload row: its answer never reaches the lead (130)." }),
+});
+
+/** A column spec with its upload gate, if it has one. */
+function withUploadGate(spec) {
+  const gate = UPLOAD_AREA_GATED.includes(spec.key) ? UPLOAD_GATES.area : UPLOAD_NEVER.includes(spec.key) ? UPLOAD_GATES.never : null;
+  return gate ? Object.freeze({ ...spec, changes: [...(spec.changes ?? []), gate] }) : spec;
+}
 
 /**
  * The computed columns, in order. kind and action are what each compiles to;
  * flag: switches (config.flag, settings.mjs flagOn); key_env: the key a keyed
  * step runs with (absent: skipped, never waits); written: a D30 waterfall.
  * Our own formulas are given here in full; every other column's text comes
- * from its original.
+ * from its original. The upload gates are added last (withUploadGate).
  *
  * @type {ReadonlyArray<import("./compile-original.mjs").ColumnSpec & { formula?: string, note?: string }>}
  */
@@ -121,9 +153,10 @@ export const PEOPLE_COLUMNS = Object.freeze([
       last_name: "{{person_last_name}} || {{use_last_name}}",
       full_name: "{{full_name}}",
       company: "{{company}}",
-      domain: "{{lookup_company_data}}?.row?.use_domain",
+      // An upload's row has no company row: its own website's domain then (130). Every other row reads the company row's, as before.
+      domain: `{{found_by}} === "${UPLOAD_FOUND_BY}" ? ({{lookup_company_data}}?.row?.use_domain || {{use_domain}}) : {{lookup_company_data}}?.row?.use_domain`,
     },
-    note: "The AI Ark tab's check with explicit inputs (2A.4), in DUPE CHECK's place: the address in leads, the Email Bison copy and the never-contact list; with no address, the person's likely addresses at the company's domain, then the same name and company. A Preview's masked last name fits by its letters.",
+    note: "The AI Ark tab's check with explicit inputs (2A.4), in DUPE CHECK's place: the address in leads, the Email Bison copy and the never-contact list; with no address, the person's likely addresses at the company's domain (an upload's row: the uploaded website's), then the same name and company. A Preview's masked last name fits by its letters.",
   },
   {
     key: "in_area", from: null, kind: "action", action: "client_area", provider: "Client rules", data_type: "boolean",
@@ -190,8 +223,14 @@ export const PEOPLE_COLUMNS = Object.freeze([
   { key: "question_ai", from: "P#61", kind: "action", action: "ai_web", model_setting: "people_question_ai", tool: "none", flag: ["personalisation"], note: "Its 5 table examples are kept as exported; it does not run until Clay's way of sending them is known (0.4 item 4, D38)." },
   { key: "question", from: "P#62", kind: "formula", flag: ["personalisation"] },
   { key: "person_outcome", from: null, kind: "formula" },
-  { key: "add_to_database", from: null, kind: "action", action: "later", phase: 4, note: "Written only by promotion (phase 3); the engine never works it." },
-]);
+  { key: "add_to_database", from: null, kind: "action", action: "later", phase: 4, note: "Written only by promotion (phase 3), and on an upload's row by the adding of its found email (130); the engine never works it." },
+].map(withUploadGate));
+
+{
+  const keys = new Set(PEOPLE_COLUMNS.map((c) => c.key));
+  const missing = [...UPLOAD_AREA_GATED, ...UPLOAD_NEVER].filter((k) => !keys.has(k));
+  if (missing.length) throw new Error(`The upload gates name People columns that don't exist: ${missing.join(", ")}`);
+}
 
 /** The person's outcome (ours): the first that applies. */
 export const PERSON_OUTCOMES = Object.freeze([

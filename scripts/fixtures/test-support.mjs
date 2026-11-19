@@ -340,6 +340,11 @@ export async function load(url, context, next) {
 /**
  * Registers the loader once and returns { T, route, srcModule, call, heartbeat }:
  * T is the stand-ins' state (role, userId, audits, worker).
+ *
+ * call(handler, { body, query, headers, params }) hands the handler a request
+ * stand-in (json(), text(), nextUrl, headers) and, as Next does for a route
+ * with a dynamic segment, { params: Promise<params> } as its second argument.
+ * text() gives a string body as it is, anything else as JSON.
  */
 export function routeLoader(userId) {
   const require = createRequire(import.meta.url);
@@ -350,10 +355,15 @@ export function routeLoader(userId) {
   const T = (globalThis.__routeTest = { role: "manager", userId, audits: [], worker: null });
   const srcModule = (p) => import(new URL(p, src).href);
   const route = (p) => srcModule(`app/api/${p}/route.ts`);
-  const call = async (handler, { body, query, headers } = {}) => {
+  const call = async (handler, { body, query, headers, params } = {}) => {
     const qs = query ? `?${new URLSearchParams(query)}` : "";
-    const req = { json: async () => body, nextUrl: new URL(`http://routes.test/api${qs}`), headers: new Headers(headers ?? {}) };
-    const res = await handler(req);
+    const req = {
+      json: async () => body,
+      text: async () => (typeof body === "string" ? body : body === undefined ? "" : JSON.stringify(body)),
+      nextUrl: new URL(`http://routes.test/api${qs}`),
+      headers: new Headers(headers ?? {}),
+    };
+    const res = await handler(req, { params: Promise.resolve(params ?? {}) });
     return { status: res.status, body: res.body };
   };
   const heartbeat = ({ online = true, capabilities = ["company_runs", "pipeline_v2"] } = {}) => ({

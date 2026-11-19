@@ -6,6 +6,7 @@ import {
   Ban,
   Building2,
   Check,
+  CirclePause,
   Clock,
   Globe,
   KeyRound,
@@ -26,7 +27,9 @@ import type { ColumnCounts, EnrichColumn, GridCell, RowStatus } from "@/lib/enri
 // How one Clay-tab cell and column header look. The states follow Clay's own:
 // a value, "Run condition not met", no result, an error, plus two of ours —
 // "Needs key" (the worker has no key for that provider yet) and later-phase
-// columns that are shown but not built.
+// columns that are shown but not built. A held row (a Google Maps place
+// waiting for its client to be switched on, migration 129) shows "Held" in
+// the steps it has not run.
 
 export function ColumnIcon({ col, className }: { col: EnrichColumn; className?: string }) {
   const cls = cn("size-3.5 shrink-0", className);
@@ -130,6 +133,7 @@ export function ClayCell({
   if (col.phase > 1) return <span className="text-[11px] italic text-muted-foreground/40">Phase {col.phase}</span>;
   if (!cell) {
     if (rowStatus === "queued") return <Muted icon={Clock} className="opacity-60">Queued</Muted>;
+    if (rowStatus === "held") return <Muted icon={CirclePause} className="opacity-60">Held</Muted>;
     if (rowStatus === "running") return <Muted icon={Loader2} spin className="text-primary">Running</Muted>;
     return <span className="text-muted-foreground/40">—</span>;
   }
