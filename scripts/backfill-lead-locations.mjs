@@ -13,10 +13,17 @@ import "dotenv/config";
  *
  * Re-runnable: processes leads whose state_code is still NULL (or --all).
  *
+ * Each run is recorded in cron_runs (migration 133) as location_backfill: when
+ * it started, and once it finished, the start of the run that finished. A
+ * share job waits for a location run that started after its import finished
+ * (scripts/lib/share/), so new leads have their place before they are matched.
+ * Not with --dry-run. A database without cron_runs records nothing.
+ *
  * Usage: node --env-file=.env.local scripts/backfill-lead-locations.mjs [--dry-run] [--all]
  */
 
 import pg from "pg";
+import { CRON_LOCATION_BACKFILL } from "./lib/overlap-topup.mjs";
 
 const DRY = process.argv.includes("--dry-run");
 const ALL = process.argv.includes("--all");
@@ -34,6 +41,24 @@ async function q(text, params, tries = 4) {
   }
 }
 const ck = (s) => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z]/g, "");
+
+// The run's start in cron_runs, before any lead is read. 42P01: no cron_runs
+// (before 133), nothing recorded. Any other failure is said and the run goes
+// on: the location pass matters more than its record.
+let runStartedAt = null;
+if (!DRY) {
+  try {
+    const { rows: [r] } = await q(
+      `INSERT INTO cron_runs (name, started_at) VALUES ($1, now())
+       ON CONFLICT (name) DO UPDATE SET started_at = EXCLUDED.started_at, updated_at = now()
+       RETURNING started_at`,
+      [CRON_LOCATION_BACKFILL]
+    );
+    runStartedAt = r.started_at;
+  } catch (err) {
+    if (err?.code !== "42P01") console.warn(`could not record the run's start in cron_runs: ${err.message}`);
+  }
+}
 
 // ── reference into memory ──
 console.log("loading reference...");
@@ -232,5 +257,21 @@ if (!DRY && process.argv.includes("--verbose")) {
   const after = (await q(`
     SELECT location_status, count(*) n FROM leads GROUP BY 1 ORDER BY 2 DESC`)).rows;
   console.log("status:", after.map((r) => `${r.location_status ?? "none"}=${r.n}`).join("  "));
+}
+// The run's finish: finished_run_started_at is this run's own start, unless a
+// later run finished first (greatest), so it never moves back.
+if (runStartedAt) {
+  try {
+    await q(
+      `UPDATE cron_runs
+          SET finished_at = now(),
+              finished_run_started_at = greatest(coalesce(finished_run_started_at, '-infinity'::timestamptz), $2::timestamptz),
+              updated_at = now()
+        WHERE name = $1`,
+      [CRON_LOCATION_BACKFILL, runStartedAt]
+    );
+  } catch (err) {
+    if (err?.code !== "42P01") console.warn(`could not record the run's finish in cron_runs: ${err.message}`);
+  }
 }
 await pool.end();
