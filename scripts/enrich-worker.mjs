@@ -79,6 +79,16 @@
 // client every 10 minutes; promotion ships off and covers no client.
 // FIT_POLL_MS (5000): the fit loop's sleep when it had nothing to do.
 //
+// Overlap sharing (migrations 133 and 134, scripts/lib/share/): every 60 s,
+// not awaited, with a busy flag and on a pool of its own (2 connections), the
+// share step finds finished imports, waits for their places, decides which
+// other clients their new leads fit and why not, applies them in apply mode
+// within the push caps, asks the web app to push applied shares
+// (POST /api/sharing/push/auto, SHARE_PUSH_KEY; SHARE_PUSH_URL or the
+// AIARK_AUTO_ADD_URL origin), writes the receivers' tags while write_tags is
+// on, and prunes. It does nothing at all while overlap_sharing is off or has
+// no "since"; it ships off and covers no client.
+//
 // Env: DATABASE_URL (required). OPENAI_API_KEY, CLEARBIT_API_KEY — optional;
 // without one, the columns that need it show "Needs key" and the row waits.
 // FINDYMAIL_API_KEY, PROSPEO_API_KEY, ANYMAIL_FINDER_API_KEY, ENRICHLEY_API_KEY:
@@ -125,6 +135,9 @@ import { releaseHeldPeopleRows, releaseHeldRows } from "./lib/enrich/held.mjs";
 import { moveUploadRows } from "./lib/enrich/upload-move.mjs";
 import { askForFound, foundAutoConfig } from "./lib/enrich/upload-found.mjs";
 import { UPLOAD_CAPABILITY } from "./lib/enrich/upload-people.mjs";
+import { SHARING_CAPABILITY, sharePushConfig } from "./lib/overlap-topup.mjs";
+import { newShareMemory, SHARE_EVERY_MS, shareRound } from "./lib/share/step.mjs";
+import { SHARE_UNREADY } from "./lib/share/db.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname, quiet: true });
 
 const env = process.env;
@@ -508,6 +521,8 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
     fit: { ...fitLoopStatus(), loop: { ...fitState }, promote_auto: Boolean(promoteAuto) },
     // Uploads' no-email rows (130): whether found emails are added with no button.
     upload_people: { found_auto: Boolean(foundAuto) },
+    // Overlap sharing (134): whether applied shares are pushed with no button (SHARE_PUSH_KEY and the web address set).
+    sharing: { push_auto: Boolean(sharePush) },
     host: os.hostname(),
     pid: process.pid,
     stopped: stopping,
@@ -695,6 +710,53 @@ async function addFoundEmails() {
   }
 }
 
+// ── Overlap sharing (migrations 133 and 134) ────────────────────────────────
+// A round every 60 s, not awaited, with a busy flag (scripts/lib/share/step.mjs).
+// Its statements run one at a time on a pool of their own, so they never take
+// a connection a row or a slice is waiting for; each stays under the same 70 s
+// query timeout as the main pool. Off, it reads the settings and stops.
+
+CAPABILITIES.push(SHARING_CAPABILITY);
+const sharePool = new pg.Pool({
+  connectionString: env.DATABASE_URL,
+  max: 2,
+  keepAlive: true,
+  connectionTimeoutMillis: 30_000,
+  idleTimeoutMillis: 30_000,
+  query_timeout: 70_000,
+});
+sharePool.on("error", (e) => log(`share pool idle-client error: ${e.message}`)); // never crash the loop
+const sharePush = sharePushConfig(env);
+const shareMemory = newShareMemory();
+let shareBusy = false;
+let shareInFlight = Promise.resolve();
+let shareUnreadyLogged = false;
+
+async function shareStep() {
+  if (shareBusy) return;
+  shareBusy = true;
+  try {
+    const settings = await readSettings(pool);
+    const r = await shareRound(sharePool, { settings, memory: shareMemory, env, log, shouldStop: () => shuttingDown });
+    shareUnreadyLogged = false;
+    if (r.discovered || r.decided || r.failed || r.rechecked || r.pushes || r.tagsAdded || r.tagsRemoved || r.pruned?.lists || r.pruned?.rows) {
+      log(`overlap sharing: ${r.discovered} import(s) found, ${r.decided} decided${r.failed ? `, ${r.failed} failed` : ""}` +
+        `${r.rechecked ? `, ${r.rechecked} rechecked` : ""}${r.pushes ? `, ${r.pushes} push request(s)` : ""}` +
+        `${r.tagsAdded || r.tagsRemoved ? `, ${r.tagsAdded} tag(s) written, ${r.tagsRemoved} taken off` : ""}` +
+        `${r.pruned?.lists || r.pruned?.rows ? `, pruned ${r.pruned.lists} list row(s) and ${r.pruned.rows} log row(s)` : ""}`);
+    }
+  } catch (e) {
+    if (SHARE_UNREADY.has(e?.code)) {
+      if (!shareUnreadyLogged) log("overlap sharing is idle: migrations 133 and 134 are not applied");
+      shareUnreadyLogged = true;
+      return;
+    }
+    log(`overlap sharing: ${e.message}`);
+  } finally {
+    shareBusy = false;
+  }
+}
+
 // ── Template rows waiting on a key or a cap: queued again once it cleared ───
 
 let sweepBusy = false;
@@ -762,11 +824,16 @@ async function main() {
   let lastWaitingSweep = 0;
   let lastPromote = 0;
   let lastFound = 0;
+  let lastShare = 0;
   while (!shuttingDown) {
     try {
       if (Date.now() - lastAdd > AUTO_ADD_EVERY_MS) {
         lastAdd = Date.now();
         addFinishedPulls();
+      }
+      if (Date.now() - lastShare > SHARE_EVERY_MS) {
+        lastShare = Date.now();
+        shareInFlight = shareStep();
       }
       if (Date.now() - lastPromote > PROMOTE_CHECK_MS) {
         lastPromote = Date.now();
@@ -815,6 +882,9 @@ async function main() {
   await runs;
   // The fit loop's step in flight is waited for too: an OpenAI call already sent is written before the pool closes.
   await fits;
+  // So is the share round in flight (told to stop, it ends after the statement it is on), then its own pool closes.
+  await shareInFlight;
+  await sharePool.end().catch(() => {});
   await heartbeat({ stopping: true }).catch(() => {});
   log(`stopped: ${stats.processed} rows processed, ${stats.calls} provider calls, ${stats.failed} failures`);
   await pool.end();
