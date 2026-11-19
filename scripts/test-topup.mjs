@@ -66,7 +66,8 @@ const E = T("E"); // Cleaning, no rules row
 const F = T("F"); // Cleaning, Paused: not visited
 const G = T("G"); // Canada Cleaning, no saved people filters
 const H = T("H"); // Cleaning, Healthy, a big tag count, low places
-const TAGS = [A, B, C, D, E, F, G, H];
+const I = T("I"); // Cleaning, Active, but not listed on the Groups tab: flagged, never pulled for
+const TAGS = [A, B, C, D, E, F, G, H, I];
 const RUN = randomUUID().slice(0, 6);
 const HOST = "tptest.example";
 const USER = randomUUID();
@@ -85,12 +86,12 @@ const TOPUP_ON = {
   weekly_credits: 25000, client_weekly_credits: 25000, max_pull_size: 1000, pulls_per_day: 3,
 };
 
-async function addClient(tag, { type = "Cleaning", status = "Active", places = undefined, exclude = [], min = null, churnInDays = null } = {}) {
+async function addClient(tag, { type = "Cleaning", status = "Active", places = undefined, exclude = [], min = null, churnInDays = null, onTab = true } = {}) {
   const churn = churnInDays == null ? null : (await one(`SELECT ((now() AT TIME ZONE 'UTC')::date + $1::int)::text AS d`, [churnInDays])).d;
   await pool.query(
     `INSERT INTO client_tags (tag, name, client_type, status, group_no, on_groups_tab, churn_cell_state, churn_date, churn_cell, groups_tab_read_at)
-     VALUES ($1, $2, $3, $4, 1, true, $5, $6::date, $7, now())`,
-    [tag, `Top-up test ${tag.slice(PREFIX.length)}`, type, status, churn ? "date" : "empty", churn, churn]
+     VALUES ($1, $2, $3, $4, 1, $8, $5, $6::date, $7, now())`,
+    [tag, `Top-up test ${tag.slice(PREFIX.length)}`, type, status, churn ? "date" : "empty", churn, churn, onTab]
   );
   if (places !== undefined) {
     await pool.query(
@@ -252,8 +253,11 @@ async function partP(churnB, routes) {
   check("F (Paused) is not visited", of(F).length === 0);
   check("G (Canada Cleaning) is covered: its empty place is low", of(G).length === 1 && of(G)[0].kind === "low" && of(G)[0].available === 0);
   check("H (Healthy, 161,000 tagged leads) is still flagged", of(H).length === 1 && of(H)[0].kind === "low" && of(H)[0].receive_block === null);
-  check("every visited client has at least one row", [A, B, C, D, E, G, H].every((t) => of(t).length >= 1));
-  check("the pass's counts", p1.counts.clients === 7 && p1.counts.low_places === 4 && p1.counts.unresolved_places === 1 && p1.counts.not_covered === 1, JSON.stringify(p1.counts));
+  check("I, not listed on the Groups tab: flagged, with that as the reason, and no pull",
+    of(I).length === 1 && of(I)[0].kind === "low" && of(I)[0].receive_block === "not on the Groups tab" && of(I)[0].action === "cannot_receive", JSON.stringify(of(I)));
+  check("every visited client has at least one row", [A, B, C, D, E, G, H, I].every((t) => of(t).length >= 1));
+  check("the pass's counts", p1.counts.clients === 8 && p1.counts.low_places === 5 && p1.counts.unresolved_places === 1 && p1.counts.not_covered === 1 &&
+    p1.counts.cannot_receive === 4, JSON.stringify(p1.counts));
   check("the settings it ran with are kept on the pass", p1.settings?.default_minimum === 5 && p1.settings?.enabled === true);
 
   section("P2. One pass a week, and Run now");
@@ -284,7 +288,7 @@ async function partP(churnB, routes) {
   const half = await runPass(pool, { settings, geo, tagPrefix: PREFIX, deadline: Date.now() - 1 });
   check("out of time: the pass stays running, no client done", half.state === "running" && half.clients_done.length === 0);
   const rest = await runPass(pool, { settings, geo, tagPrefix: PREFIX });
-  check("the next firing finishes it", rest.id === p4.id && rest.state === "done" && rest.clients_done.length === 7, JSON.stringify(rest.clients_done));
+  check("the next firing finishes it", rest.id === p4.id && rest.state === "done" && rest.clients_done.length === 8, JSON.stringify(rest.clients_done));
 
   section("P4. Stored coverage: used while fresh, computed again otherwise");
   const peoria = async (passId) => (await flagsOf(passId)).find((x) => x.client_tag === A && x.kind === "low")?.available;
@@ -595,6 +599,7 @@ try {
   await addClient(F, { status: "Paused", places: [IL("Peoria")] });
   await addClient(G, { type: "Canada Cleaning", places: [IL("Champaign")] });
   await addClient(H, { status: "Healthy", places: [IL("Champaign")] });
+  await addClient(I, { places: [IL("Peoria")], onTab: false });
   for (let i = 0; i < 4; i++) await addLead(`owner${i}`, "personal", "Springfield");
   await addLead("owner", "personal", "Peoria");
   await addLead("tptest-box", "personal", "Peoria"); // a personal address with the filter's text: always counts
