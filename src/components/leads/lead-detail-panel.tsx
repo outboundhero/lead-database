@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { LeadHistory } from "./lead-history";
 import { SuppressLeadsDialog } from "./suppress-leads-dialog";
+import { LeadShares } from "@/components/sharing/lead-shares";
 import { useRole, useHasPermission } from "@/lib/context/role-context";
 import { createClient } from "@/lib/supabase/client";
 import { toast } from "sonner";
@@ -458,6 +459,9 @@ export function LeadDetailPanel({
               <p className="px-4 py-3 text-[13px] text-muted-foreground">—</p>
             )}
           </Section>
+
+          {/* Overlap sharing: this lead's shares to other clients (managers and up read them). */}
+          {canEdit && <LeadShares key={current.id} leadId={current.id} wrap={(body) => <Section title="Shares">{body}</Section>} />}
 
           <Section title="History">
             <div className="px-4 py-3">

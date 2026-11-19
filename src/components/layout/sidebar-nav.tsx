@@ -18,6 +18,7 @@ import {
   Store,
   Table2,
   UserSearch,
+  Share2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { hasPermission } from "@/types/auth";
@@ -33,6 +34,8 @@ const NAV_SECTIONS = [
       { title: "Companies", href: "/leads/companies", icon: Store, minRole: "manager" as UserRole, tint: "text-[oklch(0.64_0.15_50)]" },
       { title: "Clay", href: "/leads/clay", icon: Table2, minRole: "manager" as UserRole, tint: "text-[oklch(0.6_0.16_200)]" },
       { title: "AI Ark", href: "/leads/ai-ark", icon: UserSearch, minRole: "manager" as UserRole, tint: "text-[oklch(0.62_0.17_285)]" },
+      // Overlap sharing (migration 134): each import's shares to other clients, the held pushes, the low places.
+      { title: "Sharing", href: "/leads/sharing", icon: Share2, minRole: "manager" as UserRole, tint: "text-[oklch(0.6_0.15_165)]" },
       { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard, minRole: "manager" as UserRole, tint: "text-[oklch(0.745_0.183_145)]" },
       { title: "Clients", href: "/clients", icon: Building2, minRole: "manager" as UserRole, tint: "text-[oklch(0.62_0.19_25)]" },
       { title: "Exports", href: "/exports", icon: Download, minRole: "manager" as UserRole, tint: "text-[oklch(0.78_0.175_65)]" },

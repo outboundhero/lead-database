@@ -19,6 +19,7 @@ import { FieldMapper } from "@/components/uploads/field-mapper";
 import { DuplicateStrategy, parseTags } from "@/components/uploads/duplicate-strategy";
 import { UploadProgress, HoldbackLinks } from "@/components/uploads/upload-progress";
 import { PeopleCell, SendDialog, useUploadPeople } from "@/components/uploads/upload-people";
+import { ShareBadge, useShareBadges } from "@/components/sharing/share-badge";
 import { detectDelimiter, type ParseResult } from "@/lib/uploads/parse-csv";
 import type { FieldMapping } from "@/lib/uploads/normalize-row";
 import { detectBisonFormat } from "@/lib/uploads/parse-bison";
@@ -65,6 +66,8 @@ export default function UploadsPage() {
     if (data) setHistory(data as UploadBatch[]);
   }, []);
   const people = useUploadPeople(history.filter(hasPeople).map((b) => b.id));
+  // Overlap sharing: "Shared to N clients" per batch that has a share job (migration 134).
+  const shares = useShareBadges(history.map((b) => b.id));
 
   useEffect(() => {
     loadHistory();
@@ -279,6 +282,7 @@ export default function UploadsPage() {
                     <TableHead>Locations</TableHead>
                     <TableHead>No email</TableHead>
                     <TableHead>People table</TableHead>
+                    <TableHead>Sharing</TableHead>
                     <TableHead>Date</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -327,6 +331,9 @@ export default function UploadsPage() {
                         ) : (
                           <span className="text-muted-foreground">None</span>
                         )}
+                      </TableCell>
+                      <TableCell>
+                        <ShareBadge batchId={batch.id} badge={shares[batch.id]} />
                       </TableCell>
                       <TableCell className="text-muted-foreground">
                         {new Date(batch.created_at).toLocaleDateString()}
