@@ -20,6 +20,18 @@
 // linkedin_profile_reads) is on only when its parent switch is on for the client,
 // and so are the LinkedIn sources (linkedin_companies needs company_pipeline,
 // linkedin_people needs people_pipeline, migration 128).
+//
+// Overlap sharing, the weekly top-up and never-contact inboxes (migrations 134
+// to 136) keep their settings here too: overlap_sharing (the switch, its
+// client list, the sharing pools, the push switch and caps, the tag writes),
+// weekly_topup (the flag pass, the minimum, the pulls and their budget) and
+// never_contact_inboxes (the switch, the Clay General inboxes filter the seed
+// read, the daily cap). clientPool() is the pool rule (SQL twin:
+// fn_client_pool_value, 134) and inboxPatternOf() the "is the filter loaded"
+// rule (SQL twin: fn_never_contact_inbox_pattern_value, 136). The cleanX()
+// functions check the settings sheet's edits before a save.
+
+import { createHash } from "node:crypto";
 
 const TTL_MS = 30_000;
 
@@ -58,7 +70,27 @@ export const FLAGS = [
   "people_pipeline", "ai_searches", "linkedin_profile_reads", "personalisation",
   "company_pipeline", "auto_buy", "promotion", "fit_gate", "fit_scoring",
   "linkedin_sources", "linkedin_companies", "linkedin_people",
+  "overlap_sharing", "share_push", "share_tag_writes", "weekly_topup", "topup_pull", "never_contact_inboxes",
 ];
+
+/** A sharing pool's name (overlap_sharing.pools), as fn_client_pool_value() reads it (134). */
+export const POOL_NAME = /^[a-z][a-z0-9_]{0,31}$/;
+/** overlap_sharing.mode: preview stops a job at "previewed"; apply applies it unless a receiver is over a cap. */
+export const SHARE_MODES = Object.freeze(["preview", "apply"]);
+/** weekly_topup.pull_mode: off makes no pull; prepare writes pulls a manager starts; auto starts them within the budget. */
+export const TOPUP_PULL_MODES = Object.freeze(["off", "prepare", "auto"]);
+/**
+ * The shape a never-contact inboxes pattern must have to be used: letters,
+ * digits, @ _ . - and the escape \. only, alternatives joined by | and none
+ * empty, so it reads the same in JavaScript and in Postgres and can never match
+ * every address. As fn_never_contact_inbox_pattern_value() (136).
+ */
+export const INBOX_PATTERN_SHAPE = /^(?:[A-Za-z0-9@_.-]|\\\.)+(?:\|(?:[A-Za-z0-9@_.-]|\\\.)+)*$/;
+export const INBOX_PATTERN_MAX = 4000;
+/** A client tag as the settings sheet takes it (src/lib/companies/server.ts TAG_TEXT). */
+const TAG_TEXT = /^[A-Z0-9][A-Z0-9_&-]{0,63}$/;
+/** An isolated tag suffix as the settings sheet takes it, after trim and upper case. */
+const SUFFIX_TEXT = /^[A-Z0-9_&-]{1,16}$/;
 
 /** LinkedIn people runs buy at most this many people a company (D-P4-6): the newest Clay template's limit. */
 export const PEOPLE_PER_COMPANY = 13;
@@ -97,8 +129,9 @@ function frozen(v) {
 
 /**
  * What applies until the table says otherwise: the values migrations 124 to
- * 126 and 128 seed (126's fit settings and 128's LinkedIn ones included, so the
- * shape is the same before they are applied).
+ * 126, 128 and 134 to 136 seed (126's fit settings, 128's LinkedIn ones and
+ * 134 to 136's sharing, top-up and never-contact ones included, so the shape
+ * is the same before they are applied).
  */
 export const SETTINGS_DEFAULTS = frozen({
   company_pipeline: {
@@ -168,6 +201,50 @@ export const SETTINGS_DEFAULTS = frozen({
   linkedin_sources: { enabled: false, tags: [], people_per_company: PEOPLE_PER_COMPANY },
   /** The excluded keywords of a client with no LinkedIn row (D-P4-5): empty until the seed writes them. */
   linkedin_starter_keywords: { items: [], version: null, source: null, sha256: null, seeded_at: null },
+  /**
+   * Overlap sharing (134): off, no client, preview only. Sharing happens only
+   * inside a pool (clientPool). since: the go-live time; batches before it are
+   * never looked at, and with none set the share step looks at nothing.
+   */
+  overlap_sharing: {
+    enabled: false,
+    tags: [],
+    mode: "preview",
+    pools: { cleaning: ["Cleaning", "Canada Cleaning"] },
+    isolated_tag_suffixes: ["-OS"],
+    push_tags: [],
+    push_every_minutes: 15,
+    push_max_per_job: 1000,
+    push_max_per_day: 2000,
+    held_retry_days: 7,
+    write_tags: false,
+    tag_rows_per_day: 20000,
+    since: null,
+    wait_location_minutes: 180,
+    recheck_days: 7,
+  },
+  /** The weekly top-up (135): the flag pass off, no pulls; a budget of 25,000 credits a week in all and per client. */
+  weekly_topup: {
+    enabled: false,
+    client_types: ["Cleaning", "Canada Cleaning"],
+    default_minimum: 500,
+    pull_mode: "off",
+    pull_tags: [],
+    weekly_credits: 25000,
+    client_weekly_credits: 25000,
+    max_pull_size: 1000,
+    pulls_per_day: 3,
+  },
+  /** Never-contact inboxes (136): off; the filter is null until the seed reads it from the Clay originals. */
+  never_contact_inboxes: {
+    enabled: false,
+    pattern: null,
+    source: null,
+    sha256: null,
+    read_at: null,
+    rows_per_day: 5000,
+    chunk_rows: 500,
+  },
 });
 
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -279,6 +356,194 @@ export function cleanVendorCaps(input) {
   return errors.length ? { value: null, errors } : { value: /** @type {any} */ (out), errors };
 }
 
+// ── The settings sheet's edits for sharing, the top-up and never-contact inboxes ──
+// Each cleanX(input) checks one row as the sheet sends it and answers
+// { value, errors }: the row to merge over what is stored, or every reason it
+// was refused. Nothing is quietly replaced, as PUT /api/companies/settings
+// refuses every other setting.
+
+const fmt = (n) => Number(n).toLocaleString("en-US");
+
+/** The checks one cleanX() shares: each pushes its reason and returns a value of the right type. */
+function checks(errors) {
+  return {
+    flag(v, label) {
+      if (typeof v !== "boolean") errors.push(`${label} must be on or off.`);
+      return v === true;
+    },
+    num(v, lo, hi, label) {
+      if (wholeIn(v, lo, hi)) return /** @type {number} */ (v);
+      errors.push(`${label} must be a whole number from ${fmt(lo)} to ${fmt(hi)}.`);
+      return lo;
+    },
+    tags(v, label) {
+      if (!Array.isArray(v)) {
+        errors.push(`${label}: the client list must be a list of tags.`);
+        return [];
+      }
+      const out = [];
+      const bad = [];
+      for (const x of v) {
+        const t = typeof x === "string" ? normTag(x) : "";
+        if (!t) continue;
+        if (!TAG_TEXT.test(t)) bad.push(String(x).slice(0, 40));
+        else if (!out.includes(t)) out.push(t);
+      }
+      if (bad.length) errors.push(`${label}: ${bad.slice(0, 5).join(", ")} ${bad.length === 1 ? "is not a client tag" : "are not client tags"}.`);
+      if (out.length > 2000) errors.push(`${label}: at most 2,000 clients.`);
+      return out;
+    },
+    types(v, label, { min = 0, max = 20 } = {}) {
+      if (!Array.isArray(v)) {
+        errors.push(`${label} must be a list of client types.`);
+        return [];
+      }
+      const out = [];
+      for (const x of v) {
+        const t = typeof x === "string" ? x.trim() : "";
+        if (!t || t.length > 60) {
+          errors.push(`${label}: each client type must be 1 to 60 characters.`);
+          return [];
+        }
+        if (!out.some((y) => normTag(y) === normTag(t))) out.push(t);
+      }
+      if (out.length < min || out.length > max) errors.push(`${label}: ${min ? `${min} to ${max}` : `at most ${max}`} client types.`);
+      return out;
+    },
+  };
+}
+
+/**
+ * The overlap_sharing row checked for a save. Switching sharing on with no
+ * go-live time set starts it now: batches imported before then are never
+ * shared. Every client on push_tags must be on tags too.
+ *
+ * @param {unknown} input
+ * @param {{ previous?: Partial<OverlapSharing> | null, now?: Date }} [opts]  previous: the row as read before this save
+ * @returns {{ value: OverlapSharing | null, errors: string[] }}
+ */
+export function cleanOverlapSharing(input, { previous = null, now = new Date() } = {}) {
+  if (!isObject(input)) return { value: null, errors: ["Overlap sharing: must be the switch and its settings."] };
+  const v = /** @type {Record<string, unknown>} */ (input);
+  const errors = [];
+  const c = checks(errors);
+  const enabled = c.flag(v.enabled, "Overlap sharing");
+  const tags = c.tags(v.tags, "Overlap sharing");
+  if (!SHARE_MODES.includes(/** @type {any} */ (v.mode))) errors.push("Overlap sharing's mode must be preview or apply.");
+  /** @type {Record<string, string[]>} */
+  const pools = {};
+  if (!isObject(v.pools)) {
+    errors.push("Sharing pools: must be named lists of client types.");
+  } else {
+    const names = Object.keys(/** @type {object} */ (v.pools)).sort();
+    if (names.length > 10) errors.push("Sharing pools: at most 10 pools.");
+    const owner = new Map();
+    for (const name of names) {
+      if (!POOL_NAME.test(name)) {
+        errors.push(`Sharing pools: "${name.slice(0, 40)}" is not a pool name (lower-case letters, digits and _, starting with a letter).`);
+        continue;
+      }
+      const types = c.types(/** @type {Record<string, unknown>} */ (v.pools)[name], `Sharing pool ${name}`, { min: 1, max: 20 });
+      for (const t of types) {
+        const k = normTag(t);
+        if (owner.has(k)) errors.push(`Sharing pools: the client type ${t} is in both ${owner.get(k)} and ${name}.`);
+        else owner.set(k, name);
+      }
+      pools[name] = types;
+    }
+  }
+  const suffixes = [];
+  if (!Array.isArray(v.isolated_tag_suffixes)) {
+    errors.push("Isolated tag endings: must be a list.");
+  } else {
+    for (const x of v.isolated_tag_suffixes) {
+      const s = typeof x === "string" ? normTag(x) : "";
+      if (!SUFFIX_TEXT.test(s)) errors.push(`Isolated tag endings: ${String(x).slice(0, 20) || "(blank)"} must be 1 to 16 letters, digits, _, & or -.`);
+      else if (!suffixes.includes(s)) suffixes.push(s);
+    }
+    if (suffixes.length > 20) errors.push("Isolated tag endings: at most 20.");
+  }
+  const pushTags = c.tags(v.push_tags, "Pushed automatically");
+  const off = pushTags.filter((t) => !tags.includes(t));
+  if (off.length) errors.push(`Pushed automatically: ${off.slice(0, 5).join(", ")} must be on the sharing list too.`);
+  let since = null;
+  if (v.since !== null && v.since !== undefined && v.since !== "") {
+    since = isoOrNull(v.since);
+    if (!since) errors.push("Sharing's go-live time must be a date and time, or empty.");
+  }
+  if (enabled && !since && previous?.enabled !== true) since = now.toISOString();
+  const value = {
+    enabled,
+    tags,
+    mode: v.mode === "apply" ? "apply" : "preview",
+    pools,
+    isolated_tag_suffixes: suffixes,
+    push_tags: pushTags,
+    push_every_minutes: c.num(v.push_every_minutes, 5, 1440, "Minutes between a client's share pushes"),
+    push_max_per_job: c.num(v.push_max_per_job, 1, 25_000, "Most shares pushed to a client from one import"),
+    push_max_per_day: c.num(v.push_max_per_day, 1, 100_000, "Most shares pushed to a client a day"),
+    held_retry_days: c.num(v.held_retry_days, 0, 30, "Days a held share is tried again"),
+    write_tags: c.flag(v.write_tags, "Writing the receiving client's tag on shared leads"),
+    tag_rows_per_day: c.num(v.tag_rows_per_day, 0, 200_000, "Tags written a day"),
+    since,
+    wait_location_minutes: c.num(v.wait_location_minutes, 30, 1440, "Minutes a share waits for places"),
+    recheck_days: c.num(v.recheck_days, 0, 30, "Days leads with no usable place are looked at again"),
+  };
+  return errors.length ? { value: null, errors } : { value: /** @type {OverlapSharing} */ (value), errors };
+}
+
+/**
+ * The weekly_topup row checked for a save.
+ *
+ * @param {unknown} input
+ * @returns {{ value: WeeklyTopup | null, errors: string[] }}
+ */
+export function cleanWeeklyTopup(input) {
+  if (!isObject(input)) return { value: null, errors: ["Weekly top-up: must be the switch and its settings."] };
+  const v = /** @type {Record<string, unknown>} */ (input);
+  const errors = [];
+  const c = checks(errors);
+  if (!TOPUP_PULL_MODES.includes(/** @type {any} */ (v.pull_mode))) errors.push("Top-up pulls must be off, prepare or auto.");
+  const value = {
+    enabled: c.flag(v.enabled, "The weekly top-up"),
+    client_types: c.types(v.client_types, "The top-up's client types", { min: 1, max: 10 }),
+    default_minimum: c.num(v.default_minimum, 1, 100_000, "The default minimum of good leads a place"),
+    pull_mode: TOPUP_PULL_MODES.includes(/** @type {any} */ (v.pull_mode)) ? /** @type {WeeklyTopup["pull_mode"]} */ (v.pull_mode) : "off",
+    pull_tags: c.tags(v.pull_tags, "Top-up pulls"),
+    weekly_credits: c.num(v.weekly_credits, 0, 1_000_000, "AI Ark credits a week for top-up pulls"),
+    client_weekly_credits: c.num(v.client_weekly_credits, 0, 1_000_000, "AI Ark credits a week for one client's top-up pulls"),
+    max_pull_size: c.num(v.max_pull_size, 1, 10_000, "The largest top-up pull"),
+    pulls_per_day: c.num(v.pulls_per_day, 0, 4, "New top-up pulls a day"),
+  };
+  return errors.length ? { value: null, errors } : { value, errors };
+}
+
+/**
+ * The never_contact_inboxes row's editable part checked for a save: the
+ * switch and the pace. The filter itself (pattern, source, sha256, read_at)
+ * is written only by the seed and never taken from the sheet; the route keeps
+ * it as stored. It can be switched on only while the filter is loaded.
+ *
+ * @param {unknown} input
+ * @param {unknown} stored  the never_contact_inboxes value as stored
+ * @returns {{ value: { enabled: boolean, rows_per_day: number, chunk_rows: number } | null, errors: string[] }}
+ */
+export function cleanNeverContactInboxes(input, stored) {
+  if (!isObject(input)) return { value: null, errors: ["Never-contact inboxes: must be the switch and its pace."] };
+  const v = /** @type {Record<string, unknown>} */ (input);
+  const errors = [];
+  const c = checks(errors);
+  const value = {
+    enabled: c.flag(v.enabled, "Never-contact inboxes"),
+    rows_per_day: c.num(v.rows_per_day, 0, 100_000, "General inboxes marked never contact a day"),
+    chunk_rows: c.num(v.chunk_rows, 1, 2000, "General inboxes marked in one step"),
+  };
+  if (value.enabled && inboxPatternOf(stored) === null) {
+    errors.push("Never-contact inboxes: the Clay General inboxes filter is not loaded, so they cannot be switched on. Run the seed first.");
+  }
+  return errors.length ? { value: null, errors } : { value, errors };
+}
+
 /**
  * The starter list of excluded keywords (enrich_settings.linkedin_starter_keywords)
  * as the LinkedIn seed wrote it: the items trimmed, once each (case aside), at
@@ -308,6 +573,114 @@ export function starterFrom(v) {
     sha256: typeof s.sha256 === "string" && /^[0-9a-f]{64}$/.test(s.sha256) ? s.sha256 : null,
     seeded_at: textOrNull(s.seeded_at, 64),
   };
+}
+
+/** A text value that is a date and time: its ISO form, else null. */
+function isoOrNull(v) {
+  if (typeof v !== "string" || !v.trim() || v.length > 64) return null;
+  const ms = Date.parse(v);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+const sha256Hex = (s) => createHash("sha256").update(s, "utf8").digest("hex");
+
+/**
+ * The sharing pools as stored: a name (POOL_NAME) for each list of client
+ * types, the types trimmed (any case when matched). Not an object: the
+ * default pools. An object holds only what is valid in it, maybe nothing
+ * (then every client is isolated). As fn_client_pool_value() reads them (134).
+ *
+ * @param {unknown} v
+ * @returns {Record<string, string[]>}
+ */
+function poolsOf(v) {
+  if (!isObject(v)) return { cleaning: [...SETTINGS_DEFAULTS.overlap_sharing.pools.cleaning] };
+  /** @type {Record<string, string[]>} */
+  const out = {};
+  for (const name of Object.keys(v).sort()) {
+    const list = /** @type {Record<string, unknown>} */ (v)[name];
+    if (!POOL_NAME.test(name) || !Array.isArray(list)) continue;
+    const types = [];
+    for (const x of list) {
+      if (typeof x !== "string") continue;
+      const t = x.trim();
+      if (t && !types.some((y) => normTag(y) === normTag(t))) types.push(t);
+    }
+    out[name] = types;
+  }
+  return out;
+}
+
+/** overlap_sharing.isolated_tag_suffixes as stored: trimmed, upper case, once each. Not a list: the default ["-OS"]. */
+function suffixesOf(v) {
+  if (!Array.isArray(v)) return [...SETTINGS_DEFAULTS.overlap_sharing.isolated_tag_suffixes];
+  return [...new Set(v.filter((s) => typeof s === "string").map(normTag).filter(Boolean))];
+}
+
+/** A list of client types: trimmed, once each (any case). Not a list: null, so the caller's default applies. */
+function typesOf(v) {
+  if (!Array.isArray(v)) return null;
+  const out = [];
+  for (const x of v) {
+    if (typeof x !== "string") continue;
+    const t = x.trim();
+    if (t && !out.some((y) => normTag(y) === normTag(t))) out.push(t);
+  }
+  return out;
+}
+
+/** Is this client type on the list? Trimmed, in any case. */
+export function typeListed(list, clientType) {
+  const t = normTag(clientType);
+  return Boolean(t) && Array.isArray(list) && list.some((x) => typeof x === "string" && normTag(x) === t);
+}
+
+/**
+ * never_contact_inboxes.pattern when it can be used, else null ("not
+ * loaded"): text of 1 to INBOX_PATTERN_MAX characters in INBOX_PATTERN_SHAPE
+ * whose sha256 is the stored sha256. As fn_never_contact_inbox_pattern_value()
+ * (136), so the page, the coverage count, the share step and the writer agree.
+ *
+ * @param {unknown} v  the never_contact_inboxes value as stored
+ * @returns {string | null}
+ */
+export function inboxPatternOf(v) {
+  if (!isObject(v)) return null;
+  const s = /** @type {Record<string, unknown>} */ (v);
+  if (typeof s.pattern !== "string" || typeof s.sha256 !== "string") return null;
+  const p = s.pattern;
+  if (p.length < 1 || p.length > INBOX_PATTERN_MAX || !INBOX_PATTERN_SHAPE.test(p)) return null;
+  return sha256Hex(p) === s.sha256 ? p : null;
+}
+
+/**
+ * The sharing pool of a client: null when it is isolated (it never receives a
+ * share and its imports are never shared). A tag that ends in one of
+ * overlap_sharing.isolated_tag_suffixes is isolated; otherwise the client's
+ * type, trimmed and in any case, is looked for in each pool, the pools taken
+ * by name in code point order, and the first pool that lists it is the one.
+ * No type, or a type in no pool: isolated. The SQL twin is
+ * fn_client_pool_value(settings, tag, type) (134).
+ *
+ * @param {Pick<PipelineSettings, "overlap_sharing"> | null | undefined} settings  settingsFrom()'s value
+ * @param {string | null | undefined} tag
+ * @param {string | null | undefined} clientType  client_tags.client_type
+ * @returns {string | null}
+ */
+export function clientPool(settings, tag, clientType) {
+  const os = settings?.overlap_sharing ?? {
+    pools: poolsOf(undefined),
+    isolated_tag_suffixes: suffixesOf(undefined),
+  };
+  const t = normTag(tag);
+  if (!t) return null;
+  if (os.isolated_tag_suffixes.some((s) => s && t.endsWith(s))) return null;
+  const ty = normTag(clientType);
+  if (!ty) return null;
+  for (const name of Object.keys(os.pools).sort()) {
+    if (os.pools[name].some((x) => normTag(x) === ty)) return name;
+  }
+  return null;
 }
 
 /** people_tracks as the seed wrote it, or null when it is missing or malformed (people runs then refuse). */
@@ -355,8 +728,21 @@ function tracksOf(v) {
  *   fit_gate_refresh: { pending: boolean, since: string | null },
  *   linkedin_sources: { enabled: boolean, tags: string[], people_per_company: number },
  *   linkedin_starter_keywords: { items: string[], version: number | null, source: string | null, sha256: string | null, seeded_at: string | null },
+ *   overlap_sharing: OverlapSharing,
+ *   weekly_topup: WeeklyTopup,
+ *   never_contact_inboxes: NeverContactInboxes,
  *   flagOn: (name: string, tag: string, ctx?: FlagContext) => boolean,
  * }} PipelineSettings
+ * @typedef {{ enabled: boolean, tags: string[], mode: "preview" | "apply", pools: Record<string, string[]>,
+ *             isolated_tag_suffixes: string[], push_tags: string[], push_every_minutes: number, push_max_per_job: number,
+ *             push_max_per_day: number, held_retry_days: number, write_tags: boolean, tag_rows_per_day: number,
+ *             since: string | null, wait_location_minutes: number, recheck_days: number }} OverlapSharing
+ * @typedef {{ enabled: boolean, client_types: string[], default_minimum: number, pull_mode: "off" | "prepare" | "auto",
+ *             pull_tags: string[], weekly_credits: number, client_weekly_credits: number, max_pull_size: number,
+ *             pulls_per_day: number }} WeeklyTopup
+ * @typedef {{ enabled: boolean, pattern: string | null, source: string | null, sha256: string | null, read_at: string | null,
+ *             rows_per_day: number, chunk_rows: number }} NeverContactInboxes
+ *   pattern: null unless usable (inboxPatternOf); sha256 and source belong to it and are null with it.
  *   spend_caps.openai_prices: { web_search_call: number, [model]: ModelPrice }
  */
 
@@ -472,6 +858,56 @@ export function settingsFrom(rows) {
     people_per_company: whole(ls.people_per_company, 1, 100, D.linkedin_sources.people_per_company),
   };
 
+  const os = objectOr(byKey.get("overlap_sharing"));
+  const dos = D.overlap_sharing;
+  /** @type {OverlapSharing} */
+  const overlap_sharing = {
+    enabled: bool(os.enabled, dos.enabled),
+    tags: tagsOf(os.tags),
+    mode: os.mode === "apply" ? "apply" : "preview",
+    pools: poolsOf(os.pools),
+    isolated_tag_suffixes: suffixesOf(os.isolated_tag_suffixes),
+    push_tags: tagsOf(os.push_tags),
+    push_every_minutes: whole(os.push_every_minutes, 5, 1440, dos.push_every_minutes),
+    push_max_per_job: whole(os.push_max_per_job, 1, 25_000, dos.push_max_per_job),
+    push_max_per_day: whole(os.push_max_per_day, 1, 100_000, dos.push_max_per_day),
+    held_retry_days: whole(os.held_retry_days, 0, 30, dos.held_retry_days),
+    write_tags: bool(os.write_tags, dos.write_tags),
+    tag_rows_per_day: whole(os.tag_rows_per_day, 0, 200_000, dos.tag_rows_per_day),
+    since: isoOrNull(os.since),
+    wait_location_minutes: whole(os.wait_location_minutes, 30, 1440, dos.wait_location_minutes),
+    recheck_days: whole(os.recheck_days, 0, 30, dos.recheck_days),
+  };
+
+  const wt = objectOr(byKey.get("weekly_topup"));
+  const dwt = D.weekly_topup;
+  /** @type {WeeklyTopup} */
+  const weekly_topup = {
+    enabled: bool(wt.enabled, dwt.enabled),
+    client_types: typesOf(wt.client_types) ?? [...dwt.client_types],
+    default_minimum: whole(wt.default_minimum, 1, 100_000, dwt.default_minimum),
+    pull_mode: TOPUP_PULL_MODES.includes(wt.pull_mode) ? wt.pull_mode : "off",
+    pull_tags: tagsOf(wt.pull_tags),
+    weekly_credits: whole(wt.weekly_credits, 0, 1_000_000, dwt.weekly_credits),
+    client_weekly_credits: whole(wt.client_weekly_credits, 0, 1_000_000, dwt.client_weekly_credits),
+    max_pull_size: whole(wt.max_pull_size, 1, 10_000, dwt.max_pull_size),
+    pulls_per_day: whole(wt.pulls_per_day, 0, 4, dwt.pulls_per_day),
+  };
+
+  const nc = objectOr(byKey.get("never_contact_inboxes"));
+  const dnc = D.never_contact_inboxes;
+  const pattern = inboxPatternOf(nc);
+  /** @type {NeverContactInboxes} */
+  const never_contact_inboxes = {
+    enabled: bool(nc.enabled, dnc.enabled),
+    pattern,
+    source: pattern ? textOrNull(nc.source, 300) : null,
+    sha256: pattern ? /** @type {string} */ (nc.sha256) : null,
+    read_at: pattern ? isoOrNull(nc.read_at) : null,
+    rows_per_day: whole(nc.rows_per_day, 0, 100_000, dnc.rows_per_day),
+    chunk_rows: whole(nc.chunk_rows, 1, 2000, dnc.chunk_rows),
+  };
+
   const settings = {
     company_pipeline,
     people_pipeline,
@@ -486,6 +922,9 @@ export function settingsFrom(rows) {
     fit_gate_refresh,
     linkedin_sources,
     linkedin_starter_keywords: starterFrom(byKey.get("linkedin_starter_keywords")),
+    overlap_sharing,
+    weekly_topup,
+    never_contact_inboxes,
     /** @type {(name: string, tag: string, ctx?: FlagContext) => boolean} */
     flagOn: (name, tag, ctx) => flagOn(settings, name, tag, ctx),
   };
@@ -510,6 +949,15 @@ export function settingsFrom(rows) {
  *   linkedin_sources        enabled, tag on linkedin_sources.tags (the one LinkedIn switch, D-P4-7)
  *   linkedin_companies      company_pipeline and linkedin_sources both on for the client (LinkedIn company pulls)
  *   linkedin_people         people_pipeline and linkedin_sources both on for the client (LinkedIn people runs)
+ *   overlap_sharing         enabled, tag on overlap_sharing.tags (as a source and as a receiver);
+ *                           SQL twin fn_overlap_sharing_on(tag) (134). Pools are clientPool()'s.
+ *   share_push              overlap_sharing on for the client, and the tag on overlap_sharing.push_tags
+ *                           (its applied shares, and own top-up leads, are pushed into its campaigns)
+ *   share_tag_writes        overlap_sharing enabled and write_tags (no client list: the paced tag writer)
+ *   weekly_topup            enabled, and ctx.clientType on weekly_topup.client_types (trimmed, any case);
+ *                           false without ctx.clientType (the flag pass)
+ *   topup_pull              weekly_topup on for the client, pull_mode prepare or auto, tag on pull_tags
+ *   never_contact_inboxes   enabled, and the filter loaded (inboxPatternOf; no client list)
  * An unknown name throws, so a typo can't read as "off" silently.
  *
  * @param {Omit<PipelineSettings, "flagOn"> | PipelineSettings} settings  settingsFrom()'s value
@@ -557,6 +1005,28 @@ export function flagOn(settings, name, tag, ctx = {}) {
       return flagOn(s, "company_pipeline", t) && flagOn(s, "linkedin_sources", t);
     case "linkedin_people":
       return flagOn(s, "people_pipeline", t) && flagOn(s, "linkedin_sources", t);
+    // The five below fail closed on a settings object made before 134 to 136 (no such key).
+    case "overlap_sharing":
+      return Boolean(t) && s.overlap_sharing?.enabled === true && listed(s.overlap_sharing?.tags);
+    case "share_push":
+      return flagOn(s, "overlap_sharing", t) && listed(s.overlap_sharing?.push_tags);
+    case "share_tag_writes":
+      return s.overlap_sharing?.enabled === true && s.overlap_sharing?.write_tags === true;
+    case "weekly_topup":
+      return (
+        s.weekly_topup?.enabled === true &&
+        typeof ctx?.clientType === "string" &&
+        typeListed(s.weekly_topup?.client_types, ctx.clientType)
+      );
+    case "topup_pull":
+      return (
+        Boolean(t) &&
+        flagOn(s, "weekly_topup", t, ctx) &&
+        (s.weekly_topup?.pull_mode === "prepare" || s.weekly_topup?.pull_mode === "auto") &&
+        listed(s.weekly_topup?.pull_tags)
+      );
+    case "never_contact_inboxes":
+      return s.never_contact_inboxes?.enabled === true && typeof s.never_contact_inboxes?.pattern === "string";
     default:
       throw new Error(`Unknown switch "${name}"`);
   }
