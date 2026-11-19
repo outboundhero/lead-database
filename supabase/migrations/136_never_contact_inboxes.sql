@@ -37,7 +37,7 @@
 --     else null ("not loaded"): text of 1 to 4,000 characters made only of
 --     letters, digits, @ _ . - and the escape \. , alternatives joined by |
 --     with none empty, and a sha256 that matches it. The same check as
---     scripts/lib/enrich/settings.mjs neverContactFrom(), so the coverage
+--     scripts/lib/enrich/settings.mjs inboxPatternOf(), so the coverage
 --     count, the share step and this function agree on when it is loaded.
 --   - fn_suppress_general_inboxes(lead ids, sha256, run, by, by name): the one
 --     writer of this reason. For up to 2,000 lead ids it takes the general

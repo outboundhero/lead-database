@@ -131,8 +131,13 @@ CREATE TABLE IF NOT EXISTS lead_shares (
 CREATE INDEX IF NOT EXISTS lead_shares_push_idx ON lead_shares (receiver_tag, push_state, id) WHERE push_state IN ('queued', 'held');
 CREATE INDEX IF NOT EXISTS lead_shares_receiver_applied_idx ON lead_shares (receiver_tag, applied_at) WHERE applied_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS lead_shares_lead_idx ON lead_shares (lead_id, receiver_tag);
+-- The paced tag writer's work (scripts/lib/share/upkeep.mjs): applied, live
+-- shares it has not looked at yet (a row leaves this index once looked at,
+-- tag_added_at), and undone shares whose tag it wrote and has not taken off.
 CREATE INDEX IF NOT EXISTS lead_shares_tag_todo_idx ON lead_shares (id)
-  WHERE outcome = 'shared' AND applied_at IS NOT NULL AND undone_at IS NULL AND NOT tag_added;
+  WHERE outcome = 'shared' AND applied_at IS NOT NULL AND undone_at IS NULL AND NOT tag_added AND tag_added_at IS NULL;
+CREATE INDEX IF NOT EXISTS lead_shares_untag_todo_idx ON lead_shares (id)
+  WHERE tag_added AND undone_at IS NOT NULL AND tag_removed_at IS NULL;
 
 DROP TRIGGER IF EXISTS trg_share_jobs_updated_at ON share_jobs;
 CREATE TRIGGER trg_share_jobs_updated_at BEFORE UPDATE ON share_jobs
@@ -313,10 +318,14 @@ BEGIN
   SELECT string_agg(i, ', ') INTO bad
     FROM unnest(ARRAY['share_jobs_due_idx', 'share_jobs_recheck_idx', 'share_jobs_recent_idx', 'share_jobs_origin_idx',
                       'lead_shares_push_idx', 'lead_shares_receiver_applied_idx', 'lead_shares_lead_idx',
-                      'lead_shares_tag_todo_idx']) i
+                      'lead_shares_tag_todo_idx', 'lead_shares_untag_todo_idx']) i
    WHERE to_regclass('public.' || i) IS NULL;
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '134: missing indexes: %', bad;
+  END IF;
+  -- The writer's index drops a row once looked at (an older copy of this file did not).
+  IF pg_get_indexdef('public.lead_shares_tag_todo_idx'::regclass) NOT LIKE '%tag_added_at IS NULL%' THEN
+    RAISE EXCEPTION '134: lead_shares_tag_todo_idx is an older version; drop it and run this file again';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM enrich_settings WHERE key = 'overlap_sharing') THEN
     RAISE EXCEPTION '134: the overlap_sharing setting is missing';
