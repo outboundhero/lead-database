@@ -55,12 +55,15 @@ export default function UploadsPage() {
   const loadHistory = useCallback(async () => {
     const supabase = createClient();
     // Rounds of found emails are left out: they show under their upload. A
-    // round whose upload was deleted lost its link but keeps its label.
+    // round whose upload was deleted lost its link but keeps its label. A
+    // database backfill firing's batch (migration 138) is no upload: its
+    // share job is on the Sharing page.
     const { data } = await supabase
       .from("upload_batches")
       .select("*")
       .is("source_batch_id", null)
       .or(`source_label.is.null,source_label.neq."${FOUND_LABEL}"`)
+      .neq("batch_type", "backfill")
       .order("created_at", { ascending: false })
       .limit(20);
     if (data) setHistory(data as UploadBatch[]);

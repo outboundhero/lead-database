@@ -13,6 +13,7 @@ import {
   EFFORTS,
   MODEL_STEPS,
   VENDOR_CAPS,
+  type DatabaseBackfillSettings,
   type Effort,
   type ModelStep,
   type OverlapSharingSettings,
@@ -41,6 +42,10 @@ import type { SharingClient } from "@/lib/sharing/types";
 // the sharing pools and the push list, the top-up's types and budget, and the
 // never-contact pace. The Clay General inboxes filter is shown as loaded or
 // not, never as text. Their work is on the Sharing page (/leads/sharing).
+// And the database backfill (migration 138, shipped off): the switch, its
+// clients, preview or apply, the shares a firing may write, its minutes, the
+// days before a place is read again, and untagged leads; its Backfill tab is
+// on the Sharing page.
 
 const NOT_SENT = "__not_sent"; // a Select item can't have an empty value
 
@@ -83,6 +88,7 @@ function toInput(v: PipelineSettings): SettingsInput {
       rows_per_day: v.never_contact_inboxes.rows_per_day,
       chunk_rows: v.never_contact_inboxes.chunk_rows,
     },
+    ...(v.database_backfill ? { database_backfill: { ...v.database_backfill, tags: [...v.database_backfill.tags] } } : {}),
   };
 }
 
@@ -314,6 +320,8 @@ export function SettingsSheet({
   type InboxesInput = NonNullable<SettingsInput["never_contact_inboxes"]>;
   const setInboxes = <K extends keyof InboxesInput>(k: K, v: InboxesInput[K]) =>
     setForm((f) => (f?.never_contact_inboxes ? { ...f, never_contact_inboxes: { ...f.never_contact_inboxes, [k]: v } } : f));
+  const setBackfill = <K extends keyof DatabaseBackfillSettings>(k: K, v: DatabaseBackfillSettings[K]) =>
+    setForm((f) => (f?.database_backfill ? { ...f, database_backfill: { ...f.database_backfill, [k]: v } } : f));
 
   const save = async () => {
     if (!form || !state) return;
@@ -359,6 +367,7 @@ export function SettingsSheet({
   const wt = form?.weekly_topup;
   const nc = form?.never_contact_inboxes;
   const ncFilter = state?.value.never_contact_inboxes?.filter;
+  const db = form?.database_backfill;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -655,6 +664,52 @@ export function SettingsSheet({
                     <NumberField label="Marked a day" hint="General inboxes marked never contact a day (UTC), 0 to 100,000." value={nc.rows_per_day} min={0} max={100000} onChange={(n) => setInboxes("rows_per_day", n)} />
                     <NumberField label="Marked in one step" hint="Leads looked at in one step, 1 to 2,000." value={nc.chunk_rows} min={1} max={2000} onChange={(n) => setInboxes("chunk_rows", n)} />
                   </div>
+                </Section>
+              )}
+
+              {db && (
+                <Section>
+                  <Switch
+                    label="Database backfill"
+                    hint={
+                      db.enabled
+                        ? "On, for the clients listed below: every hour the backfill-worker finds leads already in the database that fit a client (its places and rules, never sent, shared or tagged for it), places under its minimum first, and queues them for its Active or Draft campaigns as shares. The Sharing page's Backfill tab shows each firing."
+                        : "Off: no lead already in the database is looked at or shared. Shares a backfill queued before stay as they are."
+                    }
+                    checked={db.enabled}
+                    onChange={(v) => setBackfill("enabled", v)}
+                  />
+                  <Clients label="Database backfill" tags={db.tags} onChange={(t) => setBackfill("tags", t)} />
+                  <AddActiveOfType onAdd={(tags) => setBackfill("tags", tagsIn([...db.tags, ...tags]))} />
+                  <p className="text-[12px] leading-relaxed text-muted-foreground">
+                    A listed client also needs overlap sharing&apos;s push list (above) for its shares to be written and pushed; in preview mode it is
+                    counted either way. Its caps a firing and a day are overlap sharing&apos;s push caps.
+                  </p>
+                  <Field
+                    label="Mode"
+                    hint="Preview: each firing only counts what it would share (the Backfill tab shows it). Apply: the shares are written and queued for push."
+                  >
+                    <Select value={db.mode} onValueChange={(v) => setBackfill("mode", v === "apply" ? "apply" : "preview")}>
+                      <SelectTrigger size="sm" className="h-9 w-full rounded-full text-[13px]" aria-label="Database backfill mode">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="preview">Preview</SelectItem>
+                        <SelectItem value="apply">Apply</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                  <div className="flex flex-wrap gap-3">
+                    <NumberField label="Most shares a firing" hint="Shares one hourly firing may write for every client together, 1 to 50,000." value={db.max_per_run} min={1} max={50000} onChange={(n) => setBackfill("max_per_run", n)} />
+                    <NumberField label="Minutes a firing works" hint="A firing stops reading after this, 5 to 50." value={db.max_minutes} min={5} max={50} onChange={(n) => setBackfill("max_minutes", n)} />
+                    <NumberField label="Days before a place is read again" hint="After a place's leads were all read once, 1 to 90. A change of the client's rules reads it again at once." value={db.recheck_days} min={1} max={90} onChange={(n) => setBackfill("recheck_days", n)} />
+                  </div>
+                  <Switch
+                    label="Untagged leads too"
+                    hint="On: leads that carry no client's tag are taken, besides leads of other clients of the same pool. Off: only leads of other clients of the pool."
+                    checked={db.untagged}
+                    onChange={(v) => setBackfill("untagged", v)}
+                  />
                 </Section>
               )}
 

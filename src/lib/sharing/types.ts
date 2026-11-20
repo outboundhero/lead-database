@@ -18,9 +18,13 @@ export type SharePushState = "queued" | "pushed" | "held" | "dropped";
 /** share_jobs.counts: per receiver, the leads checked, the ones that fit, and each outcome. */
 export type JobCounts = Record<string, Record<string, number>>;
 
+/** share_jobs.kind (138): an import's job, or one database backfill firing's (origin DATABASE). Import before 138. */
+export type ShareJobKind = "import" | "backfill";
+
 export interface ShareJob {
   batch_id: string;
-  /** The import: its file name, or the label of an AI Ark add or promotion. */
+  kind: ShareJobKind;
+  /** The import: its file name, or the label of an AI Ark add or promotion ("Database backfill" for a backfill job). */
   filename: string | null;
   source_label: string | null;
   inserted_rows: number | null;
@@ -265,4 +269,128 @@ export interface SharePushRefusal {
   error: string;
   /** Rows left as they were. */
   kept: number;
+}
+
+// ── The database backfill (migration 138): GET /api/sharing/backfill ───────
+
+/** database_backfill as the Backfill tab shows it, with the caps in force (two of them overlap sharing's). */
+export interface BackfillSwitch {
+  enabled: boolean;
+  mode: "preview" | "apply";
+  tags: string[];
+  /** overlap_sharing.push_max_per_job: shares a client a firing. */
+  perClientFiring: number;
+  /** overlap_sharing.push_max_per_day: shares a client a UTC day, every source counted. */
+  perClientDay: number;
+  /** database_backfill.max_per_run: shares a firing. */
+  perFiring: number;
+  maxMinutes: number;
+  recheckDays: number;
+  untagged: boolean;
+}
+
+/** One firing (share_backfill_runs). */
+export interface BackfillRun {
+  id: string;
+  mode: "preview" | "apply";
+  state: "running" | "done" | "stopped" | "error";
+  stopReason: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  /** The firing's share job (an apply firing that shared something): /leads/sharing?job=<batchId>. */
+  batchId: string | null;
+  receivers: string[];
+  /** Per receiving client: { skipped?, places, low_places, windows, checked, fits, shared | would_share, <reason>: n, capped?, ms, error? }. */
+  counts: Record<string, Record<string, unknown>>;
+  totals: Record<string, number>;
+  lastError: string | null;
+}
+
+/** One place of a listed client, with its pass. */
+export interface BackfillPlace {
+  key: string;
+  label: string;
+  kind: "city" | "state";
+  /** Available good leads in the client's stored coverage; null when it does not count this place. */
+  available: number | null;
+  low: boolean;
+  /** The current pass: windows read of windows, and when it was done; null before its first look. */
+  windows: number | null;
+  windowsRead: number | null;
+  passDoneAt: string | null;
+  shared: number | null;
+}
+
+/** One client on the backfill list. */
+export interface BackfillClient {
+  tag: string;
+  name: string | null;
+  /** Its sharing pool, or null when it is isolated. */
+  pool: string | null;
+  /** fn_client_receive_block now: null when it can receive. */
+  receiveBlock: string | null;
+  isClient: boolean;
+  onPushList: boolean;
+  minimum: number;
+  places: BackfillPlace[];
+  /** City entries the geo reference does not know (never read). */
+  unresolved: string[];
+  lowPlaces: number;
+  /** Shares applied to it today (UTC) with a push state, every source, against perClientDay. */
+  sharedToday: number;
+  /** Its live backfill shares by push state ("none": applied, not queued). */
+  backfillShares: Record<string, number>;
+}
+
+export interface BackfillView {
+  /** False before migration 138 is applied: nothing else is filled. */
+  ready: boolean;
+  switch: BackfillSwitch | null;
+  /** Set when the backfill is on and its newest run is older than 2 hours (or there is none). */
+  warning: string | null;
+  runs: BackfillRun[];
+  clients: BackfillClient[];
+}
+
+/** One place of a client's preview: what the next apply firing would read there. */
+export interface BackfillPreviewPlace {
+  key: string;
+  label: string;
+  kind: "city" | "state";
+  low: boolean;
+  available: number | null;
+  /** new, continue, rules (a new pass: the rules changed), recheck (a new pass: the last is old), done (nothing to read). */
+  pass: string;
+  windows: number | null;
+  nextWindow: number | null;
+  windowsRead: number;
+  passDoneAt: string | null;
+  checked: number;
+  fits: number;
+  shares: number;
+  reasons: Record<string, number>;
+  capped: string | null;
+}
+
+/** GET /api/sharing/backfill?preview=TAG: one client, read only, nothing written. */
+export interface BackfillPreview {
+  ready: boolean;
+  tag: string;
+  enabled?: boolean;
+  mode?: "preview" | "apply";
+  onList?: boolean;
+  pushList?: boolean;
+  pool?: string | null;
+  receiveBlock?: string | null;
+  minimum?: number;
+  caps?: { perClientFiring: number; perClientDay: number; perFiring: number };
+  unresolved?: string[];
+  /** Why a firing would skip the client; null when it would be served. */
+  skip?: string | null;
+  today?: number | null;
+  places?: BackfillPreviewPlace[];
+  counts?: Record<string, unknown> | null;
+  capped?: string | null;
+  timedOut?: boolean;
+  ms?: number;
 }

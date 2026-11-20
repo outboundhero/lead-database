@@ -17,6 +17,7 @@ import type {
   LeadShare,
   PushRefusal,
   ShareJob,
+  ShareJobKind,
   ShareJobState,
   ShareOutcome,
   SharePushState,
@@ -102,9 +103,11 @@ function endNoteOf(status: string, error: string | null): string | null {
   return null;
 }
 
+// kind (138) is read through to_jsonb, so these reads work with and without that migration (every job is an import's before it).
 const JOB_FIELDS = `j.batch_id, j.origin_tag, j.origin_pool, j.state, j.reason, j.topup, j.mode, j.batch_done_at, j.place_wait_until,
   j.place_wait_hit_at, j.new_leads, j.leads_no_place, j.receivers, j.receivers_done, j.receivers_applied, j.receivers_over_cap,
   j.counts, j.attempts, j.next_try_at, j.recheck_until, j.last_error, j.created_at, j.decided_at, j.applied_at, j.undone_at,
+  coalesce(to_jsonb(j) ->> 'kind', 'import') AS kind,
   b.filename, b.source_label, b.inserted_rows`;
 
 const SKIP_TEXT = SHARE_SKIP_REASONS as Record<string, string>;
@@ -113,6 +116,7 @@ function jobOf(r: Record<string, unknown>): ShareJob {
   const reason = (r.reason as string | null) ?? null;
   return {
     batch_id: r.batch_id as string,
+    kind: r.kind === "backfill" ? "backfill" : "import",
     filename: (r.filename as string | null) ?? null,
     source_label: (r.source_label as string | null) ?? null,
     inserted_rows: (r.inserted_rows as number | null) ?? null,
@@ -150,11 +154,13 @@ export const JOBS_CURSOR = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z)\|([0-
 /**
  * The jobs list, newest first, a page at a time. Keyset on (created_at, id):
  * the share step may make many jobs in one statement, all with the same
- * created_at, so the time alone would lose some at a page's edge.
+ * created_at, so the time alone would lose some at a page's edge. kind
+ * (optional, 138): only imports' jobs, or only the database backfill's (whose
+ * origin is DATABASE, so origin "DATABASE" lists them too).
  */
 export async function listJobs(
   c: PoolClient,
-  { state, origin, before, limit }: { state: string | null; origin: string | null; before: string | null; limit: number }
+  { state, origin, before, limit, kind = null }: { state: string | null; origin: string | null; before: string | null; limit: number; kind?: ShareJobKind | null }
 ): Promise<Omit<JobsAnswer, "ready">> {
   const settings = await readSettings(c);
   const cursor = before ? JOBS_CURSOR.exec(before) : null;
@@ -165,9 +171,10 @@ export async function listJobs(
       WHERE ($1::text IS NULL OR j.state = $1)
         AND ($2::text IS NULL OR j.origin_tag = $2)
         AND ($3::timestamptz IS NULL OR (j.created_at, j.batch_id) < ($3::timestamptz, $4::uuid))
+        ${kind ? `AND coalesce(to_jsonb(j) ->> 'kind', 'import') = $6` : ""}
       ORDER BY j.created_at DESC, j.batch_id DESC
       LIMIT $5`,
-    [state, origin, cursor?.[1] ?? null, cursor?.[2] ?? null, limit + 1]
+    [state, origin, cursor?.[1] ?? null, cursor?.[2] ?? null, limit + 1, ...(kind ? [kind] : [])]
   );
   const jobs = rows.slice(0, limit).map(jobOf);
   const { rows: states } = await c.query(`SELECT state, count(*)::int AS n FROM share_jobs GROUP BY state`);

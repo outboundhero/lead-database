@@ -2,13 +2,14 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { OUTCOME_LABEL, PUSH_STATE_LABEL, pushNoteText, when } from "@/lib/sharing/labels";
+import { originLabel, OUTCOME_LABEL, PUSH_STATE_LABEL, pushNoteText, when } from "@/lib/sharing/labels";
 import type { LeadShare } from "@/lib/sharing/types";
 
 // The lead detail panel's shares (GET /api/sharing/lead): each time an import
 // carrying this lead was checked against another client, from which client to
 // which, the outcome, and whether it was applied, pushed or undone. Renders
 // nothing when the lead has none; wrap puts the list in the panel's section.
+// A database backfill share (138) comes from "the database (backfill)".
 
 export function LeadShares({ leadId, wrap }: { leadId: string; wrap: (body: React.ReactNode) => React.ReactNode }) {
   // Kept with the lead they belong to, so another lead's shares never show while this one's load.
@@ -30,7 +31,7 @@ export function LeadShares({ leadId, wrap }: { leadId: string; wrap: (body: Reac
       {shares.map((s) => (
         <div key={s.id} className={s.undone_at ? "opacity-50" : undefined}>
           <p className="text-[13px] font-medium">
-            {s.origin_tag} to {s.receiver_tag}: {OUTCOME_LABEL[s.outcome] ?? s.outcome}
+            {originLabel(s.origin_tag)} to {s.receiver_tag}: {OUTCOME_LABEL[s.outcome] ?? s.outcome}
             {s.matched_place ? ` (${s.matched_place})` : ""}
           </p>
           <p className="text-[12px] text-muted-foreground">
