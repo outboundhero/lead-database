@@ -38,6 +38,7 @@ import {
   type OverlapSharingSettings,
   type PipelineSettings,
   type PipelineView,
+  type PromotionInput,
   type SettingsInput,
   type SettingsState,
   type VendorCalls,
@@ -136,11 +137,11 @@ export function companyPlanView(...args: Parameters<typeof companyPlan>): Compan
 
 /**
  * The settings rows this tab reads and its sheet edits (linkedin_sources:
- * migration 128; overlap_sharing, weekly_topup, never_contact_inboxes:
- * migrations 134 to 136).
+ * migration 128; promotion: 126, its switch and client list only;
+ * overlap_sharing, weekly_topup, never_contact_inboxes: migrations 134 to 136).
  */
 const SETTING_KEYS = [
-  "company_pipeline", "people_pipeline", "personalisation", "spend_caps", "models", "linkedin_sources",
+  "company_pipeline", "people_pipeline", "personalisation", "spend_caps", "models", "linkedin_sources", "promotion",
   "overlap_sharing", "weekly_topup", "never_contact_inboxes",
 ];
 /** aiark_company_runs.size_requested takes at most 10,000. */
@@ -176,6 +177,13 @@ export function normalizeSettings(rows: { key: string; value: unknown }[]): Pipe
     spend_caps: s.spend_caps as PipelineSettings["spend_caps"],
     models: s.models as PipelineSettings["models"],
     linkedin_sources: { enabled: s.linkedin_sources.enabled, tags: [...s.linkedin_sources.tags], people_per_company: s.linkedin_sources.people_per_company },
+    // Promotion's switch and client list, and what the sheet says of it; min_fit_score and batch_max stay server side.
+    promotion: {
+      promote_to_leads: s.promotion.promote_to_leads,
+      tags: [...s.promotion.tags],
+      require_question: s.promotion.require_question,
+      source_label: s.promotion.source_label,
+    },
     overlap_sharing: {
       ...s.overlap_sharing,
       tags: [...s.overlap_sharing.tags],
@@ -276,7 +284,8 @@ type SettingsRows = {
   models: Record<string, unknown>;
   /** Only when the sheet sent it: left out, the stored row is kept as it is. */
   linkedin_sources?: Record<string, unknown>;
-  /** The three below: only when the sheet sent them and they change. */
+  /** The four below: only when the sheet sent them and they change. */
+  promotion?: Record<string, unknown>;
   overlap_sharing?: Record<string, unknown>;
   weekly_topup?: Record<string, unknown>;
   never_contact_inboxes?: Record<string, unknown>;
@@ -294,7 +303,9 @@ const PEOPLE_PER_COMPANY_MAX = 100;
  * out, the stored row is kept and not written. So is spend_caps'
  * vendor_calls_per_day (migration 129: the daily calls of the email finders
  * and Enrichley, checked with cleanVendorCaps): left out, the stored caps are
- * kept.
+ * kept. So is promotion (126): only its switch and client list are taken,
+ * merged over the stored row (batch_max, require_question, source_label and
+ * min_fit_score stay as stored), and the row is written only when they change.
  */
 export function cleanSettingsInput(
   input: unknown,
@@ -380,6 +391,21 @@ export function cleanSettingsInput(
       };
     }
   }
+  // Promotion into leads (126): the switch and its client list, as the other
+  // pipeline switches. Left out (an older sheet): kept as stored, not written.
+  let promotion: PromotionInput | null = null;
+  if (body.promotion !== undefined) {
+    const raw = body.promotion;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      errors.push("Promotion into leads: must be the switch and its client list.");
+    } else {
+      const pr = raw as Record<string, unknown>;
+      promotion = {
+        promote_to_leads: bool(pr.promote_to_leads, "Promotion into leads"),
+        tags: cleanTags(pr.tags, "Promotion into leads", errors),
+      };
+    }
+  }
   // Overlap sharing, the weekly top-up and never-contact inboxes (134 to 136):
   // each optional, checked by settings.mjs (cleanOverlapSharing,
   // cleanWeeklyTopup, cleanNeverContactInboxes), merged over the stored row.
@@ -446,8 +472,16 @@ export function cleanSettingsInput(
     diff("LinkedIn searches' clients", l0.tags, linkedin.tags, listText);
     diff("people a company (LinkedIn)", l0.people_per_company, linkedin.people_per_company);
   }
-  // The three rows below are written only when they change (a save of the
+  // The four rows below are written only when they change (a save of the
   // sheet that leaves them alone writes nothing to them).
+  const beforePromotion = changes.length;
+  let promotionChanged = false;
+  if (promotion) {
+    const r0 = current.promotion;
+    diff("promotion into leads", r0.promote_to_leads, promotion.promote_to_leads, said);
+    diff("promotion's clients", r0.tags, promotion.tags, listText);
+    promotionChanged = changes.length > beforePromotion;
+  }
   const before = changes.length;
   const listOf = (v: string[]) => (v.length ? v.join(", ") : "none");
   const poolsText = (p: Record<string, string[]>) => Object.entries(p).map(([k, v]) => `${k} (${v.join(", ")})`).join("; ") || "none";
@@ -527,6 +561,8 @@ export function cleanSettingsInput(
       },
       models,
       ...(linkedin ? { linkedin_sources: { ...obj(stored.linkedin_sources), ...linkedin } } : {}),
+      // The rest of the row (batch_max, require_question, source_label, min_fit_score) stays as stored.
+      ...(promotion && promotionChanged ? { promotion: { ...obj(stored.promotion), ...promotion } } : {}),
       ...(sharing && sharingChanged ? { overlap_sharing: { ...obj(stored.overlap_sharing), ...sharing } } : {}),
       ...(topup && topupChanged ? { weekly_topup: { ...obj(stored.weekly_topup), ...topup } } : {}),
       // The filter keys (pattern, source, sha256, read_at) stay as the seed wrote them.
@@ -572,6 +608,7 @@ export function settingsInputOf(v: PipelineSettings): SettingsInput {
     },
     models,
     linkedin_sources: { ...v.linkedin_sources, tags: [...v.linkedin_sources.tags] },
+    promotion: { promote_to_leads: v.promotion.promote_to_leads, tags: [...v.promotion.tags] },
     overlap_sharing: {
       ...v.overlap_sharing,
       tags: [...v.overlap_sharing.tags],

@@ -49,6 +49,8 @@ function CompaniesTab() {
   const [people, setPeople] = useState<PeopleSetup | null>(null);
   const [peopleRuns, setPeopleRuns] = useState<PeopleRun[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** Settings saves so far: the fit panel is keyed on it, so it reads promotion's switch again after one. */
+  const [settingsSaves, setSettingsSaves] = useState(0);
   // A response is used only if it still belongs to the client on screen.
   const loadSeq = useRef(0);
   const tagRef = useRef(tag);
@@ -355,8 +357,8 @@ function CompaniesTab() {
               <PullsCard tag={tag} runs={runs} onCancel={cancel} />
             </div>
           </div>
-          {/* keyed: the fit panel shows one client's promotion and gate */}
-          <FitPanel key={`fit-${tag}`} tag={tag} />
+          {/* keyed: the fit panel shows one client's promotion and gate, read again after a settings save (promotion's switch is there) */}
+          <FitPanel key={`fit-${tag}-${settingsSaves}`} tag={tag} />
           <CompaniesTable key={tag} tag={tag} live={busy || peopleActive} listedTotal={counts?.listed.total ?? 0} />
         </>
       )}
@@ -368,6 +370,7 @@ function CompaniesTab() {
           onSaved={() => {
             refreshQuietly();
             loadPeople(); // the people panel's switches, LinkedIn's included
+            setSettingsSaves((n) => n + 1); // the fit panel's promotion line
           }}
         />
       )}

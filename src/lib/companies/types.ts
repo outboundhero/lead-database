@@ -158,12 +158,35 @@ export interface PipelineSettings {
    * search people runs.
    */
   linkedin_sources: { enabled: boolean; tags: string[]; people_per_company: number };
+  /** Promotion into leads (migration 126), as settingsFrom reads it. Ships off. Needs no fit score. */
+  promotion: PromotionSettings;
   /** Overlap sharing (migration 134), as settingsFrom reads it. Ships off. */
   overlap_sharing: OverlapSharingSettings;
   /** The weekly top-up (migration 135), as settingsFrom reads it. Ships off. */
   weekly_topup: WeeklyTopupSettings;
   /** Never-contact inboxes (migration 136): the switch and pace, and whether the Clay filter is loaded. Never the filter itself. */
   never_contact_inboxes: NeverContactInboxesView;
+}
+
+/**
+ * The part of promotion (enrich_settings.promotion, migration 126) the
+ * settings sheet edits: the switch and its client list. Pipeline emails go
+ * into leads only for a client on the list while it is on.
+ */
+export interface PromotionInput {
+  promote_to_leads: boolean;
+  tags: string[];
+}
+
+/**
+ * Promotion as the sheet shows it: the switch and its client list, and, read
+ * only, whether a contact needs a question and the leads' source label. The
+ * rest of the row (batch_max, and min_fit_score, which promotion no longer
+ * reads: fit scoring is kept for v2) is kept as stored.
+ */
+export interface PromotionSettings extends PromotionInput {
+  require_question: boolean;
+  source_label: string;
 }
 
 /**
@@ -264,6 +287,8 @@ export interface SettingsInput {
   models: Record<ModelStep, { model: string; reasoning_effort: Effort | null; max_searches: number | null }>;
   /** Optional: left out, what is stored is kept. */
   linkedin_sources?: PipelineSettings["linkedin_sources"];
+  /** Optional: left out, what is stored is kept; the rest of the promotion row is always kept as stored. */
+  promotion?: PromotionInput;
   /** Optional: left out, what is stored is kept. */
   overlap_sharing?: OverlapSharingSettings;
   /** Optional: left out, what is stored is kept. */

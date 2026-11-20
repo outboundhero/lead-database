@@ -7,16 +7,20 @@ import type { SettingsState } from "@/lib/companies/types";
 
 // GET /api/companies/settings: the pipeline's settings as the worker reads them
 //     (enrich_settings: company pulls, people runs, personalisation, the spend
-//     caps, the model of each original AI step and the LinkedIn searches), with
-//     their version.
+//     caps, the model of each original AI step, the LinkedIn searches and
+//     promotion into leads), with their version.
 // PUT /api/companies/settings {version, company_pipeline, people_pipeline,
-//     personalisation, spend_caps, models, linkedin_sources?}: saves the
-//     settings sheet's edits. linkedin_sources (the switch, its client list and
-//     the people a LinkedIn run buys at one company, 1 to 100) is optional:
-//     left out, what is stored is kept. So is spend_caps.vendor_calls_per_day
-//     (migration 129: { findymail, prospeo, anymail_finder, enrichley }, the
-//     paid calls a day of each, 0 to 100,000; 0 is not set, and those steps
-//     wait): left out, the stored caps are kept; sent, all four are checked.
+//     personalisation, spend_caps, models, linkedin_sources?, promotion?}: saves
+//     the settings sheet's edits. linkedin_sources (the switch, its client list
+//     and the people a LinkedIn run buys at one company, 1 to 100) is optional:
+//     left out, what is stored is kept. So is promotion (the switch
+//     promote_to_leads and its client list, which say whose approved pipeline
+//     emails go into leads; no fit score is needed): the rest of its row is
+//     kept as stored, and the row is written only when they change. So is
+//     spend_caps.vendor_calls_per_day (migration 129: { findymail, prospeo,
+//     anymail_finder, enrichley }, the paid calls a day of each, 0 to 100,000;
+//     0 is not set, and those steps wait): left out, the stored caps are kept;
+//     sent, all four are checked.
 //     Every switch keeps its client list (tags, upper case; an empty list
 //     covers no client). Numbers must be whole and in range, model ids match
 //     ^[a-z0-9][a-z0-9.\-]{1,60}$, a reasoning effort is none, minimal, low,

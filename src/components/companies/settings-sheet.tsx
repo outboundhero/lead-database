@@ -17,6 +17,7 @@ import {
   type ModelStep,
   type OverlapSharingSettings,
   type PipelineSettings,
+  type PromotionInput,
   type SettingsInput,
   type SettingsState,
   type VendorCapKey,
@@ -25,14 +26,15 @@ import {
 import type { SharingClient } from "@/lib/sharing/types";
 
 // The pipeline's settings (enrich_settings), admins only: company pulls, people
-// runs, the LinkedIn searches and personalisation, each switch with its client
-// list (an empty list covers no client), their caps, the daily spend caps
-// (OpenAI, Reoon, and the calls of each email finder and Enrichley), and for
-// each original Clay AI step its model, reasoning effort and most searches.
-// Saved through PUT /api/companies/settings; the worker reads them every 30 s,
-// so a model is swapped with no deploy. Fit scoring, promotion and the gate
-// have their own panel; each client's LinkedIn places and keywords are edited
-// on the AI Ark tab.
+// runs, the LinkedIn searches, personalisation and promotion into leads, each
+// switch with its client list (an empty list covers no client), their caps,
+// the daily spend caps (OpenAI, Reoon, and the calls of each email finder and
+// Enrichley), and for each original Clay AI step its model, reasoning effort
+// and most searches. Saved through PUT /api/companies/settings; the worker
+// reads them every 30 s, so a model is swapped with no deploy. Promotion needs
+// no fit score: fit scoring and the gate (kept for v2, off) have their own
+// panel, which also shows promotion's counts and Promote now; each client's
+// LinkedIn places and keywords are edited on the AI Ark tab.
 //
 // Also overlap sharing, the weekly top-up and never-contact inboxes
 // (migrations 134 to 136), each shipped off: the switch and its client list,
@@ -67,6 +69,7 @@ function toInput(v: PipelineSettings): SettingsInput {
     },
     models,
     linkedin_sources: { ...v.linkedin_sources, tags: [...v.linkedin_sources.tags] },
+    promotion: { promote_to_leads: v.promotion.promote_to_leads, tags: [...v.promotion.tags] },
     overlap_sharing: {
       ...v.overlap_sharing,
       tags: [...v.overlap_sharing.tags],
@@ -302,6 +305,8 @@ export function SettingsSheet({
   type LinkedinInput = NonNullable<SettingsInput["linkedin_sources"]>;
   const setLinkedin = <K extends keyof LinkedinInput>(k: K, v: LinkedinInput[K]) =>
     setForm((f) => (f?.linkedin_sources ? { ...f, linkedin_sources: { ...f.linkedin_sources, [k]: v } } : f));
+  const setPromotion = <K extends keyof PromotionInput>(k: K, v: PromotionInput[K]) =>
+    setForm((f) => (f?.promotion ? { ...f, promotion: { ...f.promotion, [k]: v } } : f));
   const setSharing = <K extends keyof OverlapSharingSettings>(k: K, v: OverlapSharingSettings[K]) =>
     setForm((f) => (f?.overlap_sharing ? { ...f, overlap_sharing: { ...f.overlap_sharing, [k]: v } } : f));
   const setTopup = <K extends keyof WeeklyTopupSettings>(k: K, v: WeeklyTopupSettings[K]) =>
@@ -348,6 +353,8 @@ export function SettingsSheet({
   const pp = form?.people_pipeline;
   const ps = form?.personalisation;
   const ls = form?.linkedin_sources;
+  const pr = form?.promotion;
+  const prView = state?.value.promotion;
   const os = form?.overlap_sharing;
   const wt = form?.weekly_topup;
   const nc = form?.never_contact_inboxes;
@@ -493,6 +500,27 @@ export function SettingsSheet({
                   onChange={(v) => set("personalisation", "shared_text_ok", v)}
                 />
               </Section>
+
+              {pr && (
+                <Section>
+                  <Switch
+                    label="Promotion into leads"
+                    hint={
+                      pr.promote_to_leads
+                        ? "On, for the clients listed below: their approved general inboxes and people are added to the lead database (duplicates skipped, never merged), by the worker at most every 10 minutes, or at once with Promote now on the fit panel."
+                        : "Off: nothing from the pipeline is added to the lead database. Contacts wait in the clients' Clay tables until it is on."
+                    }
+                    checked={pr.promote_to_leads}
+                    onChange={(v) => setPromotion("promote_to_leads", v)}
+                  />
+                  <Clients label="Promotion into leads" tags={pr.tags} onChange={(t) => setPromotion("tags", t)} />
+                  <p className="text-[12px] leading-relaxed text-muted-foreground">
+                    No fit score is needed. Only addresses Reoon approved are added, with the source &quot;{prView?.source_label ?? "Companies (AI Ark)"}&quot;; one approved
+                    only by Enrichley, or found by an email finder, waits for now.
+                    {prView?.require_question ? " A question is required, so a contact without one waits too." : ""}
+                  </p>
+                </Section>
+              )}
 
               {os && (
                 <Section>
