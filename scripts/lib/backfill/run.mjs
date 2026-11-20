@@ -66,6 +66,18 @@ export const DAY_COUNT_SQL = `SELECT count(*)::int AS n FROM lead_shares
 /** A Db whose every statement runs in a read-only transaction of its own. */
 const reader = (pool) => ({ query: (sql, params = []) => read(pool, sql, params) });
 
+/**
+ * The room the three caps leave, and which one binds (the smallest; on a tie
+ * the firing's cap, then the day's, then the client's a firing).
+ *
+ * @param {{ job: number, day: number, run: number }} left  what each cap leaves
+ * @returns {{ room: number, cap: Capped }}
+ */
+export function roomOf(left) {
+  const m = Math.min(left.job, left.day, left.run);
+  return { room: Math.max(0, m), cap: m === left.run ? "run_total" : m === left.day ? "day" : "run" };
+}
+
 /** An error in one line, with anything shaped like an email taken out, at most 300 characters. */
 export function oneLine(e) {
   const m = String(/** @type {Error} */ (e)?.message ?? e).replace(/\s+/g, " ").trim();
@@ -265,13 +277,10 @@ async function writeWindow(pool, { tag, place, window, decision, caps, clientSha
       let capped = null;
       if (take.length) {
         const { rows: [t] } = await c.query(DAY_COUNT_SQL, [tag]);
-        const roomJob = caps.job - clientShared;
-        const roomDay = caps.day - Number(t?.n ?? 0);
-        const roomRun = caps.run - firing.shared;
-        const room = Math.max(0, Math.min(roomJob, roomDay, roomRun));
-        if (take.length > room) {
-          capped = room === roomRun ? "run_total" : room === roomDay ? "day" : "run";
-          take = take.slice(0, room);
+        const left = roomOf({ job: caps.job - clientShared, day: caps.day - Number(t?.n ?? 0), run: caps.run - firing.shared });
+        if (take.length > left.room) {
+          capped = left.cap;
+          take = take.slice(0, left.room);
         }
       }
       /** @type {string[]} */
@@ -395,6 +404,12 @@ export async function serveClient(pool, ctx, f, { mode, deadline, firing, now, t
       capped = d.capped = "time";
       break;
     }
+    // No room left: the place is not started (no pass, no cursor) until a later firing.
+    const room0 = roomOf({ job: caps.job - shared, day: caps.day - today - shared, run: caps.run - firing.shared });
+    if (room0.room <= 0) {
+      capped = d.capped = room0.cap;
+      break;
+    }
     let windows = /** @type {number} */ (cur?.windows ?? 1);
     let next = /** @type {number} */ (cur?.next_window ?? 0);
     if (pass !== "continue") {
@@ -410,9 +425,9 @@ export async function serveClient(pool, ctx, f, { mode, deadline, firing, now, t
         capped = d.capped = "time";
         break places;
       }
-      const room = Math.min(caps.job - shared, caps.day - today - shared, caps.run - firing.shared);
-      if (room <= 0) {
-        capped = d.capped = caps.run - firing.shared <= 0 ? "run_total" : caps.day - today - shared <= 0 ? "day" : "run";
+      const left = roomOf({ job: caps.job - shared, day: caps.day - today - shared, run: caps.run - firing.shared });
+      if (left.room <= 0) {
+        capped = d.capped = left.cap;
         break places;
       }
       const rows = await readWindow(pool, { place, bounds: windowBounds(windows, w), receiver: tag, timeout: timeoutFor() });
@@ -454,8 +469,8 @@ export async function serveClient(pool, ctx, f, { mode, deadline, firing, now, t
         took = r.written;
         cap = r.capped;
       } else {
-        took = decision.shared.slice(0, Math.max(0, room)).map((s) => s.id);
-        if (decision.shared.length > room) cap = room === caps.run - firing.shared ? "run_total" : room === caps.day - today - shared ? "day" : "run";
+        took = decision.shared.slice(0, left.room).map((s) => s.id);
+        if (decision.shared.length > left.room) cap = left.cap;
       }
       for (const id of took) seen.add(id);
       shared += took.length;
@@ -476,14 +491,15 @@ export async function serveClient(pool, ctx, f, { mode, deadline, firing, now, t
 
 const NUMERIC_TOTALS = ["places", "low_places", "unresolved_places", "windows", "checked", "fits", "shared", "would_share", ...BACKFILL_REASONS];
 
-/** The run's totals over its clients' counts. */
+/** The run's totals over its clients' counts (a client the firing stopped before is not_reached). */
 export function totalsOf(byClient) {
   /** @type {Record<string, number>} */
-  const out = { clients: 0, served: 0, skipped: 0, capped: 0, errors: 0 };
+  const out = { clients: 0, served: 0, skipped: 0, not_reached: 0, capped: 0, errors: 0 };
   for (const k of NUMERIC_TOTALS) out[k] = 0;
   for (const c of Object.values(byClient)) {
     out.clients++;
-    if (c.skipped) out.skipped++;
+    if (c.not_reached) out.not_reached++;
+    else if (c.skipped) out.skipped++;
     else out.served++;
     if (c.capped) out.capped++;
     if (c.error) out.errors++;
@@ -517,6 +533,7 @@ async function closeRun(pool, id, { state, stopReason = null, byClient, error = 
 
 /** A client's line in the log: counts only, never a lead. */
 function clientLine(tag, c, mode) {
+  if (c.not_reached) return `backfill: ${tag} not reached (${c.not_reached})`;
   if (c.skipped) return `backfill: ${tag} skipped, ${c.skipped}`;
   if (c.error && c.checked === undefined) return `backfill: ${tag} failed: ${c.error}`;
   const n = mode === "apply" ? `${c.shared} shared` : `${c.would_share} would be shared`;
@@ -608,6 +625,10 @@ export async function backfillOnce(pool, { deadline = Number.POSITIVE_INFINITY, 
         break;
       }
       if (stopReason) break;
+    }
+    if (stopReason) {
+      // The clients the firing stopped before: the next firing serves them (the least recently served first).
+      for (const f of order) if (!byClient[f.tag]) byClient[f.tag] = { not_reached: stopReason };
     }
     const state = stopReason ? "stopped" : "done";
     await closeRun(pool, runId, { state, stopReason, byClient, error: firstError });

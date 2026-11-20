@@ -260,7 +260,8 @@ export async function groupOwnerHeld(pool, { leads, receiver, groupNo, clients }
  * @typedef {{ settings: import("../enrich/settings.mjs").PipelineSettings, untagged: boolean, clients: Map<string, ClientRow>,
  *             pattern: string | null, geoIds: Map<string, Set<string>> }} DecideContext
  * @typedef {{ checked: number, fits: number, shared: Array<{ id: string, place: MatchedPlace | null }>,
- *             reasons: Record<string, number> }} WindowDecision
+ *             reasons: Record<string, number>, outcomes: Map<string, string> }} WindowDecision
+ *   outcomes: each fitting lead's outcome (shared, or its reason), for the counts' readers and the tests
  */
 
 /**
@@ -276,7 +277,13 @@ export async function groupOwnerHeld(pool, { leads, receiver, groupNo, clients }
 export async function decideWindow(pool, { receiver, rows, ctx, seen = new Set() }) {
   /** @type {Record<string, number>} */
   const reasons = Object.fromEntries(BACKFILL_REASONS.map((k) => [k, 0]));
-  const out = { checked: rows.length, fits: 0, shared: /** @type {Array<{ id: string, place: MatchedPlace | null }>} */ ([]), reasons };
+  /** @type {Map<string, string>} */
+  const outcomes = new Map();
+  const out = { checked: rows.length, fits: 0, shared: /** @type {Array<{ id: string, place: MatchedPlace | null }>} */ ([]), reasons, outcomes };
+  const why0 = (id, r) => {
+    reasons[r] = (reasons[r] ?? 0) + 1;
+    outcomes.set(id, r);
+  };
   if (!rows.length) return out;
   const byId = new Map(rows.map((r) => [r.id, r]));
   const fit = await fitsOf(pool, [...byId.keys()], receiver.tag);
@@ -289,8 +296,8 @@ export async function decideWindow(pool, { receiver, rows, ctx, seen = new Set()
   const open = [];
   for (const id of fit) {
     const owners = ownersOf(byId.get(id)?.tags, ctx.clients);
-    if (owners.some((o) => clientPool(ctx.settings, o, ctx.clients.get(o)?.client_type ?? null) !== pool0)) reasons.other_pool++;
-    else if (!owners.length && !ctx.untagged) reasons.untagged_off++;
+    if (owners.some((o) => clientPool(ctx.settings, o, ctx.clients.get(o)?.client_type ?? null) !== pool0)) why0(id, "other_pool");
+    else if (!owners.length && !ctx.untagged) why0(id, "untagged_off");
     else open.push({ id, owners });
   }
 
@@ -299,7 +306,7 @@ export async function decideWindow(pool, { receiver, rows, ctx, seen = new Set()
   const left = [];
   for (const l of open) {
     const r = why.get(l.id) ?? (seen.has(l.id) ? "already_shared" : null);
-    if (r) reasons[r] = (reasons[r] ?? 0) + 1;
+    if (r) why0(l.id, r);
     else left.push(l);
   }
 
@@ -309,9 +316,10 @@ export async function decideWindow(pool, { receiver, rows, ctx, seen = new Set()
   });
   for (const l of left) {
     if (held.has(l.id)) {
-      reasons.same_install++;
+      why0(l.id, "same_install");
       continue;
     }
+    outcomes.set(l.id, "shared");
     const lead = /** @type {Candidate} */ (byId.get(l.id));
     out.shared.push({ id: l.id, place: matchPlace({ ...receiver, block: null, isOrigin: false }, lead, ctx.geoIds) });
   }
