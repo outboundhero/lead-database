@@ -12,12 +12,15 @@ import type { JobAnswer, JobReceiver, ShareOutcome } from "@/lib/sharing/types";
 import { PushSharedDialog } from "./push-shared-dialog";
 
 // One share job on the Sharing page: per receiving client its outcomes, push
-// states and a sample of rows, the push batches its shares went into, and the
+// states and a sample of rows, the push batches its shares went into (how
+// each ended, in words, and whether the share step has settled it), and the
 // admin's buttons: Apply (a confirm shows what changed since the preview),
 // Undo, Retry and Push shared. The work is the share step's own; this only
 // asks for it.
 
 type Preview = { receivers: Array<{ tag: string; before: Record<string, number>; now: Record<string, number>; overCap: boolean }> };
+/** The push batch states the share step settles (its shares not sent get their end state). */
+const ENDED_PUSH = ["complete", "cancelled", "error"];
 type Confirm = { kind: "apply" | "undo"; receiver: string | null; preview?: Preview | null };
 
 const outcomeLine = (o: Partial<Record<ShareOutcome, number>>) =>
@@ -272,8 +275,13 @@ export function JobDetail({ batchId, isAdmin, onClose, onChanged }: { batchId: s
           <p className="text-[12.5px] font-medium">Push batches (Exports page)</p>
           {data.pushBatches.map((b) => (
             <p key={b.id} className="text-[12.5px] text-muted-foreground">
-              {b.receiver} · {b.source === "topup" ? "own top-up" : "shares"} · {b.status} · {fmtCount(b.sent)} of {fmtCount(b.total)} sent · queued{" "}
-              {age(b.created_at)} ago
+              {b.receiver} · {b.source === "topup" ? "own top-up" : "shares"} · {b.status}
+              {b.endNote ? ` · ${b.endNote}` : ""} · {fmtCount(b.sent)} of {fmtCount(b.total)} sent · queued {age(b.created_at)} ago
+              {ENDED_PUSH.includes(b.status)
+                ? b.settled
+                  ? " · settled"
+                  : " · not settled yet: its leads that were not sent get their end state at the next share round"
+                : ""}
             </p>
           ))}
         </div>

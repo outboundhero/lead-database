@@ -11,10 +11,12 @@ import { PushSharedDialog } from "./push-shared-dialog";
 
 // The Sharing page's Held tab (plan 1.11): the shares waiting to be pushed and
 // the held ones by client and reason with their age (the pick is tried again
-// once a day for held_retry_days, then they stay held until "Push shared"),
-// the leads of recent imports that still have no usable place (by the place
-// text they carry: fixing it on the Locations page lets them be shared), and
-// which Bison installs the lead mirror covers.
+// once a day for held_retry_days, then they stay held until "Push shared";
+// shares of a push cancelled on the Exports page are never tried again by
+// themselves), the push timer's refused asks as the running worker reports
+// them, the leads of recent imports that still have no usable place (by the
+// place text they carry: fixing it on the Locations page lets them be
+// shared), and which Bison installs the lead mirror covers.
 
 export function HeldTab({ isAdmin }: { isAdmin: boolean }) {
   const [data, setData] = useState<HeldAnswer | null>(null);
@@ -54,6 +56,24 @@ export function HeldTab({ isAdmin }: { isAdmin: boolean }) {
           Waiting for the next push round: {data.queued.map((x) => `${x.receiver} ${fmtCount(x.rows)} (oldest ${age(x.oldest)})`).join(" · ")}
         </p>
       )}
+      {data.refusals.length > 0 && (
+        <div className="space-y-1 rounded-2xl bg-[var(--warning)]/12 p-3">
+          <p className="text-[13px] font-semibold">Pushes refused</p>
+          {data.refusals.map((r) => (
+            <p key={r.receiver} className="text-[12.5px]">
+              <span className="font-medium">{r.receiver}</span>: the last push was refused {age(r.at) || "0 minutes"} ago ({r.status ?? "no answer"}):{" "}
+              {r.error}
+              {r.kept !== null ? ` ${fmtCount(r.kept)} shares stay queued.` : ""}
+              {r.retryHeld ? " (held shares tried again)" : ""}
+            </p>
+          ))}
+          <p className="text-[12px] text-muted-foreground">
+            {data.worker && !data.worker.online ? "The worker is offline; this is what it reported last. " : ""}
+            Kept by the running worker: cleared by the next push for that client that goes through. A worker restart forgets it until the
+            next try.
+          </p>
+        </div>
+      )}
       {data.held.length > 0 && (
         <div className="overflow-x-auto rounded-2xl bg-card shadow-ios">
           <Table>
@@ -75,10 +95,16 @@ export function HeldTab({ isAdmin }: { isAdmin: boolean }) {
                   <TableCell className="tabular-nums">{fmtCount(h.rows)}</TableCell>
                   <TableCell>
                     {age(h.oldest)}
-                    {!h.retried && (
+                    {h.manual ? (
                       <Badge variant="outline" className="ml-2">
-                        No longer retried
+                        Not retried: Push shared sends them
                       </Badge>
+                    ) : (
+                      !h.retried && (
+                        <Badge variant="outline" className="ml-2">
+                          No longer retried
+                        </Badge>
+                      )
                     )}
                   </TableCell>
                   <TableCell className="text-muted-foreground">{when(h.lastTry)}</TableCell>
@@ -95,7 +121,10 @@ export function HeldTab({ isAdmin }: { isAdmin: boolean }) {
           </Table>
         </div>
       )}
-      <p className="text-[12px] text-muted-foreground">Held shares are tried again once a day for {data.heldRetryDays} days, then they stay held until Push shared.</p>
+      <p className="text-[12px] text-muted-foreground">
+        Held shares are tried again once a day for {data.heldRetryDays} days, then they stay held until Push shared. Shares of a push cancelled on
+        the Exports page are never tried again by themselves.
+      </p>
 
       <p className="pt-2 text-[13.5px] font-semibold">Leads with no usable place</p>
       <p className="text-[12.5px] text-muted-foreground">

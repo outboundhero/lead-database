@@ -43,6 +43,9 @@ const DROP_NOTES: Record<string, string> = {
   in_campaign: "already in the picked campaigns (Bison mirror)",
   undone: "the share was undone",
   no_lead: "the lead is gone or has no email",
+  already_sent: "already sent to this client by another push",
+  not_eligible: "not eligible when pushed (no email, bounced, not valid, or outside the client's rules then)",
+  bison_refused: "Bison refused it (in another sequence, bounced or unsubscribed there)",
 };
 
 export function pushNoteText(note: string | null | undefined): string {

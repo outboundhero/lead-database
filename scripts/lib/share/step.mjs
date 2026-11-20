@@ -11,15 +11,23 @@
 //                 time, until the round's time is up; in apply mode each is
 //                 applied within the push caps (settleJob)
 //   4. recheck    jobs whose daily look at their no-place leads is due
-//   5. push       the push timer (upkeep.mjs)
-//   6. tags       the paced tag writer
-//   7. prune      at most hourly
+//   5. settle     share and top-up pushes that ended (complete, cancelled,
+//                 error) give each share row still pushed its end state: held
+//                 with a reason, dropped, or left pushed when its lead was
+//                 sent (settle.mjs); before the push timer, so this round's
+//                 timer already sees the held rows
+//   6. push       the push timer (upkeep.mjs)
+//   7. tags       the paced tag writer
+//   8. prune      at most hourly
 // A part that fails is logged and the next one runs. A missing migration
 // (SHARE_UNREADY) is thrown on, so the worker says it once and stays idle.
+// shareRefusals() gives the push timer's last failed ask per receiving client,
+// for the worker's heartbeat.
 
 import { claimDue, decideJob, discoverJobs, recheckOne } from "./jobs.mjs";
 import { isUnready } from "./db.mjs";
-import { newUpkeepMemory, prune, pushTimer, writeTags } from "./upkeep.mjs";
+import { settleEndedPushes } from "./settle.mjs";
+import { newUpkeepMemory, prune, pushRefusals, pushTimer, writeTags } from "./upkeep.mjs";
 
 /** How often the worker runs a round. */
 export const SHARE_EVERY_MS = 60_000;
@@ -38,20 +46,31 @@ export function newShareMemory() {
 }
 
 /**
+ * The push timer's last failed ask per receiving client (upkeep.mjs
+ * pushRefusals), for the worker's heartbeat; [] for a memory without them.
+ *
+ * @param {ShareMemory | null | undefined} memory
+ * @returns {Array<import("./upkeep.mjs").PushRefusal>}
+ */
+export function shareRefusals(memory) {
+  return pushRefusals(memory?.upkeep);
+}
+
+/**
  * One round.
  *
  * @param {Pool} pool  the step's own pool
  * @param {{ settings: PipelineSettings, memory: ShareMemory, env?: Record<string, string | undefined>, fetchImpl?: typeof fetch,
  *           log?: (line: string) => void, shouldStop?: () => boolean, budgetMs?: number, now?: () => number }} opts
  * @returns {Promise<{ idle: boolean, discovered: number, decided: number, paused: boolean, failed: number, rechecked: number,
- *                     pushes: number, tagsAdded: number, tagsRemoved: number, pruned: { lists: number, rows: number } | null,
- *                     errors: string[] }>}
+ *                     settled: number, pushes: number, tagsAdded: number, tagsRemoved: number,
+ *                     pruned: { lists: number, rows: number } | null, errors: string[] }>}  settled: ended pushes settled
  */
 export async function shareRound(pool, {
   settings, memory, env = process.env, fetchImpl = fetch, log = () => {}, shouldStop = () => false, budgetMs = ROUND_BUDGET_MS, now = Date.now,
 }) {
   const out = {
-    idle: true, discovered: 0, decided: 0, paused: false, failed: 0, rechecked: 0, pushes: 0, tagsAdded: 0, tagsRemoved: 0,
+    idle: true, discovered: 0, decided: 0, paused: false, failed: 0, rechecked: 0, settled: 0, pushes: 0, tagsAdded: 0, tagsRemoved: 0,
     pruned: /** @type {{ lists: number, rows: number } | null} */ (null), errors: /** @type {string[]} */ ([]),
   };
   const os = settings?.overlap_sharing;
@@ -96,6 +115,9 @@ export async function shareRound(pool, {
       if (!r) break;
       out.rechecked++;
     }
+  });
+  await part("settle", async () => {
+    out.settled = (await settleEndedPushes(pool, { log })).batches;
   });
   await part("push", async () => {
     out.pushes = (await pushTimer(pool, { settings, memory: memory.upkeep, env, fetchImpl, now, log })).length;

@@ -127,6 +127,13 @@ export interface JobPushBatch {
   sent: number;
   created_at: string;
   source: string | null;
+  /**
+   * How it ended, in words built on the server (never the raw error): "cancelled on the Exports page", the push
+   * worker's or an undo's reason for a cancel, or the note of a batch in error; null otherwise.
+   */
+  endNote: string | null;
+  /** The share step settled it: each of its shares that was not sent has its end state (held or dropped). */
+  settled: boolean;
 }
 
 export interface JobAnswer {
@@ -166,6 +173,8 @@ export interface HeldGroup {
   lastTry: string | null;
   /** True while the daily retry still covers the group's oldest row. */
   retried: boolean;
+  /** True: shares of a push cancelled on the Exports page, never retried by themselves (Push shared sends them). */
+  manual: boolean;
 }
 
 export interface NoPlaceGroup {
@@ -185,6 +194,16 @@ export interface MirrorInstall {
   lastSync: string | null;
 }
 
+/** The share push timer's last failed ask for one receiving client, as the running worker reported it. */
+export interface PushRefusal {
+  receiver: string;
+  at: string;
+  status: number | null;
+  error: string;
+  kept: number | null;
+  retryHeld: boolean;
+}
+
 export interface HeldAnswer {
   ready: boolean;
   held: HeldGroup[];
@@ -192,6 +211,9 @@ export interface HeldAnswer {
   noPlace: NoPlaceGroup[];
   mirror: MirrorInstall[];
   heldRetryDays: number;
+  /** The push timer's failed asks, from the newest worker's heartbeat; cleared by the next push that goes through. */
+  refusals: PushRefusal[];
+  worker: SharingWorker | null;
 }
 
 /** The Uploads page's badge, per batch. */

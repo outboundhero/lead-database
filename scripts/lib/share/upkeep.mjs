@@ -8,7 +8,11 @@
 //                 (plan 1.8). Once a day per receiver with held shares still
 //                 inside held_retry_days it asks again with retryHeld. Without
 //                 the address and key (sharePushConfig) the shares stay queued
-//                 and the step says so once.
+//                 and the step says so once. Each ask that fails (a 409, any
+//                 other error, no answer) is kept per receiver in memory
+//                 (pushRefusals(), for the worker's heartbeat and the Held
+//                 tab) until a push for that receiver goes through or nothing
+//                 waits for it any more.
 //   writeTags()   While write_tags is on: applied, live shared rows get the
 //                 receiver's tag on the lead (fn_merge_tags, the exact
 //                 client_tags spelling, only where the lead lacks it), with a
@@ -28,14 +32,19 @@ import { inTx, read, tagTestSql, UTC_DAY_START } from "./db.mjs";
 /**
  * @typedef {import("./db.mjs").Pool} Pool
  * @typedef {import("../enrich/settings.mjs").PipelineSettings} PipelineSettings
+ * @typedef {{ receiver: string, at: string, status: number | null, error: string, kept: number | null, retryHeld: boolean }} PushRefusal
+ *   The push timer's last failed ask for one receiving client: when (ISO), the answer's status (null: no answer), its error,
+ *   how many shares it said stay as they were, and whether held shares were being tried again.
  * @typedef {{ pushedAt: Map<string, number>, heldAt: Map<string, number>, pushConfigSaid: boolean,
- *             tagDay: { day: string, used: number } | null, prunedAt: number }} UpkeepMemory
+ *             tagDay: { day: string, used: number } | null, prunedAt: number, refusals: Map<string, PushRefusal> }} UpkeepMemory
  */
 
 /** How long the push route may take: it reads the receiver's live campaigns from Email Bison. */
 const PUSH_WAIT_MS = 120_000;
 /** Receivers asked at most per round; the others are asked next round. */
 const PUSH_ASKS_PER_ROUND = 10;
+/** Refusals pushRefusals() gives at most. */
+const REFUSALS_MAX = 200;
 const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
 /** Rows deleted per prune statement. */
@@ -43,7 +52,7 @@ const PRUNE_CHUNK = 5000;
 
 /** The timers' memory in the worker process: lost on a restart, so each timer then runs at once. */
 export function newUpkeepMemory() {
-  return { pushedAt: new Map(), heldAt: new Map(), pushConfigSaid: false, tagDay: null, prunedAt: 0 };
+  return { pushedAt: new Map(), heldAt: new Map(), pushConfigSaid: false, tagDay: null, prunedAt: 0, refusals: new Map() };
 }
 
 // ── Pushes ──────────────────────────────────────────────────────────────────
@@ -101,6 +110,10 @@ export async function pushTimer(pool, { settings, memory, env = process.env, fet
         [os.held_retry_days]
       )
     : { rows: [] };
+  // A refusal is kept only while something still waits for that receiver.
+  if (!(memory.refusals instanceof Map)) memory.refusals = new Map();
+  const waiting = new Set([...queued, ...held].map((r) => r.receiver_tag));
+  for (const receiver of [...memory.refusals.keys()]) if (!waiting.has(receiver)) memory.refusals.delete(receiver);
   if (!queued.length && !held.length) return [];
   const config = sharePushConfig(env);
   if (!config) {
@@ -126,9 +139,36 @@ export async function pushTimer(pool, { settings, memory, env = process.env, fet
     (ask.retryHeld ? memory.heldAt : memory.pushedAt).set(ask.receiver, now());
     const r = await requestSharePush(config, ask.retryHeld ? { receiver: ask.receiver, retryHeld: true } : { receiver: ask.receiver }, fetchImpl);
     log(pushLine(ask.receiver, r, ask.retryHeld));
+    if (r.ok) memory.refusals.delete(ask.receiver);
+    else {
+      memory.refusals.set(ask.receiver, {
+        receiver: ask.receiver,
+        at: new Date(now()).toISOString(),
+        status: r.status,
+        error: r.why ?? "no reason given",
+        kept: Number.isInteger(r.body?.kept) ? r.body.kept : null,
+        retryHeld: ask.retryHeld,
+      });
+    }
     made.push({ ...ask, ok: r.ok, status: r.status });
   }
   return made;
+}
+
+/**
+ * The push timer's last failed ask per receiving client, sorted by receiver,
+ * at most REFUSALS_MAX; [] for a memory without them.
+ *
+ * @param {Partial<UpkeepMemory> | null | undefined} memory
+ * @returns {PushRefusal[]}
+ */
+export function pushRefusals(memory) {
+  const refusals = memory?.refusals;
+  if (!(refusals instanceof Map)) return [];
+  return [...refusals.values()]
+    .sort((a, b) => (a.receiver < b.receiver ? -1 : a.receiver > b.receiver ? 1 : 0))
+    .slice(0, REFUSALS_MAX)
+    .map((r) => ({ ...r }));
 }
 
 // ── Tags ────────────────────────────────────────────────────────────────────

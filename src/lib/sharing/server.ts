@@ -2,8 +2,10 @@ import type { PoolClient } from "pg";
 import { clientPool, flagOn, settingsFrom } from "../../../scripts/lib/enrich/settings.mjs";
 import { SHARE_SKIP_REASONS, SHARING_CAPABILITY } from "../../../scripts/lib/overlap-topup.mjs";
 import { BISON_GROUPS } from "../../../scripts/lib/bison-groups.mjs";
+import { batchErrorNote, SETTLED_KEY } from "../../../scripts/lib/share/settle.mjs";
 import { workerState } from "@/lib/enrich/queries";
-import { iso } from "./db";
+import type { WorkerState } from "@/lib/enrich/types";
+import { iso, tagOf } from "./db";
 import type {
   BatchShareBadge,
   ClientsAnswer,
@@ -13,6 +15,7 @@ import type {
   JobReceiver,
   JobsAnswer,
   LeadShare,
+  PushRefusal,
   ShareJob,
   ShareJobState,
   ShareOutcome,
@@ -46,12 +49,57 @@ export function switchView(s: Settings): SharingSwitch {
   };
 }
 
-/** The worker running now, and whether it runs the share step. */
-export async function sharingWorker(c: PoolClient): Promise<SharingWorker | null> {
-  const w = await workerState(c);
+function workerView(w: WorkerState | null): SharingWorker | null {
   if (!w) return null;
   const caps = w.info?.capabilities;
   return { online: w.online, secondsAgo: w.seconds_ago, sharing: Array.isArray(caps) && caps.includes(SHARING_CAPABILITY) };
+}
+
+/** The worker running now, and whether it runs the share step. */
+export async function sharingWorker(c: PoolClient): Promise<SharingWorker | null> {
+  return workerView(await workerState(c));
+}
+
+const REFUSALS_MAX = 200;
+const ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+const intOrNull = (v: unknown): number | null | undefined => (v === null ? null : typeof v === "number" && Number.isInteger(v) ? v : undefined);
+
+/**
+ * The push timer's failed asks as the worker's heartbeat holds them
+ * (info.sharing.refusals, scripts/lib/share/upkeep.mjs pushRefusals). Each
+ * needs a client tag, an ISO time, an error in words, and a status and a kept
+ * count that are whole numbers or null; anything else is left out.
+ */
+function refusalsOf(info: unknown): PushRefusal[] {
+  const list = (info as { sharing?: { refusals?: unknown } } | null | undefined)?.sharing?.refusals;
+  if (!Array.isArray(list)) return [];
+  const out: PushRefusal[] = [];
+  for (const x of list) {
+    if (out.length >= REFUSALS_MAX) break;
+    if (!x || typeof x !== "object") continue;
+    const e = x as Record<string, unknown>;
+    const receiver = tagOf(e.receiver);
+    const at = typeof e.at === "string" && ISO_AT.test(e.at) ? iso(e.at) : null;
+    const status = intOrNull(e.status);
+    const kept = intOrNull(e.kept);
+    if (!receiver || !at || typeof e.error !== "string" || status === undefined || kept === undefined) continue;
+    out.push({ receiver, at, status, error: e.error.slice(0, 500), kept, retryHeld: e.retryHeld === true });
+  }
+  return out;
+}
+
+const CANCELLED = "Cancelled: ";
+
+/**
+ * How a share push ended, in words (the raw error never goes to the browser):
+ * a cancel by the push worker or an undo gives its own reason, any other
+ * cancel was an operator's on the Exports page; a batch in error gives the
+ * settle step's note.
+ */
+function endNoteOf(status: string, error: string | null): string | null {
+  if (status === "cancelled") return error?.startsWith(CANCELLED) ? error.slice(CANCELLED.length) : "cancelled on the Exports page";
+  if (status === "error") return batchErrorNote(error);
+  return null;
 }
 
 const JOB_FIELDS = `j.batch_id, j.origin_tag, j.origin_pool, j.state, j.reason, j.topup, j.mode, j.batch_done_at, j.place_wait_until,
@@ -220,7 +268,8 @@ export async function jobDetail(c: PoolClient, batchId: string): Promise<JobAnsw
     };
   });
   const { rows: pb } = await c.query(
-    `SELECT b.id, b.client_tag, b.status, b.total, b.sent, b.created_at, b.push_options->>'source' AS source
+    `SELECT b.id, b.client_tag, b.status, b.total, b.sent, b.created_at, b.push_options->>'source' AS source, b.error,
+            coalesce(b.push_options, '{}'::jsonb) ? '${SETTLED_KEY}' AS settled
        FROM push_batches b
       WHERE b.id IN (SELECT DISTINCT s.push_batch_id FROM lead_shares s WHERE s.batch_id = $1 AND s.push_batch_id IS NOT NULL)
       ORDER BY b.created_at DESC`,
@@ -234,6 +283,8 @@ export async function jobDetail(c: PoolClient, batchId: string): Promise<JobAnsw
     sent: b.sent ?? 0,
     created_at: iso(b.created_at) ?? "",
     source: b.source ?? null,
+    endNote: endNoteOf(b.status, (b.error as string | null) ?? null),
+    settled: b.settled === true,
   }));
   return { job, receivers, pushBatches, switch: switchView(settings) };
 }
@@ -284,13 +335,18 @@ export async function sharingClients(c: PoolClient): Promise<Omit<ClientsAnswer,
   };
 }
 
-/** Held and queued rows by client, leads with no usable place by place text, and the installs the mirror covers. */
+/**
+ * Held and queued rows by client, leads with no usable place by place text, the installs the mirror covers, and
+ * the push timer's failed asks as the newest worker reported them. A group whose rows all have no held_since is
+ * one of a push cancelled on the Exports page: never retried by itself (manual), aged from when it was held.
+ */
 export async function heldView(c: PoolClient): Promise<Omit<HeldAnswer, "ready">> {
   const settings = await readSettings(c);
   const days = settings.overlap_sharing.held_retry_days;
   const { rows: held } = await c.query(
-    `SELECT receiver_tag, push_note, count(*)::int AS n, min(held_since) AS oldest, max(held_at) AS last_try,
-            bool_or(held_since > now() - make_interval(days => $1::int)) AS retried
+    `SELECT receiver_tag, push_note, count(*)::int AS n, coalesce(min(held_since), min(held_at)) AS oldest, max(held_at) AS last_try,
+            bool_or(held_since > now() - make_interval(days => $1::int)) AS retried,
+            bool_and(held_since IS NULL) AS manual
        FROM lead_shares WHERE push_state = 'held' AND undone_at IS NULL
       GROUP BY receiver_tag, push_note
       ORDER BY n DESC LIMIT 500`,
@@ -326,6 +382,7 @@ export async function heldView(c: PoolClient): Promise<Omit<HeldAnswer, "ready">
     [installs.map((i) => i.install)]
   );
   const covOf = new Map(cov.map((r) => [r.inst as string, r]));
+  const w = await workerState(c);
   return {
     held: held.map((r) => ({
       receiver: r.receiver_tag,
@@ -334,6 +391,7 @@ export async function heldView(c: PoolClient): Promise<Omit<HeldAnswer, "ready">
       oldest: iso(r.oldest),
       lastTry: iso(r.last_try),
       retried: r.retried === true,
+      manual: r.manual === true,
     })),
     queued: queued.map((r) => ({ receiver: r.receiver_tag, rows: r.n, oldest: iso(r.oldest) })),
     noPlace: noPlace.map((r) => ({ city: r.city, state: r.state, country: r.country, status: r.status, leads: r.n })),
@@ -343,6 +401,8 @@ export async function heldView(c: PoolClient): Promise<Omit<HeldAnswer, "ready">
       lastSync: iso(covOf.get(i.install)?.last_sync),
     })),
     heldRetryDays: days,
+    refusals: refusalsOf(w?.info),
+    worker: workerView(w),
   };
 }
 
