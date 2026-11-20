@@ -3764,8 +3764,18 @@ owner's OK in the rollout file.
   - no item although the push gathered (the gather left the lead out): dropped
     `no_lead` (gone or no email), `already_sent` (sent for the client by another
     push) or `not_eligible`;
-  - skipped at push time as not eligible: dropped `not_eligible`; Bison refused all
-    its campaigns: dropped `bison_refused`;
+  - skipped for a reason a retry cannot change (`permanentSkipNote`): not eligible
+    at push time, dropped `not_eligible`; bounced or unsubscribed in the workspace,
+    refused by Bison, or not added even with parallel sending on, dropped
+    `bison_refused`; already in sequence in the client's own live campaign, dropped
+    `in_campaign`. With parallel sending (f65874a) the push worker records one
+    reason per refused campaign ("#<id>: <reason>; ..."): the skip is permanent only
+    when every reason is. "In sequence in another campaign ... and parallel sending
+    is off" is held ("not sent: in another client's sequence while parallel sending
+    is off") and retried, since switching parallel sending on changes it. The
+    reasons come from scripts/lib/push-attach.mjs and push-worker.mjs, and
+    test-share-gaps part U builds them with those functions, so a reworded reason
+    fails the test;
   - a cancelled push: held "cannot receive: <reason>" (the push worker's receive
     check) or "push cancelled: <why>" (its no-ids cancel, or an undo's). Any other
     cancel was an operator's on the Exports page: held "push cancelled on the

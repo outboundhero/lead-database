@@ -53,8 +53,9 @@ import { checker, dropPaidKeys, localDatabaseUrl } from "./fixtures/test-support
 import { FIT_SKIP } from "./lib/enrich/fit-push.mjs";
 import { settingsFrom } from "./lib/enrich/settings.mjs";
 import { undoShareJob } from "./lib/share/actions.mjs";
+import { itemOutcome, planTarget } from "./lib/push-attach.mjs";
 import {
-  batchErrorNote, ITEM_FAILED_NOTE, OPERATOR_CANCEL_NOTE, SETTLE_BATCHES_PER_ROUND, SETTLE_CANDIDATES_SQL, SETTLE_MS, SETTLE_ROWS_SQL,
+  batchErrorNote, ITEM_FAILED_NOTE, OPERATOR_CANCEL_NOTE, permanentSkipNote, SETTLE_BATCHES_PER_ROUND, SETTLE_CANDIDATES_SQL, SETTLE_MS, SETTLE_ROWS_SQL,
   SETTLED_KEY, settleEndedPushes, settleOutcome, skipNote,
 } from "./lib/share/settle.mjs";
 import { newShareMemory, shareRefusals, shareRound } from "./lib/share/step.mjs";
@@ -423,6 +424,45 @@ function partU() {
   check("5. Bison refused all its campaigns: dropped, bison_refused",
     is(settleOutcome(bt("complete"), it("skipped", "Bison refused all target campaigns: lead is in another sequence, previously bounced, or unsubscribed on that instance"), rw()),
       dropped("bison_refused")));
+
+  // The push worker with parallel sending (f65874a) records its own block reasons. They are made here by its own
+  // functions, so a reworded reason fails this part instead of turning a permanent skip into a daily retry.
+  const own = "GSTEST_C: Main", other = "GSTEST_Z: Main";
+  const info = (id) => ({ 501: { name: own, status: "active" }, 502: { name: other, status: "active" } })[id] ?? null;
+  const reasonOf = (bisonLead, force = true) => planTarget({ bisonLead, campaignId: 900, clientTag: "GSTEST_C", campaignInfo: info, force }).reason;
+  const bounced = reasonOf({ status: "bounced", lead_campaign_data: [] });
+  const unsubscribed = reasonOf({ status: "Unsubscribed", lead_campaign_data: [] });
+  const inOwn = reasonOf({ status: "active", lead_campaign_data: [{ campaign_id: 501, status: "in_sequence" }] });
+  const parallelOff = reasonOf({ status: "active", lead_campaign_data: [{ campaign_id: 502, status: "in_sequence" }] }, false);
+  const skippedWith = (blocked) => itemOutcome({ targets: blocked.map((_, i) => ({ id: 900 + i })), attached: new Set(), blocked: new Map(blocked.map((r, i) => [String(900 + i), r])) });
+  const workerSource = source("scripts/push-worker.mjs");
+  const REFUSED = "Bison refused it: in another sequence, previously bounced, or unsubscribed there";
+  const NOT_ADDED = "Bison did not add it, even with parallel sending on";
+  check("5b. the push worker's reasons are still worded as the settle reads them",
+    typeof bounced === "string" && typeof unsubscribed === "string" && typeof inOwn === "string" && typeof parallelOff === "string" &&
+      workerSource.includes(`"${REFUSED}"`) && workerSource.includes(`"${NOT_ADDED}"`) &&
+      skippedWith([bounced]).status === "skipped" && skippedWith([bounced]).error === bounced,
+    `${bounced} | ${unsubscribed} | ${inOwn} | ${parallelOff}`);
+  check("5c. bounced or unsubscribed in the workspace, refused by Bison, or not added even with parallel sending on: dropped, bison_refused",
+    [bounced, unsubscribed, REFUSED, NOT_ADDED].every((r) => is(settleOutcome(bt("complete"), it("skipped", skippedWith([r]).error), rw()), dropped("bison_refused"))));
+  check("5d. already in sequence in the client's own live campaign: dropped, in_campaign",
+    is(settleOutcome(bt("complete"), it("skipped", skippedWith([inOwn]).error), rw()), dropped("in_campaign")));
+  check("5e. in another client's sequence while parallel sending is off: held and retried (switching it on can change it)",
+    is(settleOutcome(bt("complete"), it("skipped", skippedWith([parallelOff]).error), rw()),
+      held("not sent: in another client's sequence while parallel sending is off")));
+  check("5f. refused in several campaigns: dropped only when every reason is permanent; in_campaign only when every one is the client's own",
+    is(settleOutcome(bt("complete"), it("skipped", skippedWith([bounced, inOwn]).error), rw()), dropped("bison_refused")) &&
+      is(settleOutcome(bt("complete"), it("skipped", skippedWith([inOwn, inOwn]).error), rw()), dropped("in_campaign")) &&
+      is(settleOutcome(bt("complete"), it("skipped", skippedWith([inOwn, parallelOff]).error), rw()),
+        held("not sent: in another client's sequence while parallel sending is off")) &&
+      skippedWith([bounced, inOwn]).error.startsWith("#900: ") && skippedWith([bounced, inOwn]).error.includes("; #901: "));
+  check("5g. permanentSkipNote: a made-up, empty or missing reason is not permanent; the two older reasons still are",
+    permanentSkipNote("a made-up reason") === null && permanentSkipNote("") === null && permanentSkipNote(null) === null &&
+      permanentSkipNote("#900: a made-up reason") === null &&
+      permanentSkipNote("ineligible per client targeting at push time") === "not_eligible" &&
+      permanentSkipNote("Bison refused all target campaigns: x") === "bison_refused");
+  check("5h. a lead added in some of its campaigns and refused in others is sent, so it stays pushed",
+    is(settleOutcome(bt("complete"), it("sent", `partial: not added to #901: ${bounced}`), rw()), keep));
   check("6a. cancelled by the worker's receive check: held with its reason, retried (a reason with brackets kept whole)",
     is(settleOutcome(bt("cancelled", `Cancelled: ${C} cannot receive (status Paused)`, false), null, rw()), held("cannot receive: status Paused")) &&
       is(settleOutcome(bt("cancelled", `Cancelled: ${C} cannot receive (churn date 2026-12-01 (in 11 days))`, false), null, rw()),
@@ -503,7 +543,12 @@ function partW() {
       { state: "held", note: "push cancelled: shares in it were undone on the Sharing page", retry: true }), undoText);
   check("the push-time skips the rules read are the worker's own", [
     'error: "ineligible per client targeting at push time"',
-    'error: "Bison refused all target campaigns: lead is in another sequence',
+    // Parallel sending (f65874a): Bison's refusals are recorded per campaign through push-attach.mjs itemOutcome
+    // (its reasons are checked in part U, 5b); "Bison refused all target campaigns" is only on older items.
+    'const BISON_REFUSED = "Bison refused it: in another sequence, previously bounced, or unsubscribed there";',
+    '"Bison did not add it, even with parallel sending on"',
+    'from "./lib/push-attach.mjs"',
+    "itemOutcome({ targets: item.target_campaigns, attached, blocked })",
     "error: `refusing to push: ${sideCall.refuse}. `",
     "sideDropped ? `no ${String(sideCall.side).toUpperCase()} campaign on this batch` : null",
     'routed ? `no campaign for the "${bucket}" bucket` : null',

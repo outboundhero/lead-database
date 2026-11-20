@@ -13,8 +13,11 @@
 //   - undone: dropped "undone";
 //   - no item in a batch that was gathered (the gather left the lead out):
 //     dropped "no_lead", "already_sent" or "not_eligible";
-//   - skipped as ineligible, or refused by Bison: dropped "not_eligible" or
-//     "bison_refused";
+//   - skipped for a reason a retry cannot change (permanentSkipNote()): as
+//     ineligible, dropped "not_eligible"; bounced or unsubscribed in the
+//     workspace, refused by Bison, or not added even with parallel sending on,
+//     dropped "bison_refused"; already in sequence in the client's own live
+//     campaign, dropped "in_campaign";
 //   - in a cancelled batch: held with the cancel's reason. A cancel on the
 //     Exports page is held with held_since NULL, so the daily held retry never
 //     takes it; "Push shared" with held does;
@@ -65,7 +68,41 @@ export function skipNote(error) {
   if (/^refusing to push/.test(e)) return "not sent: the client's B2B and B2C installs are not set";
   if (/^no \S+ campaign on this batch|^no campaign for the "/.test(e)) return "not sent: no campaign for its side or mail provider";
   if (/^batch cancelled/.test(e)) return "not sent: its push was cancelled";
+  if (/parallel sending is off/.test(e)) return "not sent: in another client's sequence while parallel sending is off";
   return "not sent: skipped by the push worker";
+}
+
+// The push worker's block reasons (scripts/lib/push-attach.mjs planTarget and
+// scripts/push-worker.mjs, parallel sending since f65874a) that a retry cannot
+// change, with the dropped note each gets. "In sequence in another campaign ...
+// and parallel sending is off" is not here: switching parallel sending on can
+// change it, so it is held.
+const PERMANENT_SKIPS = [
+  [/^already in sequence in this client's campaign /, "in_campaign"],
+  [/^Bison: the lead is (bounced|unsubscribed) in this workspace$/, "bison_refused"],
+  [/^Bison refused it: /, "bison_refused"],
+  [/^Bison did not add it, even with parallel sending on$/, "bison_refused"],
+];
+
+/**
+ * The dropped note of a push-time skip a retry cannot change, or null when a
+ * retry may help. A lead refused in several campaigns carries one reason per
+ * campaign ("#<id>: <reason>; #<id>: <reason>", push-attach.mjs itemOutcome);
+ * it is permanent only when every reason is, and "in_campaign" only when every
+ * reason is the client's own campaign.
+ *
+ * @param {string | null | undefined} error  push_items.error of a skipped item
+ * @returns {"not_eligible" | "bison_refused" | "in_campaign" | null}
+ */
+export function permanentSkipNote(error) {
+  const e = typeof error === "string" ? error : "";
+  if (e.startsWith("ineligible per client targeting")) return "not_eligible";
+  // The push worker before parallel sending wrote this for every Bison refusal.
+  if (e.startsWith("Bison refused all target campaigns")) return "bison_refused";
+  const parts = /^#\d+: /.test(e) ? e.split(/; (?=#\d+: )/).map((p) => p.replace(/^#\d+: /, "")) : [e];
+  const notes = parts.map((p) => PERMANENT_SKIPS.find(([re]) => re.test(p))?.[1] ?? null);
+  if (notes.length === 0 || notes.some((n) => n === null)) return null;
+  return notes.every((n) => n === "in_campaign") ? "in_campaign" : "bison_refused";
 }
 
 /**
@@ -109,8 +146,8 @@ export function settleOutcome(batch, item, row) {
   }
   const itemError = typeof item?.error === "string" ? item.error : "";
   // 4 and 5. Skips a retry cannot change.
-  if (item?.status === "skipped" && itemError.startsWith("ineligible per client targeting")) return { state: "dropped", note: "not_eligible" };
-  if (item?.status === "skipped" && itemError.startsWith("Bison refused all target campaigns")) return { state: "dropped", note: "bison_refused" };
+  const permanent = item?.status === "skipped" ? permanentSkipNote(itemError) : null;
+  if (permanent) return { state: "dropped", note: permanent };
   // 6. A cancelled batch: the worker's receive check, an empty list or an undo say why; anything else is an operator's cancel.
   if (batch.status === "cancelled") {
     const e = typeof batch.error === "string" ? batch.error : "";
