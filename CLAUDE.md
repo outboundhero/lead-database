@@ -416,7 +416,7 @@ src/components/uploads/upload-people.tsx   - The Uploads page's People box, Peop
 scripts/lib/enrich/upload-people.mjs       - Shared by the worker and the web: which client, row keys, inputs, found-email SQL (130)
 scripts/lib/enrich/upload-move.mjs         - The worker's copy of an upload's no-email rows into the People table (130)
 scripts/lib/enrich/upload-found.mjs        - The worker's side of the found-email hand-off (130)
-scripts/lib/enrich/clay-tools.mjs          - Exact copies of Clay's normalize-company-name and extract-email-components (G#14, G#16, P#29)
+scripts/lib/enrich/clay-tools.mjs          - Exact copies of Clay's normalize-company-name, extract-email-components and normalize-phone-number (G#14, G#16, G#35, P#18, P#29)
 scripts/lib/enrich/ai-examples.mjs         - An AI column's Clay table examples, laid out as each request's instructions (P#61, G#49, G#19)
 scripts/lib/enrich/email-verdict.mjs       - Who found or approved a promoted address: the lead's validation status and source
 scripts/lib/enrich/pull-no-email.mjs       - AI Ark pulls' people with no email: copied into the People table, found addresses handed back
@@ -2772,8 +2772,27 @@ OK in its rollout notes.
   from the public suffix list (tldts); the provider comes from the domain's name label
   (gmail, yahoo, hotmail, outlook and live, msn, aol, icloud and me, protonmail, qq;
   anything else UNKNOWN). `lodash` and `tldts` are direct dependencies since then.
-  normalize-phone-number (P#18, G#35) still waits (D38): it needs libphonenumber's
-  country metadata.
+  G#35 and P#18 run our exact copy of normalize-phone-number (2026-11-21, action
+  `clay_normalize_phone_number`, the same way): Google's libphonenumber through
+  `awesome-phonenumber`, pinned at 7.8.0 (libphonenumber 9.0.24), its
+  `parsePhoneNumber()` in the region US unless the original's optional `countryCode`
+  is set (it is unset in both), and its answer under Clay's 12 names (`number.input`,
+  `e164`, `international`, `national`, `rfc3966`, `significant`, Clay's own
+  `allDigits`, then `isPossible`, `regionCode`, `countryCode`, `successfullyParsed`,
+  `canBeInternationallyDialled`). The display is the E.164 number, or "❌ Phone number
+  is not valid"; a number that is not valid still has every format, and G#36 and P#19
+  read its national format, then "there". The run conditions are the originals': G#35
+  on the phone, P#18 on the company phone and SAFE TO RUN. Against Clay's answers on
+  real rows (local only): 3,807 of 3,808 full answers on all 12 fields, 11,473 of
+  11,473 shown values, every display and reader value, and every row Clay did not run.
+  The one difference is one field: Clay calls one +57 number of 10 national digits not
+  possible, where this metadata lists 10 among Colombia's lengths (the rest of that
+  answer is the same). Never seen in Clay's answers, so the library's: a number written
+  without "+", "x" extensions, the `countryCode` option, text that is no number (then
+  only `number.input` and `allDigits`, not possible, not valid), and surrounding
+  spaces (`number.input` comes back trimmed). The country metadata decides the region,
+  the validity and the non-US formats, so a new version of the library is checked
+  against Clay's answers before it comes in. No template column waits any more.
 - **G#19 First Name AI** is an AI step (`ai_web`) on its own model setting,
   `inbox_first_name_ai`: gpt-6-luna, no web search, no reasoning effort, "First name
   (inboxes)" on the settings sheet (2026-11-21). A stored `models` row without the key
@@ -2913,9 +2932,11 @@ OK in its rollout notes.
   people runs on the demo transport (by company id, with and without emails, its test
   faults), the routes, the settings route's shape and the compiled People template
   (about 10 s). Since 2026-11-21: `node --env-file=.env.local scripts/test-clay-tools.mjs`
-  (66 checks, under 1 s: every rule and quirk of the two tool copies with made-up names
-  and addresses, their wiring into the compiled templates, G#19's setting; made-up
-  `TLTEST_A` and `.tltest.example`, removed at the end);
+  (94 checks, under 1 s: every rule and quirk of the three tool copies with made-up
+  names, addresses and phone numbers (555-01xx numbers, numbers no numbering plan
+  holds and libphonenumber's documented examples, each case labelled `NPTEST_`), their
+  wiring into the compiled templates, G#19's setting; made-up `TLTEST_A` and
+  `.tltest.example`, removed at the end);
   `node --env-file=.env.local scripts/test-ai-examples.mjs` (64 checks, under 1 s: the
   layout and every refusal, the compiled columns, every other column byte for byte as
   without examples, the request, and rows worked in memory: G#49 off and on, a
@@ -3089,7 +3110,7 @@ score; `promotion.min_fit_score` is kept as stored and not read).
   in `spend_caps`. The tool stand-ins in `tool-standins.mjs` (our own guesses at a
   company name and a phone number, never Clay's) are used by no column: G#14 and P#29
   run the exact copy of Clay's normalize-company-name in `clay-tools.mjs` (2026-11-21),
-  and G#35 and P#18 (phone) still wait.
+  and G#35 and P#18 the exact copy of its normalize-phone-number (2026-11-21).
 - **Tests:** stop the worker, then `node --env-file=.env.local scripts/test-fit.mjs`
   (local database only, migrations 125 to 127 applied; made-up `FTTEST_` clients and
   `.fttest.example` domains, removed at the end; about 30 s). No network: OpenAI, Email
