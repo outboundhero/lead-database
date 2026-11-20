@@ -2755,8 +2755,11 @@ same way and needs no migration; the behaviour choices it made wait for the owne
 OK in its rollout notes. The next build of the same day makes the template client's
 current Clay tables the `default` for every client, each client keeping only its own
 personalisation steps as an overlay (built with a dry run; the production load is a
-later step by hand), lets G#19 fail as in Clay, and shows AI Ark pulls' `find_email`
-in the grid; no migration either.
+later step by hand), lets G#19 fail as in Clay, shows AI Ark pulls' `find_email` in
+the grid, and runs Clay's third tool, normalize-phone-number, as an exact copy (G#35 and
+P#18, below); no migration either. The same build leaves the built-in competitors list
+out of AI Ark searches wherever the standard keywords go, with no switch of its own (see
+"The built-in competitors list in AI Ark searches").
 
 - **The originals** (`enrich_originals`): the three Clay tables exactly as the Clay
   CLI exported them (Companies 68 columns, People 88, General 76 in the 11-14 layout;
@@ -2988,8 +2991,9 @@ in the grid; no migration either.
   is not valid"; a number that is not valid still has every format, and G#36 and P#19
   read its national format, then "there". The run conditions are the originals': G#35
   on the phone, P#18 on the company phone and SAFE TO RUN. Against Clay's answers on
-  real rows (local only): 3,807 of 3,808 full answers on all 12 fields, 11,473 of
-  11,473 shown values, every display and reader value, and every row Clay did not run.
+  real rows (local only; checked again on the merged code): 3,807 of 3,808 full answers
+  on all 12 fields, 11,473 of 11,473 shown values, every display and reader value, and
+  every row Clay did not run.
   The one difference is one field: Clay calls one +57 number of 10 national digits not
   possible, where this metadata lists 10 among Colombia's lengths (the rest of that
   answer is the same). Never seen in Clay's answers, so the library's: a number written
@@ -3170,8 +3174,8 @@ in the grid; no migration either.
 - **Before a push:** stop the worker; on the local database with 125 to 127 applied run
   `test-originals.mjs`, `test-pipeline-v2.mjs`, `test-companies.mjs`, `test-people.mjs`,
   `test-fit.mjs`, `test-clay-tools.mjs`, `test-ai-examples.mjs`, `test-found-emails.mjs`,
-  `test-originals-by-name.mjs`, `test-personalisation-originals.mjs` and
-  `AIARK_TEST_TAG=<a local cleaning client> test-aiark.mjs`; then `npx tsc --noEmit`,
+  `test-originals-by-name.mjs`, `test-personalisation-originals.mjs`, `test-competitors.mjs`
+  and `AIARK_TEST_TAG=<a local cleaning client> test-aiark.mjs`; then `npx tsc --noEmit`,
   `npx eslint`, `npx next build`; then the scans of the added lines, from a scratch
   folder outside the repo: client names (any case) and tags of 3 or more characters
   (exact case) from `client_tags`, the shorter tags checked by hand, anything shaped
