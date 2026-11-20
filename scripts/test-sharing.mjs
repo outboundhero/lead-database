@@ -1002,7 +1002,7 @@ async function partO() {
   ok("a missing migration is said once and the step stays idle", /if \(SHARE_UNREADY\.has\(e\?\.code\)\) \{\s*if \(!shareUnreadyLogged\)/.test(ws));
   ok("a stopping worker waits for the round in flight, then closes its pool, before the main pool",
     /await fits;[\s\S]*await shareInFlight;\s*await sharePool\.end\(\)[\s\S]*await pool\.end\(\)/.test(ws));
-  ok("the 60-second block is as it was", /if \(Date\.now\(\) - lastSweep > 60_000\) \{\s*await reclaimStale\(\);\s*await releaseHeld\(\);\s*await moveUploads\(\);\s*await releaseHeldPeople\(\);\s*lastSweep = Date\.now\(\);/.test(ws));
+  ok("the 60-second block is as it was, with the AI Ark pulls' copy and hand-back (2026-11-21)", /if \(Date\.now\(\) - lastSweep > 60_000\) \{\s*await reclaimStale\(\);\s*await releaseHeld\(\);\s*await moveUploads\(\);\s*await copyPulls\(\);\s*await releaseHeldPeople\(\);\s*await handBackPulls\(\);\s*lastSweep = Date\.now\(\);/.test(ws));
 
   const untouched = { query: async () => { throw new Error("no statement may run"); }, connect: async () => { throw new Error("no connection may be taken"); } };
   const off = await shareRound(untouched, { settings: settingsFrom([]), memory: newShareMemory() });

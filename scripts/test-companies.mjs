@@ -965,6 +965,8 @@ const summaryOf = (rowId) => one(`SELECT * FROM enrich_companies WHERE row_id = 
 const plan = (record, answers) => net.answers.set(record.summary.name, answers);
 const verdicts = (map) => Object.entries(map).forEach(([e, s]) => net.verdicts.set(e, s));
 const paidOf = (w, followers = []) => [w, ...followers].reduce((p, x) => ({ openai: p.openai + x.paid.openai, reoon: p.reoon + x.paid.reoon, probes: p.probes + x.paid.probe }), { openai: 0, reoon: 0, probes: 0 });
+/** G#19 First Name AI's requests (its run records) among a company row and its followers: one per approved inbox with a guessed name since 2026-11-21. */
+const firstNameAsks = (c) => [c.w, ...c.followers].reduce((n, x) => n + x.runs.filter((r) => r.column_key === "first_name_ai").length, 0);
 
 async function partC() {
   await addClient(G, { places: [IL("Springfield"), IL("Peoria")], terms: ["janitorial"] });
@@ -1040,18 +1042,18 @@ async function partC() {
   check("never contact: that outcome, with nothing paid", c9.s.outcome === "On the never-contact list" && !c9.s.listed && c9.paid.openai + c9.paid.reoon === 0);
 
   section("C4. The website and the general email");
-  check("AI Ark's site works: no website search, one email search, the site as use_website", c1.w.cell("companys_website")?.status === "skipped" && c1.paid.openai === 1 && c1.s.website === dom("s1") && c1.s.found_by === "claygent_1" && c1.s.listed);
+  check("AI Ark's site works: no website search, one email search, the site as use_website; G#19 asks once for its inbox", c1.w.cell("companys_website")?.status === "skipped" && c1.paid.openai === 1 + firstNameAsks(c1) && firstNameAsks(c1) === 1 && c1.s.website === dom("s1") && c1.s.found_by === "claygent_1" && c1.s.listed);
   const s11 = company("s11", "Harborview Dental S11", { website: null, domain: null });
   plan(s11, { website: `https://www.${dom("s11")}`, first: at("s11", "office") });
   verdicts({ [at("s11", "office")]: "safe" });
   const c11 = await add("s11", s11);
-  check("no website from AI Ark: one paid search, its answer checked, then the email search", c11.w.cell("companys_website")?.status === "done" && c11.w.cell("check_if_url_is_valid")?.value?.valid === true && c11.s.domain === dom("s11") && c11.s.listed && c11.paid.openai === 2);
-  check("the first search finds nothing usable (N/A): the second runs", c2.s.found_by === "claygent_2" && c2.s.listed && c2.paid.openai === 2);
+  check("no website from AI Ark: one paid search, its answer checked, then the email search; G#19 asks once for its inbox", c11.w.cell("companys_website")?.status === "done" && c11.w.cell("check_if_url_is_valid")?.value?.valid === true && c11.s.domain === dom("s11") && c11.s.listed && c11.paid.openai === 2 + firstNameAsks(c11) && firstNameAsks(c11) === 1);
+  check("the first search finds nothing usable (N/A): the second runs; G#19 asks once for its inbox", c2.s.found_by === "claygent_2" && c2.s.listed && c2.paid.openai === 2 + firstNameAsks(c2) && firstNameAsks(c2) === 1);
   check("... and AI Ark's email at a branch is not checked: it is the head office's", c2.w.cell("aiark_email_reoon")?.status === "skipped" && !net.verified.includes(at("s2", "contact")));
   const s14 = company("s14", "Harborview Dental S14", { email: at("s14", "info") });
   verdicts({ [at("s14", "info")]: "safe" });
   const c14 = await add("s14", s14);
-  check("AI Ark's email at the head office: checked and used, with no search and one Reoon call", c14.s.found_by === "aiark" && c14.s.general_email === at("s14", "info") && c14.paid.openai === 0 && c14.paid.reoon === 1, JSON.stringify(c14.paid));
+  check("AI Ark's email at the head office: checked and used, with no search and one Reoon call; G#19 asks once for its inbox", c14.s.found_by === "aiark" && c14.s.general_email === at("s14", "info") && c14.paid.openai === firstNameAsks(c14) && firstNameAsks(c14) === 1 && c14.paid.reoon === 1, JSON.stringify({ ...c14.paid, first_name_ai: firstNameAsks(c14) }));
   const s15 = company("s15", "Harborview Dental S15");
   plan(s15, { first: `${at("s15", "alpha")}, ${at("s15", "beta")}` });
   const c15 = await add("s15", s15);
