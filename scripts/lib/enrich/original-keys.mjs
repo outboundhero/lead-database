@@ -15,6 +15,16 @@
 // compiled). A column whose name doesn't give its key stops the seed. The
 // by-name seed (a client's own tables, seed-originals.mjs seedByName) matches
 // columns by these slugs instead, with NAME_ALIASES for other spellings.
+//
+// Extensions and overlays (2026-11-21). The canonical positions stay the
+// 2026-11-14 layout's (C#1 to C#68, P#1 to P#88, G#1 to G#76), so every C#n a
+// template names keeps its meaning. Columns the template client's tables gained
+// since then get extension positions after them (ORIGINAL_EXTENSIONS): the
+// default refreshed from those tables holds them, an exact-layout variant never
+// does. A client keeps only its own personalisation columns as its variant, an
+// overlay of the rows at OVERLAY_POSITIONS that is composed with the default
+// when loaded (compile-original.mjs loadOriginals), so every client runs the
+// default's other steps.
 
 /** How many columns each original table has. The seed refuses an export with another count. */
 export const ORIGINAL_COUNTS = Object.freeze({ companies: 68, people: 88, inboxes: 76 });
@@ -89,6 +99,42 @@ export const ORIGINAL_KEYS = Object.freeze({
     73: "eb_campaign_id_medium_b2c_2", 74: "add_eb_lead_to_campaign_medium_b2c_2", 75: "eb_campaign_id_hard_b2c_2", 76: "add_eb_lead_to_campaign_hard_b2c_2",
   }),
 });
+
+/** Positions after ORIGINAL_COUNTS that a variant MAY hold (columns added to the template client's tables since 11-14), with their keys (slugs). */
+export const ORIGINAL_EXTENSIONS = Object.freeze({
+  companies: Object.freeze({ 69: "inclusion_keywords_filter", 70: "dupe_check_3" }),
+  people: Object.freeze({ 89: "dupe_check_2" }),
+  inboxes: Object.freeze({ 77: "dupe_check_2" }),
+});
+
+/**
+ * Every key of a kind: ORIGINAL_KEYS plus ORIGINAL_EXTENSIONS.
+ *
+ * @param {"companies" | "people" | "inboxes"} kind
+ * @returns {Record<number, string>}  position to key
+ */
+export function keysOf(kind) {
+  return { ...(ORIGINAL_KEYS[kind] ?? {}), ...(ORIGINAL_EXTENSIONS[kind] ?? {}) };
+}
+
+/**
+ * Is this a position a variant may hold (1..ORIGINAL_COUNTS[kind], or an extension)?
+ *
+ * @param {"companies" | "people" | "inboxes"} kind
+ * @param {number} position
+ * @returns {boolean}
+ */
+export function knownPosition(kind, position) {
+  const n = Number(position);
+  if (!Number.isInteger(n) || !Object.hasOwn(ORIGINAL_COUNTS, kind)) return false;
+  return (n >= 1 && n <= ORIGINAL_COUNTS[kind]) || Object.hasOwn(ORIGINAL_EXTENSIONS[kind], n);
+}
+
+/** The personalisation positions a client keeps as its own (the overlay): P#57 to P#62, G#45 to G#50. */
+export const OVERLAY_POSITIONS = Object.freeze({ people: Object.freeze([57, 58, 59, 60, 61, 62]), inboxes: Object.freeze([45, 46, 47, 48, 49, 50]) });
+
+/** The research and question AI positions a table must have as its own for its overlay (P#60, P#61; G#48, G#49). */
+export const OVERLAY_AI_POSITIONS = Object.freeze({ people: Object.freeze([60, 61]), inboxes: Object.freeze([48, 49]) });
 
 /** Positions whose key is not the slug of the Clay column's name (both NOT NEEDED, never compiled). */
 export const NAME_NOT_SLUG = Object.freeze({ companies: Object.freeze([3, 4]), people: Object.freeze([]), inboxes: Object.freeze([]) });

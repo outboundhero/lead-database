@@ -19,9 +19,16 @@
 // (config.examples_text), next to the binding kept as exported
 // (config.table_examples). Its remembered answers then depend on the examples
 // too, so two variants with one prompt and other examples never share one.
+//
+// A variant is complete (every canonical position of the three tables, plus
+// any extension positions: original-keys.mjs ORIGINAL_EXTENSIONS) or an overlay
+// (only a client's own personalisation rows, OVERLAY_POSITIONS), which
+// loadOriginals composes with "default". A personalisation column notes the
+// variant whose text it runs (config.text_variant), and G#19 carries
+// config.on_error "empty" (the engine reads a failure as empty, as Clay does).
 
 import { examplesFor } from "./ai-examples.mjs";
-import { ORIGINAL_COUNTS, ORIGINAL_KEYS } from "./original-keys.mjs";
+import { keysOf, knownPosition, ORIGINAL_COUNTS, ORIGINAL_KINDS, OVERLAY_POSITIONS } from "./original-keys.mjs";
 
 /** {{f_<id>}}: how a Clay formula reads another column. */
 export const CLAY_REF = /\{\{\s*(f_[A-Za-z0-9_]+)\s*\}\}/g;
@@ -49,71 +56,139 @@ export class OriginalsMissing extends Error {
 /**
  * @typedef {{ variant: string, template_kind: "companies" | "people" | "inboxes", position: number, key: string,
  *             name: string, clay_field_id: string, clay_type: "source" | "basic" | "action", clay_action: string | null,
- *             definition: Record<string, any>, unknown_refs: string[], source_sha256: string }} OriginalRow
+ *             definition: Record<string, any>, unknown_refs: string[], source_sha256: string, text_variant?: string }} OriginalRow
+ *   text_variant: set on a row loadOriginals copied from the base into an overlay ("default"): the variant
+ *   whose text the row is, where variant names the variant the rows were loaded for
  * @typedef {Map<string, OriginalRow>} Originals  keyed "kind:position", e.g. "companies:24"
  * @typedef {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> }} Db
+ * @typedef {{ shape: "complete" | "overlay" | "partial", kinds: { people: boolean, inboxes: boolean } }} Shape
  */
 
 /**
- * Every original column of one variant, keyed "kind:position". Throws
- * OriginalsMissing unless all three tables are there in full (68, 88, 76).
+ * What a variant's rows make: "complete" (a row at every canonical position
+ * of the three tables, 1..ORIGINAL_COUNTS, and any extension positions),
+ * "overlay" (rows only at OVERLAY_POSITIONS: for each kind it holds, all six of
+ * that kind; People only, General only, or both) or "partial" (anything else,
+ * a row at a position knownPosition refuses included). kinds: which of People
+ * and General the rows hold.
  *
- * @param {Db} db
- * @param {string} [variant]
- * @returns {Promise<Originals>}
+ * @param {Array<{ template_kind: string, position: number }>} rows
+ * @returns {Shape}
  */
-export async function loadOriginals(db, variant = "default") {
-  let rows = [];
+export function shapeOf(rows) {
+  /** @type {Record<string, Set<number>>} */
+  const at = { companies: new Set(), people: new Set(), inboxes: new Set() };
+  let unknown = false;
+  for (const r of rows ?? []) {
+    const k = r?.template_kind;
+    const p = Number(r?.position);
+    if (!Object.hasOwn(at, k) || !knownPosition(/** @type {any} */ (k), p) || at[k].has(p)) {
+      unknown = true;
+      continue;
+    }
+    at[k].add(p);
+  }
+  const kinds = { people: at.people.size > 0, inboxes: at.inboxes.size > 0 };
+  if (unknown) return { shape: "partial", kinds };
+  const canonical = (k) => {
+    for (let p = 1; p <= ORIGINAL_COUNTS[k]; p++) if (!at[k].has(p)) return false;
+    return true;
+  };
+  if (ORIGINAL_KINDS.every(canonical)) return { shape: "complete", kinds };
+  const overlayKind = (k) => !at[k].size || (at[k].size === OVERLAY_POSITIONS[k].length && OVERLAY_POSITIONS[k].every((p) => at[k].has(p)));
+  if (!at.companies.size && (kinds.people || kinds.inboxes) && overlayKind("people") && overlayKind("inboxes")) return { shape: "overlay", kinds };
+  return { shape: "partial", kinds };
+}
+
+/** The rows found per kind, canonical positions only (OriginalsMissing's counts). */
+function canonicalCounts(rows) {
+  /** @type {Record<string, number>} */
+  const counts = { companies: 0, people: 0, inboxes: 0 };
+  for (const r of rows) if (Object.hasOwn(counts, r.template_kind) && r.position <= ORIGINAL_COUNTS[r.template_kind]) counts[r.template_kind]++;
+  return counts;
+}
+
+/** One variant's rows, or none before migration 125. */
+async function variantRows(db, variant) {
   try {
-    ({ rows } = await db.query(
+    const { rows } = await db.query(
       `SELECT variant, template_kind, position, key, name, clay_field_id, clay_type, clay_action, definition, unknown_refs, source_sha256
          FROM enrich_originals WHERE variant = $1`,
       [variant]
-    ));
+    );
+    return rows;
   } catch (e) {
     if (e?.code !== "42P01") throw e; // migration 125 not applied: nothing is loaded
+    return [];
   }
-  /** @type {Record<string, number>} */
-  const counts = { companies: 0, people: 0, inboxes: 0 };
+}
+
+/**
+ * Every original column of one variant, keyed "kind:position". A complete
+ * variant is returned as stored (its extension rows too). An overlay is
+ * composed with the base (complete, else OriginalsMissing(base, ...)): the
+ * base's map with the overlay's rows put in their places, every row copied
+ * from the base carrying text_variant "default" (the shared text, whatever
+ * the base's own name). Anything else throws OriginalsMissing(variant, ...).
+ *
+ * @param {Db} db
+ * @param {string} [variant]
+ * @param {{ base?: string }} [opts]  the variant an overlay is composed with ("default"; the tests pass their own)
+ * @returns {Promise<Originals>}
+ */
+export async function loadOriginals(db, variant = "default", { base = "default" } = {}) {
+  const rows = await variantRows(db, variant);
+  const { shape } = shapeOf(rows);
   /** @type {Originals} */
   const out = new Map();
-  for (const r of rows) {
-    counts[r.template_kind] = (counts[r.template_kind] ?? 0) + 1;
-    out.set(`${r.template_kind}:${r.position}`, r);
+  if (shape === "complete") {
+    for (const r of rows) out.set(`${r.template_kind}:${r.position}`, r);
+    return out;
   }
-  if (Object.entries(ORIGINAL_COUNTS).some(([k, n]) => counts[k] !== n)) throw new OriginalsMissing(variant, counts);
+  if (shape !== "overlay" || base === variant) throw new OriginalsMissing(variant, canonicalCounts(rows));
+  const baseRows = await variantRows(db, base);
+  if (shapeOf(baseRows).shape !== "complete") throw new OriginalsMissing(base, canonicalCounts(baseRows));
+  for (const r of baseRows) out.set(`${r.template_kind}:${r.position}`, { ...r, text_variant: "default" });
+  for (const r of rows) out.set(`${r.template_kind}:${r.position}`, r);
   return out;
 }
 
 /**
  * How many originals are loaded, for the Companies tab's pill and the worker's
  * heartbeat: the default set, and the client's own variant when one is loaded.
+ * complete: every canonical position present (extensions allowed); a client's
+ * overlay counts as complete while the default is. total: the row count.
  *
  * @param {Db} db
  * @param {string | null} [variant]  a client's variant name (templates.mjs variantName), or null
- * @returns {Promise<{ default: { total: number, complete: boolean }, client: { variant: string, total: number, complete: boolean } | null }>}
+ * @returns {Promise<{ default: { total: number, complete: boolean },
+ *   client: { variant: string, total: number, shape: Shape["shape"], complete: boolean } | null }>}
  */
 export async function originalsSummary(db, variant = null) {
   let rows = [];
   try {
     ({ rows } = await db.query(
-      `SELECT variant, count(*)::int AS n FROM enrich_originals WHERE variant = ANY($1::text[]) GROUP BY variant`,
+      `SELECT variant, template_kind, position FROM enrich_originals WHERE variant = ANY($1::text[])`,
       [variant && variant !== "default" ? ["default", variant] : ["default"]]
     ));
   } catch (e) {
     if (e?.code !== "42P01") throw e;
   }
-  const n = (v) => rows.find((r) => r.variant === v)?.n ?? 0;
+  const of = (v) => rows.filter((r) => r.variant === v);
+  const defaultComplete = shapeOf(of("default")).shape === "complete";
+  const own = variant && variant !== "default" ? shapeOf(of(variant)).shape : null;
   return {
-    default: { total: n("default"), complete: n("default") === ORIGINALS_TOTAL },
-    client: variant && variant !== "default" ? { variant, total: n(variant), complete: n(variant) === ORIGINALS_TOTAL } : null,
+    default: { total: of("default").length, complete: defaultComplete },
+    client: variant && variant !== "default" && own
+      ? { variant, total: of(variant).length, shape: own, complete: own === "complete" || (own === "overlay" && defaultComplete) }
+      : null,
   };
 }
 
 /**
  * One template's id-to-key map: positions from the variant's definitions,
- * keys from { ...ORIGINAL_KEYS[kind], ...refs }. A write-to's target ids use
- * the target template's map.
+ * keys from { ...keysOf(kind), ...refs } (extension rows map too). A
+ * write-to's target ids use the target template's map.
  *
  * @param {Originals} originals
  * @param {"companies" | "people" | "inboxes"} kind
@@ -122,7 +197,7 @@ export async function originalsSummary(db, variant = null) {
  */
 export function refMap(originals, kind, refs = {}) {
   /** @type {Record<number, string>} */
-  const keys = { ...ORIGINAL_KEYS[kind], ...refs };
+  const keys = { ...keysOf(kind), ...refs };
   const out = new Map();
   for (const row of originals.values()) {
     if (row.template_kind !== kind) continue;
@@ -344,11 +419,13 @@ export function urlHost(def) {
  *             waterfall?: string[], run_if?: string | null, inputs?: Record<string, string>,
  *             config?: Record<string, any>, changes?: ColumnChange[], memory_days?: string | number,
  *             data_type?: string, description?: string, note?: string, why?: string, provider?: string,
- *             hidden?: boolean }} ColumnSpec
+ *             hidden?: boolean, on_error?: "empty", optional?: boolean }} ColumnSpec
  *   A template column as the template modules declare it (company-template-v2.mjs, inbox-template.mjs,
  *   people-template.mjs). from: "C#24", "P#11", "G#39" (compiled from that original), "T#17" (phase 1's
  *   template) or null (ours). A spec's own formula, waterfall, run_if (even null) or inputs replace the
- *   original's.
+ *   original's. on_error "empty": a failure of the column is read as empty by the steps after it, as in
+ *   Clay (engine.mjs), kept in config.on_error. optional: the template leaves the column out when the
+ *   originals don't hold its original (an extension position).
  * @typedef {{ own: Map<string, string>, targets?: Record<string, Map<string, string>>,
  *             cellFor?: (kind: string, key: string) => string | null, record?: Record<string, string> }} CompileMaps
  *   own: the template's id-to-key map; targets: the write-to targets' maps by kind; cellFor: the cell a
@@ -496,6 +573,14 @@ export function compileColumn(spec, originals, maps) {
     throw new Error(`${spec.key} (${spec.from}) reads ${unknown.length} column(s) this template does not map: ${unknown.join(", ")}`);
   }
   if (Array.isArray(spec.flag) && spec.flag.length) row.config.flag = [...spec.flag];
+  // Set after the action's own config (ai_web replaces row.config).
+  if (spec.on_error != null) {
+    if (spec.on_error !== "empty") throw new Error(`${spec.key}: on_error must be "empty"`);
+    row.config.on_error = "empty";
+  }
+  // The variant whose text a personalisation step runs: an overlay row's own, "default" for a row composed from the
+  // base, a complete variant's own name. The engine's personalisation switch reads it (engine.mjs switchedOff).
+  if (Array.isArray(spec.flag) && spec.flag.includes("personalisation")) row.config.text_variant = orig?.text_variant ?? orig?.variant ?? "default";
   if (spec.key_env) {
     row.config.key_env = spec.key_env;
     row.needs_env = []; // a key we may not hold never makes the row wait (R28)

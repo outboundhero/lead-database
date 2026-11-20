@@ -13,9 +13,18 @@
 // variant does not compile (a template changed since it was loaded, say), its
 // tables compile from "default" instead and their note says why; the worker
 // then reads them as "default", so personalisation stays off for the client.
+//
+// Overlays and extensions (2026-11-21): a client's variant is usually an
+// overlay, only its own personalisation rows (P#57 to P#62, G#45 to G#50),
+// which loadOriginals composes with "default", so the client runs every other
+// step of the default (refreshed from the template client's current tables)
+// and its own research and question steps. A complete variant (loaded by name
+// earlier) still compiles as before. The default's extension columns (positions
+// after 68, 88 and 76, original-keys.mjs) map by their keys, and a template
+// column compiled from one is left out when the originals lack it.
 
-import { loadOriginals, OriginalsMissing } from "./compile-original.mjs";
-import { ORIGINAL_COUNTS, ORIGINAL_KEYS } from "./original-keys.mjs";
+import { loadOriginals, OriginalsMissing, shapeOf } from "./compile-original.mjs";
+import { keysOf } from "./original-keys.mjs";
 import { COMPANY_REFS, COMPANY_TABLE_NAME_V2, COMPANY_TEMPLATE_V2, companyColumnsV2 } from "./company-template-v2.mjs";
 import { INBOX_TABLE_NAME, INBOX_TEMPLATE, inboxColumns } from "./inbox-template.mjs";
 import { PEOPLE_TABLE_NAME, PEOPLE_TEMPLATE, peopleColumns } from "./people-template.mjs";
@@ -62,8 +71,8 @@ export function variantName(tag) {
 }
 
 /**
- * Which originals a client's tables compile from: its own variant when all of
- * it is loaded, else "default".
+ * Which originals a client's tables compile from: its own variant when it is
+ * complete or an overlay (compile-original.mjs shapeOf), else "default".
  *
  * @param {Db} db
  * @param {string} tag
@@ -73,16 +82,9 @@ export async function variantFor(db, tag) {
   const own = variantName(tag);
   if (!own) return "default";
   try {
-    const { rows } = await db.query(
-      `SELECT count(*) FILTER (WHERE template_kind = 'companies')::int AS c,
-              count(*) FILTER (WHERE template_kind = 'people')::int AS p,
-              count(*) FILTER (WHERE template_kind = 'inboxes')::int AS i
-         FROM enrich_originals WHERE variant = $1`,
-      [own]
-    );
-    const r = rows[0] ?? {};
-    const full = r.c === ORIGINAL_COUNTS.companies && r.p === ORIGINAL_COUNTS.people && r.i === ORIGINAL_COUNTS.inboxes;
-    return full ? own : "default";
+    const { rows } = await db.query(`SELECT template_kind, position FROM enrich_originals WHERE variant = $1`, [own]);
+    const { shape } = shapeOf(rows);
+    return shape === "complete" || shape === "overlay" ? own : "default";
   } catch (e) {
     if (e?.code === "42P01") return "default"; // migration 125 not applied
     throw e;
@@ -166,7 +168,7 @@ export function compileTemplates(originals, { settings = null } = {}) {
   const out = {
     companies: companyColumnsV2(originals),
     inboxes: inboxColumns(originals),
-    people: peopleColumns(originals, settings?.people_tracks ?? null, { companyKeys: { ...ORIGINAL_KEYS.companies, ...COMPANY_REFS } }),
+    people: peopleColumns(originals, settings?.people_tracks ?? null, { companyKeys: { ...keysOf("companies"), ...COMPANY_REFS } }),
   };
   for (const [kind, cols] of Object.entries(out)) {
     const keys = new Set();
@@ -258,28 +260,30 @@ export async function lockPipelineTables(db, tag) {
  * Throws RetiredV1Table (D24) or OriginalsMissing; the routes answer 409 to
  * both.
  *
- * A client's own variant (complete: variantFor) that does not compile with
- * the templates of this code, for any reason but OriginalsMissing, is set
- * aside for the call: the tables compile from "default", and their note names
- * the variant and the first line of the failure (fallbackNote, 300
- * characters at most). variantOfNote reads "default" from that note, so the
- * worker never treats them as the client's own (personalisation stays off).
+ * A client's own variant (complete or an overlay: variantFor) that does not
+ * compile with the templates of this code, for any reason but
+ * OriginalsMissing, is set aside for the call: the tables compile from
+ * "default", and their note names the variant and the first line of the
+ * failure (fallbackNote, 300 characters at most). variantOfNote reads
+ * "default" from that note, so the worker never treats them as the client's
+ * own (personalisation stays off).
  *
  * @param {Db} db  a client inside the caller's transaction
  * @param {string} tag
- * @param {{ settings?: import("./settings.mjs").PipelineSettings | null }} [opts]
+ * @param {{ settings?: import("./settings.mjs").PipelineSettings | null, base?: string }} [opts]
+ *   base: the variant an overlay is composed with ("default"; the tests pass their own, production never does)
  * @returns {Promise<{ companies: string, inboxes: string, people: string, variant: string, own_variant: string | null,
  *   fallback: string | null, created: { companies: boolean, inboxes: boolean, people: boolean } }>}
- *   table ids, the variant they were compiled from, the client's own variant when all of it is loaded (else null),
+ *   table ids, the variant they were compiled from, the client's own variant when it is loaded (else null),
  *   why its own variant was set aside (null when it was not), and which tables were made now
  */
-export async function ensurePipelineTables(db, tag, { settings = null } = {}) {
+export async function ensurePipelineTables(db, tag, { settings = null, base = "default" } = {}) {
   const t = normTag(tag);
   if (!t) throw new Error("No client tag");
   if (await hasRetiredV1(db, t)) throw new RetiredV1Table(t);
   const own = await variantFor(db, t);
   let variant = own;
-  let originals = await loadOriginals(db, own);
+  let originals = await loadOriginals(db, own, { base });
   /** @type {string | null} */
   let fallback = null;
   if (own !== "default") {
