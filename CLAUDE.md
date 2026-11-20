@@ -416,6 +416,11 @@ src/components/uploads/upload-people.tsx   - The Uploads page's People box, Peop
 scripts/lib/enrich/upload-people.mjs       - Shared by the worker and the web: which client, row keys, inputs, found-email SQL (130)
 scripts/lib/enrich/upload-move.mjs         - The worker's copy of an upload's no-email rows into the People table (130)
 scripts/lib/enrich/upload-found.mjs        - The worker's side of the found-email hand-off (130)
+scripts/lib/enrich/clay-tools.mjs          - Exact copies of Clay's normalize-company-name and extract-email-components (G#14, G#16, P#29)
+scripts/lib/enrich/ai-examples.mjs         - An AI column's Clay table examples, laid out as each request's instructions (P#61, G#49, G#19)
+scripts/lib/enrich/email-verdict.mjs       - Who found or approved a promoted address: the lead's validation status and source
+scripts/lib/enrich/pull-no-email.mjs       - AI Ark pulls' people with no email: copied into the People table, found addresses handed back
+scripts/clay-fetch-tables.mjs              - Reads clients' Clay tables, read only, for the by-name originals load
 src/app/api/uploads/bounces/route.ts       — CSV bounce import (NEW)
 src/app/auth/callback/route.ts             — Auth callback (uses x-forwarded-host)
 src/components/filters/filter-bar.tsx      — Filter chip UI
@@ -2286,7 +2291,9 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   client's Google Maps places come from the GMaps Scraper app through the
   client's own inbound URL into its Companies (pipeline) table (see "Inbound
   URLs (migration 129)"). The no-email rows of a client's uploads go to its People
-  (pipeline) table, held (see "Upload no-email rows (migration 130)").
+  (pipeline) table, held (see "Upload no-email rows (migration 130)"), and so, once
+  the client is on People runs, do the people its AI Ark tab pulls bought with no
+  email (see "People with no email go to the email finders" below).
 - **AI Ark tab** (`/leads/ai-ark`): pick a client, see what AI Ark will be asked
   (locations and exclusion terms from `client_targeting`, job titles / seniority /
   company size from `client_people_filters`), count (People Preview, 1 credit a
@@ -2331,13 +2338,52 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   them (`AIARK_AUTO_ADD_URL`, `AIARK_AUTO_ADD_KEY`, `POST /api/aiark/add/auto`). ⚠
   **Not switched on:** with those unset, and until a worker exists, nothing is added
   automatically and live Start is refused (`Pulls aren't switched on yet`). A cancelled
-  pull, and anyone an add could not store, take the button. People with no email stay
-  in the pull's table; the email-finding steps (`find_email`, phase 3) are not built.
-  When they are, they hand an address to `emailFound()`, which works the person again
-  so they go to the database like anyone else. Those steps need a real name and
-  company, which only the export strategy should return (a Preview has a masked last
-  name and no LinkedIn or domain, and Export Single returns nothing without an email),
-  so Export job is the tab's default.
+  pull, and anyone an add could not store, take the button. People with no email go
+  to the email finders once the client is on People runs (next bullet). The finders
+  need a real name and company, which only the export strategy should return (a
+  Preview has a masked last name and no LinkedIn or domain, and Export Single returns
+  nothing without an email), so Export job is the tab's default.
+- **People with no email go to the email finders** (`scripts/lib/enrich/pull-no-email.mjs`,
+  2026-11-21, no migration, the worker only). Every minute, right after the uploads'
+  move, the worker copies the people whose Outcome is "No email" from finished live
+  pulls (cancelled ones too) into the client's People (pipeline) table, held: keyed
+  `aiark:<person id>`, `found_by` "aiark", `stage` "no_email", Source "AI Ark pull
+  <day>: no email", with no company row and no email. It does so only for a client on
+  People runs (`fn_enrich_people_switch_on`, the switch that also releases held upload
+  rows), makes the client's tables when they are missing, and copies at most 5 chunks
+  of 1,000 a minute; nothing is copied, and no table is made, for a client that is
+  off. A run still being worked, or still claimed by the run engine, waits. Each pull
+  row's `find_email` cell (a phase 3 column the engine never works) records where the
+  person went: "Sent to the People table", "In the People table already" (another run
+  bought them: that row is followed, not copied again) or "No AI Ark id" (never
+  copied). One `enrich_sources` row per run and People table (kind `ai_ark`,
+  `external_id` `pull:<run id>`) counts them, a deleted People row is never put back,
+  and `aiark_runs.progress.no_email` tracks the copy (`copying`, `done`, or `waiting`
+  for 10 minutes when the client's tables can't be made or a chunk failed). The People
+  release then queues the held rows, at most 2,000 of a table in work at once, and the
+  finders and Enrichley look for an address there. Right after the People release, the
+  hand-back takes the People rows that finished: "Approved email" with an address
+  traced to its approval (a finder's own answer, Enrichley or Reoon, as promotion
+  traces it, `email-verdict.mjs`) goes back to the pull's row through `emailFound()`,
+  with `email_found_source`, `email_found_status` and the People row's question; the
+  pull row is worked again and the AI Ark add takes it (source "AI Ark, found by
+  <finder>" or "AI Ark, approved by Enrichley", plain "AI Ark" for Reoon's approval;
+  that verdict as the validation status; the question). The `find_email` cell then
+  says "Found by <vendor>" (or "Approved by <vendor>") and the People row's
+  `add_to_database` cell "Sent to the AI Ark pull". An approval that can't be traced
+  closes the search ("People table: Approved email, approval not traced"), as does any
+  other Outcome ("People table: <Outcome>"); a removed People row says "Removed from
+  the People table". Rows still held, queued, running, waiting or in error are left for
+  a later minute. The Clay tab's add bar says "N no email (M sent to the People
+  table)", and a held row copied from a pull says so in the cell panel. The Clay grid
+  still shows the `find_email` column as "Not built yet" (its cell panel shows the
+  value and note). ⚠ A pull row closed with "People table: No
+  email (AI Ark found none)" never reopens: if that People row is queued again later
+  (for example when a finder key is first set) and then finds an address, the address
+  stays in the People table, and promotion does not take it either (the row has no
+  company row). So set the finder keys and the vendor caps before putting a client
+  on People runs. The worker's heartbeat lists `pull_no_email`. Tests:
+  `scripts/test-found-emails.mjs` (see "Fit scoring", Promotion).
 - **Before the pipeline, the database is checked** (`lead_lookup`,
   `scripts/lib/enrich/client-checks.mjs`). Only someone whose Outcome is "No email"
   goes to the pipeline, and that Outcome now comes last: bought before, never contact,
@@ -2368,7 +2414,11 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   (`importRows`, strategy `skip`, never merged) as one `upload_batches` row, so
   each add is on the Uploads page. Each lead gets the client's tag, `source` =
   `AI Ark`, `validation_status` from AI Ark's check (valid / catch_all), AI Ark's
-  first and last name, and the industry in `general_industry`, which
+  first and last name (a person whose address the People table found instead gets
+  the source "AI Ark, found by <finder>" or "AI Ark, approved by Enrichley", that
+  verdict as its validation status, NULL for Findymail and an unverified Prospeo
+  answer, and the People row's question; the add's "Added" note names that source,
+  2026-11-21), and the industry in `general_industry`, which
   `fn_client_eligibility_conditions` checks for exclusion terms (the Outcome
   checked the same text) and which isn't sent to Email Bison. That and
   `country` / `seniority` / `company_size` are outside the Uploads page's fields,
@@ -2522,7 +2572,9 @@ approved emails to `leads`, behind its own switch (no fit score needed since
   places) and since 130 `upload_people` (it copies an upload's no-email rows and
   releases held People rows), with `info.upload_people.found_auto` (it asks for found
   emails to be added by itself); the Clay tab and the Uploads page warn while the
-  worker running lacks them.
+  worker running lacks them. Since 2026-11-21 it also lists `pull_no_email` (it copies
+  AI Ark pulls' people with no email into People tables and hands found addresses
+  back); the heartbeat has no new info field for it.
 - **The Companies tab** (`/leads/companies`, manager and up; the settings sheet is
   admin): pick a client, see what AI Ark will be asked, its company filters (read
   only: size and industries are saved on the AI Ark tab), count (one Company Search
@@ -2575,6 +2627,11 @@ approved emails to `leads`, behind its own switch (no fit score needed since
 Phases 2 and 3 of the restart run the original Clay tables' columns, compiled from
 the Clay CLI's exports, instead of steps of our own. Every paid or send switch
 ships **off** and covers no client until its tag is on the switch's list (D46).
+The Clay build of 2026-11-21 (Clay's two tools as exact copies, G#19 and the table
+examples, promotion of finder-found and Enrichley-approved addresses, AI Ark pulls'
+people with no email to the finders, clients' own originals by name) ships off the
+same way and needs no migration; the behaviour choices it made wait for the owner's
+OK in its rollout notes.
 
 - **The originals** (`enrich_originals`): the three Clay tables exactly as the Clay
   CLI exported them (Companies 68 columns, People 88, General 76). They hold
@@ -2587,7 +2644,71 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   default variant only) and refuses a phrase its cited column doesn't hold, prints
   counts and the models that differ from the settings (never a prompt, list or name),
   and never changes a setting. A client's own exports load as its variant (its tag in
-  lower case, `variantName()`); every other client compiles from `default`.
+  lower case, `variantName()`); every other client compiles from `default`. This
+  exact-layout load stays the only way to load `default`; a client's own tables, which
+  rarely keep that layout, load by column name since 2026-11-21 (next bullets).
+- **A client's own originals, by name** (2026-11-21; `seedByName`, `mapByName` and
+  `mergeVariant` in `seed-originals.mjs`): each client column goes to the position
+  whose default name gives the same slug (`slugKey`), with `NAME_ALIASES` in
+  `original-keys.mjs` for the Enrichley/Enrichly spelling; two columns with one name are
+  ambiguous and neither is matched. A position still unmatched then takes the client
+  column holding the default's field id: Clay keeps field ids when a table is
+  duplicated, so a renamed column is found (83 of the 114 clients read had one). Moved
+  columns are fine; extra ones are listed and never stored. Missing ones are filled from
+  the default, every field id of a position the client has re-pointed to the client's
+  (references and write-to targets), `seeded_by` "<who> (filled from default)". Stored
+  variants are always complete (68/88/76, canonical positions and keys), so
+  `loadOriginals`, `variantFor` and the compiler are unchanged. A variant is refused,
+  with nothing written, when its name is `default` or not the tag's; the People or
+  General export is missing; a compiled position is ambiguous or holds another type or
+  Clay action; two rows of a table share a field id; P#60, P#61, G#48 or G#49 is not its
+  own (so personalisation never runs the default's prompts under a client's variant);
+  or the templates do not compile from it. When it does not compile and its Companies
+  columns are its own, it is tried once with all 68 Companies columns from the default,
+  and loaded that way if that compiles ("companies: from the default, its own did not
+  compile: <first line>"). Tracks are never stored for a client variant; models and the
+  example counts of P#61, G#49 and G#19 are reported only.
+- **The by-name scripts:** `node scripts/enrich-seed-originals.mjs --by-name --variant <v>
+  --companies <file> | --no-companies --people <file> --inboxes <file> [--dry] [--report
+  <file>] [--base <variant>]`, or `--by-name --plan <plan.json> [--dry] [--report <file>]
+  [--base <variant>]`. Each client loads in its own transaction (one refusal never stops
+  the others; `--dry` rolls each back). The output is one line of counts per client, then
+  totals, never a prompt, list or column name; `--report` writes the full JSON (names,
+  reasons, first compile lines) and is refused inside the repo. Without `--by-name` it is
+  the exact-layout load, as before; never load `default` by name. `node
+  scripts/clay-fetch-tables.mjs --ids <file> --out <dir outside the repo> [--only TAG,TAG]
+  [--pause-ms 300] [--retry-ms 1000]` reads the tables: it runs only `clay workspaces
+  current` and `clay tables columns get <id>`, one table at a time, in the Clay CLI's
+  active workspace. That workspace is one pointer for every process on the Mac and is
+  never switched here, so clients of the other workspace are "not read here". An answer
+  from another workspace, or a not-found after which the pointer moved, stops the run
+  with no plan. It writes `<out>/<variant>/{companies,people,inboxes}.json` and
+  `<out>/plan.json`.
+- **The fallback** (`ensurePipelineTables`, 2026-11-21): a client's own variant that no
+  longer compiles (after a template change, say) is set aside for that call. Its tables
+  compile from `default` and their note reads "compiled from the Clay originals (variant
+  default); the client's own variant <v> did not compile: <first line, 300
+  characters>". The worker reads them as `default` (`variantOfNote`), so personalisation
+  stays off for that client. The return carries `own_variant` and `fallback`. With no
+  client variant loaded (production today) nothing changes.
+- **Dry run 2026-11-21** (the local database, nothing kept; run on the builder's branch,
+  then again on the merged code with the same exports: every client's result the same):
+  205 clients in the scan; 114 read in the active Clay workspace (308 tables), 90 in the
+  other workspace not read here, 1 with no People or General table. Would load 13 (3
+  with their own Companies, 10 with the default's, the template client among them).
+  Refused 102, 99 of them first at the compile, because their compiled columns read
+  columns the default layout lacks: LeadMagic steps in the P#50, P#53 and P#55
+  waterfalls, Surfe in P#50, Lead City and Lead State in P#21 to P#23, company LinkedIn
+  and Facebook links in P#60 and G#48, a recruiter LinkedIn URL in C#48, a DNC
+  competitor filter in C#17, a company email in C#34, and write-tos into such columns.
+  Every client read has its own P#61, G#49 and G#19 with readable examples. What to do
+  with the refused clients is the owner's decision (the rollout notes).
+- **Loading a client** (production, a later step by hand): fetch, run the dry run on
+  the code being deployed, read the report, then `--by-name --plan` (or one client)
+  without `--dry` against the production database. Never at the same time as another
+  Clay CLI job, and never `default` by name. Afterwards `variantFor` names the client's
+  variant, and its next pull or people run notes "(variant <v>)" on its tables; a
+  fallback note means the variant did not compile.
 - **The tables** (`ensurePipelineTables()`, `templates.mjs`, run inside the pull route's
   transaction): "Companies (pipeline)" (`companies_v2`), "General (pipeline)"
   (`inboxes_v1`, one row per general address the company row wrote) and "People
@@ -2608,8 +2729,10 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   writes each address as its own inbox row, at most `company_pipeline.inboxes_per_company`
   (5). An inbox row: the database check, then G#37 to G#44 verbatim. A People row
   (written by people runs, the AI searches' write-tos and, since 130, the worker's copy
-  of an upload's no-email rows; input cells only): P#4 to P#62. Its key says who wrote
-  it: `aiark:<person id>`, `w:<company row id>:<writer column>` or
+  of an upload's no-email rows, and since 2026-11-21 its copy of AI Ark pulls' people
+  with no email; input cells only): P#4 to P#62. Its key says who wrote
+  it: `aiark:<person id>` (a people run, or a pull's person: `found_by` "aiark", `stage`
+  "no_email"), `w:<company row id>:<writer column>` or
   `upload:<batch id>:<seq>` (`found_by` "upload", see "Upload no-email rows (migration 130)").
 - **Switches** (`flagOn()`; a switched-off column is skipped "Switched off: <switch>"
   and read as empty): `company_pipeline` (pulls and counts refuse a client not on
@@ -2618,14 +2741,70 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   (Buy without a manager's click), `company_pipeline.linkedin_profile_reads` (C#50, P#27)
   and `personalisation` (P#57 to P#62, G#45 to G#50; also needs the client's own
   originals unless `shared_text_ok`). A sub-switch needs its parent on for the client.
-  The question steps P#61 and G#49 wait for how Clay sends their table examples, so no
-  question is written yet. Every switch ships off with an empty client list.
+  The question steps P#61 and G#49 send their table examples with every request (see
+  "Table examples" below), so a question is written for a client once personalisation
+  is on for it; P#61 never runs on an upload row. Every switch ships off with an empty
+  client list.
 - **AI steps:** one setting per column in `enrich_settings.models`, every one
   `gpt-6-luna` (2026-11-13), with the web search tool for the columns whose prompts
   visit pages, `max_tool_calls` from the setting, no reasoning effort, no user
   location, and answers kept as returned ("N/A" included, as in Clay). One send per
   attempt; a cell sent twice with no answer is not sent again (a timed-out request may
   still be billed); OpenAI's billing refusals are never retried.
+- **Clay's built-in tools** (`scripts/lib/enrich/clay-tools.mjs`, 2026-11-21): G#14 and
+  P#29 run our exact copy of Clay's normalize-company-name, and G#16 our exact copy of
+  extract-email-components (actions `clay_normalize_company_name` and
+  `clay_extract_email_components`: free and local, `cache: false`, no run record).
+  Their inputs are the originals' own: `toolInputs()` takes every binding with a formula
+  and rewrites its references, and a variant whose tool column lacks `companyName` or
+  `email`, or reads a column the template does not map, does not compile. Their run
+  conditions are the originals', verbatim: G#14 on the company, G#16 on an approved
+  address (G#44), P#29 on the company and SAFE TO RUN. So G#15, G#17, G#18 and P#30
+  hold Clay's values. The rules were worked out from Clay's answers on real rows (local
+  only, never in the repo) and reproduce all of them: company names 7,649 of 7,649 full
+  answers and 19,981 of 19,981 shown values, emails 1,063 of 1,063 and 15,927 of 15,927,
+  and every reader value and cell display through the templates compiled from the
+  default originals (checked again on the merged code). Clay's quirks are kept: one
+  suffix only; the patterns' dots match any character ("Telecom" reads as ending in
+  ".com", "CO2" is cut, "Corp." and "P.C." stay); "& Co" keeps its "&" in mixed case;
+  title case is lodash's `startCase(camelCase())` without the ordinal rule ("5TH" gives
+  "5 Th"). The email tool splits at the last "@"; the domain is the registrable domain
+  from the public suffix list (tldts); the provider comes from the domain's name label
+  (gmail, yahoo, hotmail, outlook and live, msn, aol, icloud and me, protonmail, qq;
+  anything else UNKNOWN). `lodash` and `tldts` are direct dependencies since then.
+  normalize-phone-number (P#18, G#35) still waits (D38): it needs libphonenumber's
+  country metadata.
+- **G#19 First Name AI** is an AI step (`ai_web`) on its own model setting,
+  `inbox_first_name_ai`: gpt-6-luna, no web search, no reasoning effort, "First name
+  (inboxes)" on the settings sheet (2026-11-21). A stored `models` row without the key
+  takes the default, so no migration was needed; the sheet's first save stores it. It
+  has no switch: it runs wherever its original run condition holds (an approved address
+  with a guessed name), as in Clay, with its table examples (next bullet), so every
+  approved general inbox costs one more OpenAI request. G#20 falls to its second step,
+  "<Company> Team", when G#19 gives no usable first name; with no company the original's
+  second step gives "undefined Team", which promotion holds back. Like every AI step,
+  its inbox row waits without `OPENAI_API_KEY` or past the day's OpenAI cap, and fails
+  when G#19 fails (Clay would fall back to "<Company> Team").
+- **Table examples** (P#61, G#49 and G#19; `scripts/lib/enrich/ai-examples.mjs`,
+  2026-11-21): a column's Clay examples (its `tableExamples` binding, kept as exported
+  in `config.table_examples`) go with every request as the request's `instructions`,
+  and the prompt stays the `input`, unchanged. The layout is ours: Clay's wording is not
+  documented, and this is the layout that fits Clay's own token counts best (measured
+  2026-11-20). It is one fixed sentence, then for each example its inputs as compact
+  JSON keyed by column name (an AI column's field as "Column.field"; a second column with
+  the same name gets " (2)") and its answer as `{"response": ...}`. The compiler writes
+  `config.examples_text`, `examples_count` and `examples_sha`. When the examples can't
+  be read (not JSON, not a list, an example with no inputs object, or one that reads a
+  column its table does not hold) it writes `examples_error` instead, and the column
+  never runs ("Its table examples could not be read (...), so it is not run (nothing
+  was sent)"). A table compiled before this keeps the column skipped ("Its table
+  examples are not compiled yet: ...") until `ensurePipelineTables()` recompiles it (its
+  next pull, people run, upload move, Maps intake or pulls' copy), so nothing runs or is
+  paid early; rows already worked are not re-run. With examples, the memory key is the
+  rendered prompt plus `examples:<sha>` (the memory kind is unchanged), so a client
+  with other examples never reuses another's answer. The run record keeps the count and
+  the first 8,000 characters of the instructions. On the default originals the
+  instructions add about 540 (G#19), 600 (G#49) and 670 (P#61) input tokens per request.
 - **The email finders and Enrichley** (P#46 to P#54, G#41, P#13) run only while their
   key is on the worker: `FINDYMAIL_API_KEY`, `PROSPEO_API_KEY`, `ANYMAIL_FINDER_API_KEY`,
   `ENRICHLEY_API_KEY`. Without one, its steps show "Needs <KEY> (not held)", read as
@@ -2703,7 +2882,7 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   /api/companies/people/runs/candidates?id=&after=` (keyset, pages of 100). The
   settings sheet (admin) edits every switch with its client list (promotion into
   leads among them since 2026-11-20), the people and personalisation blocks, the
-  twelve model settings with their most searches, `inboxes_per_company`,
+  thirteen model settings with their most searches, `inboxes_per_company`,
   `min_balance` and the spend caps; what it doesn't show (memory days, prices,
   `fit_score`, promotion's other keys) is kept as stored.
 - **Keys and environment (the enrich-worker):** `DATABASE_URL`; `OPENAI_API_KEY` (every AI
@@ -2733,15 +2912,33 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   only; about 3 s together. `node --env-file=.env.local scripts/test-people.mjs` checks
   people runs on the demo transport (by company id, with and without emails, its test
   faults), the routes, the settings route's shape and the compiled People template
-  (about 10 s).
+  (about 10 s). Since 2026-11-21: `node --env-file=.env.local scripts/test-clay-tools.mjs`
+  (66 checks, under 1 s: every rule and quirk of the two tool copies with made-up names
+  and addresses, their wiring into the compiled templates, G#19's setting; made-up
+  `TLTEST_A` and `.tltest.example`, removed at the end);
+  `node --env-file=.env.local scripts/test-ai-examples.mjs` (64 checks, under 1 s: the
+  layout and every refusal, the compiled columns, every other column byte for byte as
+  without examples, the request, and rows worked in memory: G#49 off and on, a
+  remembered answer reused, other examples asking again, P#61 never on an upload row;
+  made-up `CXTEST_A` in memory and `.cxtest.example` addresses; it writes only shared
+  answers, Reoon verdicts and today's spend, and puts all three back); and
+  `node --env-file=.env.local scripts/test-originals-by-name.mjs` (64 checks, about 3 s:
+  the by-name load, the fallback and the fetch script with a fake `clay` on PATH;
+  `LDTEST_` clients and `ldtest_` variants built from the fixtures with relabelled
+  field ids; it needs the local `default`, which two checks compile). Each refuses to
+  run while a client is on the `company_pipeline`, `people_pipeline`, `personalisation`
+  or `promotion` lists, or while another client's row is held.
 - **Before a push:** stop the worker; on the local database with 125 to 127 applied run
   `test-originals.mjs`, `test-pipeline-v2.mjs`, `test-companies.mjs`, `test-people.mjs`,
-  `test-fit.mjs` and `AIARK_TEST_TAG=<a local cleaning client> test-aiark.mjs`; then
-  `npx tsc --noEmit`, `npx eslint`, `npx next build`; then the scans of the added lines,
-  from a scratch folder outside the repo: client names (any case) and tags of 3 or more
-  characters (exact case) from `client_tags`, the shorter tags checked by hand, anything
-  shaped like a key, and every 40-character run of the exports' prompts, lists and
-  examples. The repo is public.
+  `test-fit.mjs`, `test-clay-tools.mjs`, `test-ai-examples.mjs`, `test-found-emails.mjs`,
+  `test-originals-by-name.mjs` and `AIARK_TEST_TAG=<a local cleaning client>
+  test-aiark.mjs`; then `npx tsc --noEmit`, `npx eslint`, `npx next build`; then the
+  scans of the added lines, from a scratch folder outside the repo: client names (any
+  case) and tags of 3 or more characters (exact case) from `client_tags`, the shorter
+  tags checked by hand, anything shaped like a key, every 40-character run of the
+  exports' prompts, lists and examples (the clients' own exports too), and since
+  2026-11-21 every input of Clay's tool answers of 8 or more characters, every table
+  example value and every table and workbook id of the Clay scan. The repo is public.
 
 ### Fit scoring (migrations 126 and 127)
 
@@ -2810,12 +3007,25 @@ score; `promotion.min_fit_score` is kept as stored and not read).
   scoring is off and nobody scores by hand). The gate need not cover the client, and the
   rule and model need not be set. A person needs
   the outcome "Approved email" and no "*" in the name (a Preview's masked last name); an
-  inbox's first name must not hold "undefined". Only addresses Reoon itself approved are
-  promoted (`validation_status = 'valid'`): one approved only by Enrichley, or found by a
-  finder, is held back, its `add_to_database` cell says why (how such addresses are marked
-  in `leads` is still to be decided). While `promotion.require_question` is on (it ships
+  inbox's first name must not hold "undefined" (G#20's "<Company> Team" with no company).
+  Promotion takes every address P#55 or G#44 can be traced to, as Clay does
+  (`scripts/lib/enrich/email-verdict.mjs`, 2026-11-21; until then only Reoon's own
+  approval counted). A person, in P#55's own order: Findymail (P#46), Prospeo (P#47),
+  Anymail Finder with its own "valid" (P#48), Enrichley on Anymail Finder's address
+  (P#49), AI Ark's own address (P#9) with Reoon's stamp (P#12) or Enrichley's (P#14),
+  then the LinkedIn finders (P#51 Findymail, P#52 Prospeo, P#54 Enrichley on Anymail
+  Finder's address). An inbox: Reoon (G#40), else Enrichley (G#42). The lead's
+  `validation_status`: valid for Reoon, Anymail Finder and a VERIFIED Prospeo answer;
+  valid or catch_all for Enrichley; NULL (sendable, no check claimed) for Findymail and an
+  unverified Prospeo answer. Its source: the label alone for Reoon (exactly as before),
+  else the label plus ", approved by Enrichley", ", found by Findymail" or ", found by
+  Anymail Finder, approved by Enrichley". An address traced to none is held back, its
+  `add_to_database` cell saying "No approval this address can be traced to (Reoon,
+  Enrichley or an email finder's own answer)". Each contact carries its own source to
+  `finishPromote`, which compares it. While `promotion.require_question` is on (it ships
   on), only contacts with a question. The Uploads page's engine imports them (strategy
-  skip, never merged, `ON CONFLICT (email) DO NOTHING`), source "Companies (AI Ark)", in
+  skip, never merged, `ON CONFLICT (email) DO NOTHING`), source "Companies (AI Ark)"
+  (with who found or approved the address added, as above), in
   rounds of two batches (inboxes, then people, at most `batch_max`, 1,000, each), one
   round per client at a time. Started by a manager (`POST /api/companies/promote`) or by
   the worker (`POST /api/companies/promote/auto` with Bearer `AIARK_AUTO_ADD_KEY`; checked
@@ -2876,9 +3086,10 @@ score; `promotion.min_fit_score` is kept as stored and not read).
   batch_max, require_question, source_label }` (the sheet edits only the switch and its
   tags; `min_fit_score` is not read since 2026-11-20), `fit_gate` `{ enabled, tags, threshold,
   client_types, require_scored }`, `fit_gate_refresh` `{ pending, since }`, and the fit cap
-  in `spend_caps`. The tool stand-ins in `tool-standins.mjs` (company name and phone
-  number, for Clay's built-in tools in G#14, G#35, P#18 and P#29) are not used by any
-  column until the owner says so.
+  in `spend_caps`. The tool stand-ins in `tool-standins.mjs` (our own guesses at a
+  company name and a phone number, never Clay's) are used by no column: G#14 and P#29
+  run the exact copy of Clay's normalize-company-name in `clay-tools.mjs` (2026-11-21),
+  and G#35 and P#18 (phone) still wait.
 - **Tests:** stop the worker, then `node --env-file=.env.local scripts/test-fit.mjs`
   (local database only, migrations 125 to 127 applied; made-up `FTTEST_` clients and
   `.fttest.example` domains, removed at the end; about 30 s). No network: OpenAI, Email
@@ -2888,6 +3099,20 @@ score; `promotion.min_fit_score` is kept as stored and not read).
   (against 050's), pushes and the AI Ark tab's auto-add list do not move. Promotion is
   switched on through the settings sheet's route and runs with no rule, no model, the
   gate off and `min_fit_score` 5; every row a sheet save writes is put back at the end.
+  Promotion by verdict and the AI Ark pulls' people with no email (2026-11-21):
+  `node --env-file=.env.local scripts/test-found-emails.mjs` (144 checks, about 1 s;
+  made-up `PRTEST_A` and `PRTEST_B` with the fixture variant, leads under
+  `.prtest.example`, all removed at the end; it turns `promotion` and `people_pipeline`
+  on for its own tags only for the checks that need them and puts every settings row
+  back): every verdict and source text; promotion end to end through the promote route
+  and the real import (a Reoon person exactly as before, an Enrichley inbox, a Findymail
+  person, an Anymail Finder and Enrichley person, an untraceable address held back, a
+  second round adding nothing); the pulls' copy (off: nothing copied and no table made;
+  on: the right rows held with their inputs, the `find_email` cells and the source row's
+  counts; a second call copies nothing; a deleted People row is not put back; a run whose
+  client's tables can't be made waits; a demo run and an unfinished run are never
+  taken); the release, the hand-back and the AI Ark add with the finder's source and
+  status and the question; and the worker's wiring.
 - ⚠ **Rollout order:** 125, then 126, then 127 (run 127's read-only body check first),
   then the web push and the worker upload (its heartbeat must list `fit_scoring`). Put a
   client on `fit_gate.tags` only once the rule is set and scoring is on: until its
@@ -3312,7 +3537,10 @@ the owner's OK. Everything ships off.
   queued, running or waiting (every row of the table counts, AI Ark rows too). A
   client switched off mid-round makes the guard refuse (23514); the release catches it
   and leaves that table for the round. `releaseHeldRows()` is unchanged and never
-  takes a People row.
+  takes a People row. Since 2026-11-21 the block runs the move, then the copy of AI
+  Ark pulls' people with no email, then this release, then the pulls' hand-back (see
+  "People with no email go to the email finders"); the release takes the pulls' held
+  rows like the uploads'.
 - **The upload gates** (`people-template.mjs`): a new change on a run condition,
   `{ in: "run_if", and: <clause> }` (`applyChanges()`), makes it `(<original>) &&
   <clause>`, so the clause can't bind to the last term of an original whose top level
@@ -3339,6 +3567,7 @@ the owner's OK. Everything ships off.
   mark per person. One log line per request; off while either variable is missing.
 - **On a database without 130** the worker logs once for each of its three new steps
   (the move, the People release, the found-email timer) and the Maps release goes on.
+  The AI Ark pulls' copy and hand-back (2026-11-21) do the same.
 
 - **Adding the found emails** (`src/lib/uploads/found.ts`, `src/lib/uploads/found-run.ts`):
   one round of an upload at a time (an advisory lock on the upload). A round takes the
@@ -3418,7 +3647,9 @@ the owner's OK. Everything ships off.
 - **The Clay tab:** a held row of a People (pipeline) table says "Held: a no-email row
   of an upload. It is worked once its client is on People runs." (the cell route returns
   the table's `template`, and a held People row's title is the name and company it was
-  given). Above a People (pipeline) table a strip lists the uploads that fed it (the
+  given); one the worker copied from an AI Ark pull (its Source "AI Ark pull <day>: no
+  email") says "Held: a person an AI Ark pull bought with no email. ..." instead
+  (2026-11-21). Above a People (pipeline) table a strip lists the uploads that fed it (the
   table route's `uploads`: its 10 newest upload sources, each with its rows still held;
   `deliveries` stay Maps only), the held rows and why, and a warning while the worker
   running lacks `upload_people`. The table picker reads "from people runs and uploads".
