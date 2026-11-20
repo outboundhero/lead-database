@@ -24,7 +24,12 @@
 //                    them out of campaigns is a separate step).
 //   retryShareJob    sends a job in error, or one decided at its place wait
 //                    limit, round again.
+//
+// A database backfill firing's job (share_jobs.kind backfill, migration 138)
+// is made applied by the backfill (scripts/lib/backfill/run.mjs): preview,
+// apply and retry refuse it (409); only undo applies to it.
 
+import { BACKFILL_JOB_KIND } from "../backfill/settings.mjs";
 import { flagOn } from "../enrich/settings.mjs";
 import { inTx, isUnready, isUuid, read } from "./db.mjs";
 import { decideLeads, Fenced, jobLeads, receiversByTag } from "./decide.mjs";
@@ -68,9 +73,21 @@ async function action(fn) {
 
 async function loadJob(pool, batchId) {
   if (!isUuid(batchId)) throw new ShareActionError(400, "batchId must be a uuid.");
-  const { rows: [job] } = await read(pool, `SELECT * FROM share_jobs WHERE batch_id = $1`, [batchId]);
+  // job_kind: share_jobs.kind (138) read from the row as a whole, so a database without it reads every job as an import's.
+  const { rows: [job] } = await read(
+    pool,
+    `SELECT j.*, coalesce(to_jsonb(j) ->> 'kind', 'import') AS job_kind FROM share_jobs j WHERE j.batch_id = $1`,
+    [batchId]
+  );
   if (!job) throw new ShareActionError(404, "No such share job.");
   return job;
+}
+
+/** A database backfill job is made by the backfill: only Undo applies to it. */
+function refuseBackfill(job) {
+  if (job.job_kind === BACKFILL_JOB_KIND) {
+    throw new ShareActionError(409, "A database backfill job is made by the backfill; only Undo applies to it.");
+  }
 }
 
 function needDecided(job, verb) {
@@ -105,6 +122,7 @@ export async function previewShareJob(pool, opts) {
   const db = /** @type {import("./db.mjs").Pool} */ (pool);
   return action(async () => {
     const job = await loadJob(db, opts?.batchId);
+    refuseBackfill(job);
     needDecided(job, "previewed");
     const r = pickReceiver(job, opts?.receiver);
     const settings = await settingsNow(db);
@@ -166,6 +184,7 @@ export async function applyShareJob(pool, opts) {
   return action(async () => {
     if (!isUuid(opts?.userId)) throw new ShareActionError(400, "userId must be a uuid.");
     const job = await loadJob(db, opts.batchId);
+    refuseBackfill(job);
     const settings = await settingsNow(db);
     if (!settings.overlap_sharing.enabled) throw new ShareActionError(409, "Sharing is switched off, so nothing was applied.");
     needDecided(job, "applied");
@@ -242,6 +261,7 @@ export async function retryShareJob(pool, opts) {
   return action(async () => {
     if (!isUuid(opts?.userId)) throw new ShareActionError(400, "userId must be a uuid.");
     const job = await loadJob(db, opts.batchId);
+    refuseBackfill(job);
     const settings = await settingsNow(db);
     return retryJob(db, { batchId: job.batch_id, settings });
   });

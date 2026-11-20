@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { age, fmtCount, JOB_STATE_LABEL, OUTCOME_LABEL, OUTCOME_ORDER, PUSH_STATE_LABEL, pushNoteText, when } from "@/lib/sharing/labels";
+import { age, fmtCount, JOB_STATE_LABEL, originLabel, OUTCOME_LABEL, OUTCOME_ORDER, PUSH_STATE_LABEL, pushNoteText, when } from "@/lib/sharing/labels";
 import type { JobAnswer, JobReceiver, ShareOutcome } from "@/lib/sharing/types";
 import { PushSharedDialog } from "./push-shared-dialog";
 
@@ -16,7 +16,8 @@ import { PushSharedDialog } from "./push-shared-dialog";
 // each ended, in words, and whether the share step has settled it), and the
 // admin's buttons: Apply (a confirm shows what changed since the preview),
 // Undo, Retry and Push shared. The work is the share step's own; this only
-// asks for it.
+// asks for it. A database backfill firing's job (138) is made applied by the
+// backfill: it has no Preview, Apply or Retry, only Undo and Push shared.
 
 type Preview = { receivers: Array<{ tag: string; before: Record<string, number>; now: Record<string, number>; overCap: boolean }> };
 /** The push batch states the share step settles (its shares not sent get their end state). */
@@ -28,12 +29,14 @@ const outcomeLine = (o: Partial<Record<ShareOutcome, number>>) =>
     .map((k) => `${OUTCOME_LABEL[k]} ${fmtCount(o[k])}`)
     .join(" · ");
 
-function ReceiverCard({ r, onApply, onUndo, onPush, canAct, jobState }: {
+function ReceiverCard({ r, onApply, onUndo, onPush, canAct, canApply, jobState }: {
   r: JobReceiver;
   onApply: () => void;
   onUndo: () => void;
   onPush: () => void;
   canAct: boolean;
+  /** False for a database backfill job: only Undo and Push shared apply to it. */
+  canApply: boolean;
   jobState: string;
 }) {
   const shares = (r.outcomes.shared ?? 0) + (r.outcomes.own_topup ?? 0);
@@ -48,7 +51,7 @@ function ReceiverCard({ r, onApply, onUndo, onPush, canAct, jobState }: {
         {r.receiveBlock && <Badge variant="destructive">Cannot receive: {r.receiveBlock}</Badge>}
         {canAct && (
           <div className="ml-auto flex flex-wrap gap-1.5">
-            {shares > 0 && !r.applied && ["previewed", "applied"].includes(jobState) && (
+            {canApply && shares > 0 && !r.applied && ["previewed", "applied"].includes(jobState) && (
               <Button size="xs" onClick={onApply}>
                 <CheckCircle2 /> Apply
               </Button>
@@ -191,12 +194,20 @@ export function JobDetail({ batchId, isAdmin, onClose, onChanged }: { batchId: s
   };
 
   const job = data?.job;
+  const backfill = job?.kind === "backfill";
   return (
     <div className="space-y-3 rounded-2xl bg-muted/40 p-4">
       <div className="flex flex-wrap items-start gap-3">
         <div className="min-w-0 flex-1">
-          <p className="text-[15px] font-semibold">{job ? job.filename ?? job.source_label ?? "Import" : "Share job"}</p>
-          {job && (
+          <p className="text-[15px] font-semibold">{job ? (backfill ? "Database backfill" : job.filename ?? job.source_label ?? "Import") : "Share job"}</p>
+          {job && backfill && (
+            <p className="text-[12.5px] text-muted-foreground">
+              From {originLabel(job.origin_tag)}
+              {job.origin_pool ? ` (${job.origin_pool} pool)` : ""} · {JOB_STATE_LABEL[job.state]} · {fmtCount(job.new_leads)} lead
+              {job.new_leads === 1 ? "" : "s"} already in the database shared · made {when(job.batch_done_at)}
+            </p>
+          )}
+          {job && !backfill && (
             <p className="text-[12.5px] text-muted-foreground">
               From {job.origin_tag ?? "no client"}
               {job.origin_pool ? ` (${job.origin_pool} pool)` : ""} · {JOB_STATE_LABEL[job.state]}
@@ -214,12 +225,12 @@ export function JobDetail({ batchId, isAdmin, onClose, onChanged }: { batchId: s
               </a>
             </Button>
           )}
-          {isAdmin && job && ["previewed", "applied"].includes(job.state) && job.receivers.length > 1 && (
+          {isAdmin && job && !backfill && ["previewed", "applied"].includes(job.state) && job.receivers.length > 1 && (
             <Button size="xs" onClick={() => askApply(null)} disabled={busy}>
               <CheckCircle2 /> Apply all
             </Button>
           )}
-          {isAdmin && job && job.state === "error" && (
+          {isAdmin && job && !backfill && job.state === "error" && (
             <Button size="xs" variant="outline" onClick={retry} disabled={busy}>
               <RotateCcw /> Retry
             </Button>
@@ -261,6 +272,7 @@ export function JobDetail({ batchId, isAdmin, onClose, onChanged }: { batchId: s
           r={r}
           jobState={data.job.state}
           canAct={isAdmin}
+          canApply={data.job.kind !== "backfill"}
           onApply={() => askApply(r.tag)}
           onUndo={() => setConfirm({ kind: "undo", receiver: r.tag })}
           onPush={() => setPushTarget({ batchId, receiver: r.tag })}

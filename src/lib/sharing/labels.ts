@@ -53,6 +53,15 @@ export function pushNoteText(note: string | null | undefined): string {
   return DROP_NOTES[note] ?? note;
 }
 
+/** The origin of a database backfill share or job (BACKFILL_ORIGIN in scripts/lib/backfill/settings.mjs, migration 138). */
+export const BACKFILL_ORIGIN_TAG = "DATABASE";
+
+/** A share's or a job's origin in words: "the database (backfill)" for the backfill's marker, else the client's tag. */
+export function originLabel(tag: string | null | undefined): string {
+  if (!tag) return "";
+  return tag === BACKFILL_ORIGIN_TAG ? "the database (backfill)" : tag;
+}
+
 export const fmtCount = (n: number | null | undefined) => (n ?? 0).toLocaleString("en-US");
 
 export function when(iso: string | null | undefined): string {

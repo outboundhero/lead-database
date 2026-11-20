@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { fmtCount, JOB_STATE_LABEL, OUTCOME_LABEL, OUTCOME_ORDER, when } from "@/lib/sharing/labels";
+import { BACKFILL_ORIGIN_TAG, fmtCount, JOB_STATE_LABEL, originLabel, OUTCOME_LABEL, OUTCOME_ORDER, when } from "@/lib/sharing/labels";
 import type { JobsAnswer, ShareJob, ShareJobState } from "@/lib/sharing/types";
 import { JobDetail } from "./job-detail";
 
@@ -14,9 +14,13 @@ import { JobDetail } from "./job-detail";
 // found (share_jobs), newest first: its source and client, its state ("no lead
 // list" and "waited the limit" included), the new leads checked and the ones
 // still waiting for a place, and per receiving client the counts by outcome.
-// A row opens the job (JobDetail).
+// A row opens the job (JobDetail). A database backfill firing's job (138) reads
+// "Database backfill" where an import shows its file, its origin "the database
+// (backfill)"; the source filter lists only those (their origin is DATABASE).
 
 const ALL = "__all";
+/** The source filter: every job, or only the database backfill's (origin DATABASE, so the jobs route's origin filter finds them). */
+const BACKFILL = "backfill";
 const STATE_VARIANT: Record<ShareJobState, "success" | "warning" | "destructive" | "secondary" | "tinted" | "outline"> = {
   waiting: "secondary",
   deciding: "secondary",
@@ -39,6 +43,7 @@ function receiverCounts(job: ShareJob): string {
 
 export function JobsTab({ isAdmin, openJob, onOpenJob }: { isAdmin: boolean; openJob: string | null; onOpenJob: (id: string | null) => void }) {
   const [state, setState] = useState<string>(ALL);
+  const [source, setSource] = useState<string>(ALL);
   const [data, setData] = useState<JobsAnswer | null>(null);
   const [more, setMore] = useState<ShareJob[]>([]);
   const [next, setNext] = useState<string | null>(null);
@@ -52,6 +57,7 @@ export function JobsTab({ isAdmin, openJob, onOpenJob }: { isAdmin: boolean; ope
       try {
         const q = new URLSearchParams({ limit: "50" });
         if (state !== ALL) q.set("state", state);
+        if (source === BACKFILL) q.set("origin", BACKFILL_ORIGIN_TAG);
         if (before) q.set("before", before);
         const r = await fetch(`/api/sharing/jobs?${q}`);
         const j = (await r.json()) as JobsAnswer & { error?: string };
@@ -68,7 +74,7 @@ export function JobsTab({ isAdmin, openJob, onOpenJob }: { isAdmin: boolean; ope
         setLoading(false);
       }
     },
-    [state]
+    [state, source]
   );
   useEffect(() => {
     load();
@@ -125,6 +131,15 @@ export function JobsTab({ isAdmin, openJob, onOpenJob }: { isAdmin: boolean; ope
             ))}
           </SelectContent>
         </Select>
+        <Select value={source} onValueChange={setSource}>
+          <SelectTrigger size="sm" className="h-9 w-48 rounded-full text-[13px]" aria-label="Source">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL}>Every source</SelectItem>
+            <SelectItem value={BACKFILL}>Database backfill</SelectItem>
+          </SelectContent>
+        </Select>
         <Button size="sm" variant="outline" onClick={() => load()} aria-label="Reload" disabled={loading}>
           {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
         </Button>
@@ -148,8 +163,10 @@ export function JobsTab({ isAdmin, openJob, onOpenJob }: { isAdmin: boolean; ope
             )}
           >
             <div className="flex flex-wrap items-center gap-2">
-              <span className="max-w-[320px] truncate text-[13.5px] font-medium">{j.filename ?? j.source_label ?? "Import"}</span>
-              <span className="text-[12.5px] text-muted-foreground">{j.origin_tag ?? "no client"}</span>
+              <span className="max-w-[320px] truncate text-[13.5px] font-medium">
+                {j.kind === "backfill" ? "Database backfill" : j.filename ?? j.source_label ?? "Import"}
+              </span>
+              <span className="text-[12.5px] text-muted-foreground">{j.origin_tag ? originLabel(j.origin_tag) : "no client"}</span>
               <Badge variant={STATE_VARIANT[j.state]}>{JOB_STATE_LABEL[j.state]}</Badge>
               {j.place_wait_hit_at && <Badge variant="destructive">Waited the limit</Badge>}
               {j.receivers_over_cap.length > 0 && <Badge variant="warning">Over a cap: {j.receivers_over_cap.join(", ")}</Badge>}
@@ -159,7 +176,9 @@ export function JobsTab({ isAdmin, openJob, onOpenJob }: { isAdmin: boolean; ope
             <p className="text-[12.5px] text-muted-foreground">
               {j.reason_text
                 ? j.reason_text
-                : `${fmtCount(j.new_leads)} new lead${j.new_leads === 1 ? "" : "s"} checked${j.leads_no_place ? `, ${fmtCount(j.leads_no_place)} waiting for a place` : ""}`}
+                : j.kind === "backfill"
+                  ? `${fmtCount(j.new_leads)} lead${j.new_leads === 1 ? "" : "s"} already in the database shared`
+                  : `${fmtCount(j.new_leads)} new lead${j.new_leads === 1 ? "" : "s"} checked${j.leads_no_place ? `, ${fmtCount(j.leads_no_place)} waiting for a place` : ""}`}
               {receiverCounts(j) ? ` · ${receiverCounts(j)}` : ""}
             </p>
           </button>
