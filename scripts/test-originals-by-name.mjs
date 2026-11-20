@@ -75,7 +75,12 @@ function mapText(v, fn) {
 function texts(v, out = []) {
   if (typeof v === "string") out.push(v);
   else if (Array.isArray(v)) v.forEach((x) => texts(x, out));
-  else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) (out.push(k), texts(x, out));
+  else if (v && typeof v === "object") {
+    for (const [k, x] of Object.entries(v)) {
+      out.push(k);
+      texts(x, out);
+    }
+  }
   return out;
 }
 
