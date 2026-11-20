@@ -357,7 +357,7 @@ const sharesOf = (tag, batchId = null) =>
          FROM lead_shares WHERE receiver_tag = $1 AND origin_tag = '${BACKFILL_ORIGIN}' AND ($2::uuid IS NULL OR batch_id = $2) ORDER BY lead_id`, [tag, batchId]);
 
 // The suite's made-up clients and their leads.
-const A = T("A"); // a receiver: Reno (a city) and Utah (state-wide); its group mate C; an exclusion term
+const A = T("RX"); // a receiver: Reno (a city) and Utah (state-wide); its group mate C; an exclusion term
 const B = T("B"); // a second receiver: Sparks
 const C = T("C"); // A's Bison group mate (Nevada): its pushes, shares and tag keep leads back from A
 const O = T("O"); // another client of the pool (Wyoming): its leads may go to A
@@ -370,12 +370,12 @@ const K2 = T("K2"); // the cap a client a day (North Dakota)
 const R1 = T("R1"); // the cap a firing, not low (South Dakota)
 const R2 = T("R2"); // the cap a firing, low (Nebraska)
 const L = T("L"); // low places first: Kansas (enough), Oklahoma (low)
-const TM = T("TM"); // a time limit and a rules change (Oregon)
+const TIME = T("TIME"); // a time limit and a rules change (Oregon)
 const NONE = T("NONE"); // listed, but no client
 const ctx = {}; // what later parts need
 
 async function setup() {
-  await client("A", { group: 8801, places: [NV({ city: "Reno" }), ST("UT")], exclude: ["Bftestvending"], b2b: B2B2, b2c: B2C2 });
+  await client("RX", { group: 8801, places: [NV({ city: "Reno" }), ST("UT")], exclude: ["Bftestvending"], b2b: B2B2, b2c: B2C2 });
   await client("B", { group: 8802, places: [NV({ city: "Sparks" })] });
   await client("C", { group: 8801, places: [NV()] });
   await client("O", { group: 8803, places: [ST("WY")] });
@@ -388,8 +388,8 @@ async function setup() {
   await client("R1", { group: 8812, places: [ST("SD")] });
   await client("R2", { group: 8813, places: [ST("NE")] });
   await client("L", { group: 8814, places: [ST("KS"), ST("OK")] });
-  await client("TM", { group: 8815, places: [ST("OR")] });
-  LIST = [A, B, C, O, XOS, N, P, F, K1, K2, R1, R2, L, TM];
+  await client("TIME", { group: 8815, places: [ST("OR")] });
+  LIST = [A, B, C, O, XOS, N, P, F, K1, K2, R1, R2, L, TIME];
   PUSH = LIST.filter((t) => t !== F);
   await setSharing();
   await setFilter(true);
@@ -458,10 +458,10 @@ async function partA() {
     same(pl.places.map((p) => [p.key, p.kind, p.label, p.ids, p.entry]), [["US|NV|reno", "city", "Reno, NV", ["1", "2"], 1], ["US|UT", "state", "UT (state-wide)", null, 3]]) &&
       same(pl.unresolved, [{ key: "US|NV|nowhere", label: "Nowhere, NV", entry: 2 }]), JSON.stringify(pl));
   const P0 = (st, entry) => ({ key: `US|${st}`, kind: "state", country: "US", state: st, city: null, label: st, ids: null, entry });
-  const cov = new Map([["US|AA", 900], ["US|BB", 10], ["US|CC", 300], ["US|DD", 50]]);
-  const ranked = orderPlaces([P0("EE", 1), P0("AA", 2), P0("BB", 3), P0("FF", 4), P0("CC", 5), P0("DD", 6)], cov, 100);
+  const cov = new Map([["US|X1", 900], ["US|X2", 10], ["US|X3", 300], ["US|X4", 50]]);
+  const ranked = orderPlaces([P0("X5", 1), P0("X1", 2), P0("X2", 3), P0("X6", 4), P0("X3", 5), P0("X4", 6)], cov, 100);
   ok("orderPlaces: under the minimum first (fewest first), then the rest (fewest first), then the uncounted in entry order",
-    same(ranked.map((p) => [p.state, p.low]), [["BB", true], ["DD", true], ["CC", false], ["AA", false], ["EE", false], ["FF", false]]), JSON.stringify(ranked.map((p) => p.state)));
+    same(ranked.map((p) => [p.state, p.low]), [["X2", true], ["X4", true], ["X3", false], ["X1", false], ["X5", false], ["X6", false]]), JSON.stringify(ranked.map((p) => p.state)));
   const oc = orderClients([
     { tag: "D", lowPlaces: 0, servedAt: 5 }, { tag: "C", lowPlaces: 0, servedAt: null }, { tag: "B", lowPlaces: 2, servedAt: 100 },
     { tag: "A", lowPlaces: 0, servedAt: 5 }, { tag: "E", lowPlaces: 1, servedAt: null },
@@ -810,7 +810,8 @@ async function partE() {
   const cur = await all(`SELECT receiver_tag, place_key, windows, next_window, place_rows, pass_done_at IS NOT NULL AS done, shared::int AS shared, checked::int AS checked
                            FROM share_backfill_cursors WHERE receiver_tag = ANY($1::text[]) ORDER BY 1, 2`, [[A, B]]);
   ok("... its cursors: Reno, Utah and Sparks, one window each, read, the pass done, the shares counted",
-    same(cur.map((c) => [c.receiver_tag, c.place_key, c.windows, c.next_window, c.done]), [[A, "US|NV|reno", 1, 1, true], [A, "US|UT", 1, 1, true], [B, "US|NV|sparks", 1, 1, true]]) &&
+    same(cur.map((c) => [c.receiver_tag, c.place_key, c.windows, c.next_window, c.done]),
+      [[A, "US|NV|reno", 1, 1, true], [A, "US|UT", 1, 1, true], [B, "US|NV|sparks", 1, 1, true]].sort((x, y) => (`${x[0]}|${x[1]}` < `${y[0]}|${y[1]}` ? -1 : 1))) &&
       cur.reduce((s, c) => s + c.shared, 0) === expectA + nB, JSON.stringify(cur));
   const hist = await one(
     `SELECT count(*)::int AS n FROM upload_batches WHERE id = $1 AND source_batch_id IS NULL AND (source_label IS NULL OR source_label <> 'Emails found') AND batch_type <> 'backfill'`,
@@ -924,28 +925,28 @@ async function partE() {
   await pool.query(
     `INSERT INTO share_backfill_cursors (receiver_tag, place_key, windows, next_window, place_rows, rules_at)
      SELECT $1, 'US|OR', 4, 1, 6, t.updated_at FROM client_targeting t WHERE t.client_tag = $1`,
-    [TM]
+    [TIME]
   );
-  await setBackfill({ tags: [TM], mode: "apply" });
+  await setBackfill({ tags: [TIME], mode: "apply" });
   const t1 = await fire({ deadline: Date.now() - 1 });
   const tr1 = await runRow(t1.run);
-  const c1 = await cursorOf(TM, "US|OR");
+  const c1 = await cursorOf(TIME, "US|OR");
   ok("a time limit: the firing stops (time), the client is not reached, its cursor stays at its window",
-    t1.state === "stopped" && tr1.stop_reason === "time" && tr1.counts[TM]?.not_reached === "time" && c1.next_window === 1 && (await sharesOf(TM)).length === 0,
+    t1.state === "stopped" && tr1.stop_reason === "time" && tr1.counts[TIME]?.not_reached === "time" && c1.next_window === 1 && (await sharesOf(TIME)).length === 0,
     JSON.stringify({ t1, counts: tr1.counts }));
   const tr2 = await runRow((await fire()).run);
-  const c2 = await cursorOf(TM, "US|OR");
-  const got2 = (await sharesOf(TM)).map((r) => r.lead_id);
+  const c2 = await cursorOf(TIME, "US|OR");
+  const got2 = (await sharesOf(TIME)).map((r) => r.lead_id);
   ok("... the next firing reads from that window to the end: 3 windows, the leads of windows 2 to 4 written, the pass done",
-    tr2.counts[TM]?.windows === 3 && c2.next_window === 4 && c2.pass_done_at && same(sorted(got2), sorted(ids.slice(2))), JSON.stringify({ counts: tr2.counts[TM], got2 }));
+    tr2.counts[TIME]?.windows === 3 && c2.next_window === 4 && c2.pass_done_at && same(sorted(got2), sorted(ids.slice(2))), JSON.stringify({ counts: tr2.counts[TIME], got2 }));
 
   // A rules change starts a new pass.
-  await pool.query(`UPDATE client_targeting SET updated_at = clock_timestamp() WHERE client_tag = $1`, [TM]);
+  await pool.query(`UPDATE client_targeting SET updated_at = clock_timestamp() WHERE client_tag = $1`, [TIME]);
   const tr3 = await runRow((await fire()).run);
-  const c3 = await cursorOf(TM, "US|OR");
+  const c3 = await cursorOf(TIME, "US|OR");
   ok("a rules change starts a new pass: the windows worked out again (one), every lead read, the 2 never read before written, the rest already shared",
-    tr3.counts[TM]?.shared === 2 && tr3.counts[TM]?.already_shared === 4 && c3.windows === 1 && c3.next_window === 1 && Number(c3.checked) === 6 &&
-      Number(c3.shared) === 2 && (await sharesOf(TM)).length === 6, JSON.stringify({ counts: tr3.counts[TM], c3 }));
+    tr3.counts[TIME]?.shared === 2 && tr3.counts[TIME]?.already_shared === 4 && c3.windows === 1 && c3.next_window === 1 && Number(c3.checked) === 6 &&
+      Number(c3.shared) === 2 && (await sharesOf(TIME)).length === 6, JSON.stringify({ counts: tr3.counts[TIME], c3 }));
 
   // A client tagged DATABASE.
   await pool.query(
