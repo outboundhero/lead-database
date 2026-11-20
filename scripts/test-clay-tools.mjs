@@ -342,13 +342,13 @@ async function partC2() {
 // ── C. Rows worked in memory, from TLTEST_A's stored columns ────────────────
 
 /** One row worked in memory, as the worker would, forced (no answer reused): its cells, the engine's answer and the run records. */
-async function work(def, inputs, settings) {
+async function work(def, inputs, settings, env = KEYS) {
   const stored = new Map(Object.entries(inputs).filter(([, v]) => v !== "" && v != null).map(([k, v]) => [k, { status: "done", value: v }]));
   const cells = new Map(stored);
   const runs = [];
   const out = await runRow({
     row: { id: 0, created_at: new Date("2026-11-21T00:00:00Z"), run_force: ["*"], next_run_at: new Date() },
-    table: def.table, columns: def.columns, cells: stored, env: KEYS, db: pool, settings,
+    table: def.table, columns: def.columns, cells: stored, env, db: pool, settings,
     hooks: { changed: (k, c) => cells.set(k, c), ran: (r) => runs.push(r) },
   });
   return { ...out, cells, runs, cell: (k) => cells.get(k) };
@@ -414,6 +414,14 @@ async function partC3(settings) {
       r3.cell("normalized_company_name")?.status === "empty" && r3.cell("guessed_name")?.value === "Team" && g19Settled(r3.cell("first_name_ai")) &&
       r3.cell("use_first_name")?.value === "undefined Team",
     JSON.stringify({ g14: r3.cell("normalize_company_name"), g20: r3.cell("use_first_name")?.value }));
+
+  const noKey = at("hello", "nokey");
+  net.reoon.set(noKey, "safe");
+  const r4 = await work(inbox, { ...base, general_email: noKey }, settings, { ENRICH_REOON_API_KEY: KEYS.ENRICH_REOON_API_KEY });
+  check("without the OpenAI key, G#19 waits like every AI step, and so does the row (G#14 and G#16 still run)",
+    r4.cell("first_name_ai")?.status === "needs_key" && /OPENAI_API_KEY/.test(r4.cell("first_name_ai")?.note ?? "") && r4.needsKey > 0 &&
+      r4.cell("guessed_name")?.value === "Hello" && r4.cell("normalized_company_name")?.value === "Plover Tltest Cleaning",
+    JSON.stringify({ g19: r4.cell("first_name_ai"), needsKey: r4.needsKey }));
 
   section("C8. A People row worked in memory");
   const source = { name: "Pat Tltest", last_name: "Tltest", latest_experience_title: "Owner", latest_experience_company: "PLOVER TLTEST CLEANING LLC", url: "", location_name: "", domain: `plover-${RUN}.${HOST}` };
