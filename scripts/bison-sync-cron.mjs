@@ -73,7 +73,7 @@ const tail = out.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 400);
 const error = !ok
   ? `sync exited ${exit}: ${tail}`
   : failures.length
-    ? `${failures.length} shard(s) failed; their ids are skipped by later incremental runs (a full sync re-reads them): ${failures.join("; ")}`.slice(0, 2000)
+    ? `${failures.length} shard(s) still failed after 2 retries; the watermark stayed below them, so the next sync fetches them again: ${failures.join("; ")}`.slice(0, 2000)
     : null;
 await finishRun(q, id, { ok, rowsFetched, newLeads, error });
 console.log(`run #${id} ${ok ? "done" : "FAILED"}: ${rowsFetched ?? "?"} rows fetched, ${newLeads ?? "?"} new lead(s)${error ? ` — ${error}` : ""}`);

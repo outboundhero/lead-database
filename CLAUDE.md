@@ -1010,10 +1010,24 @@ with no heartbeat for 10 minutes is marked failed at the next check; a partial
 unique index allows one `running` row, so two syncs never overlap. The top bar
 (`BisonSyncStatus`, `GET/POST /api/bison/sync`) shows the last run in Pacific
 time. A failed run is not retried automatically — the panel shows it, and Sync
-now re-runs it. `--dry-run` prints the decision only. ⚠ In `--incremental`
-mode a failed shard is only logged and the install's watermark still moves past
-its ids, so later incremental runs never fetch them (a full sync does); the run
-log records such shards as errors.
+now re-runs it. `--dry-run` prints the decision only.
+
+**Incremental slices are never skipped** (fixed 2026-11-20,
+[scripts/lib/bison-incremental.mjs](scripts/lib/bison-incremental.mjs)). Until
+then a slice that failed was only logged, the watermark jumped to the top id
+anyway, and the floor was the GREATER of the watermark and the highest mirrored
+id — so that slice was never fetched by any later incremental run. Now: the
+floor is the watermark (max mirrored id only for an install with none); a
+failing slice is retried twice from where it stopped; the watermark climbs only
+over the slices that completed, counted from the bottom, so a slice that still
+fails (or stops at `--max`) is fetched by the next run; incremental slices keep
+their own progress rows (shard 100+) instead of overwriting the full sync's
+0..7; and a `--resume` full sync only trusts a saved row of the same slice
+(incremental runs had left "done" rows on shards 0..2, which a resume would
+have skipped). A gap scan on 2026-11-20 found no slice already lost: every
+10,000-id block of each install's latest million ids held 10,000 leads.
+`--shard-size <ids>` (default 20000) sets the slice size. Tested by
+`scripts/test-bison-incremental.mts`.
 
 Also scheduled, but NOT a Railway cron:
 `.github/workflows/daily-dashboard-refresh.yml` POSTs `/api/dashboard/refresh`

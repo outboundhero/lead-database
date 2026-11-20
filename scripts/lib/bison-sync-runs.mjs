@@ -35,9 +35,9 @@ export function decide({ now, requested, lastStartedAt }) {
 /**
  * Read scripts/sync-bison-leads.mjs's output: its closing "done: N rows fetched,
  * M new lead(s) added" line, and any "shard N failed" lines with the install they
- * were printed under. In --incremental mode a failed shard's ids are NOT
- * re-fetched by later runs (the install's watermark still moves past them), so
- * failures are recorded rather than ignored.
+ * were printed under — a slice that still failed after its retries. (Since
+ * 2026-11-20 such a slice holds the install's watermark below it, so the next
+ * run fetches it; it is recorded so a repeat failure is visible.)
  */
 export function parseSyncOutput(text) {
   const num = (s) => Number(String(s).replace(/,/g, ""));

@@ -20,6 +20,7 @@
 //     8 shards sustained 569 leads/sec with zero 429s.
 import pg from "pg";
 import dotenv from "dotenv";
+import { incrementalBounds, runIncrementalSlices } from "./lib/bison-incremental.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname });
 
 const env = process.env;
@@ -33,9 +34,12 @@ const RESUME = has("resume");
 // bison_sync_state row that records "everything up to this id is accounted for",
 // separate from the real shard rows (0..n). Negative so it can never collide.
 const WATERMARK_SHARD = -1;
-// Only fetch leads newer than the highest id already mirrored. This is what the
-// every-3-days job runs; a full pass is hours, this is seconds.
+// Only fetch leads newer than the install's watermark. This is what the
+// bison-sync job runs; a full pass is hours, this is seconds to minutes.
+// Slicing, retries and the watermark rule live in lib/bison-incremental.mjs.
 const INCREMENTAL = has("incremental");
+// --shard-size <ids>: ids per incremental slice (default 20000; tests use small ones).
+const SHARD_SIZE = Math.max(1, Number(flag("shard-size")) || 20000);
 // Skip promoting new leads into the leads table (mirror only).
 const NO_IMPORT = has("no-import");
 // --pace <ms>: minimum gap between page fetches PER SHARD. 8 unpaced shards
@@ -333,55 +337,89 @@ function mapLead(domain, r) {
 }
 
 // One shard: walk DOWN from `from_id` until it passes `to_id`.
-async function runShard(domain, key, shard, fromId, toId, budget) {
+// `resume` continues from the shard's saved cursor — but only when the saved row
+// is the SAME slice (its range sits where this one does, its cursor inside it).
+// Until 2026-11-20 incremental runs wrote rows 0..n too, so a resumed full sync
+// found an incremental slice's "done" row on its shard 0..2 and skipped that
+// whole slice of the back catalogue.
+async function runShard(domain, key, shard, fromId, toId, budget, resume = RESUME) {
   let cursorId = fromId;
   let seen = 0;
   let buffer = [];
   const { rows: st } = await dbQuery(
-    `select cursor_id, done from bison_sync_state where instance_url=$1 and shard=$2`, [domain, shard]);
-  if (RESUME && st[0] && !st[0].done && st[0].cursor_id != null) cursorId = Number(st[0].cursor_id);
-  if (RESUME && st[0]?.done) return 0;
+    `select from_id, to_id, cursor_id, done from bison_sync_state where instance_url=$1 and shard=$2`, [domain, shard]);
+  const saved = st[0];
+  const sameSlice = !!saved && saved.to_id != null && saved.cursor_id != null &&
+    Math.abs(Number(saved.to_id) - toId) <= Math.max(1, (fromId - toId) / 2) &&
+    Number(saved.cursor_id) <= fromId && Number(saved.cursor_id) >= toId;
+  if (resume && sameSlice && saved.done) return 0;
+  if (resume && sameSlice) cursorId = Number(saved.cursor_id);
 
+  // The row always records THIS walk's start: keeping an older cursor here (as
+  // `coalesce` did) let a retry resume far outside its slice.
   await dbQuery(
     `insert into bison_sync_state (instance_url, shard, from_id, to_id, cursor_id, started_at)
      values ($1,$2,$3,$4,$5, now())
      on conflict (instance_url, shard) do update set
        from_id=excluded.from_id, to_id=excluded.to_id,
-       cursor_id=coalesce(bison_sync_state.cursor_id, excluded.cursor_id),
+       cursor_id=excluded.cursor_id,
        started_at=now(), done=false, updated_at=now()`,
     [domain, shard, fromId, toId, cursorId]);
 
-  let url = pageUrl(domain, { cursor: cursorFor(cursorId) });
-  while (url) {
-    if (budget.used >= budget.max) break;
-    if (PACE_MS) await sleep(PACE_MS);
-    const j = await getPage(url, key);
-    const rows = Array.isArray(j.data) ? j.data : [];
-    if (rows.length === 0) break;
+  // The SAVED cursor only moves once every row above it is written. Rows sit in
+  // `buffer` until WRITE_CHUNK of them have gathered; saving the walk's own
+  // cursor (as until 2026-11-20) meant a page error lost up to 499 buffered rows
+  // that a resume then stepped over. On error, `rowsWritten` tells the caller
+  // how many rows of this attempt did reach the table.
+  let savedCursor = cursorId;
+  let written = 0;
+  try {
+    let url = pageUrl(domain, { cursor: cursorFor(cursorId) });
+    while (url) {
+      if (budget.used >= budget.max) break;
+      if (PACE_MS) await sleep(PACE_MS);
+      const j = await getPage(url, key);
+      const rows = Array.isArray(j.data) ? j.data : [];
+      if (rows.length === 0) break;
 
-    let passedEnd = false;
-    for (const r of rows) {
-      const id = Number(r.id);
-      if (Number.isFinite(id)) {
-        if (id <= toId) { passedEnd = true; break; }   // this shard's range is done
-        cursorId = id;
+      let passedEnd = false;
+      for (const r of rows) {
+        const id = Number(r.id);
+        if (Number.isFinite(id)) {
+          if (id <= toId) { passedEnd = true; break; }   // this shard's range is done
+          cursorId = id;
+        }
+        buffer.push(mapLead(domain, r));
+        seen++; budget.used++;
+        if (budget.used >= budget.max) { passedEnd = true; break; }
       }
-      buffer.push(mapLead(domain, r));
-      seen++; budget.used++;
-      if (budget.used >= budget.max) { passedEnd = true; break; }
+      if (buffer.length >= WRITE_CHUNK) {
+        const chunk = buffer.splice(0, buffer.length);
+        await writeRows(chunk);
+        written += chunk.length;
+        savedCursor = cursorId;
+      }
+      if (passedEnd) break;
+
+      const next = j.links?.next;
+      // Re-apply pagination_type: Bison's own next-link drops it.
+      url = next ? pageUrl(domain, { cursor: new URL(next).searchParams.get("cursor") }) : null;
+
+      await dbQuery(
+        `update bison_sync_state set cursor_id=$3, rows_seen=$4, updated_at=now()
+          where instance_url=$1 and shard=$2`, [domain, shard, savedCursor, seen]);
     }
-    if (buffer.length >= WRITE_CHUNK) { await writeRows(buffer.splice(0, buffer.length)); }
-    if (passedEnd) break;
-
-    const next = j.links?.next;
-    // Re-apply pagination_type: Bison's own next-link drops it.
-    url = next ? pageUrl(domain, { cursor: new URL(next).searchParams.get("cursor") }) : null;
-
-    await dbQuery(
-      `update bison_sync_state set cursor_id=$3, rows_seen=$4, updated_at=now()
-        where instance_url=$1 and shard=$2`, [domain, shard, cursorId, seen]);
+    if (buffer.length) {
+      const chunk = buffer.splice(0, buffer.length);
+      await writeRows(chunk);
+      written += chunk.length;
+    }
+  } catch (e) {
+    // Rows of a write that threw are not counted; a resume re-fetches them
+    // (from savedCursor) and the upsert makes that harmless.
+    if (e && typeof e === "object") e.rowsWritten = written;
+    throw e;
   }
-  if (buffer.length) await writeRows(buffer);
   await dbQuery(
     `update bison_sync_state set cursor_id=$3, rows_seen=$4, done=$5, updated_at=now()
       where instance_url=$1 and shard=$2`,
@@ -399,15 +437,16 @@ async function syncInstance(domain, key) {
   // exactly the set of new leads. One shard, stop on arrival — seconds instead
   // of hours, and no re-reading of millions of unchanged rows.
   if (INCREMENTAL) {
-    // The floor is the highest id we have ever ACCOUNTED FOR — either mirrored,
-    // or recorded as a watermark. Keeping them separate is what lets "pull the
-    // new leads" work without first pulling 12.7M old ones.
+    // The floor is the WATERMARK: every id at or below it is mirrored (or was
+    // deliberately skipped at seeding). Only an install with no watermark yet
+    // falls back to its highest mirrored id. Taking the GREATER of the two — as
+    // until 2026-11-20 — let a slice that succeeded above a failed one lift the
+    // floor past the gap, and that slice was never fetched.
     const { rows } = await dbQuery(
-      `select greatest(
-                coalesce((select max(bison_id) from bison_leads where instance_url = $1), 0),
-                coalesce((select cursor_id from bison_sync_state
-                           where instance_url = $1 and shard = ${WATERMARK_SHARD}), 0)
-              )::bigint as known`, [domain]);
+      `select coalesce(
+                (select cursor_id from bison_sync_state where instance_url = $1 and shard = ${WATERMARK_SHARD}),
+                (select max(bison_id) from bison_leads where instance_url = $1),
+                0)::bigint as known`, [domain]);
     const known = Number(rows[0]?.known ?? 0);
 
     // SEEDING: an install nobody has mirrored gets its watermark set to today's
@@ -436,27 +475,32 @@ async function syncInstance(domain, key) {
     // than "a few new ones since last time". Split it the same way a full sync
     // splits the id space; a small delta still collapses to one shard.
     const span = top - known;
-    const shards = Math.max(1, Math.min(SHARDS, Math.ceil(span / 20000)));
+    const bounds = incrementalBounds(known, top, { shardSize: SHARD_SIZE, maxShards: SHARDS });
     console.log(`\n=== ${domain} — incremental: ids ${(known + 1).toLocaleString()}..${top.toLocaleString()} ` +
-                `(${span.toLocaleString()} ids, ${shards} shard${shards === 1 ? "" : "s"}) ===`);
+                `(${span.toLocaleString()} ids, ${bounds.length} shard${bounds.length === 1 ? "" : "s"}) ===`);
     const budget = { used: 0, max: MAX_ROWS };
-    const bounds = Array.from({ length: shards }, (_, i) => ({
-      shard: i,
-      from: Math.floor(top - (i * span) / shards) + 1,
-      to: Math.floor(top - ((i + 1) * span) / shards),
-    }));
-    const counts = await Promise.all(
-      bounds.map((b) => runShard(domain, key, b.shard, b.from, Math.max(b.to, known), budget)
-        .catch((e) => { console.log(`   shard ${b.shard} failed: ${e.message}`); return 0; }))
-    );
-    const n = counts.reduce((a, b) => a + b, 0);
-    // Advance the watermark even if nothing came back, so a quiet install does
-    // not re-walk the same empty range every three days.
-    await dbQuery(
-      `insert into bison_sync_state (instance_url, shard, from_id, to_id, cursor_id, done, started_at)
-       values ($1, ${WATERMARK_SHARD}, $2, $2, $2, true, now())
-       on conflict (instance_url, shard) do update set cursor_id = greatest(bison_sync_state.cursor_id, excluded.cursor_id), updated_at = now()`,
-      [domain, top]);
+    // A slice that errors is retried twice from where it stopped; one that still
+    // fails (or stops at --max) holds the watermark below it, so the NEXT run
+    // starts there and fetches it — never skipped.
+    const { results, watermark } = await runIncrementalSlices({
+      known,
+      bounds,
+      run: (b, resume) => runShard(domain, key, b.shard, b.from, b.to, budget, resume),
+      isDone: async (b) => (await dbQuery(
+        `select done from bison_sync_state where instance_url = $1 and shard = $2`, [domain, b.shard])).rows[0]?.done === true,
+    });
+    const n = results.reduce((a, r) => a + r.seen, 0);
+    if (watermark > known) {
+      await dbQuery(
+        `insert into bison_sync_state (instance_url, shard, from_id, to_id, cursor_id, done, started_at)
+         values ($1, ${WATERMARK_SHARD}, $2, $2, $2, true, now())
+         on conflict (instance_url, shard) do update set cursor_id = greatest(bison_sync_state.cursor_id, excluded.cursor_id), updated_at = now()`,
+        [domain, watermark]);
+    }
+    if (watermark < top) {
+      console.log(`   watermark held at ${watermark.toLocaleString()} (not ${top.toLocaleString()}): ` +
+                  `ids ${(watermark + 1).toLocaleString()}..${top.toLocaleString()} are fetched again by the next run`);
+    }
     const secs = (Date.now() - started) / 1000;
     console.log(`${domain}: ${n.toLocaleString()} new rows in ${secs.toFixed(0)}s (${(n / Math.max(secs, 1)).toFixed(0)}/sec)`);
     return n;
