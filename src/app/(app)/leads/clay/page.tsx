@@ -700,10 +700,10 @@ function TableView({
   };
 
   const visible = (detail?.columns ?? []).filter((c) => !c.hidden);
-  const laterCount = visible.filter(notRunHere).length;
+  const laterCount = visible.filter((c) => notRunHere(c, { run: isRun })).length;
   // A table that runs none of its columns always shows them: hiding them would leave nothing.
   const canHideLater = laterCount > 0 && laterCount < visible.length;
-  const columns: EnrichColumn[] = visible.filter((c) => showLater || !canHideLater || !notRunHere(c));
+  const columns: EnrichColumn[] = visible.filter((c) => showLater || !canHideLater || !notRunHere(c, { run: isRun }));
   const rowCount = detail?.table.row_count ?? table.row_count;
   const total = page?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / size));
@@ -883,6 +883,7 @@ function TableView({
               activeCell={openCell}
               onCellClick={(row, col) => setOpenCell({ row, col })}
               copy={isCopy}
+              run={isRun}
               sort={sort}
               onSort={(s) => {
                 setSort(s);
@@ -971,6 +972,7 @@ function TableView({
         target={openCell}
         onClose={() => setOpenCell(null)}
         copy={isCopy}
+        run={isRun}
         canRun
         onRun={(rowId, column) =>
           run({ scope: "rows", rows: [rowId], column, force: true }, () =>

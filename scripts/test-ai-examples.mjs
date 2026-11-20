@@ -334,6 +334,13 @@ const settingsWith = (rows) => settingsFrom([{ key: "spend_caps", value: HIGH_CA
 const OFF = settingsWith([]);
 const ON = settingsWith([{ key: "personalisation", value: { enabled: true, tags: [TAG], shared_text_ok: false } }]);
 const marked = (bodies, marker) => bodies.filter((b) => String(b?.input ?? "").includes(`[fx:${marker}] business=${COMPANY};`));
+/**
+ * The originals and templates of the client's own variant: the same made-up rows labelled with its variant, as a
+ * client's own tables are compiled (its personalisation columns' config.text_variant names the variant whose text
+ * they run, and the switch reads it).
+ */
+const ownOriginals = new Map([...originals].map(([k, r]) => [k, { ...r, variant: VARIANT }]));
+const own = compileTemplates(ownOriginals);
 
 async function partD() {
   section("D1. A General row worked by the compiled template: G#49 off, then on");
@@ -355,7 +362,8 @@ async function partD() {
   const def = await runInMemory(cols, inbox, { template: "inboxes_v1", settings: ON, variant: "default" });
   check("on, but for a client on the default originals: still Switched off (shared_text_ok false)",
     def.cells.get("question_ai")?.note === "Switched off: personalisation" && marked(def.bodies, "G49").length === 0);
-  const on = await runInMemory(cols, inbox, { template: "inboxes_v1", settings: ON });
+  const ownCols = order(own.inboxes.map((c) => ({ ...c })));
+  const on = await runInMemory(ownCols, inbox, { template: "inboxes_v1", settings: ON });
   const sent = marked(on.bodies, "G49");
   check("on for a client with its own variant: G#49 sends once, its examples as the instructions and its prompt as the input",
     sent.length === 1 && sent[0].instructions === g49.config.examples_text && sent[0].input === promptFor(g49, { company: COMPANY, claygent: on.values.claygent }) &&
@@ -365,14 +373,14 @@ async function partD() {
   check("... with G#48 asked before it (its summary is in the prompt)", marked(on.bodies, "G48").length === 1 && on.bodies.indexOf(marked(on.bodies, "G48")[0]) < on.bodies.indexOf(sent[0]));
 
   section("D2. Remembered by prompt and examples");
-  const later = await runInMemory(cols, inbox, { template: "inboxes_v1", settings: ON, force: false });
+  const later = await runInMemory(ownCols, inbox, { template: "inboxes_v1", settings: ON, force: false });
   check("a fresh row, not forced: G#49's answer is reused from the shared answers, nothing sent, the same question",
     marked(later.bodies, "G49").length + marked(later.bodies, "G48").length === 0 && /^Reused: found for CXTEST_A on /.test(later.cells.get("question_ai")?.note ?? "") &&
       later.values.question === on.values.question,
     JSON.stringify({ note: later.cells.get("question_ai")?.note, paid: later.paid }));
   const kept = await one(`SELECT count(*)::int AS n FROM enrich_memory WHERE kind = 'inbox_question_ai_v1' AND client_tag = $1`, [TAG]);
   check("one shared answer kept for G#49, under its setting's memory kind", kept.n === 1, JSON.stringify(kept));
-  const otherSet = compileTemplates(variantWith("inboxes:49", { definition: withExamples(defOf("inboxes:49"), [{ inputs: { "{{f_fxG12}}": "Another Made-up Shop" }, output: "Another made-up question?" }]) }));
+  const otherSet = compileTemplates(new Map([...variantWith("inboxes:49", { definition: withExamples(defOf("inboxes:49"), [{ inputs: { "{{f_fxG12}}": "Another Made-up Shop" }, output: "Another made-up question?" }]) })].map(([k, r]) => [k, { ...r, variant: VARIANT }])));
   const g49b = otherSet.inboxes.find((c) => c.key === "question_ai");
   const other = await runInMemory(order(otherSet.inboxes.map((c) => ({ ...c }))), inbox, { template: "inboxes_v1", settings: ON, force: false });
   const otherSent = marked(other.bodies, "G49");
@@ -382,12 +390,13 @@ async function partD() {
     JSON.stringify({ sent: otherSent.length, paid: other.paid }));
 
   section("D3. P#61 on People rows: an AI Ark row sends it, an upload row never");
-  const p62 = compiled.people.find((c) => c.key === "question");
+  const p62 = own.people.find((c) => c.key === "question");
+  const p61Own = own.people.find((c) => c.key === "question_ai");
   const reads = [...new Set([p61.run_if, ...Object.values(p61.inputs)].flatMap((t) => [...refs(t)]))];
   check("P#61's run condition carries the upload gate (found_by)", reads.includes("found_by") && p61.run_if.includes(`{{found_by}} !== "${UPLOAD_FOUND_BY}"`), p61.run_if);
   // Everything P#61 reads, given as input cells: only its own run condition decides.
   const standIns = reads.map((key) => ({ key, name: key, kind: "input", action: null, phase: 1, inputs: {}, config: {} }));
-  const pcols = order([...standIns, { ...p61 }, { ...p62 }]);
+  const pcols = order([...standIns, { ...p61Own }, { ...p62 }]);
   const PQ = "Would a made-up people question help?";
   net.openai.set(`P61|${COMPANY}`, { response: PQ });
   const person = (foundBy) => ({

@@ -10,7 +10,9 @@
 // formulas, the changes and the REFS: no prompt and no list.
 //
 // Order of work (the engine follows the dependencies): the office and the
-// client's rules (phase 1), the brand check C#16 and the Master Filter C#17,
+// client's rules (phase 1), the brand check C#16, the inclusion keyword
+// filter C#69 (an extension column, compiled only when the originals hold it)
+// and the Master Filter C#17,
 // the database check (held inbox, never contact, named people held: C#13 SAFE
 // TO RUN), the website chain C#24 to C#29, the first general email (C#30's
 // place: a held inbox, else AI Ark's email once Reoon approves it by G#40's
@@ -18,7 +20,7 @@
 // table), then the people side (people_at_company; with the AI searches on, C#41,
 // C#48, C#50, C#56 and their write-tos).
 
-import { compileColumn, instanceMap, refMap } from "./compile-original.mjs";
+import { compileColumn, instanceMap, parseFrom, refMap } from "./compile-original.mjs";
 import { ORIGINAL_KEYS } from "./original-keys.mjs";
 import { INBOX_INPUT_KEYS } from "./inbox-template.mjs";
 import { PEOPLE_INPUT_KEYS, PEOPLE_REFS, PEOPLE_WRITERS, PEOPLE_WRITTEN_KEYS, writtenKey } from "./people-template.mjs";
@@ -133,6 +135,7 @@ export const COMPANY_COLUMNS_V2 = Object.freeze([
   { key: "category", from: "C#64", kind: "formula" },
   { key: "sub_category", from: "C#65", kind: "formula" },
   { key: "exclusion_large_company_check", from: "C#16", kind: "formula" },
+  { key: "inclusion_keywords_filter", from: "C#69", kind: "formula", optional: true, note: "Clay's inclusion keyword list (the template client's, compiled verbatim): Master Filter (C#17) reads it. Compiled only when the originals hold it." },
   { key: "master_filter", from: "C#17", kind: "formula" },
   { key: "passes_filters", from: "T#23", change: true, kind: "formula", formula: "{{master_filter}} === true" },
   { key: "held_email", from: "T#24", kind: "action", action: "held_general_email" },
@@ -403,6 +406,10 @@ export function companyColumnsV2(originals) {
     rows.push(compileColumn({ key, kind: "input", name: p.name, data_type: p.data_type ?? "text", description: p.description, hidden: p.hidden, provider: p.provider }, originals, { own }));
   }
   for (const spec of COMPANY_COLUMNS_V2) {
+    // An extension column (C#69) only when the variant holds its original: the 11-14 layout and every exact-layout
+    // variant don't, and their C#17 does not read it.
+    const at = parseFrom(spec.from);
+    if (spec.optional && at && !originals.has(`${at.kind}:${at.position}`)) continue;
     if (String(spec.from ?? "").startsWith("T#")) {
       const p = PHASE1[spec.key];
       if (!p) throw new Error(`No phase 1 column ${spec.key}`);
