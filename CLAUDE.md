@@ -2434,8 +2434,9 @@ Phase 1 of the Clay section restart: for any client tag, companies come from AI 
 Company Search into that client's template Companies table on the Clay tab, are
 enriched there, and the Companies tab lists only those with a usable email. Since
 migration 125 the steps are the original Clay columns (see "Pipeline v2" below).
-Nothing in it writes `leads`, Email Bison or a campaign: phase 3 adds that, behind
-fit scoring. Seeded **off** (`enrich_settings.company_pipeline.enabled = false`,
+Nothing in it writes `leads`, Email Bison or a campaign: phase 3's promotion adds the
+approved emails to `leads`, behind its own switch (no fit score needed since
+2026-11-20; see "Fit scoring"). Seeded **off** (`enrich_settings.company_pipeline.enabled = false`,
 `tags: []`).
 
 - **Tables (124):** `aiark_company_runs` (one row per pull, worked a slice at a time,
@@ -2700,10 +2701,11 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   missing, a v1 table, the balance under `min_balance`, or no eligible company),
   `POST /api/companies/people/runs/buy` and `/cancel` `{ id }`, `GET
   /api/companies/people/runs/candidates?id=&after=` (keyset, pages of 100). The
-  settings sheet (admin) edits every switch with its client list, the people and
-  personalisation blocks, the twelve model settings with their most searches,
-  `inboxes_per_company`, `min_balance` and the spend caps; what it doesn't show
-  (memory days, prices, `fit_score`) is kept as stored.
+  settings sheet (admin) edits every switch with its client list (promotion into
+  leads among them since 2026-11-20), the people and personalisation blocks, the
+  twelve model settings with their most searches, `inboxes_per_company`,
+  `min_balance` and the spend caps; what it doesn't show (memory days, prices,
+  `fit_score`, promotion's other keys) is kept as stored.
 - **Keys and environment (the enrich-worker):** `DATABASE_URL`; `OPENAI_API_KEY` (every AI
   step and the fit scorer; best from the worker's own OpenAI project with a monthly
   budget, since other services use the same variable name); `ENRICH_REOON_API_KEY` and
@@ -2754,6 +2756,11 @@ list (scoring has no list: it scores companies, not clients). With the gate off,
 push, count and export is exactly as before (127 proves
 it for every client when it is applied; `test-fit.mjs` counts before and after).
 
+**Fit scoring is kept for v2 (2026-11-20).** Clay had no fit score, so going live does
+not wait for one: the rule, the scorer, the gate and their settings stay built and
+switched off, and promotion no longer asks for any of them (no rule, model, gate or
+score; `promotion.min_fit_score` is kept as stored and not read).
+
 - **Tables (126):** `company_fit` (one score per company under its key: `domain`, its bare
   domain, never a free-mail, platform or directory domain, `fit_domain_exclusions`; else
   `name`, `lower(company)|lower(city)|STATE`), with its status (`scored`, `unscorable`,
@@ -2795,9 +2802,13 @@ it for every client when it is applied; `test-fit.mjs` counts before and after).
   the shared score in the Clay section ("N of 5", "Could not be scored", "Likely a home
   office"); before 126 is applied they stay empty.
 - **Promotion** (`scripts/lib/enrich/promote.mjs`, `src/lib/companies/promote-run.ts`;
-  switch `promotion.promote_to_leads` with `promotion.tags`): approved, usable, unheld
-  contacts of listed companies scored at least `promotion.min_fit_score` (2) and blocked
-  under no key, for a client the gate covers, with the rule and model set. A person needs
+  switch `promotion.promote_to_leads` with `promotion.tags`, set on the Companies tab's
+  settings sheet like the other pipeline switches: admin, versioned, in the audit log):
+  approved, usable, unheld contacts of listed companies blocked under no key. No fit score
+  is needed: a company with no score is taken, and only one already scored under the
+  gate's threshold (by the scorer or by hand), or found unscorable, is blocked (none while
+  scoring is off and nobody scores by hand). The gate need not cover the client, and the
+  rule and model need not be set. A person needs
   the outcome "Approved email" and no "*" in the name (a Preview's masked last name); an
   inbox's first name must not hold "undefined". Only addresses Reoon itself approved are
   promoted (`validation_status = 'valid'`): one approved only by Enrichley, or found by a
@@ -2809,7 +2820,8 @@ it for every client when it is applied; `test-fit.mjs` counts before and after).
   round per client at a time. Started by a manager (`POST /api/companies/promote`) or by
   the worker (`POST /api/companies/promote/auto` with Bearer `AIARK_AUTO_ADD_KEY`; checked
   every minute, at most one round per client every 10 minutes; the path skips the session
-  middleware).
+  middleware). When the company has a score, the lead's keys become aliases of it; a
+  company with none gets no key, score or alias from promotion.
   Promotion never takes an upload row (130): `projectContact()` writes no contact for
   one, and its found email goes to leads through the upload's own import instead (see
   "Upload no-email rows (migration 130)").
@@ -2853,13 +2865,16 @@ it for every client when it is applied; `test-fit.mjs` counts before and after).
   `GET`, `PUT /api/fit/settings` (admin: the rule and its version, the scoring switch,
   batch size, model; the only writer of `fit_rule`); `GET`, `PUT /api/fit/gate` (admin:
   logged, marks the refresh pending); `POST /api/fit/score` (admin: a manual score); the
-  scoring run, review, promote and release routes above. The fit panel sits on the
-  Companies tab and on `/leads/companies/review?client=TAG`; the push batches panel shows
-  "N of M companies scored" and Release for a push waiting in `scoring`.
+  scoring run, review, promote and release routes above. Promotion's switch and client
+  list are saved through `PUT /api/companies/settings` (the settings sheet). The fit
+  panel sits on the Companies tab and on `/leads/companies/review?client=TAG`, and shows
+  promotion's counts and Promote now; the push batches panel shows "N of M companies
+  scored" and Release for a push waiting in `scoring`.
 - **Settings (126):** `fit_rule` `{ prompt, version }` (null), `fit_scoring` `{ enabled,
   batch_size, calls_in_flight }`, `models.fit_score` `{ model: "gpt-6-luna",
   reasoning_effort: "low" }`, `promotion` `{ promote_to_leads, tags, min_fit_score,
-  batch_max, require_question, source_label }`, `fit_gate` `{ enabled, tags, threshold,
+  batch_max, require_question, source_label }` (the sheet edits only the switch and its
+  tags; `min_fit_score` is not read since 2026-11-20), `fit_gate` `{ enabled, tags, threshold,
   client_types, require_scored }`, `fit_gate_refresh` `{ pending, since }`, and the fit cap
   in `spend_caps`. The tool stand-ins in `tool-standins.mjs` (company name and phone
   number, for Clay's built-in tools in G#14, G#35, P#18 and P#29) are not used by any
@@ -2870,12 +2885,15 @@ it for every client when it is applied; `test-fit.mjs` counts before and after).
   Bison and Google's DNS answer from stubs, the removal worker and the re-push script run
   as child processes with a Bison stub. The rule exists only in memory; the suite checks
   that with every switch off the counts, eligibility (against 093's body), exports
-  (against 050's), pushes and the AI Ark tab's auto-add list do not move.
+  (against 050's), pushes and the AI Ark tab's auto-add list do not move. Promotion is
+  switched on through the settings sheet's route and runs with no rule, no model, the
+  gate off and `min_fit_score` 5; every row a sheet save writes is put back at the end.
 - ⚠ **Rollout order:** 125, then 126, then 127 (run 127's read-only body check first),
   then the web push and the worker upload (its heartbeat must list `fit_scoring`). Put a
   client on `fit_gate.tags` only once the rule is set and scoring is on: until its
   companies are scored, its pushes wait in `scoring`. The gate covers a client before any
-  removal or promotion for it, so a removed bad fit can't be pushed straight back.
+  removal for it, so a removed bad fit can't be pushed straight back. Promotion does not
+  wait for the gate (since 2026-11-20).
 
 ### LinkedIn sources (migration 128)
 
