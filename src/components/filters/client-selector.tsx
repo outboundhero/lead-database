@@ -40,7 +40,7 @@ export function ClientSelector({
   onChange: (tag: string | null) => void;
   /** Fired only on a NEW selection — this is what applies the client's targeting. */
   onSelected?: (tag: string) => void;
-  /** Lets the page reuse this fetch instead of making its own. */
+  /** Lets the page reuse the list instead of fetching its own: called whenever a new list arrives, the cached one included. */
   onRosterLoaded?: (roster: ClientRosterEntry[]) => void;
 }) {
   const { clients, refresh } = useClientRoster();
