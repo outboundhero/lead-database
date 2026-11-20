@@ -36,6 +36,7 @@
     "@supabase/ssr": "^0.9.0",
     "@supabase/supabase-js": "^2.99.1",
     "@tanstack/react-table": "^8.21.3",
+    "awesome-phonenumber": "7.8.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "csv-parse": "^6.2.1",

@@ -12,10 +12,12 @@
 //   held_people         free   named usable leads already held at the company (D11, D28)
 //   absent_key          free   a step whose key is not held: skipped, read as empty
 //   waiting             free   a step waiting for the original (D38): never run
-//   clay_normalize_company_name, clay_extract_email_components
+//   clay_normalize_company_name, clay_extract_email_components,
+//   clay_normalize_phone_number
 //                       free   our exact copies of Clay's normalize-company-name
-//                              (G#14, P#29) and extract-email-components (G#16),
-//                              from clay-tools.mjs
+//                              (G#14, P#29), extract-email-components (G#16)
+//                              and normalize-phone-number (G#35, P#18), from
+//                              clay-tools.mjs
 //   the keyed steps     paid   the email finders (P#46 to P#54) and Enrichley (G#41,
 //                              P#13, P#49, P#54), each run only while its key is on
 //                              the worker, and within its vendor's daily calls
@@ -620,5 +622,5 @@ export const PIPELINE_ACTIONS = {
   enrichley_verify_email: { run: keyed("enrichley_verify_email", enrichleyVerify), cache: true },
   findymail_find_work_email_from_linkedin: { run: keyed("findymail_find_work_email_from_linkedin", findymailByLinkedin), cache: true },
   prospeo_linkedin_email_search: { run: keyed("prospeo_linkedin_email_search", prospeoByLinkedin), cache: true },
-  ...CLAY_TOOL_ACTIONS, // clay_normalize_company_name, clay_extract_email_components (clay-tools.mjs): free, local
+  ...CLAY_TOOL_ACTIONS, // clay_normalize_company_name, clay_extract_email_components, clay_normalize_phone_number (clay-tools.mjs): free, local
 };
