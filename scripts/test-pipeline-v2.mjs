@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // End-to-end checks for the pipeline's templates on the made-up originals
-// (design 8.2): company rows, their General inboxes rows and People rows,
+// (design 8.2): company rows, their General rows and People rows,
 // worked as the enrichment worker works them, with OpenAI, Reoon, Google's
 // DNS, the email finders, Enrichley and the websites answering from stubs.
 // LOCAL DATABASE ONLY: made-up clients (tags starting PVTEST_), their tables,

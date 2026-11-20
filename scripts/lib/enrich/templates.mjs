@@ -1,5 +1,5 @@
 // A client's three pipeline template tables on the Clay tab: Companies
-// (companies_v2), General inboxes (inboxes_v1) and People (people_v1), each
+// (companies_v2), General (inboxes_v1) and People (people_v1), each
 // one enrich_tables row per client (unique on client_tag, kind, template),
 // with columns compiled from the Clay originals in enrich_originals.
 //

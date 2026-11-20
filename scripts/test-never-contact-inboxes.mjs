@@ -142,7 +142,7 @@ async function partS() {
   const e = await readFilter(pool, { variant: "nctest_e" });
   check("a filter with a group, or an empty part, is refused by the shape check", d.pattern === null && /shape/.test(d.why) && e.pattern === null && /shape/.test(e.why), `${d.why} | ${e.why}`);
   check("no run condition with a filter, or no such variant, is not loaded",
-    (await readFilter(pool, { variant: "nctest_f" })).pattern === null && /no General inboxes columns/.test((await readFilter(pool, { variant: "nctest_zz" })).why));
+    (await readFilter(pool, { variant: "nctest_f" })).pattern === null && /no General table columns/.test((await readFilter(pool, { variant: "nctest_zz" })).why));
   check("the shape check is the settings' own (a wrong sha reads as not loaded)",
     inboxPatternOf({ pattern: P, sha256: sha(P) }) === P && inboxPatternOf({ pattern: P, sha256: sha(Q) }) === null);
 

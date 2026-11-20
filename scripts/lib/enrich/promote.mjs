@@ -5,7 +5,7 @@
 // imports the rest through the Uploads page's engine (strategy skip, never
 // merged) as one upload batch; finishPromote() settles each one.
 //
-// A contact (enrich_contacts: a General inboxes row or a People row) may be
+// A contact (enrich_contacts: a General row or a People row) may be
 // promoted only when, in the query that takes it:
 //   - the switch is on and the client on promotion.tags, the gate covers the
 //     client (fn_fit_gate_applies, so a promoted lead can never be pushed past

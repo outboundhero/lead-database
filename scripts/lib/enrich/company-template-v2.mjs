@@ -14,8 +14,8 @@
 // the database check (held inbox, never contact, named people held: C#13 SAFE
 // TO RUN), the website chain C#24 to C#29, the first general email (C#30's
 // place: a held inbox, else AI Ark's email once Reoon approves it by G#40's
-// rule), C#31 then C#32, C#34 and C#36 (each address its own General inboxes
-// row), then the people side (people_at_company; with the AI searches on, C#41,
+// rule), C#31 then C#32, C#34 and C#36 (each address its own row of the General
+// table), then the people side (people_at_company; with the AI searches on, C#41,
 // C#48, C#50, C#56 and their write-tos).
 
 import { compileColumn, instanceMap, refMap } from "./compile-original.mjs";
@@ -62,7 +62,7 @@ export const COMPANY_ABSENT_KEYS = Object.freeze([
 
 /**
  * G#38, G#39 and G#40 compiled a second time onto the company row, to check
- * AI Ark's head-office email (D8): their own references (General inboxes
+ * AI Ark's head-office email (D8): their own references (General table
  * positions) read these company keys.
  */
 export const AIARK_EMAIL_INSTANCE_REFS = Object.freeze({
@@ -162,7 +162,7 @@ export const COMPANY_COLUMNS_V2 = Object.freeze([
   { key: "email_extraction_claygent", from: "C#31", kind: "action", action: "ai_web", model_setting: "email_extraction_claygent", tool: "web_search" },
   { key: "email_extraction_claygent_2", from: "C#32", kind: "action", action: "ai_web", model_setting: "email_extraction_claygent_2", tool: "web_search" },
   { key: "extract_urls_and_emails_from_text", from: "C#34", change: true, kind: "action", action: "find_emails_in_text", note: "A named stand-in for Clay's tool (D38): emails only, each tagged with where it was found." },
-  { key: "general_email_write_to", from: "C#36", kind: "action", action: "write_to_table", note: "Each address its own General inboxes row, mapping verbatim, at most company_pipeline.inboxes_per_company." },
+  { key: "general_email_write_to", from: "C#36", kind: "action", action: "write_to_table", note: "Each address its own row of the General table, mapping verbatim, at most company_pipeline.inboxes_per_company." },
   {
     key: "people_at_company", from: null, kind: "action", action: "people_at_company", flag: PEOPLE,
     run_if: "{{passes_filters}} && !{{never_contact}}",

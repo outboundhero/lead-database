@@ -1,6 +1,6 @@
 // Our key for every column of the three original Clay tables, by
 // position (C#n, P#n, G#n: the column at position n of the Companies, People
-// or General inboxes table, as the Clay CLI exports them: data[n - 1]).
+// or General table, as the Clay CLI exports them: data[n - 1]).
 //
 // The keys are the older hand-seeded copy's (scripts/enrich-seed-table.mjs),
 // and for the 12 columns that copy left out, the keys its formulas use. The

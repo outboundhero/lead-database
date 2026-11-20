@@ -1,7 +1,7 @@
-// The General inboxes template (enrich_tables.template = 'inboxes_v1',
-// "General inboxes (pipeline)"): one row per general address the company row's
+// The General template (enrich_tables.template = 'inboxes_v1',
+// "General (pipeline)"): one row per general address the company row's
 // C#36 wrote, as in Clay, compiled from the original Clay General
-// inboxes table (G#n) in enrich_originals (2A.3).
+// table (G#n) in enrich_originals (2A.3).
 //
 // This public file holds keys, which original each column comes from, our own
 // formulas and the REFS: no prompt and no list.
@@ -18,7 +18,7 @@
 import { compileColumn, refMap } from "./compile-original.mjs";
 
 export const INBOX_TEMPLATE = "inboxes_v1";
-export const INBOX_TABLE_NAME = "General inboxes (pipeline)";
+export const INBOX_TABLE_NAME = "General (pipeline)";
 
 /** found_in: where C#34 found the address. */
 export const INBOX_FOUND_IN = Object.freeze(["database", "aiark", "claygent_1", "claygent_2"]);
@@ -146,7 +146,7 @@ const OURS = {
 };
 
 /**
- * The General inboxes template's enrich_columns rows, compiled from a
+ * The General template's enrich_columns rows, compiled from a
  * variant's originals: INBOX_INPUTS as input columns, then INBOX_COLUMNS
  * through compileColumn() with INBOX_REFS, and inbox_outcome from
  * INBOX_OUTCOME_FORMULA.

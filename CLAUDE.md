@@ -2576,7 +2576,7 @@ the Clay CLI's exports, instead of steps of our own. Every paid or send switch
 ships **off** and covers no client until its tag is on the switch's list (D46).
 
 - **The originals** (`enrich_originals`): the three Clay tables exactly as the Clay
-  CLI exported them (Companies 68 columns, People 88, General inboxes 76). They hold
+  CLI exported them (Companies 68 columns, People 88, General 76). They hold
   client text (prompts, lists, examples), so they live in the database only and the
   export files stay out of git. Load them with
   `node scripts/enrich-seed-originals.mjs --companies <file> --people <file> --inboxes <file> [--variant default] [--tracks <file>] [--dry]`.
@@ -2588,7 +2588,7 @@ ships **off** and covers no client until its tag is on the switch's list (D46).
   and never changes a setting. A client's own exports load as its variant (its tag in
   lower case, `variantName()`); every other client compiles from `default`.
 - **The tables** (`ensurePipelineTables()`, `templates.mjs`, run inside the pull route's
-  transaction): "Companies (pipeline)" (`companies_v2`), "General inboxes (pipeline)"
+  transaction): "Companies (pipeline)" (`companies_v2`), "General (pipeline)"
   (`inboxes_v1`, one row per general address the company row wrote) and "People
   (pipeline)" (`people_v1`). `compile-original.mjs` rewrites each `{{f_<id>}}` to the
   template's keys (`ORIGINAL_KEYS` with the template's `REFS`) and applies the
@@ -3041,7 +3041,7 @@ owner on 2026-11-18. Nothing changed in the scraper app (gmaps-UI) or the extern
 scraper: a URL is pasted on the client's card there like a Clay URL.
 
 - **The URLs** (`enrich_inbound_urls`, server-only: RLS on, no policy): one live URL per
-  client and target (`companies` only; People and General inboxes get one when
+  client and target (`companies` only; People and General get one when
   something sends to them). The token is 32 random bytes made on the server
   (`makeToken()`, base64url, 43 characters), kept in plain text as `api_tokens` are, so
   the Clay tab can show the URL again. The full URL is `NEXT_PUBLIC_SITE_URL` +
@@ -4025,7 +4025,7 @@ everything ships off.
 
 ## Never-contact general inboxes (migration 136, 2026-11-20)
 
-The client's Clay General inboxes table runs its paid and sending steps only for
+The client's Clay General table runs its paid and sending steps only for
 inboxes its exclusion filter does not match (legal, complaints, no-reply and the
 like). The client wants those inboxes never contacted and not counted as good leads.
 The filter is the client's own text: it lives only in the database (`enrich_originals`,
@@ -4047,8 +4047,8 @@ filter loaded.
 - **Scope.** Only `email_type = 'general'` leads are ever looked at: the filter also
   matches law-firm domains, so a personal address is never touched.
 - **Seed:** `node scripts/never-contact-inboxes.mjs --seed [--variant v]` (default
-  variant `default`) takes the `!/<re>/i.test(...)` filter that most General inboxes
-  run conditions share. It must contain `customerservice@`; a tie or none is "not
+  variant `default`) takes the `!/<re>/i.test(...)` filter that most of the General
+  table's run conditions share. It must contain `customerservice@`; a tie or none is "not
   loaded". It stores pattern, source, sha256 and read_at, prints the source, the
   number of parts and the first 12 characters of the sha, never the filter, and
   leaves the switch and the pace alone. Reading a different filter stops any apply

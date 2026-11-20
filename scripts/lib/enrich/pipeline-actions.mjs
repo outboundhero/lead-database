@@ -331,7 +331,7 @@ const WRITE_ROWS = `
 
 /**
  * Writes the row(s) the original's mapping describes into the client's
- * General inboxes or People table: a target input as itself, a D30 People
+ * General or People table: a target input as itself, a D30 People
  * column as written_<key> (config.cells, worked out at compile time). Each row
  * is upserted on (table_id, row_key) with a write_to source and queued; a
  * repeat writes nothing new. At most company_pipeline.inboxes_per_company

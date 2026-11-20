@@ -1,5 +1,5 @@
 // The Companies tab's contacts (enrich_contacts, migration 125): one summary
-// per row of a client's General inboxes (pipeline) and People (pipeline)
+// per row of a client's General (pipeline) and People (pipeline)
 // tables, written by the worker when the row finishes, fenced on the row's
 // claim token, and the listing of the company they belong to (2A.8).
 //

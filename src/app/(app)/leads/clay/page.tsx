@@ -56,7 +56,7 @@ import type { AddState } from "@/lib/aiark/types";
 const KIND_TABS: { kind: EnrichTableSummary["kind"]; label: string }[] = [
   { kind: "companies", label: "Companies" },
   { kind: "people", label: "People" },
-  { kind: "inboxes", label: "General inboxes" },
+  { kind: "inboxes", label: "General" },
   { kind: "ai_ark", label: "AI Ark runs" },
 ];
 
@@ -163,7 +163,7 @@ const EMPTY_NOTE: Record<EnrichTableSummary["kind"], (tag: string) => string> = 
   people: () =>
     "A copy of the client's own Clay People table, for reading its columns. The pipeline writes people into the client's People (pipeline) table, made by its first pull or people run on the Companies tab.",
   inboxes: () =>
-    "A copy of the client's own Clay General inboxes table, for reading its columns. The pipeline writes general inboxes into the client's General inboxes (pipeline) table, made by its first pull on the Companies tab.",
+    "A copy of the client's own Clay General table, for reading its columns. The pipeline writes general inboxes into the client's General (pipeline) table, made by its first pull on the Companies tab.",
   ai_ark: () =>
     "People appear here as the run pulls them from AI Ark, and each one's outcome is worked out as they land. A queued run starts as soon as the enrichment worker picks it up.",
 };
@@ -238,7 +238,7 @@ function ClayTab() {
     () => (tables ?? []).filter((t) => t.kind === "ai_ark" && t.client_tag === table?.client_tag),
     [tables, table?.client_tag]
   );
-  // The client's tables of the open kind (Companies, People or General inboxes): its pipeline table
+  // The client's tables of the open kind (Companies, People or General): its pipeline table
   // first, then a hand-seeded copy (the route's order).
   const kindTables = useMemo(
     () => (tables ?? []).filter((t) => t.kind !== "ai_ark" && t.kind === table?.kind && t.client_tag === table?.client_tag),

@@ -641,7 +641,7 @@ async function partB(routes) {
   const table = await one(`SELECT kind, template, name FROM enrich_tables WHERE id = $1`, [run1?.table_id]);
   const sources = await all(`SELECT kind, meta->>'run_id' AS run FROM enrich_sources WHERE table_id = $1 ORDER BY kind`, [run1?.table_id]);
   const three = await all(`SELECT kind, template, name FROM enrich_tables WHERE client_tag = $1 ORDER BY kind`, [A]);
-  check("its table is the client's Companies template table (companies_v2), made with its General inboxes and People tables",
+  check("its table is the client's Companies template table (companies_v2), made with its General and People tables",
     table?.kind === "companies" && table.template === "companies_v2" && table.name === "Companies (pipeline)" && three.map((x) => x.template).join() === "companies_v2,inboxes_v1,people_v1", JSON.stringify(three));
   check("a source for what it buys and one for what it copies free", sources.map((s) => `${s.kind}:${s.run === run1?.id}`).join() === "ai_ark:true,registry:true", JSON.stringify(sources));
   check("a second pull while one is going: 409", (await call(runs.POST, { body: pullBody() })).status === 409);
@@ -1374,7 +1374,7 @@ async function partE(routes, c) {
   section("E3. The Clay section's table list");
   const listed = await call(tables.GET);
   const ours = (listed.body?.tables ?? []).filter((x) => x.client_tag === J);
-  check("the client's Companies template table comes before its hand-seeded one, then its People and General inboxes tables, each once",
+  check("the client's Companies template table comes before its hand-seeded one, then its People and General tables, each once",
     listed.status === 200 && ours.length === 4 && ours[0].id === tJ && ours[0].template === "companies_v2" && ours[1].id === hand.id && ours[1].template === null &&
       ours[2].template === "people_v1" && ours[3].template === "inboxes_v1" && (listed.body.tables ?? []).filter((x) => x.id === tG).length === 1,
     JSON.stringify(ours.map((x) => x.template)));

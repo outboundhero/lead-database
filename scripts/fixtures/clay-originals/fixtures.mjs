@@ -265,7 +265,7 @@ function companies() {
   return t.done();
 }
 
-// ── General inboxes (76) ────────────────────────────────────────────────────
+// ── General (76) ────────────────────────────────────────────────────────────
 
 function inboxes() {
   const t = table("inboxes");

@@ -93,7 +93,7 @@ const brakeReason = (run, used) =>
 // ── The client's template table ─────────────────────────────────────────────
 
 /**
- * The client's Companies (pipeline) table, with its General inboxes and People
+ * The client's Companies (pipeline) table, with its General and People
  * tables, made on its first pull and brought up to date on every pull: their
  * columns are compiled from the client's variant of the Clay originals
  * (ensurePipelineTables, templates.mjs). Refuses a client that still has a

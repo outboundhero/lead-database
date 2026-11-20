@@ -404,7 +404,7 @@ async function partM(h) {
     w.cell("companys_website")?.status === "skipped" && w.values.use_domain === dom("north") && net.asked.some((x) => x.marker === "C31" && x.who === north.title),
     JSON.stringify({ c24: w.cell("companys_website")?.status, domain: w.values.use_domain }));
   const inboxes = await all(`SELECT id FROM enrich_rows WHERE table_id = $1 AND starts_with(row_key, $2) ORDER BY id`, [tables[HA].inboxes, `w:${northId}:`]);
-  check("... and C#36 writes its two addresses as General inboxes rows", inboxes.length === 2, `${inboxes.length} rows`);
+  check("... and C#36 writes its two addresses as rows of the General table", inboxes.length === 2, `${inboxes.length} rows`);
   const summary = await one(`SELECT source, aiark_id, company, domain, city, state FROM enrich_companies WHERE row_id = $1`, [northId]);
   check("the Companies tab's summary says Google Maps, with the place's name, domain, city and state",
     summary?.source === "Google Maps" && summary.aiark_id === null && summary.company === north.title && summary.domain === dom("north") &&

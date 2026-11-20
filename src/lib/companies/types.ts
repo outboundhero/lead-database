@@ -68,7 +68,7 @@ export type ModelStep =
   | "inbox_question_ai";
 
 /** tool: "web" for the Claygent steps (they get the web search tool and a cap on tool calls), "none" for the plain AI steps. */
-export const MODEL_STEPS: { key: ModelStep; label: string; hint: string; tool: "web" | "none"; table: "Companies" | "People" | "General inboxes" }[] = [
+export const MODEL_STEPS: { key: ModelStep; label: string; hint: string; tool: "web" | "none"; table: "Companies" | "People" | "General" }[] = [
   { key: "companys_website", label: "Company's website", hint: "Finds the website when AI Ark gave no domain.", tool: "web", table: "Companies" },
   { key: "email_extraction_claygent", label: "Email search, first", hint: "Looks for the office's general emails on its website.", tool: "web", table: "Companies" },
   { key: "email_extraction_claygent_2", label: "Email search, second", hint: "Runs when the first search found nothing usable.", tool: "web", table: "Companies" },
@@ -79,8 +79,8 @@ export const MODEL_STEPS: { key: ModelStep; label: string; hint: string; tool: "
   { key: "current_employer", label: "Current employer", hint: "Reads a person's LinkedIn profile (LinkedIn profile reads switch).", tool: "web", table: "People" },
   { key: "people_claygent", label: "Personalisation research (people)", hint: "Personalisation switch.", tool: "web", table: "People" },
   { key: "people_question_ai", label: "Personalisation question (people)", hint: "Personalisation switch. No web search.", tool: "none", table: "People" },
-  { key: "inbox_claygent", label: "Personalisation research (inboxes)", hint: "Personalisation switch.", tool: "web", table: "General inboxes" },
-  { key: "inbox_question_ai", label: "Personalisation question (inboxes)", hint: "Personalisation switch. No web search.", tool: "none", table: "General inboxes" },
+  { key: "inbox_claygent", label: "Personalisation research (inboxes)", hint: "Personalisation switch.", tool: "web", table: "General" },
+  { key: "inbox_question_ai", label: "Personalisation question (inboxes)", hint: "Personalisation switch. No web search.", tool: "none", table: "General" },
 ];
 
 /**
@@ -324,7 +324,7 @@ export interface CompanyCounts {
   /** The client's Companies table on the Clay tab (made on its first pull). */
   tableId: string | null;
   tableRows: number;
-  /** The client's General inboxes and People tables (pipeline templates), when made. */
+  /** The client's General and People tables (pipeline templates), when made. */
   inboxTableId: string | null;
   peopleTableId: string | null;
   /**
@@ -335,7 +335,7 @@ export interface CompanyCounts {
   listed: { total: number; general: number; people: number; both: number; held: number };
   /** The people runs' people: looked at (candidates), held in the database, bought, and the People rows by verdict. */
   people: { looked: number; held: number; bought: number; approved: number; waiting: number; noEmail: number; rows: number };
-  /** The General inboxes rows by verdict. */
+  /** The General table's rows by verdict. */
   inboxes: { approved: number; waiting: number; rejected: number; rows: number };
   /** Every worked company, by outcome (enrich_companies.outcome). */
   outcomes: Record<string, number>;
@@ -440,7 +440,7 @@ export type Track = "operations" | "facility_office" | "ceo";
 export const TRACKS: Track[] = ["operations", "facility_office", "ceo"];
 export const TRACK_LABELS: Record<Track, string> = { operations: "Operations", facility_office: "Facility and office", ceo: "CEO or owner" };
 
-/** One General inboxes row or People row of a company, as the tab lists it. */
+/** One General row or People row of a company, as the tab lists it. */
 export interface Contact {
   row_id: number;
   table_id: string;

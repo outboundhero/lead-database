@@ -29,7 +29,7 @@
 // company) are the third kind of slice, taking their turn the same way. A
 // pull's companies land in the client's Companies (pipeline) table, whose
 // columns are the original Clay columns (companies_v2); its general emails
-// become rows of the client's General inboxes (pipeline) table, and its people
+// become rows of the client's General (pipeline) table, and its people
 // rows of People (pipeline). When a row finishes the worker writes its summary
 // for the Companies tab, fenced on the row's claim: a company row into
 // enrich_companies, an inbox or People row into enrich_contacts, then its

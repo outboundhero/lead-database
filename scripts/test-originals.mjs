@@ -351,7 +351,7 @@ async function partB(routes) {
   const counts = {};
   for (const x of tables) counts[x.kind] = await colsOf(x.id);
   check("three tables, named \"(pipeline)\", with their templates and the client's variant noted",
-    tables.length === 3 && tables.map((x) => `${x.kind}:${x.template}:${x.name}`).join("|") === "companies:companies_v2:Companies (pipeline)|inboxes:inboxes_v1:General inboxes (pipeline)|people:people_v1:People (pipeline)" &&
+    tables.length === 3 && tables.map((x) => `${x.kind}:${x.template}:${x.name}`).join("|") === "companies:companies_v2:Companies (pipeline)|inboxes:inboxes_v1:General (pipeline)|people:people_v1:People (pipeline)" &&
       tables.every((x) => x.source_note.includes(`(variant ${vA})`)) && first2.variant === vA,
     JSON.stringify(tables));
   check("their columns are the compiled templates, with clay_field_id set on the compiled ones",

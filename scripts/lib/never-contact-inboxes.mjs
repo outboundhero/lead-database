@@ -88,7 +88,7 @@ export function pickFilter(columns, { marker = FILTER_MARKER } = {}) {
     total++;
     for (const l of lits) counts.set(l, (counts.get(l) ?? 0) + 1);
   }
-  if (!counts.size) return { pattern: null, used: 0, total, why: "No General inboxes column's run condition holds a filter." };
+  if (!counts.size) return { pattern: null, used: 0, total, why: "No column of the General table holds a filter in its run condition." };
   const ranked = [...counts].sort((a, b) => b[1] - a[1]);
   const [top, n] = ranked[0];
   if (ranked.length > 1 && ranked[1][1] === n) {
@@ -120,7 +120,7 @@ export async function readFilter(db, { variant = "default", marker = FILTER_MARK
     [variant]
   );
   if (!rows.length) {
-    return { pattern: null, sha256: null, source: `${variant} inboxes`, used: 0, total: 0, why: `The Clay originals hold no General inboxes columns for ${variant}.` };
+    return { pattern: null, sha256: null, source: `${variant} inboxes`, used: 0, total: 0, why: `The Clay originals hold no General table columns for ${variant}.` };
   }
   const pick = pickFilter(rows, { marker });
   const source = `${variant} inboxes: ${pick.used} of ${pick.total} run conditions`;
