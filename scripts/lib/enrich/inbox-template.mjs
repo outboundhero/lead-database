@@ -18,7 +18,9 @@
 // G#14 and G#16 run our exact copies of Clay's normalize-company-name and
 // extract-email-components (clay-tools.mjs), with the originals' own inputs
 // and run conditions: G#15, G#17 and G#18 read them as in Clay, and G#19 runs
-// as an AI step on its own model setting (inbox_first_name_ai). G#35, Clay's
+// as an AI step on its own model setting (inbox_first_name_ai). A failure of
+// G#19 is read as empty by the steps after it (on_error "empty"), so G#20
+// gives "<Company> Team" and the row finishes, as in Clay. G#35, Clay's
 // normalize-phone-number, still waits (D38).
 
 import { compileColumn, refMap } from "./compile-original.mjs";
@@ -78,8 +80,11 @@ export const INBOX_COLUMNS = Object.freeze([
   { key: "identify_email_type_and_extract_company_domain_from_email", from: "G#16", kind: "action", action: "clay_extract_email_components", provider: "Clay tool (exact copy)", note: "Clay's extract-email-components, our exact copy (clay-tools.mjs). G#17 and G#18 read it." },
   { key: "username", from: "G#17", kind: "formula" },
   { key: "guessed_name", from: "G#18", kind: "formula" },
-  { key: "first_name_ai", from: "G#19", kind: "action", action: "ai_web", model_setting: "inbox_first_name_ai", tool: "none", note: "Clay's First Name AI; its table examples go with every request. G#20's first step reads it." },
-  { key: "use_first_name", from: "G#20", kind: "waterfall", note: "Falls to its second step, \"<Company> Team\", when G#19 gives no usable first name." },
+  {
+    key: "first_name_ai", from: "G#19", kind: "action", action: "ai_web", model_setting: "inbox_first_name_ai", tool: "none", on_error: "empty",
+    note: "Clay's First Name AI; its table examples go with every request. G#20's first step reads it. When it fails, the steps after it read it as empty, so G#20 falls to \"<Company> Team\", as in Clay.",
+  },
+  { key: "use_first_name", from: "G#20", kind: "waterfall", note: "Falls to its last step, \"<Company> Team\", when G#19 gives no usable first name or fails (read as empty, as in Clay)." },
   { key: "use_last_name", from: "G#21", kind: "formula" },
   { key: "use_city", from: "G#23", kind: "formula" },
   { key: "use_state", from: "G#25", kind: "waterfall" },

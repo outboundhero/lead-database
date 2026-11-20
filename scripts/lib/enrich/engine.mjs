@@ -21,11 +21,17 @@
 // key makes its own cell wait, so a paid step never runs on a guess (with the
 // Reoon key missing, the second email search must not read "nothing usable"
 // and pay). Other tables keep their rule: only formulas react, to errors.
+// A column with config.on_error "empty" (G#19) is the exception, as in Clay:
+// its cell still shows the error, the steps after it read it as empty, and it
+// is not counted as a failed cell (a failure that may pass still has the row
+// tried again).
 //
 // Switches (pipeline templates): a column with config.flag (a list of
 // switches, settings.mjs FLAGS) runs only while every one of them is on for
 // the table's client (flagOn). Otherwise it is skipped, noted "Switched off:
-// <switch>", and read as empty.
+// <switch>", and read as empty. The personalisation switch reads the variant
+// whose text the column runs (config.text_variant, compile-original.mjs) when
+// the column has one, else the table's variant.
 //
 // Keyed steps (pipeline templates): a column with config.key_env runs only
 // while that key is on the worker. Without it the cell is skipped, noted
@@ -57,6 +63,8 @@ import { absentKeyNote } from "./pipeline-actions.mjs";
 import { flagOn, SETTINGS_DEFAULTS, settingsFrom } from "./settings.mjs";
 
 const DISPLAY_MAX = 300;
+/** The note suffix of a failed on_error "empty" cell (G#19): the steps after it read it as empty, as in Clay. */
+export const READ_AS_EMPTY = " (read as empty, as in Clay: the steps after it go on)";
 const msg = (e) => String(e?.message ?? e).slice(0, 300);
 const text = (v) => (v == null ? "" : String(v).trim());
 
@@ -144,10 +152,13 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {}, 
   /** The first switch on a column that is off for this client, or null. An unknown switch counts as off. */
   const switchedOff = (col) => {
     const flags = Array.isArray(col.config?.flag) ? col.config.flag : [];
+    // A personalisation step runs the text of the variant it was compiled from (an overlay's kind on the default's
+    // text reads "default"); a column compiled before text_variant existed reads the table's variant, as before.
+    const variant = flags.includes("personalisation") && typeof col.config?.text_variant === "string" ? col.config.text_variant : table?.variant;
     for (const f of flags) {
       let on = false;
       try {
-        on = flagOn(config, f, table?.client_tag, { variant: table?.variant });
+        on = flagOn(config, f, table?.client_tag, { variant });
       } catch {
         on = false;
       }
@@ -189,17 +200,20 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {}, 
         : null;
 
   const put = (col, next) => {
+    // As in Clay, a failure of an on_error "empty" column (G#19) is read as empty by the steps after it.
+    const readAsEmpty = next.status === "error" && col.config?.on_error === "empty";
+    const note = next.note ? String(next.note) : null;
     const cell = {
       status: next.status,
       value: isEmpty(next.value) ? null : next.value,
       display: next.display !== undefined ? (next.display == null ? null : String(next.display).slice(0, DISPLAY_MAX)) : displayOf(next.value),
-      note: next.note ? String(next.note).slice(0, 1000) : null,
+      note: readAsEmpty ? `${(note ?? "Failed").slice(0, 1000 - READ_AS_EMPTY.length)}${READ_AS_EMPTY}` : note ? note.slice(0, 1000) : null,
       input_hash: next.input_hash ?? null,
       runs: next.runs ?? 0,
     };
     // Downstream formulas see a value only when the cell has one.
     values[col.key] = cell.status === "done" && !isEmpty(cell.value) ? cell.value : undefined;
-    if (cell.status === "error") {
+    if (cell.status === "error" && !readAsEmpty) {
       summary.errors++;
       failed.add(col.key);
     }
