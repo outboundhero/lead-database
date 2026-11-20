@@ -65,7 +65,7 @@ const COLUMNS = [
     key: "rule_match", name: "Client exclusions", kind: "action", action: "client_exclusions",
     inputs: { company: "{{company}}", industry: "{{company_industry}}", description: "{{company_description}}", title: "{{title}}" },
     provider: "Client rules",
-    description: "Re-checks the company against the client's exclusion terms. The company name and industry the way the lead database does (the term anywhere in the text), which is stricter than AI Ark's whole-word match. The company description as whole words, as the lead never holds it: \"pub\" doesn't catch \"public\". For cleaning clients the job title is also checked against the cleaning title exclusions.",
+    description: "Re-checks the company against the client's exclusion terms. The company name and industry the way the lead database does (the term anywhere in the text), which is stricter than AI Ark's whole-word match. The company description as whole words, as the lead never holds it: \"pub\" doesn't catch \"public\". For cleaning clients the job title is also checked against the cleaning title exclusions, and the company against every excluded keyword the pull kept (the standard keywords, the built-in competitors list from the Lists page and the client's own terms), as whole words, whether or not AI Ark's request had room for it.",
   },
   {
     key: "outcome", name: "Outcome", kind: "formula",
