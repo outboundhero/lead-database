@@ -10,6 +10,7 @@ import { JobsTab } from "@/components/sharing/jobs-tab";
 import { ClientsTab } from "@/components/sharing/clients-tab";
 import { HeldTab } from "@/components/sharing/held-tab";
 import { LowPlacesTab } from "@/components/sharing/low-places-tab";
+import { BackfillTab } from "@/components/sharing/backfill-tab";
 import { NeverContactInboxesPanel } from "@/components/sharing/never-contact-inboxes-panel";
 
 // The Sharing page (overlap sharing, plan 1.11; the weekly top-up and
@@ -22,6 +23,9 @@ import { NeverContactInboxesPanel } from "@/components/sharing/never-contact-inb
 //   Held             held and queued shares, leads with no usable place, the
 //                    installs the Bison mirror covers
 //   Low places       the weekly top-up's flags and pulls
+//   Backfill         the database backfill (138): leads already in the database
+//                    queued as shares for the listed clients, each place's
+//                    pass, a read-only preview per client, the newest firings
 //   General inboxes  the Clay General inboxes filter, its dry run and apply
 //
 // ?tab= picks a tab; ?job=<batch id> opens a job (the Uploads page links here).
@@ -31,6 +35,7 @@ const TABS = [
   { value: "clients", label: "Clients" },
   { value: "held", label: "Held" },
   { value: "low", label: "Low places" },
+  { value: "backfill", label: "Backfill" },
   { value: "inboxes", label: "General inboxes" },
 ] as const;
 type Tab = (typeof TABS)[number]["value"];
@@ -71,8 +76,8 @@ function Sharing() {
         <div>
           <h1 className="text-[22px] font-semibold tracking-tight">Sharing</h1>
           <p className="text-[12.5px] text-muted-foreground">
-            New leads of each import that fit another client of the same pool, the low places of each client, and the general inboxes on the Clay
-            filter
+            New leads of each import that fit another client of the same pool, leads already in the database the backfill queues, the low places
+            of each client, and the general inboxes on the Clay filter
           </p>
         </div>
       </div>
@@ -81,6 +86,7 @@ function Sharing() {
       {tab === "clients" && <ClientsTab />}
       {tab === "held" && <HeldTab isAdmin={isAdmin} />}
       {tab === "low" && <LowPlacesTab />}
+      {tab === "backfill" && <BackfillTab />}
       {tab === "inboxes" && <NeverContactInboxesPanel />}
     </div>
   );
