@@ -257,7 +257,7 @@ function partA() {
   check("a switch is off for a client not on its list", flagOn(on, "company_pipeline", "OGTEST_A") && !flagOn(on, "company_pipeline", "OGTEST_B") && flagOn(on, "people_pipeline", "ogtest_b") && !flagOn(on, "people_pipeline", "OGTEST_A"));
   check("a sub-switch needs its parent on for the client", flagOn(on, "ai_searches", "OGTEST_B") && !flagOn(on, "ai_searches", "OGTEST_A") && flagOn(on, "linkedin_profile_reads", "OGTEST_A") && !flagOn(on, "linkedin_profile_reads", "OGTEST_B"));
   check("personalisation needs the client's own originals (or shared_text_ok)", !flagOn(on, "personalisation", "OGTEST_A") && flagOn(on, "personalisation", "OGTEST_A", { variant: "ogtest_a" }));
-  check("everything ships off", MODEL_SETTINGS.length === 13 && ["company_pipeline", "people_pipeline", "ai_searches", "auto_buy", "personalisation", "promotion", "fit_scoring"].every((f) => !flagOn(settingsFrom([]), f, "OGTEST_A")));
+  check("everything ships off", MODEL_SETTINGS.length === 14 && ["company_pipeline", "people_pipeline", "ai_searches", "auto_buy", "personalisation", "promotion", "fit_scoring"].every((f) => !flagOn(settingsFrom([]), f, "OGTEST_A")));
 }
 
 /** The real exports, compiled in memory (counts only; the files stay where they are, outside the repo). */
@@ -437,8 +437,12 @@ async function partB(routes) {
   const stored = Object.fromEntries((await all(`SELECT key, value FROM enrich_settings`)).map((r) => [r.key, r.value]));
   check("company_pipeline gained its client list, LinkedIn reads, inboxes per company and the AI Ark floor, and lost the checks per company",
     ["tags", "linkedin_profile_reads", "inboxes_per_company", "min_balance"].every((k) => k in stored.company_pipeline) && !("email_checks_per_company" in stored.company_pipeline));
-  check("models holds the twelve original-column settings and no phase 1 key",
-    MODEL_SETTINGS.filter((k) => k !== "fit_score").every((k) => k in stored.models) && !["website_search", "email_search_first", "email_search_second"].some((k) => k in stored.models) && settings.models.companys_website?.model?.length > 0);
+  check("models holds the twelve original-column settings 125 seeded and no phase 1 key",
+    MODEL_SETTINGS.filter((k) => !["fit_score", "inbox_first_name_ai"].includes(k)).every((k) => k in stored.models) && !["website_search", "email_search_first", "email_search_second"].some((k) => k in stored.models) && settings.models.companys_website?.model?.length > 0);
+  const storedNoG19 = Object.fromEntries(Object.entries(stored.models).filter(([k]) => k !== "inbox_first_name_ai"));
+  check("G#19's setting (inbox_first_name_ai), which no migration seeds, reads gpt-6-luna from its default",
+    settingsFrom([{ key: "models", value: storedNoG19 }]).models.inbox_first_name_ai?.model === "gpt-6-luna" &&
+      ("inbox_first_name_ai" in stored.models || settings.models.inbox_first_name_ai?.model === "gpt-6-luna"));
   check("people_pipeline, personalisation and spend_caps are there, every switch off", ["people_pipeline", "personalisation", "spend_caps"].every((k) => k in stored) && !stored.people_pipeline.enabled && !stored.personalisation.enabled);
   const body = readFileSync(new URL("../supabase/migrations/125_people_pipeline.sql", import.meta.url), "utf8");
   const inner = body.slice(body.indexOf("BEGIN;") + "BEGIN;".length, body.lastIndexOf("COMMIT;"));

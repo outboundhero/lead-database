@@ -64,6 +64,7 @@ export type ModelStep =
   | "current_employer"
   | "people_claygent"
   | "people_question_ai"
+  | "inbox_first_name_ai"
   | "inbox_claygent"
   | "inbox_question_ai";
 
@@ -79,6 +80,7 @@ export const MODEL_STEPS: { key: ModelStep; label: string; hint: string; tool: "
   { key: "current_employer", label: "Current employer", hint: "Reads a person's LinkedIn profile (LinkedIn profile reads switch).", tool: "web", table: "People" },
   { key: "people_claygent", label: "Personalisation research (people)", hint: "Personalisation switch.", tool: "web", table: "People" },
   { key: "people_question_ai", label: "Personalisation question (people)", hint: "Personalisation switch. No web search.", tool: "none", table: "People" },
+  { key: "inbox_first_name_ai", label: "First name (inboxes)", hint: "Guesses a first name from a general inbox's address, with Clay's examples. No web search.", tool: "none", table: "General" },
   { key: "inbox_claygent", label: "Personalisation research (inboxes)", hint: "Personalisation switch.", tool: "web", table: "General" },
   { key: "inbox_question_ai", label: "Personalisation question (inboxes)", hint: "Personalisation switch. No web search.", tool: "none", table: "General" },
 ];
