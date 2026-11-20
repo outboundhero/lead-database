@@ -1,21 +1,26 @@
-// Pipeline emails into leads (2B.5), switch promotion.promote_to_leads: ships
+// Pipeline emails into leads (2B.5), switch promotion.promote_to_leads with its
+// client list promotion.tags, set on the Companies tab's settings sheet: ships
 // OFF, covering no client. Copied from the AI Ark add (scripts/lib/aiark/add.mjs):
 // beginPromote() takes the contacts that may be promoted and settles at once
 // those the database already holds; the web app (src/lib/companies/promote-run.ts)
 // imports the rest through the Uploads page's engine (strategy skip, never
 // merged) as one upload batch; finishPromote() settles each one.
 //
+// Fit scoring is not a condition (2026-11-20): Clay had no fit score, so the
+// fit rule, the scorer, the gate and promotion.min_fit_score are kept for v2,
+// built and switched off, and promotion reads none of them.
+//
 // A contact (enrich_contacts: a General row or a People row) may be
 // promoted only when, in the query that takes it:
-//   - the switch is on and the client on promotion.tags, the gate covers the
-//     client (fn_fit_gate_applies, so a promoted lead can never be pushed past
-//     a later bad score), the rule is set and models.fit_score is set (the
-//     caller checks the settings; the gate is checked in the query);
+//   - the switch is on and the client on promotion.tags (the caller checks
+//     the settings);
 //   - it is usable, approved, not held, and not already promoted (promote_state
 //     null, or running on a batch no longer live: 3 hours);
-//   - its company is listed and scored at or above promotion.min_fit_score,
-//     and not blocked under any key (the company's, the address's domain, the
-//     website's, the name key);
+//   - its company is listed, and not blocked under any key (the company's, the
+//     address's domain, the website's, the name key). Only a company already
+//     scored under the gate's threshold (by the scorer or by hand), or found
+//     unscorable, is blocked, so while scoring is off (v2) and nobody scores
+//     by hand nothing is; a company with no score is never held back for it;
 //   - the brand check is true (G#37 for an inbox, P#10 for a person);
 //   - a person's outcome is "Approved email" and no name holds "*" (a
 //     Preview's masked last name must never reach leads); an inbox's first
@@ -42,9 +47,9 @@
 //   skipped  {added: false, reason: "refused"} the brand list
 //   error    {batch_id}                         not stored; the button tries again
 //
-// Each promoted contact's email domain and its lead's name key become aliases
-// of the company's score (2B.2), so a later re-score or manual score reaches
-// the lead at once.
+// When the company has a score, each promoted contact's email domain and its
+// lead's name key become aliases of it (2B.2), so a later re-score or manual
+// score reaches the lead at once. A company with no score gets no alias.
 
 import { evaluate, isEmpty, makeContext } from "./formula.mjs";
 import { addAliases } from "./fit-keys.mjs";
@@ -274,45 +279,48 @@ const LIVE_BATCH = `b.status = 'processing' AND b.created_at > now() - make_inte
 
 /**
  * The SQL that takes a client's contacts that may be promoted ($1 tag, $2
- * kind, $3 min score, $4 limit, $5 the button: also not_added ones, and
- * those held back since their row was last worked, $6 require a question).
- * The gate is checked in the same statement.
+ * kind, $3 limit, $4 the button: also not_added ones, and those held back
+ * since their row was last worked, $5 require a question). No fit score is
+ * needed: the company's score, when it has one, is read only for its blocked
+ * flag and for the aliases (fit_kind and fit_key, null with no score).
  */
 const PROMOTABLE_SQL = `
   SELECT c.row_id, c.company_row_id, c.table_id, c.kind, c.email, c.has_question, c.promote_state,
-         e.industry, f.key_kind AS fit_kind, f.key AS fit_key, f.score
+         e.industry, f.key_kind AS fit_kind, f.key AS fit_key
     FROM enrich_contacts c
     JOIN enrich_companies e ON e.row_id = c.company_row_id
-    JOIN company_fit_keys ck ON ck.key_kind = e.fit_key_kind AND ck.key = e.fit_key
-    JOIN company_fit f ON f.key_kind = ck.fit_kind AND f.key = ck.fit_key
+    LEFT JOIN company_fit_keys ck ON ck.key_kind = e.fit_key_kind AND ck.key = e.fit_key
+    LEFT JOIN company_fit f ON f.key_kind = ck.fit_kind AND f.key = ck.fit_key
     LEFT JOIN upload_batches b ON c.promote_state = 'running' AND b.id = c.batch_id
-   WHERE public.fn_fit_gate_applies($1)
-     AND c.client_tag = $1 AND c.kind = $2
+   WHERE c.client_tag = $1 AND c.kind = $2
      AND c.usable AND c.verdict = 'approved' AND NOT c.held AND c.email IS NOT NULL
      AND ($2 <> 'person' OR c.outcome = 'Approved email')
-     AND ((c.promote_state IS NULL AND ($5 OR c.promoted_at IS NULL OR c.updated_at > c.promoted_at))
+     AND ((c.promote_state IS NULL AND ($4 OR c.promoted_at IS NULL OR c.updated_at > c.promoted_at))
           OR (c.promote_state = 'running' AND NOT coalesce(${LIVE_BATCH}, false))
-          OR ($5 AND c.promote_state = 'not_added'))
+          OR ($4 AND c.promote_state = 'not_added'))
      AND e.listed
-     AND f.status IN ('scored', 'manual') AND f.score >= $3 AND NOT f.blocked AND NOT ck.blocked
+     AND NOT coalesce(f.blocked, false) AND NOT coalesce(ck.blocked, false)
      AND NOT EXISTS (SELECT 1 FROM company_fit_keys k
                       WHERE k.blocked AND k.key_kind = 'domain' AND k.key = lower(split_part(c.email, '@', 2)))
-     AND (NOT $6 OR c.has_question)
+     AND (NOT $5 OR c.has_question)
    ORDER BY c.row_id
-   LIMIT $4`;
+   LIMIT $3`;
 
 /**
  * Is promotion allowed for this client by the settings? { ok, why }: the
- * switch and the client list, the rule and the model. (The gate is checked by
- * the queries themselves.)
+ * switch and its client list. Nothing of fit scoring is asked for (kept for
+ * v2): not the rule, the model, the gate or a score.
  *
  * @param {PipelineSettings} settings
  * @param {string} tag
  */
 export function promotionAllowed(settings, tag) {
-  if (!settings.flagOn("promotion", tag)) return { ok: false, why: "Promotion is off for this client (the switch, or the client is not on its list)" };
-  if (!settings.fit_rule?.prompt) return { ok: false, why: "The fit rule is not set, so nothing is scored" };
-  if (!settings.models?.fit_score?.model) return { ok: false, why: "No model is set for fit scoring" };
+  if (!settings.flagOn("promotion", tag)) {
+    return {
+      ok: false,
+      why: "Promotion is off for this client (the switch, or the client is not on its list; an admin sets both in the Companies tab's settings)",
+    };
+  }
   return { ok: true, why: null };
 }
 
@@ -325,8 +333,7 @@ export function promotionAllowed(settings, tag) {
 export async function promotable(db, { tag, kind, limit, settings, button = false }) {
   if (!PROMOTE_KINDS.includes(kind)) throw new Error(`Unknown contact kind "${kind}"`);
   const { rows } = await db.query(PROMOTABLE_SQL, [
-    tag, kind, settings.promotion.min_fit_score, Math.max(1, Math.min(limit, settings.promotion.batch_max)), button,
-    settings.promotion.require_question,
+    tag, kind, Math.max(1, Math.min(limit, settings.promotion.batch_max)), button, settings.promotion.require_question,
   ]);
   if (!rows.length) return [];
   const { rows: cells } = await db.query(
@@ -353,7 +360,7 @@ export async function promotable(db, { tag, kind, limit, settings, button = fals
 export async function promoteCounts(db, { tag, settings }) {
   const count = async (kind, needQuestion) => {
     const { rows: [r] } = await db.query(`SELECT count(*)::int AS n FROM (${PROMOTABLE_SQL}) x`, [
-      tag, kind, settings.promotion.min_fit_score, 1_000_000, false, needQuestion,
+      tag, kind, 1_000_000, false, needQuestion,
     ]);
     return r.n;
   };
@@ -559,8 +566,8 @@ export async function beginPromote(db, { tag, kind, userId, limit, settings, but
     row_id: r.row_id, table_id: r.table_id, status: "running", value: { batch_id: batch.id, email: r.lead.email },
     display: "Adding…", note: null,
   })));
-  // The score reaches the lead under every key it will show, from the moment it exists.
-  await aliasesForRows(db, toAdd.map((r) => ({ ...r.lead, fit_kind: r.fit_kind, fit_key: r.fit_key })));
+  // A company's score, when it has one, reaches the lead under every key it will show, from the moment it exists.
+  await aliasesForRows(db, toAdd.filter((r) => r.fit_key).map((r) => ({ ...r.lead, fit_kind: r.fit_kind, fit_key: r.fit_key })));
   return {
     busy: false,
     batchId: batch.id,
@@ -615,7 +622,7 @@ export async function finishPromote(db, { batchId, batchAt, contacts, label = PR
         ? "Skipped: a lead with this address reached the database while this batch ran; it was left as it was."
         : "The import could not store this contact (the batch's errors on the Uploads page say why). The button tries again.",
   })));
-  // The stored lead's own keys, as the gate will read them.
+  // The stored lead's own keys, as the gate will read them (only for a company with a score).
   const { rows: keys } = await db.query(
     `SELECT v.key_kind, v.key, ck.fit_kind, ck.fit_key
        FROM enrich_contacts c
@@ -642,9 +649,9 @@ export async function finishPromote(db, { batchId, batchAt, contacts, label = PR
 // ── The worker's trigger ────────────────────────────────────────────────────
 
 /**
- * The clients whose scored contacts wait to be promoted: on the switch's
- * list, with the rule and the model set, the gate covering them, and at least
- * one contact the query would take (the button's not_added ones aside).
+ * The clients whose approved contacts wait to be promoted: on the switch's
+ * list, with at least one contact the query would take (the button's
+ * not_added ones aside). No fit rule, model, gate or score is needed.
  *
  * @param {Db} db
  * @param {PipelineSettings} settings
@@ -656,9 +663,7 @@ export async function promoteDue(db, settings) {
   for (const tag of settings.promotion.tags) {
     if (!promotionAllowed(settings, tag).ok) continue;
     for (const kind of PROMOTE_KINDS) {
-      const { rows } = await db.query(PROMOTABLE_SQL, [
-        tag, kind, settings.promotion.min_fit_score, 1, false, settings.promotion.require_question,
-      ]);
+      const { rows } = await db.query(PROMOTABLE_SQL, [tag, kind, 1, false, settings.promotion.require_question]);
       if (rows.length) {
         out.push(tag);
         break;

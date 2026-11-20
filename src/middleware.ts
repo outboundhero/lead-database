@@ -20,7 +20,7 @@ export const config = {
      *   /api/enrich/intake/<token>: each client's inbound URL token is the only auth)
      * - api/aiark/webhook (AI Ark's export callback — answers 200 and reads nothing)
      * - api/aiark/add/auto (the enrichment worker — Bearer AIARK_AUTO_ADD_KEY only)
-     * - api/companies/promote/auto (the enrichment worker's promotion of scored
+     * - api/companies/promote/auto (the enrichment worker's promotion of approved
      *   pipeline emails into leads: Bearer AIARK_AUTO_ADD_KEY only)
      * - api/uploads/found/auto (the enrichment worker's adding of the emails
      *   found for an upload's no-email rows: Bearer AIARK_AUTO_ADD_KEY only)

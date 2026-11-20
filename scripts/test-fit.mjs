@@ -23,10 +23,13 @@
 // worker's heartbeat, Next's after() (its callbacks are awaited), the shared
 // pg pool (local, no TLS), and the fit settings read (readFitSettings: the
 // stored rows with the test's in-memory changes on top). That last one is why
-// no rule is ever written to the database here: the scorer and promotion are
-// given a made-up rule in memory only. The gate is switched on in the
-// database for the route checks (restored at the end, and on the next run if
-// a run is cut off); the SQL gate checks run inside a rolled-back transaction.
+// no rule is ever written to the database here: the scorer is given a made-up
+// rule in memory only, and promotion runs with none (since 2026-11-20 it needs
+// no fit rule, model, gate or score). The gate is switched on in the database
+// for the route checks, and promotion through the Companies settings sheet's
+// route (both restored at the end, with every row a sheet save writes, and on
+// the next run if a run is cut off); the SQL gate checks run inside a
+// rolled-back transaction.
 //
 // What it checks (the design's section 8.4), plus "switches off means no
 // change": with every switch as shipped, nothing moves, the eligibility and
@@ -54,7 +57,7 @@ import {
   advanceScoringBatch, eligibilitySql, enqueueLeadCompanies, FIT_SKIP, fitCheckOn, gateEnabled, scoringStatusFor,
 } from "./lib/enrich/fit-push.mjs";
 import { advanceBackfill, buildReview, estimateUsd, liveCampaignsFor, reviewCampaignsFor } from "./lib/enrich/fit-backfill.mjs";
-import { fallbackOf, HOLD, inboxLeadRow, personLeadRow, promoteDue, REFUSED_BRAND, withoutFallback } from "./lib/enrich/promote.mjs";
+import { fallbackOf, HOLD, inboxLeadRow, personLeadRow, promoteDue, promotionAllowed, REFUSED_BRAND, withoutFallback } from "./lib/enrich/promote.mjs";
 import { normalizeCompanyName, normalizePhoneNumber, TOOL_STANDIN_ACTIONS } from "./lib/enrich/tool-standins.mjs";
 import { CANNOT_CONFIRM, confirmDryRun, finishRows, heldRows, liveCheck, recordDryRun, rowsSha } from "./lib/bison/fit-removal.mjs";
 import { openAiCost, spentToday } from "./lib/enrich/spend.mjs";
@@ -410,6 +413,12 @@ async function counts() {
 
 // The settings this suite changes in the database, as they stood, put back at the end.
 const SHIPPED_GATE = { enabled: false, tags: [], threshold: 2, client_types: ["Cleaning", "Canada Cleaning"], require_scored: true };
+const SHIPPED_PROMOTION = { promote_to_leads: false, tags: [], min_fit_score: 2, batch_max: 1000, require_question: true, source_label: "Companies (AI Ark)" };
+// The rows a save of the Companies tab's settings sheet may write: section E switches promotion on through it.
+const SHEET_ROWS = [
+  "company_pipeline", "people_pipeline", "personalisation", "spend_caps", "models", "linkedin_sources", "overlap_sharing", "weekly_topup",
+  "never_contact_inboxes",
+];
 let snapshot = null;
 async function setSetting(key, value) {
   await pool.query(`UPDATE enrich_settings SET value = $2::jsonb, updated_at = now() WHERE key = $1`, [key, JSON.stringify(value)]);
@@ -418,6 +427,10 @@ const gateOn = (tags, extra = {}) => setSetting("fit_gate", { ...snapshot.fit_ga
 const gateOff = () => setSetting("fit_gate", snapshot.fit_gate);
 async function restoreSettings() {
   if (!snapshot) return;
+  for (const k of SHEET_ROWS) {
+    if (snapshot.sheet[k] === undefined) await pool.query(`DELETE FROM enrich_settings WHERE key = $1`, [k]);
+    else await setSetting(k, snapshot.sheet[k]);
+  }
   for (const k of ["fit_gate", "fit_gate_refresh", "fit_scoring", "fit_rule", "promotion"]) await setSetting(k, snapshot[k]);
   await pool.query(
     `UPDATE enrich_settings SET value = jsonb_set(value, '{fit_score}', $1::jsonb) WHERE key = 'models'`,
@@ -500,6 +513,9 @@ try {
   // A run cut off while the gate was on leaves it covering only test clients: put it back.
   const g = (await one(`SELECT value FROM enrich_settings WHERE key = 'fit_gate'`))?.value;
   if (g && Array.isArray(g.tags) && g.tags.length && g.tags.every((t) => String(t).startsWith(PREFIX))) await setSetting("fit_gate", SHIPPED_GATE);
+  // So does one cut off while section E had promotion switched on for test clients.
+  const pv = (await one(`SELECT value FROM enrich_settings WHERE key = 'promotion'`))?.value;
+  if (pv && Array.isArray(pv.tags) && pv.tags.length && pv.tags.every((t) => String(t).startsWith(PREFIX))) await setSetting("promotion", SHIPPED_PROMOTION);
   const foreign = await one(
     `SELECT (SELECT count(*) FROM company_fit WHERE key NOT LIKE '%fttest%')::int AS fit,
             (SELECT count(*) FROM company_fit_queue WHERE key NOT LIKE '%fttest%')::int AS queue,
@@ -515,6 +531,7 @@ try {
   snapshot = {
     fit_gate: st.fit_gate, fit_gate_refresh: st.fit_gate_refresh, fit_scoring: st.fit_scoring, fit_rule: st.fit_rule, promotion: st.promotion,
     fit_score: st.models?.fit_score ?? null,
+    sheet: Object.fromEntries(SHEET_ROWS.map((k) => [k, st[k]])),
     spendFit: (await one(`SELECT (SELECT used FROM enrich_spend_daily WHERE day = (now() AT TIME ZONE 'utc')::date AND kind = 'openai_usd_fit') AS n`)).n,
   };
 
@@ -847,7 +864,8 @@ try {
       personLeadRow(personCells("finder@x.fttest.example", { email: "other@x.fttest.example" })).hold === HOLD.validation &&
       inboxLeadRow(inboxCells("a@x.fttest.example", { exclusion_large_company_check: false })).refuse === REFUSED_BRAND);
 
-  // Contacts of the promotion fixtures (acme is scored 3; low is scored 1; one company's contact sits on a blocked domain).
+  // Contacts of the promotion fixtures (acme is scored 3; low is scored 1, so blocked; one company's contact sits on a blocked
+  // domain; plain has no score and no key, as every company has while fit scoring is off).
   const lowRow = await addCompany(tablesA, TAG_A, { slug: "lowfit", name: "Lowfit Fttest" });
   await score("domain", dom("lowfit"), 1, { source: "pipeline" });
   await pool.query(`UPDATE enrich_companies SET fit_key_kind = 'domain', fit_key = $2 WHERE row_id = $1`, [lowRow, dom("lowfit")]);
@@ -855,6 +873,7 @@ try {
   await score("domain", dom("fine"), 4, { source: "pipeline" });
   await score("domain", dom("badmail"), 1);
   await pool.query(`UPDATE enrich_companies SET fit_key_kind = 'domain', fit_key = $2 WHERE row_id = $1`, [aliasRow, dom("fine")]);
+  const plainRow = await addCompany(tablesA, TAG_A, { slug: "plain", name: "Plain Fttest" });
   const existing = await addLead({ email: `known@${dom("acme")}`, company: "Already Fttest", source: "earlier upload" });
   const C = {
     i1: await addContact(tablesA, TAG_A, acmeRow, { kind: "general", email: `info@${dom("acme")}`, cells: inboxCells(`info@${dom("acme")}`) }),
@@ -870,44 +889,116 @@ try {
     p3: await addContact(tablesA, TAG_A, acmeRow, { kind: "person", email: `far@${dom("acme")}`, cells: personCells(`far@${dom("acme")}`), outcome: "Outside the client's area" }),
     l1: await addContact(tablesA, TAG_A, lowRow, { kind: "general", email: `info@${dom("lowfit")}`, cells: inboxCells(`info@${dom("lowfit")}`) }),
     b1: await addContact(tablesA, TAG_A, aliasRow, { kind: "general", email: `info@${dom("badmail")}`, cells: inboxCells(`info@${dom("badmail")}`) }),
+    u1: await addContact(tablesA, TAG_A, plainRow, { kind: "general", email: `info@${dom("plain")}`, cells: inboxCells(`info@${dom("plain")}`) }),
+    u2: await addContact(tablesA, TAG_A, plainRow, {
+      kind: "person", email: `lee@${dom("plain")}`, cells: personCells(`lee@${dom("plain")}`, { use_first_name: "Lee", full_name: "Lee Fttest" }),
+    }),
   };
   const PROMO_ON = { promotion: { ...snapshot.promotion, promote_to_leads: true, tags: [TAG_A] } };
   const { POST: promotePost } = await route("companies/promote");
   const { POST: promoteAuto } = await route("companies/promote/auto");
+  const sheetRoute = await route("companies/settings");
+  const { GET: panelGet } = await route("fit/state");
+  const { settingsInputOf } = await srcModule("lib/companies/server.ts");
   const leadsBefore = Number((await one(`SELECT count(*)::int AS n FROM leads`)).n);
   as("viewer");
   check("promotion is manager and up", (await call(promotePost, { body: { tag: TAG_A } })).status === 403);
   as("manager");
   T.settingsRows = [];
   const r0 = await call(promotePost, { body: { tag: TAG_A } });
-  check("refused while promotion is off (as shipped)", r0.status === 409 && /off for this client/.test(r0.body.error), JSON.stringify(r0.body));
-  T.settingsRows = [{ key: "promotion", value: { ...PROMO_ON.promotion, tags: [TAG_B] } }, { key: "fit_rule", value: WITH_RULE().fit_rule }];
+  check("refused while promotion is off (as shipped), saying where it is switched on", r0.status === 409 && /off for this client/.test(r0.body.error) &&
+    /Companies tab's settings/.test(r0.body.error), JSON.stringify(r0.body));
+  T.settingsRows = [{ key: "promotion", value: { ...PROMO_ON.promotion, tags: [TAG_B] } }];
   const rNot = await call(promotePost, { body: { tag: TAG_A } });
   check("refused for a client not on its list", rNot.status === 409 && /not on its list/.test(rNot.body.error));
-  T.settingsRows = [{ key: "promotion", value: PROMO_ON.promotion }, { key: "fit_rule", value: WITH_RULE().fit_rule }];
-  const rGate = await call(promotePost, { body: { tag: TAG_A } });
-  check("refused while the gate does not cover the client", rGate.status === 409 && /gate does not cover/.test(rGate.body.error));
-  await gateOn([TAG_A]);
-  T.settingsRows = [{ key: "promotion", value: PROMO_ON.promotion }];
-  const rRule = await call(promotePost, { body: { tag: TAG_A } });
-  T.settingsRows = [{ key: "promotion", value: PROMO_ON.promotion }, { key: "fit_rule", value: WITH_RULE().fit_rule },
-    { key: "models", value: { ...(await settingsWith()).models, fit_score: null } }];
-  const rModel = await call(promotePost, { body: { tag: TAG_A } });
-  check("refused without the rule, or without the model", rRule.status === 409 && /rule is not set/.test(rRule.body.error) && rModel.status === 409 && /No model/.test(rModel.body.error));
+  T.settingsRows = [];
   check("nothing was added by a refused round", Number((await one(`SELECT count(*)::int AS n FROM leads`)).n) === leadsBefore);
+  const promoS = (promotion, extra = []) => settingsFrom([{ key: "promotion", value: promotion }, ...extra]);
+  check("promotionAllowed asks for the switch and the client list only: no fit rule, model, gate or score",
+    promotionAllowed(promoS({ promote_to_leads: true, tags: [TAG_A] }, [{ key: "models", value: { fit_score: null } }]), TAG_A).ok === true &&
+      promotionAllowed(promoS({ promote_to_leads: true, tags: [TAG_A], min_fit_score: 5 }), TAG_A).ok === true &&
+      !promotionAllowed(promoS({ promote_to_leads: false, tags: [TAG_A] }), TAG_A).ok && !promotionAllowed(promoS({ promote_to_leads: true, tags: [TAG_B] }), TAG_A).ok &&
+      !(await gateEnabled(pool)) && (await settingsWith()).fit_rule.prompt === null);
 
-  T.settingsRows = [{ key: "promotion", value: PROMO_ON.promotion }, { key: "fit_rule", value: WITH_RULE().fit_rule }];
+  // The switch and its client list on the Companies tab's settings sheet: admin only, checked, merged over the stored row,
+  // versioned and logged, as the other pipeline switches.
+  as("manager");
+  check("the settings sheet is admin only (403)", (await call(sheetRoute.GET)).status === 403 && (await call(sheetRoute.PUT, { body: {} })).status === 403);
+  as("admin");
+  const sheet = await call(sheetRoute.GET);
+  const sv = sheet.body?.value?.promotion;
+  check("the sheet shows promotion as shipped: off, no client, a question required, its source label (min_fit_score is not shown)",
+    sheet.status === 200 && sv?.promote_to_leads === false && same(sv.tags, []) && sv.require_question === true && sv.source_label === "Companies (AI Ark)" &&
+      !("min_fit_score" in sv) && same(settingsInputOf(sheet.body.value).promotion, { promote_to_leads: false, tags: [] }) && /promotion@/.test(sheet.body.version),
+    JSON.stringify({ sv, version: sheet.body?.version }));
+  const sheetEdit = (body, f) => {
+    const x = structuredClone(settingsInputOf(body.value));
+    f(x);
+    return { body: { version: body.version, ...x } };
+  };
+  for (const [label, f, re] of [
+    ["a client list with something that is not a tag", (x) => { x.promotion.tags = ["not a tag!"]; }, /Promotion into leads: not a tag! is not a client tag/],
+    ["a switch that is not on or off", (x) => { x.promotion.promote_to_leads = "yes"; }, /Promotion into leads must be on or off/],
+    ["not the block's shape", (x) => { x.promotion = [1]; }, /Promotion into leads: must be the switch/],
+  ]) {
+    const bad = await call(sheetRoute.PUT, sheetEdit(sheet.body, f));
+    check(`the sheet refuses ${label} (400)`, bad.status === 400 && re.test(bad.body.error ?? ""), `${bad.status} ${bad.body.error ?? ""}`);
+  }
+  const promoRow = async () => one(`SELECT value, updated_at::text AS at FROM enrich_settings WHERE key = 'promotion'`);
+  const pr0 = await promoRow();
+  const unchanged = await call(sheetRoute.PUT, sheetEdit(sheet.body, () => {}));
+  const leftOut = await call(sheetRoute.PUT, sheetEdit(sheet.body, (x) => { delete x.promotion; }));
+  check("the sheet sent back unchanged, or without promotion (an older sheet), writes nothing to its row",
+    unchanged.status === 200 && unchanged.body.changes.length === 0 && leftOut.status === 200 && leftOut.body.changes.length === 0 && (await promoRow()).at === pr0.at,
+    JSON.stringify({ unchanged: unchanged.body.changes, leftOut: leftOut.body.changes }));
+  const audits0 = T.audits.length;
+  const sheetNow = await call(sheetRoute.GET);
+  const on = await call(sheetRoute.PUT, sheetEdit(sheetNow.body, (x) => { x.promotion = { promote_to_leads: true, tags: [` ${TAG_A.toLowerCase()} `, TAG_A] }; }));
+  const prOn = await promoRow();
+  check("switched on for the client on the sheet: each change listed and logged, and the version moves",
+    on.status === 200 && same(on.body.changes, ["promotion into leads off to on", `promotion's clients no client to ${TAG_A}`]) &&
+      T.audits.slice(audits0).some((a) => a.action === "enrich_settings" && a.details.includes("promotion into leads off to on")) &&
+      on.body.version !== sheetNow.body.version && on.body.value.promotion.promote_to_leads === true,
+    JSON.stringify(on.body.changes ?? on.body));
+  check("... the tag upper case, once; the rest of the row kept as stored (batch size, the question, the label, min_fit_score)",
+    prOn.value.promote_to_leads === true && same(prOn.value.tags, [TAG_A]) && prOn.value.batch_max === pr0.value.batch_max &&
+      prOn.value.require_question === pr0.value.require_question && prOn.value.source_label === pr0.value.source_label &&
+      prOn.value.min_fit_score === pr0.value.min_fit_score && prOn.at !== pr0.at, JSON.stringify(prOn.value));
+  check("... the worker reads it on for the client, and a save over the older version is refused (409)",
+    settingsFrom(await all(`SELECT key, value FROM enrich_settings`)).flagOn("promotion", TAG_A) && (await call(sheetRoute.PUT, sheetEdit(sheetNow.body, () => {}))).status === 409);
+  // min_fit_score is kept but not read: at 5, acme (scored 3) is still promoted below.
+  await pool.query(`UPDATE enrich_settings SET value = value || '{"min_fit_score": 5}'::jsonb WHERE key = 'promotion'`);
+
+  // The fit panel: promotion on for the client, with no rule, scoring off and the gate not covering it. Ready is the query's
+  // count, before the row checks: inboxes B's (no address), i1, i3, i4, i5, i7, i8 and u1 (i2 lacks a question; i6 is held;
+  // l1 and b1 are blocked); people B's, p1, p2 and u2 (p3 is outside the area).
+  as("manager");
+  const panel = await call(panelGet, { query: { tag: TAG_A } });
+  const pc = panel.body?.promotion?.counts;
+  check("the fit panel: promotion on for the client and nothing blocking it, though there is no rule and the gate does not cover it",
+    panel.status === 200 && panel.body.promotion.on_for_client === true && panel.body.promotion.blocked_why === null && panel.body.gate.covers_client === false &&
+      panel.body.rule.set === false && !("min_fit_score" in panel.body.promotion) && pc?.general.ready === 8 && pc.general.no_question === 1 &&
+      pc.person.ready === 4 && pc.person.no_question === 0,
+    JSON.stringify(panel.body?.promotion));
+
+  // A round: promotion on from the sheet, the gate off for the client, no rule, no model, min_fit_score 5.
+  T.settingsRows = [{ key: "models", value: { ...(await settingsWith()).models, fit_score: null } }];
   const rGo = await call(promotePost, { body: { tag: TAG_A } });
   await drainAfter();
   const states = Object.fromEntries((await all(`SELECT row_id, promote_state, lead_id FROM enrich_contacts WHERE client_tag = $1`, [TAG_A])).map((r) => [Number(r.row_id), r]));
-  check("a round: inboxes and people each one upload batch, those held back left for later", rGo.status === 202 && rGo.body.batches?.length === 2 && rGo.body.adding === 3,
-    JSON.stringify(rGo.body));
-  check("the approved inboxes and person were added; the address already a lead settled 'Already in the database'",
+  check("a round with no fit rule, model, gate or score: inboxes and people each one upload batch, those held back left for later",
+    rGo.status === 202 && rGo.body.batches?.length === 2 && rGo.body.adding === 5, JSON.stringify(rGo.body));
+  check("added: acme's approved inboxes and person (scored 3, under min_fit_score 5), and both of the company with no score; the address already a lead settled 'Already in the database'",
     states[C.i1].promote_state === "added" && states[C.i8].promote_state === "added" && states[C.p1].promote_state === "added" &&
-      states[C.i7].promote_state === "in_database" && states[C.i7].lead_id === existing, JSON.stringify([states[C.i1], states[C.p1], states[C.i7]]));
-  check("held back: no question, an undefined first name, not Reoon's approval, a masked name, held, outside the area, under the minimum, a blocked domain",
+      states[C.u1].promote_state === "added" && states[C.u2].promote_state === "added" &&
+      states[C.i7].promote_state === "in_database" && states[C.i7].lead_id === existing, JSON.stringify([states[C.i1], states[C.p1], states[C.u1], states[C.u2], states[C.i7]]));
+  check("held back: no question, an undefined first name, not Reoon's approval, a masked name, held, outside the area, a company scored under the threshold, a blocked domain",
     [C.i2, C.i3, C.i4, C.i6, C.p2, C.p3, C.l1, C.b1].every((id) => states[id].promote_state === null) && states[C.i5].promote_state === "refused",
     JSON.stringify([C.i2, C.i3, C.i4, C.i5, C.i6, C.p2, C.p3, C.l1, C.b1].map((id) => states[id].promote_state)));
+  check("the company with no score gets no key, no score and no alias from its promoted leads",
+    !(await fitOf("domain", dom("plain"))) && !(await keyOf("domain", dom("plain"))) &&
+      (await one(`SELECT fit_key FROM enrich_companies WHERE row_id = $1`, [plainRow])).fit_key === null &&
+      (await one(`SELECT lead_id FROM enrich_contacts WHERE row_id = $1`, [C.u1])).lead_id === (await one(`SELECT id FROM leads WHERE email = $1`, [`info@${dom("plain")}`]))?.id);
   const li = await one(`SELECT * FROM leads WHERE email = $1`, [`info@${dom("acme")}`]);
   const lp = await one(`SELECT * FROM leads WHERE email = $1`, [`pat@${dom("acme")}`]);
   check("the inbox lead, through the import engine: fields from the original columns, no fallback words, the question, tagged, the pipeline's label",
@@ -921,7 +1012,7 @@ try {
   const ub = await all(`SELECT status, source_label, inserted_rows FROM upload_batches WHERE id IN (SELECT batch_id FROM enrich_contacts WHERE row_id = ANY($1::bigint[]))`, [[C.i1, C.i8, C.p1]]);
   const heldCell = await one(`SELECT status, value, display FROM enrich_cells WHERE row_id = $1 AND column_key = 'add_to_database'`, [C.i3]);
   check("each contact's add_to_database cell says what happened, and the upload batches are complete", cell?.status === "done" && cell.value.added === true && cell.value.lead_id === li.id &&
-    ub.length === 2 && ub.every((b) => b.status === "complete" && b.source_label === "Companies (AI Ark)") && ub.reduce((n, b) => n + b.inserted_rows, 0) === 3 &&
+    ub.length === 2 && ub.every((b) => b.status === "complete" && b.source_label === "Companies (AI Ark)") && ub.reduce((n, b) => n + b.inserted_rows, 0) === 5 &&
     heldCell?.status === "skipped" && heldCell.display === "Held back" && heldCell.value.why === HOLD.first_name, JSON.stringify({ cell, ub, heldCell }));
   check("the promotion is in the audit log", T.audits.some((a) => a.action === "company_promote" && a.details.startsWith(TAG_A)));
   const rAgain = await call(promotePost, { body: { tag: TAG_A } });
@@ -930,10 +1021,11 @@ try {
     Number((await one(`SELECT count(*)::int AS n FROM leads WHERE email = $1`, [`info@${dom("acme")}`])).n) === 1, JSON.stringify(rAgain.body));
   // The lead's keys became aliases of acme's score.
   check("a promoted contact's address on a new domain becomes an alias of its company's score", (await keyOf("domain", dom("acme-svc")))?.fit_key === dom("acme"));
-  check("held-back contacts don't make the worker start rounds; a contact whose row is worked again does", same(await promoteDue(pool, await settingsWith({ ...PROMO_ON, ...WITH_RULE() })), []));
+  // The worker's trigger reads the stored settings: promotion on from the sheet, no rule.
+  check("held-back contacts don't make the worker start rounds; a contact whose row is worked again does (no rule needed)", same(await promoteDue(pool, await settingsWith()), []));
   await pool.query(`UPDATE enrich_cells SET value = '"Acme Fttest Team"'::jsonb WHERE row_id = $1 AND column_key = 'use_first_name'`, [C.i3]);
   await pool.query(`UPDATE enrich_contacts SET updated_at = now() WHERE row_id = $1`, [C.i3]);
-  const dueNow = await promoteDue(pool, await settingsWith({ ...PROMO_ON, ...WITH_RULE() }));
+  const dueNow = await promoteDue(pool, await settingsWith());
   // The worker's trigger.
   const AUTO_KEY = "fttest-auto-key-0123456789abcdef0123";
   const rA0 = await call(promoteAuto, { body: { tag: TAG_A }, headers: { authorization: `Bearer ${AUTO_KEY}` } });
@@ -945,8 +1037,13 @@ try {
   check("the worker's route: off without its key, 401 with a wrong one, the same round with the right one (the re-worked contact added)",
     same(dueNow, [TAG_A]) && rA0.status === 503 && rA1.status === 401 && rA2.status === 202 && rA2.body.adding === 1 &&
       (await one(`SELECT promote_state FROM enrich_contacts WHERE row_id = $1`, [C.i3])).promote_state === "added", JSON.stringify({ dueNow, rA2: rA2.body }));
-  check("then nothing is due for the client", same(await promoteDue(pool, await settingsWith({ ...PROMO_ON, ...WITH_RULE() })), []));
+  check("then nothing is due for the client", same(await promoteDue(pool, await settingsWith()), []));
   T.settingsRows = [];
+  // Promotion back as it stood; the company with no score left out of the later sections' scoring (as a company with no key is);
+  // the gate on for the client, for the alias checks below.
+  await setSetting("promotion", snapshot.promotion);
+  await pool.query(`UPDATE enrich_companies SET fit_scored_at = now(), fit_reason = 'Made-up: left unscored by test-fit' WHERE row_id = $1`, [plainRow]);
+  await gateOn([TAG_A]);
 
   // ── C. Aliases (8.4 item 3) ───────────────────────────────────────────────
   section("C. Aliases: a re-score reaches a promoted lead on another domain");

@@ -14,8 +14,9 @@ import {
 import { readFitSettings } from "@/lib/companies/fit";
 import type { PromoteKind } from "./fit-types";
 
-// Pipeline emails into leads (2B.5; switch promotion.promote_to_leads, shipped
-// OFF and covering no client). As the AI Ark add does (src/lib/aiark/add-run.ts):
+// Pipeline emails into leads (2B.5; switch promotion.promote_to_leads with its
+// client list, on the Companies tab's settings sheet, shipped OFF and covering
+// no client). As the AI Ark add does (src/lib/aiark/add-run.ts):
 // one round per client at a time (an advisory lock on the client), the
 // contacts that may be promoted taken in one query (scripts/lib/enrich/promote.mjs),
 // those the database already holds settled at once, the rest imported through
@@ -25,10 +26,9 @@ import type { PromoteKind } from "./fit-types";
 // people, at most promotion.batch_max (1,000) contacts each. The answer comes
 // as soon as the batches exist; the imports run after it (Next `after()`).
 //
-// Refused while promotion is off or the client is not on its list, while the
-// fit gate does not cover the client (so a promoted lead can never be pushed
-// past a later bad score), while the rule or the model is not set, and while a
-// batch of the client is still being imported.
+// Refused while promotion is off or the client is not on its list, and while a
+// batch of the client is still being imported. Fit scoring is not needed (kept
+// for v2, switched off): no rule, model, gate or score is asked for.
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const KINDS: PromoteKind[] = ["general", "person"];
@@ -66,13 +66,6 @@ export async function startPromote({
         const settings = await readFitSettings(c);
         const allowed = promotionAllowed(settings, tag);
         if (!allowed.ok) return { status: 409, error: `${allowed.why}. Nothing was promoted.` };
-        const { rows: [g] } = await c.query(`SELECT public.fn_fit_gate_applies($1) AS on`, [tag]);
-        if (g?.on !== true) {
-          return {
-            status: 409,
-            error: `The fit gate does not cover ${tag} yet, so nothing was promoted: a promoted lead must never be pushed past a later bad score. Put the client on the gate first.`,
-          };
-        }
         // Batches that never got a final status (a restart) are dead, as the Uploads page treats them.
         await c.query(
           `UPDATE upload_batches SET status = 'error', error_log = $1::jsonb, completed_at = now()

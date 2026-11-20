@@ -73,10 +73,11 @@
 // (fit-push.mjs), the scorer (fit-score.mjs: idle while scoring is off, the
 // rule is not set or OPENAI_API_KEY is missing), the blocked refresh after a
 // gate change, and a step of a scoring or review run over the Email Bison copy
-// (fit-backfill.mjs). Every minute, clients whose scored contacts wait are
+// (fit-backfill.mjs). Every minute, clients whose approved contacts wait are
 // promoted into leads through the web app (POST /api/companies/promote/auto,
 // the AIARK_AUTO_ADD_URL origin and AIARK_AUTO_ADD_KEY), at most one round per
-// client every 10 minutes; promotion ships off and covers no client.
+// client every 10 minutes; promotion ships off and covers no client, and needs
+// no fit score (fit scoring is kept for v2, switched off).
 // FIT_POLL_MS (5000): the fit loop's sleep when it had nothing to do.
 //
 // Overlap sharing (migrations 133 and 134, scripts/lib/share/): every 60 s,
@@ -659,7 +660,7 @@ async function fitLoop() {
   }
 }
 
-// Scored contacts into leads: the web app runs the import (TypeScript); the
+// Approved contacts into leads: the web app runs the import (TypeScript); the
 // worker only asks, at most one round per client every 10 minutes.
 const PROMOTE_CHECK_MS = 60_000;
 const PROMOTE_EVERY_MS = 10 * 60_000;
@@ -679,7 +680,7 @@ async function promoteWaiting() {
       log(`promotion for ${tag}: ${r.ok ? "started" : `not started, ${r.status ?? "no answer"}: ${r.why}`}`);
     }
   } catch (e) {
-    log(`promoting scored contacts: ${e.message}`);
+    log(`promoting approved contacts: ${e.message}`);
   } finally {
     promoteBusy = false;
   }

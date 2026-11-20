@@ -60,12 +60,12 @@ export interface FitState {
   };
   /** On a large company_fit the total is the planner's estimate (approx) and manual and unscorable are not counted. */
   scores: { total: number; approx: boolean; blocked: number; manual: number | null; unscorable: number | null };
+  /** Promotion into leads: its switch and client list (set on the Companies settings sheet). It needs no fit score. */
   promotion: {
     enabled: boolean;
     tags: string[];
     on_for_client: boolean | null;
     require_question: boolean;
-    min_fit_score: number;
     source_label: string;
     /** Why promotion can't run for the client now, or null. */
     blocked_why: string | null;

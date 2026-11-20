@@ -4,7 +4,7 @@ import { cleanTag, TAG_RE } from "@/lib/aiark/server";
 import { startPromote } from "@/lib/companies/promote-run";
 
 // POST /api/companies/promote/auto {tag}: the enrichment worker, once a client's
-// scored contacts wait, at most one round per client every 10 minutes
+// approved contacts wait, at most one round per client every 10 minutes
 // (scripts/enrich-worker.mjs). The same round as the button
 // (src/lib/companies/promote-run.ts), and the same refusals. Outside the
 // session middleware: a Bearer AIARK_AUTO_ADD_KEY is the only auth, and with

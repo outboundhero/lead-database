@@ -5,11 +5,11 @@ import { startPromote } from "@/lib/companies/promote-run";
 import type { PromoteKind } from "@/lib/companies/fit-types";
 
 // POST /api/companies/promote {tag, kind?}: "Promote now" on the Companies tab.
-// One round of the client's scored, approved pipeline emails into leads
+// One round of the client's approved pipeline emails into leads
 // (src/lib/companies/promote-run.ts): general inboxes, people, or both when no
 // kind is given. Manager and up. Refused (409) while promotion is off or the
-// client is not on its list, while the fit gate does not cover the client,
-// while the rule or the model is not set, and while a round is running.
+// client is not on its list (both set on the settings sheet), and while a
+// round is running. No fit score is needed (fit scoring is kept for v2).
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;

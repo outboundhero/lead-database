@@ -303,9 +303,9 @@ export async function fitState(c: Db, s: FitSettings, tag: string | null, worker
   let blockedWhy: string | null = null;
   let counts: FitState["promotion"]["counts"] = null;
   if (tag) {
+    // Only the switch and its client list: promotion needs no fit score, rule, model or gate (kept for v2).
     const allowed = promotionAllowed(s, tag);
     if (!allowed.ok) blockedWhy = allowed.why;
-    else if (!coversClient) blockedWhy = "The fit gate does not cover this client yet, so nothing of it may be promoted";
     counts = (await promoteCounts(c, { tag, settings: s })) as FitState["promotion"]["counts"];
   }
   return {
@@ -331,7 +331,6 @@ export async function fitState(c: Db, s: FitSettings, tag: string | null, worker
       tags: [...p.tags],
       on_for_client: tag ? s.flagOn("promotion", tag) : null,
       require_question: p.require_question,
-      min_fit_score: p.min_fit_score,
       source_label: p.source_label,
       blocked_why: blockedWhy,
       counts,

@@ -2,7 +2,8 @@
 // 124 to 126, 128 and 129): the switches and their client lists, the caps, how
 // long paid answers are remembered, the people runs, the spend caps (with the
 // daily calls of the email finders and Enrichley, 129), the fit
-// scorer, promotion and the gate, the LinkedIn sources and their starter
+// scorer, promotion and the gate (promotion needs no fit score: the scorer and
+// the gate are kept for v2, off), the LinkedIn sources and their starter
 // keywords, and the model for each AI step, so a model is swapped without a
 // deploy. The worker reads them through readSettings(),
 // at most 30 seconds old; the routes read them fresh and pass the rows to
@@ -187,6 +188,11 @@ export const SETTINGS_DEFAULTS = frozen({
   people_tracks: null,
   fit_rule: { prompt: null, version: null },
   fit_scoring: { enabled: false, batch_size: 25, calls_in_flight: 2 },
+  /**
+   * Promotion into leads: the switch and its client list are set on the
+   * Companies tab's settings sheet. No fit score is needed (2026-11-20: fit
+   * scoring is kept for v2), so min_fit_score is kept as stored and not read.
+   */
   promotion: {
     promote_to_leads: false,
     tags: [],

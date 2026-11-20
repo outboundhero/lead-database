@@ -10,11 +10,12 @@ import { useHasPermission } from "@/lib/context/role-context";
 import type { FitGateView, FitKeyKind, FitRun, FitSettingsView, FitState, ScoreEstimate } from "@/lib/companies/fit-types";
 
 // The fit panel (phase 3): what the scorer is doing and why, the gate, and
-// promotion of the client's scored pipeline emails into leads. Managers see it
-// and can press "Promote now" (only while promotion covers the client). Admins
-// edit the scoring settings and score a company by hand; owners and admins
-// edit the gate. Everything ships off: no rule, scoring off, promotion off and
-// the gate off, each covering no client.
+// promotion of the client's approved pipeline emails into leads. Managers see
+// it and can press "Promote now" (only while promotion covers the client).
+// Admins edit the scoring settings and score a company by hand; owners and
+// admins edit the gate. Everything ships off: no rule, scoring off, promotion
+// off and the gate off, each covering no client. Promotion needs no fit score
+// (fit scoring is kept for v2); its switch is on the Companies settings sheet.
 
 const fmt = (n: number | null | undefined) => (n ?? 0).toLocaleString("en-US");
 const usd = (n: number) => n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -78,7 +79,7 @@ export function FitPanel({ tag }: { tag: string | null }) {
 
   const promote = async () => {
     if (!tag) return;
-    if (!window.confirm(`Promote ${tag}'s scored, approved pipeline emails into the lead database now? Duplicates are skipped, never merged.`)) return;
+    if (!window.confirm(`Promote ${tag}'s approved pipeline emails into the lead database now? Duplicates are skipped, never merged.`)) return;
     setPromoting(true);
     try {
       const j = await send("/api/companies/promote", "POST", { tag });
@@ -220,7 +221,8 @@ export function FitPanel({ tag }: { tag: string | null }) {
             <span className="flex flex-wrap items-center gap-2">
               <Pill tone={state.promotion.enabled ? "good" : "plain"}>{state.promotion.enabled ? "Promotion on" : "Promotion off"}</Pill>
               <span>
-                scored {state.promotion.min_fit_score} or more{state.promotion.require_question ? ", with a question" : ""}, source &quot;{state.promotion.source_label}&quot;
+                approved emails{state.promotion.require_question ? " with a question" : ""}, no fit score needed, source &quot;{state.promotion.source_label}&quot;;
+                switched on {isAdmin ? "in Settings" : "by an admin"}
               </span>
               {tag && state.promotion.counts && (
                 <span>
