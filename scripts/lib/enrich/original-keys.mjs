@@ -12,7 +12,9 @@
 // seed checks an export's layout against it by name: every key here is the
 // slug of its Clay column name (slugKey), except the two positions in
 // NAME_NOT_SLUG, which the seed does not check by name (neither is ever
-// compiled). A column whose name doesn't give its key stops the seed.
+// compiled). A column whose name doesn't give its key stops the seed. The
+// by-name seed (a client's own tables, seed-originals.mjs seedByName) matches
+// columns by these slugs instead, with NAME_ALIASES for other spellings.
 
 /** How many columns each original table has. The seed refuses an export with another count. */
 export const ORIGINAL_COUNTS = Object.freeze({ companies: 68, people: 88, inboxes: 76 });
@@ -90,6 +92,18 @@ export const ORIGINAL_KEYS = Object.freeze({
 
 /** Positions whose key is not the slug of the Clay column's name (both NOT NEEDED, never compiled). */
 export const NAME_NOT_SLUG = Object.freeze({ companies: Object.freeze([3, 4]), people: Object.freeze([]), inboxes: Object.freeze([]) });
+
+/**
+ * Another spelling of a column name, as slugs (slugKey): a client column whose
+ * name slugs to the left one is matched as the right one by the by-name seed
+ * (seed-originals.mjs mapByName), unless the left one is itself a name of the
+ * default's layout. Slugs only: no other text of a Clay table.
+ */
+export const NAME_ALIASES = Object.freeze({
+  companies: Object.freeze({}),
+  people: Object.freeze({ enrichley_validation: "enrichly_validation", enrichley_stamp_of_approval: "enrichly_stamp_of_approval" }),
+  inboxes: Object.freeze({ enrichley_validation: "enrichly_validation", enrichley_stamp_of_approval: "enrichly_stamp_of_approval" }),
+});
 
 /**
  * Our key for one original column, or null when the position is outside the table.
