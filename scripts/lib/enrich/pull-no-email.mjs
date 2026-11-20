@@ -33,19 +33,21 @@
 //     works) records where the person went, so a row deleted from the People
 //     table is never put back and a repeat copies nothing.
 //  2. The hand-back (handBackFound), right after the People release. For the
-//     runs with People rows still open (progress.no_email.open), each pull
-//     row whose find_email cell is "sent" is joined to its People row: gone,
-//     it is "Removed from the People table"; done with "Approved email" and
-//     an address traced to its finder or Enrichley (personVerdict), the
-//     address goes to the pull's row through emailFound() with who found it,
-//     the validation status that gives and the People row's question; done
-//     with any other Outcome, the pull row's search is closed with that
-//     Outcome. Rows still held, queued, running, waiting or in error are left
-//     for a later minute.
+//     runs with People rows still open (progress.no_email.open), the one
+//     checked longest ago first, each pull row whose find_email cell is
+//     "sent" is joined to its People row: gone, it is "Removed from the
+//     People table"; done with "Approved email" and an address traced to its
+//     finder or Enrichley (personVerdict), the address goes to the pull's row
+//     through emailFound() with who found it, the validation status that
+//     gives and the People row's question; done with any other Outcome, the
+//     pull row's search is closed with that Outcome. Rows still held, queued,
+//     running, waiting or in error are left for a later minute (and never
+//     take the place of rows with an answer).
 //
 // progress.no_email (written with jsonb_set, only on a finished run: the run
 // engine writes progress only while it holds its claim):
-//   { state: "copying" | "done" | "waiting", reason?, next_try_at?, copied, already, open, at }
+//   { state: "copying" | "done" | "waiting", reason?, next_try_at?, copied, already, open, at, checked_at? }
+// checked_at: the hand-back's last look at the run.
 // waiting: the client's tables can't be made now (originals_missing,
 // retired_v1) or a chunk failed (failed); tried again after
 // MOVE_RETRY_MINUTES.
@@ -452,24 +454,36 @@ export async function copyPullNoEmail(pool, {
 
 // ── The hand-back ───────────────────────────────────────────────────────────
 
+// The runs with People rows still open, the one checked longest ago first
+// (progress.no_email.checked_at, then the oldest finished): a run whose
+// People rows wait or failed never holds up the others.
 const OPEN_RUNS = `
   SELECT r.id, r.table_id
     FROM aiark_runs r
    WHERE r.table_id IS NOT NULL AND r.finished_at IS NOT NULL AND coalesce((r.progress #>> '{no_email,open}')::int, 0) > 0
      AND ($1::uuid[] IS NULL OR r.id = ANY($1::uuid[]))
-   ORDER BY r.finished_at, r.id
+   ORDER BY (r.progress #>> '{no_email,checked_at}')::timestamptz NULLS FIRST, r.finished_at, r.id
    LIMIT $2`;
 
-// A run's pull rows sent to the People table, with their People row (or none: deleted).
+// A run's pull rows sent to the People table whose People row has an answer:
+// worked to the end, or deleted. Rows still held, queued, running, waiting or
+// in error are left out here, so they never fill the limit.
 const SENT_ROWS = `
-  SELECT f.row_id AS pull_row_id, f.value AS sent, p.id AS people_row_id, p.table_id AS people_table_id, p.run_status AS people_status,
+  SELECT f.row_id AS pull_row_id, p.id AS people_row_id, p.table_id AS people_table_id,
          (SELECT jsonb_object_agg(c.column_key, c.value) FROM enrich_cells c
            WHERE c.row_id = p.id AND c.status = 'done' AND c.column_key = ANY($3::text[])) AS cells
     FROM enrich_cells f
     LEFT JOIN enrich_rows p ON p.id = (f.value ->> 'people_row_id')::bigint
    WHERE f.table_id = $1 AND f.column_key = '${FIND_EMAIL_COLUMN}' AND f.value ->> 'state' = 'sent'
+     AND (p.id IS NULL OR p.run_status = 'done')
    ORDER BY f.row_id
    LIMIT $2`;
+
+// A pull row's find_email cell, still sent, locked for its hand-back: a second worker waits, then finds it settled.
+const LOCK_SENT = `
+  SELECT 1 FROM enrich_cells f
+   WHERE f.row_id = $1 AND f.column_key = '${FIND_EMAIL_COLUMN}' AND f.value ->> 'state' = 'sent'
+     FOR UPDATE`;
 
 // A pull row's search ended (closed, gone, found): only while its cell still says sent.
 const SETTLE_FIND = `
@@ -492,7 +506,8 @@ const MARK_PEOPLE_ROW = `
 
 const RECOUNT_OPEN = `
   UPDATE aiark_runs r
-     SET progress = jsonb_set(r.progress, '{no_email,open}', to_jsonb(${OPEN_COUNT("r")}), true)
+     SET progress = jsonb_set(r.progress, '{no_email}',
+                              (r.progress -> 'no_email') || jsonb_build_object('open', ${OPEN_COUNT("r")}, 'checked_at', now()), true)
    WHERE r.id = $1 AND r.finished_at IS NOT NULL AND jsonb_typeof(r.progress -> 'no_email') = 'object'`;
 
 /** The cells a hand-back reads from a People row: its Outcome, its question and what its verdict reads. */
@@ -506,15 +521,20 @@ const foundWords = (v) => (v.found_by ? `Found by ${vendorName(v.found_by)}` : `
  * pull row takes it (emailFound), its find_email cell says found, and the
  * People row's add_to_database cell says where the address went (when it has
  * none). "running": the pull row is being worked, left for the next minute;
- * "changed": its Outcome is no longer "No email".
+ * "changed": its Outcome is no longer "No email"; "settled": another worker
+ * handed it back meanwhile.
  *
- * @returns {Promise<"found" | "running" | "changed">}
+ * @returns {Promise<"found" | "running" | "changed" | "settled">}
  */
 async function handBackOne(pool, { pullTableId, pullRowId, peopleRowId, peopleTableId, verdict, question }) {
   const c = await pool.connect();
   try {
     await c.query("BEGIN");
     await c.query("SET LOCAL statement_timeout = '30s'");
+    if (!(await c.query(LOCK_SENT, [pullRowId])).rows.length) {
+      await c.query("ROLLBACK");
+      return "settled";
+    }
     const ok = await emailFound(c, {
       rowId: pullRowId,
       email: verdict.address,
@@ -576,7 +596,6 @@ export async function handBackFound(pool, { runIds = null, runs = 20, limit = 20
         });
         continue;
       }
-      if (r.people_status !== "done") continue; // held, queued, running, waiting or in error: a later minute
       const cells = r.cells ?? {};
       const outcome = typeof cells.person_outcome === "string" ? cells.person_outcome : "";
       if (outcome !== APPROVED_OUTCOME) {
