@@ -28,6 +28,8 @@ type Suggestion = {
 export default function LocationsPage() {
   const canResolve = useHasPermission("manager");
   const [tab, setTab] = useState<"browse" | "unresolved">("browse");
+  // /locations?tab=unresolved (the Low places tab's link) opens the queue.
+  useEffect(() => { try { if (new URLSearchParams(window.location.search).get("tab") === "unresolved") setTab("unresolved"); } catch {} }, []);
 
   // ── browse state ──
   const [country, setCountry] = useState<CountryRow | null>(null);

@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useHasPermission } from "@/lib/context/role-context";
-import type { TopupClient, TopupPull, TopupView } from "@/app/api/topup/types";
+import type { TopupClient, TopupFreeFirst, TopupHandRun, TopupPull, TopupView } from "@/app/api/topup/types";
 
 // The Sharing page's "Low places" tab: the weekly top-up (migration 135).
 // Each Active client of the covered types with its places under its minimum
@@ -17,9 +17,36 @@ import type { TopupClient, TopupPull, TopupView } from "@/app/api/topup/types";
 // places reads clearly. Pulls waiting to start can be counted and started
 // here (managers); "Run now" asks for a pass at once (admins). No props: the
 // tab reads the viewer's role itself.
+//
+// "Free first" (plan 2.4): leads already in the database that a place fix
+// would count for a client's low cities, as the pass counted them, with a
+// link to the Locations page's Unresolved queue. AI Ark runs started by hand
+// for clients that cannot receive (plan 2.7) are listed read only: the top-up
+// cancels only its own runs.
 
 const fmt = (n: number | null | undefined) => (n == null ? "?" : Math.round(n).toLocaleString("en-US"));
 const when = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString() : "never");
+const UNRESOLVED_QUEUE = "/locations?tab=unresolved";
+
+/** A state key "US|IL" as words: the code, with its country when it is not the US. */
+const stateWords = (key: string) => {
+  const [country, state] = key.split("|");
+  return state ? (country === "US" ? state : `${state} (${country})`) : key;
+};
+/** partial plus unresolved, null when neither was counted. */
+const freeFirstSum = (f: TopupFreeFirst) => (f.partial == null && f.unresolved == null ? null : (f.partial ?? 0) + (f.unresolved ?? 0));
+function freeFirstWords(f: TopupFreeFirst) {
+  const partial = f.partial == null ? "not counted" : fmt(f.partial);
+  const states = f.states.length
+    ? f.states.map((s) => `${stateWords(s.key)} (${s.partial == null ? "not counted" : fmt(s.partial)})`).join(", ")
+    : "its states";
+  const unresolved = f.unresolved == null ? "not counted" : fmt(f.unresolved);
+  const cities = f.unresolved == null ? "not counted" : f.cities.length ? f.cities.map((c) => `${c.label} (${fmt(c.unresolved)})`).join(", ") : "none";
+  return {
+    partial: `${partial} leads in ${states} whose city text the geo reference did not match (they count for no city place today, and the Locations page cannot fix them yet)`,
+    unresolved: `${unresolved} unresolved leads whose place text names one of these cities (some may be a same-named city elsewhere): ${cities}`,
+  };
+}
 
 const ACTION_WORDS: Record<string, string> = {
   none: "Nothing to do",
@@ -79,6 +106,9 @@ function ClientRow({ c }: { c: TopupClient }) {
   const low = c.places.filter((p) => p.kind === "low");
   const unknown = c.places.filter((p) => p.kind === "unresolved");
   const tone = c.receiveBlock ? "bad" : c.action === "started" ? "good" : c.action === "none" ? "plain" : "warn";
+  const free = c.freeFirst ?? null;
+  const freeSum = free ? freeFirstSum(free) : null;
+  const freeText = free ? freeFirstWords(free) : null;
   return (
     <div className="border-b last:border-b-0">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2.5 text-[13px]">
@@ -97,6 +127,11 @@ function ClientRow({ c }: { c: TopupClient }) {
         )}
         {c.receiveBlock && <Pill tone="bad">cannot receive: {c.receiveBlock}</Pill>}
         {!c.kind && <Pill tone={tone} title={c.reason ?? undefined}>{ACTION_WORDS[c.action] ?? c.action}</Pill>}
+        {free && freeText && (freeSum == null || freeSum > 0) && (
+          <Pill tone="plain" title={`${freeText.partial}; ${freeText.unresolved}.`}>
+            Free first: {freeSum == null ? "not counted" : fmt(freeSum)}
+          </Pill>
+        )}
         {c.runId && (
           <Link href={`/leads/ai-ark?client=${encodeURIComponent(c.tag)}`} className="text-[12px] font-medium text-primary hover:underline">
             Run {c.runId.slice(0, 8)}
@@ -114,6 +149,18 @@ function ClientRow({ c }: { c: TopupClient }) {
       {open && c.places.length > 0 && (
         <div className="space-y-1 px-9 pb-3 text-[12px]">
           {c.reason && <p className="text-muted-foreground">{c.reason}</p>}
+          {free && freeText && (
+            <p className="text-muted-foreground">
+              {free.partial === 0 && free.unresolved === 0
+                ? "Free first: none waiting for a place fix."
+                : `Free first: ${freeText.partial}; ${freeText.unresolved}. `}
+              {!(free.partial === 0 && free.unresolved === 0) && (
+                <Link href={UNRESOLVED_QUEUE} className="font-medium text-primary hover:underline">
+                  Locations page, Unresolved queue
+                </Link>
+              )}
+            </p>
+          )}
           {c.places.map((p) => (
             <div key={`${p.kind}|${p.placeKey}`} className="flex gap-3">
               <span className="w-56 truncate">{p.label}</span>
@@ -205,6 +252,28 @@ function PullRow({ p, view, onDone }: { p: TopupPull; view: TopupView; onDone: (
   );
 }
 
+/** One AI Ark run someone started by hand for a client that cannot receive now. Read only. */
+function HandRunRow({ r }: { r: TopupHandRun }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b px-3 py-2.5 text-[13px] last:border-b-0">
+      <span className="min-w-24 font-semibold">{r.tag}</span>
+      <Link href={`/leads/ai-ark?client=${encodeURIComponent(r.tag)}`} className="text-[12px] font-medium text-primary hover:underline">
+        Run {r.id.slice(0, 8)}
+      </Link>
+      <Pill tone={r.status === "running" ? "warn" : "plain"}>{r.status}</Pill>
+      <span className="text-[12px] text-muted-foreground">{r.mode}</span>
+      <span className="text-[12px] text-muted-foreground">
+        started by {r.startedBy ?? "nobody recorded"} {when(r.createdAt)}
+      </span>
+      <span className="text-[12px] tabular-nums">{fmt(r.size)} people</span>
+      <span className="text-[12px] tabular-nums">
+        {r.creditsUsed.toLocaleString("en-US", { maximumFractionDigits: 1 })} credits used
+      </span>
+      <Pill tone="bad">cannot receive: {r.reason}</Pill>
+    </div>
+  );
+}
+
 export function LowPlacesTab() {
   const canView = useHasPermission("manager");
   const isAdmin = useHasPermission("admin");
@@ -258,6 +327,7 @@ export function LowPlacesTab() {
     }
   };
   const pass = view.pass;
+  const handRuns = view.handRuns ?? [];
 
   return (
     <div className="space-y-4">
@@ -296,6 +366,15 @@ export function LowPlacesTab() {
           {view.lastDone && pass?.id !== view.lastDone.id ? ` The last finished pass ended ${when(view.lastDone.finishedAt)}.` : ""}
           {pass?.lastError ? ` Last error: ${pass.lastError}` : ""}
         </p>
+        {view.freeFirst?.unresolvedTotal != null && (
+          <p className="mt-1 text-muted-foreground">
+            Leads anywhere whose place text the location cron could not read: {fmt(view.freeFirst.unresolvedTotal)} (at the pass). Fixing
+            place text costs nothing:{" "}
+            <Link href={UNRESOLVED_QUEUE} className="font-medium text-primary hover:underline">
+              Locations page, Unresolved queue
+            </Link>
+          </p>
+        )}
       </div>
 
       {view.pulls.length > 0 && (
@@ -305,6 +384,23 @@ export function LowPlacesTab() {
           </p>
           {view.pulls.map((p) => (
             <PullRow key={p.id} p={p} view={view} onDone={load} />
+          ))}
+        </div>
+      )}
+
+      {handRuns.length > 0 && (
+        <div className="rounded-2xl border bg-card">
+          <div className="border-b px-3 py-2">
+            <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
+              AI Ark runs started by hand for clients that cannot receive ({handRuns.length})
+            </p>
+            <p className="mt-0.5 text-[12px] text-muted-foreground">
+              The weekly top-up cancels only its own runs. These were started by hand, so they keep going: cancel one on the AI Ark tab if it
+              should stop.
+            </p>
+          </div>
+          {handRuns.map((r) => (
+            <HandRunRow key={r.id} r={r} />
           ))}
         </div>
       )}

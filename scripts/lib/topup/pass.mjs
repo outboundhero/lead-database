@@ -23,11 +23,19 @@
 // transaction with its name added to topup_passes.clients_done, so a firing
 // that stops (its time is up, or it crashed) leaves the next one to go on
 // from there.
+//
+// "Free first" (plan 2.4, scripts/lib/topup/free-first.mjs): once a pass, the
+// unresolved leads of the whole database are counted; for each client with a
+// low city place, the leads already in its states or named after its low
+// cities that a place fix would count there. Stored on the pass
+// (counts.free_first) with the client's flags; a count that fails reads "not
+// counted" and never stops the pass.
 
 import { placeKeyOf } from "../aiark/company-filters.mjs";
 import { cityKey } from "../aiark/geo.mjs";
 import { computeCoverage, coverageSettings, minimumOf, storeCoverage, wholeMinimum } from "../coverage.mjs";
 import { COVERAGE_MAX_AGE_HOURS, TOPUP_PASS_EVERY_DAYS } from "../overlap-topup.mjs";
+import { freeFirstCounter, SET_CLIENT_SQL, storeUnresolvedTotal } from "./free-first.mjs";
 import { inTx, preparePull } from "./pulls.mjs";
 
 /** After a pass that failed, a scheduled one waits this long before it tries again (Run now does not wait). */
@@ -130,14 +138,17 @@ export async function passClients(db, { tagPrefix = null } = {}) {
 
 /**
  * One client's flags for a pass, and its pull when it gets one. Coverage may
- * be computed here (its own transaction); the flags, the pull and the pass's
- * progress are then written in one transaction.
+ * be computed here (its own transaction), and with `free` its free-first
+ * numbers (their own transactions); the flags, the pull, the free-first
+ * numbers and the pass's progress are then written in one transaction.
  *
  * @param {DbPool} pool
- * @param {{ pass: any, client: any, settings: any, geo: any, cov: { defaultMinimum: number, pattern: string | null, patternSha256: string | null } }} opts
+ * @param {{ pass: any, client: any, settings: any, geo: any, cov: { defaultMinimum: number, pattern: string | null, patternSha256: string | null },
+ *           free?: import("./free-first.mjs").FreeFirstCounter | null }} opts
+ *   free: the firing's free-first counter; absent, nothing is counted or written for free first
  * @returns {Promise<{ kinds: Record<string, number>, action: string }>}
  */
-export async function flagClient(pool, { pass, client, settings, geo, cov }) {
+export async function flagClient(pool, { pass, client, settings, geo, cov, free = null }) {
   const tag = client.tag;
   const clientType = client.client_type ?? null;
   const { rows: [rb] } = await pool.query(`SELECT public.fn_client_receive_block($1) AS block`, [tag]);
@@ -195,6 +206,9 @@ export async function flagClient(pool, { pass, client, settings, geo, cov }) {
     return true;
   });
   buyable = buyable.filter((b, i) => buyable.findIndex((x) => flagKeyOf(x.entry) === flagKeyOf(b.entry)) === i);
+  // Free first: only for low city places (state-wide ones get no partial count). Never throws.
+  const lowCities = flags.filter((f) => f.kind === "low" && f.place?.city && f.place?.state);
+  const freeNumbers = free && lowCities.length ? await free.forClient(lowCities) : null;
 
   return inTx(pool, async (c) => {
     // A pass that carries on rewrites a client it had half done.
@@ -230,6 +244,8 @@ export async function flagClient(pool, { pass, client, settings, geo, cov }) {
         ]
       );
     }
+    // A client with no low city now loses an entry an earlier try of this pass wrote.
+    if (free) await c.query(SET_CLIENT_SQL, [pass.id, tag, freeNumbers ? JSON.stringify(freeNumbers) : null]);
     await c.query(
       `UPDATE topup_passes SET clients_done = array_append(clients_done, $2) WHERE id = $1 AND NOT ($2 = ANY (clients_done))`,
       [pass.id, tag]
@@ -278,6 +294,10 @@ export async function runPass(pool, { settings, geo, deadline = Infinity, log = 
   if (!pass) return null;
   pass = await inTx(pool, (c) => beginPass(c, pass, settings));
   const cov = await coverageSettings(pool);
+  // Free first: the unresolved total once a pass, then one counter for this
+  // firing, seeded with the states an earlier firing of the pass counted.
+  if (typeof pass.counts?.free_first?.unresolved_total !== "number") await storeUnresolvedTotal(pool, pass.id, { log });
+  const free = freeFirstCounter(pool, { passId: pass.id, pattern: cov.pattern, known: pass.counts?.free_first?.states ?? {}, log });
   const clients = await passClients(pool, { tagPrefix });
   const done = new Set(pass.clients_done ?? []);
   let left = 0;
@@ -288,7 +308,7 @@ export async function runPass(pool, { settings, geo, deadline = Infinity, log = 
       continue;
     }
     try {
-      await flagClient(pool, { pass, client, settings, geo, cov });
+      await flagClient(pool, { pass, client, settings, geo, cov, free });
     } catch (e) {
       // Tried again at the next firing; after FAILED_TRIES the pass goes on
       // without the client (no flags), and its counts name it.
@@ -315,6 +335,7 @@ export async function runPass(pool, { settings, geo, deadline = Infinity, log = 
   const { rows: [p] } = await pool.query(
     `UPDATE topup_passes SET state = 'done', finished_at = now(),
             counts = $2::jsonb || CASE WHEN counts ? 'failed_tries' THEN jsonb_build_object('failed_tries', counts->'failed_tries') ELSE '{}'::jsonb END
+                               || CASE WHEN counts ? 'free_first' THEN jsonb_build_object('free_first', counts->'free_first') ELSE '{}'::jsonb END
       WHERE id = $1 AND state = 'running' RETURNING *`,
     [pass.id, JSON.stringify(counts)]
   );

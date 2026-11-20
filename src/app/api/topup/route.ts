@@ -5,14 +5,21 @@ import { modes } from "@/lib/aiark/server";
 import { settingsFrom } from "../../../../scripts/lib/enrich/settings.mjs";
 import { placeLabel } from "../../../../scripts/lib/aiark/start-run.mjs";
 import { pullsStartedToday, topupBudget } from "../../../../scripts/lib/topup/budget.mjs";
-import type { TopupClient, TopupPull, TopupView } from "./types";
+import { readFreeFirst } from "../../../../scripts/lib/topup/free-first.mjs";
+import { handRunsBlocked } from "../../../../scripts/lib/topup/hand-runs.mjs";
+import type { TopupClient, TopupHandRun, TopupPull, TopupView } from "./types";
 
 // GET /api/topup: the Sharing page's Low places tab. The weekly top-up's
 // settings, the newest pass with its flags per client (low places, available
-// against the minimum, what was done, the run, the client's tag count), the
-// pulls waiting to start with the versions POST /api/aiark/runs checks, the
-// budget used and held in the last 7 days, and which AI Ark modes can run.
+// against the minimum, what was done, the run, the client's tag count, and
+// its "free first" numbers as the pass stored them), the pass's count of
+// every unresolved lead, the pulls waiting to start with the versions
+// POST /api/aiark/runs checks, the budget used and held in the last 7 days,
+// which AI Ark modes can run, and the AI Ark runs someone started by hand
+// that are going for clients that cannot receive now (a live read).
 // Manager and up. Read only. Before migration 135 it answers ready: false.
+
+const iso = (v: unknown): string | null => (v == null ? null : new Date(v as string | Date).toISOString());
 
 export const dynamic = "force-dynamic";
 
@@ -24,7 +31,10 @@ export async function GET() {
       async (c): Promise<TopupView> => {
         const { rows: [ready] } = await c.query(`SELECT to_regclass('public.topup_passes') IS NOT NULL AS ok`);
         if (!ready.ok) {
-          return { ready: false, settings: null, pass: null, lastDone: null, clients: [], pulls: [], budget: null, clientBudget: {}, modes: null };
+          return {
+            ready: false, settings: null, pass: null, lastDone: null, clients: [], pulls: [], budget: null, clientBudget: {}, modes: null,
+            freeFirst: null, handRuns: [],
+          };
         }
         const { rows: srows } = await c.query(`SELECT key, value FROM enrich_settings`);
         const wt = settingsFrom(srows).weekly_topup;
@@ -47,6 +57,8 @@ export async function GET() {
               [pass.id]
             )
           : { rows: [] };
+        // Free first, as the pass stored it (checked; a pass from before it has none).
+        const free = readFreeFirst(pass?.counts);
         const byTag = new Map<string, TopupClient>();
         for (const f of flags) {
           let cl = byTag.get(f.client_tag);
@@ -57,6 +69,7 @@ export async function GET() {
               pullId: null, runId: null,
               tagLeads: f.tag_leads == null ? null : Number(f.tag_leads),
               tagContactable: f.tag_contactable == null ? null : Number(f.tag_contactable),
+              freeFirst: free.clientOf(f.client_tag),
             };
             byTag.set(f.client_tag, cl);
           }
@@ -96,6 +109,11 @@ export async function GET() {
           const cb = await topupBudget(c, { tag });
           clientBudget[tag] = { used: cb.clientUsed, reserved: cb.clientReserved };
         }
+        const handRuns: TopupHandRun[] = (await handRunsBlocked(c)).map((r) => ({
+          id: r.id, tag: r.client_tag, status: r.status, mode: r.mode, strategy: r.strategy,
+          size: Number(r.size_requested), creditsUsed: Number(r.credits_used), pulled: Number(r.pulled),
+          createdAt: iso(r.created_at) ?? "", startedAt: iso(r.started_at), startedBy: r.started_by ?? null, reason: r.block,
+        }));
         return {
           ready: true,
           settings: {
@@ -119,6 +137,8 @@ export async function GET() {
           },
           clientBudget,
           modes: modes(),
+          freeFirst: free.top,
+          handRuns,
         };
       },
       { readOnly: true, timeoutMs: 15_000 }
