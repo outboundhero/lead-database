@@ -14,7 +14,9 @@ import { AccessDenied } from "@/components/layout/access-denied";
 import { useHasPermission } from "@/lib/context/role-context";
 import { ClientSelector } from "@/components/filters/client-selector";
 import { LinkedinSettingsCard } from "@/components/aiark/linkedin-settings-card";
-import type { AiArkPlan, AiArkRun, AiArkSetup, CountResult, EmployeeBand, PeopleFilters, RunMode, RunStatus, RunStrategy } from "@/lib/aiark/types";
+import type {
+  AiArkPlan, AiArkRun, AiArkSetup, CompetitorsListView, CountResult, EmployeeBand, PeopleFilters, RunMode, RunStatus, RunStrategy,
+} from "@/lib/aiark/types";
 
 // The AI Ark tab: pick a client, check what AI Ark would be asked (the
 // client's locations and exclusions from its rules, plus people filters saved
@@ -617,9 +619,12 @@ function AiArkTab() {
                   <TagInput values={form.industries} onChange={(v) => set("industries", v)} placeholder="facilities services…" maxTags={300} splitOn={null} />
                   <Suggest values={form.industries} options={setup.suggestions.industries} onAdd={(v) => set("industries", [...form.industries, v])} />
                 </Field>
-                <Field label="Leave out industries" hint="Exact AI Ark industry names: “real estate” doesn't also leave out “commercial real estate”.">
-                  <TagInput values={form.exclude_industries} onChange={(v) => set("exclude_industries", v)} placeholder="restaurants…" maxTags={300} splitOn={null} />
-                </Field>
+                <div>
+                  <Field label="Leave out industries" hint="Exact AI Ark industry names: “real estate” doesn't also leave out “commercial real estate”.">
+                    <TagInput values={form.exclude_industries} onChange={(v) => set("exclude_industries", v)} placeholder="restaurants…" maxTags={300} splitOn={null} />
+                  </Field>
+                  {setup.competitors && <CompetitorsLine list={setup.competitors} />}
+                </div>
                 <p className="text-[12px] leading-relaxed text-muted-foreground">
                   Company size and industries also apply to company pulls on the{" "}
                   <Link className="underline" href={`/leads/companies?client=${encodeURIComponent(tag)}`}>Companies tab</Link>.
@@ -662,7 +667,12 @@ function AiArkTab() {
                   <Row label="Company size">{plan.report.bands?.length ? plan.report.bands.map((b) => `${fmt(b.start)}${b.end ? `–${fmt(b.end)}` : "+"}`).join(", ") : "any"}</Row>
                   <Row label="Companies">
                     leaving out {fmt(plan.report.excludeTerms?.sent)} exclusion term{plan.report.excludeTerms?.sent === 1 ? "" : "s"}
-                    {plan.report.excludeTerms?.standard ? ` (${fmt(plan.report.excludeTerms.standard)} standard, the rest this client's)` : ""}
+                    {plan.report.excludeTerms?.standard
+                      ? plan.report.competitors
+                        ? ` (${fmt(plan.report.excludeTerms.standard)} standard, ${fmt(plan.report.excludeTerms.list)} more from the competitors list, the rest this client's)`
+                        : ` (${fmt(plan.report.excludeTerms.standard)} standard, the rest this client's)`
+                      : ""}
+                    {plan.report.excludeTerms?.checkedAfter ? `, ${fmt(plan.report.excludeTerms.checkedAfter)} more checked after the pull` : ""}
                     {plan.report.industries ? `, in ${fmt(plan.report.industries)} industries` : ""}
                     {plan.report.excludeIndustries ? `, not in ${fmt(plan.report.excludeIndustries)} industries` : ""}
                     {plan.report.excludeCompanyTypes?.length ? `, no ${plan.report.excludeCompanyTypes.map((t) => t.replace(/_/g, " ").toLowerCase()).join(" or ")} companies` : ""}
@@ -919,7 +929,8 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
         {fmt(run.pulled)} of {fmt(run.size_requested)} pulled · {fmt(run.with_email)} with an email
         {run.skipped_held
           ? ` · ${fmt(run.skipped_held)} bought before, ${run.strategy === "export" ? "bought again by the export" : "skipped"}`
-          : ""}{" "}
+          : ""}
+        {run.keyword_skipped ? ` · ${fmt(run.keyword_skipped)} at a company holding an excluded keyword, not bought` : ""}{" "}
         · {cr(run.credits_used)} credits
         {run.match_count != null ? ` · ${fmt(run.match_count)} matched at the count` : ""}
         {waiting ? " · AI Ark is preparing the export" : ""}
@@ -951,6 +962,27 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * The built-in competitors list beside "Leave out industries": its terms are
+ * company keywords (whole words in the name, industry and description), not
+ * industry names, so they go with the standard keywords, and are edited on the
+ * Lists page (the Leads page's Lists chip applies the same list to lead filters).
+ */
+function CompetitorsLine({ list }: { list: CompetitorsListView }) {
+  return (
+    <p className="mt-2 rounded-xl bg-muted/60 px-3 py-2 text-[12px] leading-relaxed text-muted-foreground">
+      Also left out, as company keywords (whole words in a company&apos;s name, industry or description) beside the standard keywords: the
+      built-in list <span className="font-medium text-foreground">{list.name}</span> ({fmt(list.terms)} term{list.terms === 1 ? "" : "s"}), read at
+      every count and pull. Edit it on the{" "}
+      <Link className="underline" href={list.editHref}>
+        Lists page
+      </Link>
+      ; the Leads page&apos;s Lists chip applies the same list to lead filters.
+      {list.note && <span className="mt-1 block text-[var(--warning)]">{list.note}</span>}
+    </p>
   );
 }
 

@@ -37,8 +37,14 @@ export interface AiArkModes {
 export interface PlanReport {
   locations: { total: number; sent: number; requests: number; examples: string[]; dropped: { entry: unknown; why: string }[] };
   excludeLocations?: { total: number; sent: number };
-  /** standard: how many of them are the cleaning clients' standard keywords. */
-  excludeTerms?: { total: number; sent: number; standard?: number };
+  /**
+   * standard: how many of them are the cleaning clients' standard keywords; list: how many the built-in
+   * competitors list adds beside those and the client's own; checkedAfter: how many the search can't hold
+   * (checked after the pull). list and checkedAfter come with the competitors list (cleaning clients).
+   */
+  excludeTerms?: { total: number; sent: number; standard?: number; list?: number; checkedAfter?: number };
+  /** The built-in competitors list the search leaves out (cleaning clients): terms in it, added beside the others. */
+  competitors?: { name: string; from: "database" | "fallback"; terms: number; added: number };
   /** Standard keywords left out at the people level too (cleaning clients). */
   peopleKeywords?: number;
   excludeCompanyTypes?: string[];
@@ -94,6 +100,8 @@ export interface AiArkRun {
   finishing: boolean;
   lists_note: string | null;
   excluded: number | null;
+  /** One at a time: people whose Preview company held an excluded keyword, skipped before their email was bought. */
+  keyword_skipped: number | null;
   job_state: string | null;
   created_by_name: string | null;
   /** People per outcome so far; only on a client's newest runs. */
@@ -109,11 +117,25 @@ export interface AiArkSetup {
   targeting: { updatedAt: string; version: string; places: number; excludeTerms: number; commercialCleaning: boolean } | null;
   /** version: the saved filters' updated_at as text (null when nothing is saved), sent back with a save or a pull. */
   people: { saved: boolean; updatedAt: string | null; version: string | null; defaultsFrom: "cleaning" | null; value: PeopleFilters };
+  /** The built-in competitors list this client's searches leave out (cleaning clients), or null. */
+  competitors: CompetitorsListView | null;
   plan: AiArkPlan;
   runs: AiArkRun[];
   credits: Partial<Record<RunMode, { credits: number | null; error: string | null }>>;
   worker: { online: boolean; secondsAgo: number | null } | null;
   suggestions: { departments: string[]; industries: string[]; seniority: string[] };
+}
+
+/** The built-in competitors list as the AI Ark tab shows it (competitorsView in scripts/lib/aiark/competitors.mjs). */
+export interface CompetitorsListView {
+  name: string;
+  /** Terms in the list (trimmed, once each). */
+  terms: number;
+  /** fallback: the database has no such list, so the terms it was first made with are used. */
+  from: "database" | "fallback";
+  note: string | null;
+  /** Where the list is edited (the Lists page). */
+  editHref: string;
 }
 
 /** GET /api/aiark/add: where a run's people stand with "Add to the database". */

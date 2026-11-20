@@ -7,6 +7,8 @@ import {
   cleanPeopleFilters,
   cleanTag,
   clientInfo,
+  competitorsFor,
+  competitorsListView,
   creditsLeft,
   DEPARTMENT_SUGGESTIONS,
   geo,
@@ -24,6 +26,7 @@ import type { AiArkSetup, PeopleFilters } from "@/lib/aiark/types";
 
 // GET  /api/aiark/setup?tag=ABC — everything the AI Ark tab shows for a
 //      client: its rules, its people filters (saved, or the starting point),
+//      the built-in competitors list its searches leave out (cleaning clients),
 //      what AI Ark would be asked, its runs, the credits left and whether the
 //      worker is up. Reading the balance is a free AI Ark call.
 // POST /api/aiark/setup {tag, filters} — the plan for filters not saved yet.
@@ -42,12 +45,13 @@ async function setupFor(c: PoolClient, tag: string | null, override: PeopleFilte
   };
   if (!tag) {
     const people = peopleOrDefaults(null, null);
-    return { ...base, client: null, targeting: null, people, plan: planView(null, people.value, g), runs: await runsFor(c, null) };
+    return { ...base, client: null, targeting: null, people, competitors: null, plan: planView(null, people.value, g), runs: await runsFor(c, null) };
   }
   const client = await clientInfo(c, tag);
   const targeting = await targetingOf(c, tag);
   const people = peopleOrDefaults(await savedPeople(c, tag), client?.client_type ?? null);
-  const p = planView(targeting, override ?? people.value, g, client?.client_type ?? null);
+  const competitors = await competitorsFor(c, client?.client_type ?? null);
+  const p = planView(targeting, override ?? people.value, g, client?.client_type ?? null, competitors);
   return {
     ...base,
     client,
@@ -61,6 +65,7 @@ async function setupFor(c: PoolClient, tag: string | null, override: PeopleFilte
         }
       : null,
     people,
+    competitors: competitorsListView(competitors),
     plan: p,
     runs: await runsFor(c, tag),
   };

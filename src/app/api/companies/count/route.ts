@@ -10,6 +10,7 @@ import {
   companyModes,
   companyPlan,
   companySample,
+  competitorsFor,
   geo,
   readPipelineSettings,
   savedPeople,
@@ -94,7 +95,7 @@ export async function POST(req: NextRequest) {
           return {
             enabled: settings.value.company_pipeline.enabled,
             listed: settingsFrom(settingRows).flagOn("company_pipeline", tag),
-            ...companyPlan(targeting, filters.value, await geo(c), client?.client_type ?? null),
+            ...companyPlan(targeting, filters.value, await geo(c), client?.client_type ?? null, await competitorsFor(c, client?.client_type ?? null)),
             rulesVersion: (targeting?.version as string | undefined) ?? null,
             filtersVersion: (saved?.version as string | undefined) ?? null,
           };

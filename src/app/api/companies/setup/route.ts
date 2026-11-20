@@ -11,6 +11,7 @@ import {
   companyModes,
   companyPlanView,
   companyRunsFor,
+  competitorsFor,
   countsFor,
   creditsLeft,
   geo,
@@ -65,7 +66,7 @@ async function setupFor(c: PoolClient, tag: string | null, admin: boolean) {
         }
       : null,
     filters,
-    plan: companyPlanView(targeting, filters.value, await geo(c), client?.client_type ?? null),
+    plan: companyPlanView(targeting, filters.value, await geo(c), client?.client_type ?? null, await competitorsFor(c, client?.client_type ?? null)),
     runs: await companyRunsFor(c, tag),
     counts: await countsFor(c, tag),
     linkedin: client ? await linkedinPlanViewSafe(c, { tag, kind: "companies", settings: await readSettingsNow(c), g: await geo(c) }) : null,

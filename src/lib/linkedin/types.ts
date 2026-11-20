@@ -60,7 +60,7 @@ export interface LinkedinOwnInput {
 
 /** O1: what AI Ark is sent of the keywords, and what is checked after the pull instead. */
 export interface LinkedinKeywordsView {
-  /** The standard keywords and the client's own, once each. */
+  /** The standard keywords, the built-in competitors list and the client's own, once each. */
   union: number;
   /** Phrases AI Ark is sent (condensed: a phrase a shorter one covers is not sent again). */
   sent: number;
@@ -106,6 +106,11 @@ export interface LinkedinSettingsView {
     companyTypes: string[];
     /** The standard keywords, always sent first. */
     keywords: string[];
+    /**
+     * The built-in competitors list (the Lists page), sent after the standard keywords as room allows and
+     * checked after the pull: its terms, and how many of them the union holds beside the standard and own ones.
+     */
+    competitors: { name: string; from: "database" | "fallback"; terms: string[]; added: number; note: string | null; editHref: string };
     /** The full filters, for a "show all" view. */
     filters: PeopleFilters;
   };

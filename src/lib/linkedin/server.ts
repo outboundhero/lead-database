@@ -2,6 +2,7 @@ import type { PoolClient } from "pg";
 import { CLEANING_EXCLUDE_COMPANY_TYPES } from "../../../scripts/lib/aiark/cleaning-filters.mjs";
 import { pickCompanyFilters } from "../../../scripts/lib/aiark/company-filters.mjs";
 import { createCompanyRun } from "../../../scripts/lib/aiark/company-runs.mjs";
+import { COMPETITORS_EDIT_HREF, COMPETITORS_FALLBACK, readCompetitors } from "../../../scripts/lib/aiark/competitors.mjs";
 import type { loadGeo } from "../../../scripts/lib/aiark/geo.mjs";
 import {
   checkPlaces,
@@ -165,6 +166,7 @@ export function areaView(e: Effective, g: Geo): { placesSent: PlaceView[]; notSe
 
 function standardOf(e: Effective): LinkedinSettingsView["standard"] {
   const f = e.filters.value as PeopleFilters;
+  const list = e.competitors ?? COMPETITORS_FALLBACK;
   return {
     from: e.filters.from,
     titles: f.titles?.length ?? 0,
@@ -174,6 +176,7 @@ function standardOf(e: Effective): LinkedinSettingsView["standard"] {
     excludeIndustries: f.exclude_industries?.length ?? 0,
     companyTypes: [...CLEANING_EXCLUDE_COMPANY_TYPES],
     keywords: [...e.keywords.standard],
+    competitors: { name: list.name, from: list.from, terms: [...list.terms], added: e.keywords.list.added.length, note: list.note, editHref: COMPETITORS_EDIT_HREF },
     filters: f,
   };
 }
@@ -303,6 +306,7 @@ export async function previewView(
   const targeting = await readTargeting(c, t);
   const saved = await readSavedFilters(c, t);
   const starter = await readStarter(c);
+  const competitors = await readCompetitors(c);
   const draft = {
     client_tag: t, kind, notes: [], flags: [], source: "manual", copied_from: null, clay_source_id: null, clay_campaign: null, clay_set_up_at: null,
     clay_fingerprint: null, seed_sha256: null, seeded_at: null, updated_by: null, created_at: "", updated_at: "", version: "preview",
@@ -312,7 +316,7 @@ export async function previewView(
     unplaced: stored.filter((u: UnplacedValue) => sentKeys.has(keyOf(u))),
     exclude_keywords: shape.value.exclude_keywords,
   } as unknown as NonNullable<Parameters<typeof resolveLinkedin>[0]["row"]>;
-  const e = resolveLinkedin({ tag: t, kind, row: draft, targeting, starter, saved, clientType: client?.client_type ?? null });
+  const e = resolveLinkedin({ tag: t, kind, row: draft, targeting, starter, saved, clientType: client?.client_type ?? null, competitors });
   const built = linkedinPlanOf(e, g);
   return { plan: planOf(built), keywords: keywordsView(e), ...areaView(e, g), errors };
 }

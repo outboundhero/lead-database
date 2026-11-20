@@ -11,6 +11,7 @@ import {
   companyModes,
   companyPlan,
   companyRunsFor,
+  competitorsFor,
   countsFor,
   createCompanyRun,
   geo,
@@ -205,7 +206,7 @@ export async function POST(req: NextRequest) {
           return { status: 409, error: `${tag}'s ${what} changed since this page loaded them, so nothing was started.`, changed: true };
         }
         const filters = companyFiltersFor(saved, client.client_type ?? null);
-        const p = companyPlan(targeting, filters.value, await geo(c), client.client_type ?? null);
+        const p = companyPlan(targeting, filters.value, await geo(c), client.client_type ?? null, await competitorsFor(c, client.client_type ?? null));
         const blocked = [...p.blockers, ...p.pullBlockers];
         if (blocked.length) return { status: 400, error: blocked.join(" ") };
         // createCompanyRun makes the client's three pipeline tables (Companies companies_v2, General
@@ -225,6 +226,8 @@ export async function POST(req: NextRequest) {
             filters_updated_at: saved?.updated_at ?? null,
             report: p.report,
             notes: p.notes,
+            // The excluded keywords the pull keeps: each row it writes is checked against all of them (client_exclusions).
+            ...(p.keywords ? { keywords: p.keywords } : {}),
           },
           requests: p.requests,
           matchCount,
