@@ -3,12 +3,13 @@ import { stringify } from "csv-stringify/sync";
 import { requireRole } from "@/lib/enrich/auth";
 import { getPool } from "@/lib/db/pool";
 import { isUuid, notApplied, sharingTx, tagOf } from "@/lib/sharing/db";
+import { pushNoteText } from "@/lib/sharing/labels";
 import { jobRows } from "@/lib/sharing/server";
 
 // GET /api/sharing/csv?id=<batch id>&receiver=<tag>: a share job's rows as CSV
 // (plan 1.11): receiver, email, company, city, state, matched place, outcome,
-// push state, applied, undone. Every receiver unless one is named; at most
-// 200,000 rows. Manager and up.
+// push state, note (why a row is held or dropped, in words), applied, undone.
+// Every receiver unless one is named; at most 200,000 rows. Manager and up.
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -25,7 +26,7 @@ export async function GET(req: NextRequest) {
   try {
     const rows = await sharingTx(getPool(), (c) => jobRows(c, id, receiver), { readOnly: true, timeoutMs: 60_000 });
     const csv = stringify([
-      ["receiver", "email", "company", "city", "state", "matched place", "outcome", "push state", "applied", "undone"],
+      ["receiver", "email", "company", "city", "state", "matched place", "outcome", "push state", "note", "applied", "undone"],
       ...rows.map((r) => [
         r.receiver_tag,
         r.email ?? "",
@@ -35,6 +36,7 @@ export async function GET(req: NextRequest) {
         r.matched_place ?? "",
         r.outcome,
         r.push_state ?? "",
+        pushNoteText(r.push_note),
         r.applied_at ? new Date(r.applied_at).toISOString() : "",
         r.undone_at ? new Date(r.undone_at).toISOString() : "",
       ]),

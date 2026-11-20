@@ -40,12 +40,12 @@ export const PUSH_STATE_LABEL: Record<SharePushState, string> = {
 
 /** lead_shares.push_note codes of a dropped row, in words; a held row's note is already in words. */
 const DROP_NOTES: Record<string, string> = {
-  in_campaign: "already in the picked campaigns (Bison mirror)",
+  in_campaign: "already in this client's campaigns (the Bison mirror, or in sequence in its own live campaign)",
   undone: "the share was undone",
   no_lead: "the lead is gone or has no email",
   already_sent: "already sent to this client by another push",
   not_eligible: "not eligible when pushed (no email, bounced, not valid, or outside the client's rules then)",
-  bison_refused: "Bison refused it (in another sequence, bounced or unsubscribed there)",
+  bison_refused: "Bison would not take it (bounced or unsubscribed there, or refused by Bison)",
 };
 
 export function pushNoteText(note: string | null | undefined): string {

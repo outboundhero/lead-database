@@ -1043,8 +1043,12 @@ async function partH(routes) {
   const labels = await srcModule("lib/sharing/labels.ts");
   check("the three new drop notes in words", labels.pushNoteText("already_sent") === "already sent to this client by another push" &&
     labels.pushNoteText("not_eligible") === "not eligible when pushed (no email, bounced, not valid, or outside the client's rules then)" &&
-    labels.pushNoteText("bison_refused") === "Bison refused it (in another sequence, bounced or unsubscribed there)" &&
+    labels.pushNoteText("bison_refused") === "Bison would not take it (bounced or unsubscribed there, or refused by Bison)" &&
+    labels.pushNoteText("in_campaign") === "already in this client's campaigns (the Bison mirror, or in sequence in its own live campaign)" &&
     labels.pushNoteText(OPERATOR_CANCEL_NOTE) === OPERATOR_CANCEL_NOTE);
+  const csvRoute = source("src/app/api/sharing/csv/route.ts");
+  check("the job CSV has a note column with each held or dropped row's note in words",
+    csvRoute.includes('"push state", "note", "applied"') && csvRoute.includes("pushNoteText(r.push_note)"));
   const jd = source("src/components/sharing/job-detail.tsx").replace(/\s+/g, " ");
   check("the job detail's push line says how it ended and whether it is settled",
     jd.includes("{b.endNote ? ` · ${b.endNote}` : \"\"}") && jd.includes("\" · settled\"") &&

@@ -3818,7 +3818,8 @@ owner's OK in the rollout file.
   apply, undo, push and retry. Tabs: Jobs (state, "no lead list" and "waited the
   limit" shown, counts per receiver; the detail has a table per receiver, sample rows
   and a CSV of email, company, city, state, matched place, outcome, receiver, push
-  state, applied and undone, up to 200,000 rows), Clients (pool or "isolated", "cannot
+  state, note (a held or dropped row's note in words), applied and undone, up to
+  200,000 rows), Clients (pool or "isolated", "cannot
   receive: <reason>"), Held (age and reason; leads with no usable place, by place
   text; installs the mirror does not cover), Low places (the weekly top-up) and
   General inboxes (never-contact inboxes). A warning shows when the running worker
@@ -3834,8 +3835,8 @@ owner's OK in the rollout file.
   reports it (when, the status or "no answer", the error, how many shares stay
   queued, and whether held shares were being tried again); entries that are not
   well formed are left out, and when the worker is offline the block says this is
-  what it reported last. The three new drop notes read in words in the job detail
-  and the lead detail; the CSV shows the push state only, as before.
+  what it reported last. The drop notes read in words in the job detail, the lead
+  detail and the job CSV's note column (src/lib/sharing/labels.ts pushNoteText).
 - Routes under src/app/api/sharing/: `jobs`, `job`, `csv`, `clients`, `held`,
   `batches?ids=` (the Uploads page's "Shared to N clients"), `lead?id=` (the lead
   detail's shares) for managers; `apply` (with `preview: true` for the confirm),

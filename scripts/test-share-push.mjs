@@ -919,8 +919,8 @@ async function partV() {
   check("an unknown job is 404", (await call(jobR.GET, { query: { id: randomUUID() } })).status === 404);
   const file = await call(csv.GET, { query: { id: ctx.jobAB, receiver: B } });
   const lines = file.text.trim().split("\n");
-  check("the CSV: receiver, email, company, city, state, matched place, outcome, push state, applied, undone",
-    file.status === 200 && lines[0] === "receiver,email,company,city,state,matched place,outcome,push state,applied,undone" &&
+  check("the CSV: receiver, email, company, city, state, matched place, outcome, push state, note, applied, undone",
+    file.status === 200 && lines[0] === "receiver,email,company,city,state,matched place,outcome,push state,note,applied,undone" &&
       lines.length === 1 + 8 && lines.some((l) => l.includes(biz("b1")) && l.includes(",AZ,shared,pushed,")), lines.slice(0, 3).join(" | "));
   const cl = await call(clients.GET);
   const cOf = (t) => cl.body.clients?.find((x) => x.tag === t);
