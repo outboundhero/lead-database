@@ -420,7 +420,8 @@ scripts/lib/enrich/clay-tools.mjs          - Exact copies of Clay's normalize-co
 scripts/lib/enrich/ai-examples.mjs         - An AI column's Clay table examples, laid out as each request's instructions (P#61, G#49, G#19)
 scripts/lib/enrich/email-verdict.mjs       - Who found or approved a promoted address: the lead's validation status and source
 scripts/lib/enrich/pull-no-email.mjs       - AI Ark pulls' people with no email: copied into the People table, found addresses handed back
-scripts/clay-fetch-tables.mjs              - Reads clients' Clay tables, read only, for the by-name originals load
+scripts/clay-fetch-tables.mjs              - Reads clients' Clay tables, read only, for the originals loads (its files hold keys: 0700/0600)
+scripts/lib/enrich/seed-originals.mjs      - Loads originals: exact layout, by name, the default refresh, personalisation overlays; redacts keys
 src/app/api/uploads/bounces/route.ts       — CSV bounce import (NEW)
 src/app/auth/callback/route.ts             — Auth callback (uses x-forwarded-host)
 src/components/filters/filter-bar.tsx      — Filter chip UI
@@ -463,12 +464,18 @@ scripts/share-seed.mjs                     - Lists the leads of imports made bef
 src/lib/sharing/push.ts                    - One receiver's share push: receive check, campaign pick, sides, batches
 src/lib/bison/client-campaigns.ts          - The client-scoped live campaign search (export popup and share push)
 src/lib/bison/push-stamp.ts                - Side and bucket stamping and the freemail split (push route and share push)
-src/app/(app)/leads/sharing/page.tsx       - The Sharing page (Jobs, Clients, Held, Low places, General inboxes)
+src/app/(app)/leads/sharing/page.tsx       - The Sharing page (Jobs, Clients, Held, Low places, Backfill, General inboxes)
 src/app/api/sharing/push/auto/route.ts     - The worker's share push (Bearer SHARE_PUSH_KEY, outside the session middleware)
 scripts/topup-worker.mjs                   - Hourly cron: top-up cancel, weekly pass, pulls, never-contact sweep (scripts/lib/topup/)
 scripts/lib/coverage.mjs                   - The one per-place coverage count (refresh, route, top-up pass)
 scripts/lib/aiark/start-run.mjs            - The one AI Ark run start (route and topup-worker), places and top-up marker
 scripts/lib/never-contact-inboxes.mjs      - Never-contact inboxes: read the filter, seed, dry run, apply sweep (CLI: scripts/never-contact-inboxes.mjs)
+
+── The client list and the database backfill (138, 2026-11-21) ──
+src/lib/clients/roster.ts                  - The cached client list every client dropdown reads (useClientRoster; ClientRosterPrefetch loads it in the app layout)
+src/app/api/bison/client-tags/route.ts     - The client list: the session check, then one statement through getPool; Server-Timing on every answer
+scripts/backfill-worker.mjs                - Hourly cron, not created yet: the database backfill, shipped off (scripts/lib/backfill/)
+src/app/api/sharing/backfill/route.ts      - The Sharing page's Backfill tab: the switch, runs, passes, and a read-only preview per client
 ```
 
 ⚠ **Legacy vs live scripts.** `scripts/` also holds ~20 one-off and
@@ -1045,10 +1052,14 @@ services deploy from THIS repo. Single replica everywhere.
 | `bison-sync` | cron | `*/30 * * * *` | `npm run bison-sync-cron` (2026-11-20; was `0 3 */3 * *` + `npm run sync-bison-leads -- --incremental`) |
 | `validation-worker` | cron | `17 * * * *` | `npm run validation-worker` (added 2026-09-14) |
 | `topup-worker` | cron | hourly, for example `23 * * * *` | `npm run topup-worker` (new 2026-11-20, migration 135; the owner creates it, DATABASE_URL only) |
+| `backfill-worker` | cron | hourly, for example `41 * * * *` | `npm run backfill-worker` (new 2026-11-21, migration 138; the owner creates it later, DATABASE_URL only) |
 
 `topup-worker` runs the weekly top-up and the never-contact inboxes sweep; with
 both switched off a firing writes nothing. Like every worker it needs the build
 command override below. See "Weekly top-up" for what a firing does.
+`backfill-worker` runs the database backfill (see "Database backfill (migration
+138)"): with `database_backfill` off, or without 138, a firing logs one line and
+writes nothing. It is not created yet; it needs the same build command override.
 
 **`bison-sync` checks every 30 minutes and usually does nothing** (2026-11-20,
 migration 131). [scripts/bison-sync-cron.mjs](scripts/bison-sync-cron.mjs) runs
@@ -1402,6 +1413,49 @@ named `ACTIVE`/`CHURNED` **with real Bison routing**. The route finds the two ta
 columns by header regex and rejects any Status/Plan value via `NOT_A_TAG`.
 Shared Sheets auth now lives in [src/lib/google/sheets.ts](src/lib/google/sheets.ts)
 (readonly scope only).
+
+## The client list (2026-11-21)
+
+Every client dropdown reads one cached list, `src/lib/clients/roster.ts`
+(`useClientRoster()`), so it opens at once. That covers the top bar picker on
+Leads, AI Ark, Companies and its review; saved searches (Presets); Send to Bison;
+the export popup's client scope; and the Uploads page's People send. The Clay
+tab's picker (clients with Clay tables) and the Sharing page keep their own reads,
+because they list other things. No migration; web only.
+
+- **Where it is kept.** In memory and in `localStorage` per signed-in user (key
+  `ohdb:client-roster:v1:<userId>`, `{ v: 1, at, owner, clients }`, shown up to 7
+  days old), so a dropdown shows it at once, also after a reload. Every storage
+  access is in try/catch, so private mode or a full quota still works from memory.
+- **When it refreshes** (in the background; one fetch at a time, callers share it):
+  when the app loads (`ClientRosterPrefetch` in the app layout); when a dropdown
+  opens and the list is over a minute old (`ROSTER_FRESH_MS`); when the tab comes
+  back after 10 minutes (`ROSTER_REFOCUS_MS`); and forced right after Refresh
+  stats, Sync groups, Sync with sheet or a status change on the Clients page. A
+  failed refresh (401, the middleware's login redirect, 500, no network) keeps the
+  list on screen and sets `error`. "Loading clients" shows only while there is no
+  list; an empty list reads "No clients".
+- **Sign out** clears memory and every stored list before `signOut()`; signing in
+  as another user drops the other user's stored list. Server rendering always gets
+  an empty list.
+- **The route** (`GET /api/bison/client-tags`) keeps its session check
+  (`auth.getUser()`), then runs ONE statement through `getPool()` (`client_tags`
+  LEFT JOIN `client_stats`, autocommit, no SET) where two supabase-js reads used to
+  be. The answer is the old one plus `name`. Every answer carries `Server-Timing`
+  (`auth`, `db`, `total`) and `Cache-Control: private, no-store`: read Server-Timing
+  in the browser's network panel to see where a slow call spent its time. Locally
+  the statement takes about 1 ms and a warm call about 2.5 ms.
+- **Rule for new code:** only `roster.ts` names the route. A new client dropdown
+  uses `useClientRoster()` and calls `refresh()` when it opens, never a fetch of
+  its own. The route imports the row type with `import type` only.
+- **Still on the route's path, not changed:** the middleware's `getSession()` (a
+  cookie read, plus a network call only when the token needs refreshing), the
+  route's `getUser()` (one Supabase Auth round trip per call), and, after 30 s with
+  no database use, a new pooler connection (`getPool`'s idle timeout). Only the
+  background refresh waits for them: the dropdown shows the cached list.
+- **Test:** `node --env-file=.env.local scripts/test-client-roster.mjs` (local
+  database, 88 checks; made-up `RTTEST_` clients in a transaction that is rolled
+  back; the route and the store through a TypeScript loader; the wiring by source).
 
 ## Targeting include-lists are empty by design
 
@@ -2276,6 +2330,11 @@ threshold today; `?fresh=1` for those clients exceeds its 30 s cap.
 7. Region: measure the Railway→Supabase RTT from inside the container before
    spending on a move; free mitigations first (verify the session JWT locally
    instead of `auth.getUser()` per request, dedupe the double client-tags fetch).
+   **Done 2026-11-21:** the double client-tags fetch is gone. Every dropdown reads
+   one cached list, prefetched when the app loads, and the route reads with one
+   statement (see "The client list"). Not taken: verifying the session JWT locally
+   (`getClaims`) instead of `auth.getUser()`; the route's Server-Timing `auth` part
+   shows what that would save.
 
 ## Clay tab and AI Ark tab (migrations 122, 123)
 
@@ -2375,9 +2434,13 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   other Outcome ("People table: <Outcome>"); a removed People row says "Removed from
   the People table". Rows still held, queued, running, waiting or in error are left for
   a later minute. The Clay tab's add bar says "N no email (M sent to the People
-  table)", and a held row copied from a pull says so in the cell panel. The Clay grid
-  still shows the `find_email` column as "Not built yet" (its cell panel shows the
-  value and note). ⚠ A pull row closed with "People table: No
+  table)", and a held row copied from a pull says so in the cell panel. Since
+  2026-11-21 the Clay grid shows an AI Ark pull table's `find_email` column as built
+  (before, "Not built yet"): each cell in the copy's words, green with a check when
+  it starts "Found by" or "Approved by", red on an error, muted otherwise; the header
+  "<n> done", or "Nothing sent yet"; the cell panel "Not sent yet" for a row with no
+  cell. The `run` prop of the grid, its cells and the panel says the table is an AI
+  Ark run's. ⚠ A pull row closed with "People table: No
   email (AI Ark found none)" never reopens: if that People row is queued again later
   (for example when a finder key is first set) and then finds an address, the address
   stays in the People table, and promotion does not take it either (the row has no
@@ -2631,10 +2694,16 @@ The Clay build of 2026-11-21 (Clay's two tools as exact copies, G#19 and the tab
 examples, promotion of finder-found and Enrichley-approved addresses, AI Ark pulls'
 people with no email to the finders, clients' own originals by name) ships off the
 same way and needs no migration; the behaviour choices it made wait for the owner's
-OK in its rollout notes.
+OK in its rollout notes. The next build of the same day makes the template client's
+current Clay tables the `default` for every client, each client keeping only its own
+personalisation steps as an overlay (built with a dry run; the production load is a
+later step by hand), lets G#19 fail as in Clay, and shows AI Ark pulls' `find_email`
+in the grid; no migration either.
 
 - **The originals** (`enrich_originals`): the three Clay tables exactly as the Clay
-  CLI exported them (Companies 68 columns, People 88, General 76). They hold
+  CLI exported them (Companies 68 columns, People 88, General 76 in the 11-14 layout;
+  the template client's current tables add C#69, C#70, P#89 and G#77, credentials
+  always stored as "[redacted]"). They hold
   client text (prompts, lists, examples), so they live in the database only and the
   export files stay out of git. Load them with
   `node scripts/enrich-seed-originals.mjs --companies <file> --people <file> --inboxes <file> [--variant default] [--tracks <file>] [--dry]`.
@@ -2645,8 +2714,11 @@ OK in its rollout notes.
   counts and the models that differ from the settings (never a prompt, list or name),
   and never changes a setting. A client's own exports load as its variant (its tag in
   lower case, `variantName()`); every other client compiles from `default`. This
-  exact-layout load stays the only way to load `default`; a client's own tables, which
-  rarely keep that layout, load by column name since 2026-11-21 (next bullets).
+  exact-layout load loaded the 11-14 `default`; since 2026-11-21 `--refresh-default`
+  refreshes `default` by column name from the template client's current tables, and a
+  client keeps only its own personalisation as an overlay (see "The default from the
+  template client's current tables" below). The full by-name client variants (next
+  bullets) stay loadable for their tests but are no longer how clients are loaded.
 - **A client's own originals, by name** (2026-11-21; `seedByName`, `mapByName` and
   `mergeVariant` in `seed-originals.mjs`): each client column goes to the position
   whose default name gives the same slug (`slugKey`), with `NAME_ALIASES` in
@@ -2690,9 +2762,11 @@ OK in its rollout notes.
   default); the client's own variant <v> did not compile: <first line, 300
   characters>". The worker reads them as `default` (`variantOfNote`), so personalisation
   stays off for that client. The return carries `own_variant` and `fallback`. With no
-  client variant loaded (production today) nothing changes.
-- **Dry run 2026-11-21** (the local database, nothing kept; run on the builder's branch,
-  then again on the merged code with the same exports: every client's result the same):
+  client variant loaded (production today) nothing changes. An overlay (below) that
+  stops compiling falls back the same way, with the same note.
+- **The by-name dry run of 2026-11-21** (the last build; the local database, nothing
+  kept; run on the builder's branch, then again on the merged code with the same
+  exports: every client's result the same):
   205 clients in the scan; 114 read in the active Clay workspace (308 tables), 90 in the
   other workspace not read here, 1 with no People or General table. Would load 13 (3
   with their own Companies, 10 with the default's, the template client among them).
@@ -2701,14 +2775,87 @@ OK in its rollout notes.
   waterfalls, Surfe in P#50, Lead City and Lead State in P#21 to P#23, company LinkedIn
   and Facebook links in P#60 and G#48, a recruiter LinkedIn URL in C#48, a DNC
   competitor filter in C#17, a company email in C#34, and write-tos into such columns.
-  Every client read has its own P#61, G#49 and G#19 with readable examples. What to do
-  with the refused clients is the owner's decision (the rollout notes).
-- **Loading a client** (production, a later step by hand): fetch, run the dry run on
-  the code being deployed, read the report, then `--by-name --plan` (or one client)
-  without `--dry` against the production database. Never at the same time as another
-  Clay CLI job, and never `default` by name. Afterwards `variantFor` names the client's
-  variant, and its next pull or people run notes "(variant <v>)" on its tables; a
-  fallback note means the variant did not compile.
+  Every client read has its own P#61, G#49 and G#19 with readable examples. The owner
+  then chose (2026-11-21): every client runs the template client's current steps and
+  keeps only its own personalisation (next bullets).
+- **The default from the template client's current tables; clients keep only their
+  personalisation** (2026-11-21, no migration). Canonical positions stay the 11-14
+  layout's (C#1 to C#68, P#1 to P#88, G#1 to G#76), so every C#, P# and G# in the
+  templates keeps its meaning. Columns added to the template client's tables since
+  then sit at **extension positions** after them (`ORIGINAL_EXTENSIONS`, `keysOf`,
+  `knownPosition` in `original-keys.mjs`): C#69 an inclusion keyword filter, C#70 a
+  third duplicate check, P#89 and G#77 a second duplicate check each. The Companies
+  template compiles C#69 (`inclusion_keywords_filter`, right before the Master Filter,
+  which reads it) only when the originals hold it, so the 11-14 `default` and the
+  fixtures compile as before. The duplicate checks are stored and never compiled; our
+  database check stays in SAFE TO RUN's place.
+- **Shapes** (`shapeOf` in `compile-original.mjs`): a variant is `complete` (every
+  canonical position, extensions allowed: `default`, and the exact-layout and by-name
+  client variants), an `overlay` (rows only at `OVERLAY_POSITIONS`, P#57 to P#62 and
+  G#45 to G#50, all six of each kind it holds: People only, General only, or both), or
+  `partial` (unusable: the client compiles from `default`). `loadOriginals(db, v, {
+  base })` composes an overlay with `default` (rows taken from the base carry
+  `text_variant` "default"); `variantFor` takes a complete variant or an overlay;
+  `originalsSummary` gives `client.shape`, and an overlay counts as complete while
+  `default` is. An overlay never touches C#, G#19 or any position outside the
+  personalisation steps: every client gets the refreshed default's steps.
+- **Whose text a personalisation step runs.** Every compiled personalisation column
+  carries `config.text_variant`: the client's variant for a kind it keeps as its own,
+  `default` otherwise. The engine's switch reads it, so a step on the default's text
+  runs only under `shared_text_ok`, as before. Columns compiled before this read the
+  table's variant.
+- **Credentials.** The Clay CLI's exports hold live API keys (the Authorization
+  headers of the HTTP columns, Reoon's key). Every loader (exact layout, by name, the
+  refresh, the overlays) stores them as "[redacted]" (`redactCredentials`, a header or
+  query string value under a key's name, never one that reads a column) and refuses a
+  definition it can't redact. The fetch writes folders 0700 and files 0600: keep the
+  exports private, never copy them, never print a definition's credentials.
+- **The refresh:** `node scripts/enrich-seed-originals.mjs --refresh-default --companies
+  <f> --people <f> --inboxes <f> --backup <file> [--tracks <file>] [--dry] [--report
+  <file>]`, with the template client's own exports. It matches columns by name, keeps
+  field ids, stores new columns at their extension positions, and lists extra columns
+  without storing them. It is refused, with nothing written, for a missing canonical
+  column, an ambiguous name or another type or Clay action at a compiled position, a
+  credential it can't redact, a compile failure, or bad tracks. The people tracks are
+  derived again from the refreshed AI search prompts and stored; models and example
+  counts are reported only. `--backup` is required without `--dry`, refused inside the
+  repo, written 0600 and never over an existing file; `--restore-default <file>
+  [--dry]` puts the old rows and tracks back exactly.
+- **The overlays:** `--personalisation --plan <plan.json> [--dry] [--report <file>]`,
+  or `--personalisation --variant <v> --people <f> --inboxes <f>`. People and General
+  are decided apart: **own** (the client's six columns, re-pointed to the default's
+  field ids by name, alias or field id, the examples' keys too; a missing non-AI
+  column is filled from the default), **the default's** with the reason (`no_steps`:
+  no research or question step of its own; `type`; `unmapped_column`: a step reads a
+  column the template client's tables lack; `credentials`; `compile`; `examples`),
+  **same as the default's** (nothing stored), or **not read**. A client's earlier rows,
+  a full by-name variant included, are replaced. With `--refresh-default --dry` the
+  refresh and every client run in ONE transaction (a savepoint per client), all
+  rolled back; without `--dry` the refresh commits first, then each client in its own
+  transaction. Counts only on stdout; `--report` (0600, refused inside the repo) has
+  the names.
+- **Dry run 2026-11-21 (the next build;** the template client's current tables and
+  each client's own, fetched read only from the active Clay workspace; the local
+  database, nothing kept; run on the builder's branch, then on the merged code with
+  the same exports: every client's result the same). Refresh: companies 70 (68 + C#69,
+  C#70), people 89 (+ P#89), general 77 (+ G#77); 212 columns moved, none renamed, no
+  extra; 10 credentials redacted (8 Authorization headers, 2 Reoon keys); compiles;
+  tracks 6, 9 and 6 phrases before and after; 1 model differs from its setting (P#27,
+  the setting unchanged); G#19 has 11 examples. Clients: 205 in the scan, 114 read
+  here, 91 in the other workspace not read here. Own personalisation in both tables
+  51, People only 4, General only 1; the default's in both 57; same as the default's 1
+  (the template client). By table: People own 55, the default's 58; General own 52,
+  the default's 61. Every "default's" table has one reason, `unmapped_column`: mostly
+  the research step reading the client's company LinkedIn and Facebook link columns,
+  plus 4 one-off columns.
+- **Loading in production** (a later step by hand, after the web app and the
+  enrich-worker run this code): fetch, run the dry run on the deployed code, read the
+  report, then `--refresh-default --backup <file outside the repo>` and `--personalisation
+  --plan` without `--dry` against the production database. Never at the same time as
+  another Clay CLI job. Afterwards `variantFor` names a client's overlay, and its next
+  pull or people run notes "(variant <v>)" on its tables; a fallback note means the
+  overlay did not compile. The inclusion filter (C#69) then applies to every client's
+  Companies rows once its tables are compiled again.
 - **The tables** (`ensurePipelineTables()`, `templates.mjs`, run inside the pull route's
   transaction): "Companies (pipeline)" (`companies_v2`), "General (pipeline)"
   (`inboxes_v1`, one row per general address the company row wrote) and "People
@@ -2780,11 +2927,16 @@ OK in its rollout notes.
   takes the default, so no migration was needed; the sheet's first save stores it. It
   has no switch: it runs wherever its original run condition holds (an approved address
   with a guessed name), as in Clay, with its table examples (next bullet), so every
-  approved general inbox costs one more OpenAI request. G#20 falls to its second step,
-  "<Company> Team", when G#19 gives no usable first name; with no company the original's
-  second step gives "undefined Team", which promotion holds back. Like every AI step,
-  its inbox row waits without `OPENAI_API_KEY` or past the day's OpenAI cap, and fails
-  when G#19 fails (Clay would fall back to "<Company> Team").
+  approved general inbox costs one more OpenAI request. G#20 falls to its last step,
+  "<Company> Team", when G#19 gives no usable first name (the 11-14 waterfall has two
+  steps, the template client's current one three); with no company that step gives
+  "undefined Team", which promotion holds back. Like every AI step, its inbox row waits
+  without `OPENAI_API_KEY` or past the day's OpenAI cap. **When G#19 fails** (since
+  2026-11-21, as in Clay): G#19 carries `on_error` "empty", so its cell keeps the error,
+  noted "(read as empty, as in Clay: the steps after it go on)", is not counted as a
+  failed cell, and G#20 gives "<Company> Team", so the row finishes. A failure that may
+  pass (a 5xx) still has the row tried again (3 attempts). Only G#19 has `on_error`. An
+  enrich-worker older than this ignores it, so there the row still fails.
 - **Table examples** (P#61, G#49 and G#19; `scripts/lib/enrich/ai-examples.mjs`,
   2026-11-21): a column's Clay examples (its `tableExamples` binding, kept as exported
   in `config.table_examples`) go with every request as the request's `instructions`,
@@ -2883,7 +3035,8 @@ OK in its rollout notes.
   settings sheet (admin) edits every switch with its client list (promotion into
   leads among them since 2026-11-20), the people and personalisation blocks, the
   thirteen model settings with their most searches, `inboxes_per_company`,
-  `min_balance` and the spend caps; what it doesn't show (memory days, prices,
+  `min_balance`, the spend caps and, since 2026-11-21, the database backfill (see
+  "Database backfill (migration 138)"); what it doesn't show (memory days, prices,
   `fit_score`, promotion's other keys) is kept as stored.
 - **Keys and environment (the enrich-worker):** `DATABASE_URL`; `OPENAI_API_KEY` (every AI
   step and the fit scorer; best from the worker's own OpenAI project with a monthly
@@ -2925,20 +3078,29 @@ OK in its rollout notes.
   `node --env-file=.env.local scripts/test-originals-by-name.mjs` (64 checks, about 3 s:
   the by-name load, the fallback and the fetch script with a fake `clay` on PATH;
   `LDTEST_` clients and `ldtest_` variants built from the fixtures with relabelled
-  field ids; it needs the local `default`, which two checks compile). Each refuses to
-  run while a client is on the `company_pipeline`, `people_pipeline`, `personalisation`
-  or `promotion` lists, or while another client's row is held.
+  field ids; it needs the local `default`, which two checks compile); and
+  `node --env-file=.env.local scripts/test-personalisation-originals.mjs` (91 checks,
+  about 2 s: extension positions and shapes, credential redaction, the refresh and
+  its refusals, overlays and each reason a table runs the default's, the script's
+  modes with a backup and a restore, G#19 read as empty, and the grid's sources;
+  made-up `PSTEST_` clients and `pstest_` variants over a made-up base, removed at the
+  end; it needs the local `default`, which one check compiles and one restores inside
+  a transaction that is rolled back). Each refuses to run while a client is on the
+  `company_pipeline`, `people_pipeline`, `personalisation` or `promotion` lists, or
+  while another client's row is held.
 - **Before a push:** stop the worker; on the local database with 125 to 127 applied run
   `test-originals.mjs`, `test-pipeline-v2.mjs`, `test-companies.mjs`, `test-people.mjs`,
   `test-fit.mjs`, `test-clay-tools.mjs`, `test-ai-examples.mjs`, `test-found-emails.mjs`,
-  `test-originals-by-name.mjs` and `AIARK_TEST_TAG=<a local cleaning client>
-  test-aiark.mjs`; then `npx tsc --noEmit`, `npx eslint`, `npx next build`; then the
-  scans of the added lines, from a scratch folder outside the repo: client names (any
-  case) and tags of 3 or more characters (exact case) from `client_tags`, the shorter
-  tags checked by hand, anything shaped like a key, every 40-character run of the
-  exports' prompts, lists and examples (the clients' own exports too), and since
-  2026-11-21 every input of Clay's tool answers of 8 or more characters, every table
-  example value and every table and workbook id of the Clay scan. The repo is public.
+  `test-originals-by-name.mjs`, `test-personalisation-originals.mjs` and
+  `AIARK_TEST_TAG=<a local cleaning client> test-aiark.mjs`; then `npx tsc --noEmit`,
+  `npx eslint`, `npx next build`; then the scans of the added lines, from a scratch
+  folder outside the repo: client names (any case) and tags of 3 or more characters
+  (exact case) from `client_tags`, the shorter tags checked by hand, anything shaped
+  like a key, every 40-character run of the exports' prompts, lists and examples (the
+  clients' own exports too), and since 2026-11-21 every input of Clay's tool answers
+  of 8 or more characters, every table example value, every table and workbook id of
+  the Clay scan, and every credential value of the fetched exports (compared in
+  memory, counts only). The repo is public.
 
 ### Fit scoring (migrations 126 and 127)
 
@@ -4070,9 +4232,9 @@ owner's OK in the rollout file.
   state, note (a held or dropped row's note in words), applied and undone, up to
   200,000 rows), Clients (pool or "isolated", "cannot
   receive: <reason>"), Held (age and reason; leads with no usable place, by place
-  text; installs the mirror does not cover), Low places (the weekly top-up) and
-  General inboxes (never-contact inboxes). A warning shows when the running worker
-  lacks the `sharing` capability.
+  text; installs the mirror does not cover), Low places (the weekly top-up), Backfill
+  (the database backfill, 138) and General inboxes (never-contact inboxes). A warning
+  shows when the running worker lacks the `sharing` capability.
 - **How a push ended, and refused pushes** (2026-11-20). The job detail's line for
   each push names how it ended (`cancelled on the Exports page`, the push worker's or
   the undo's reason, or the note of a push in error; built on the server, never the
@@ -4092,6 +4254,12 @@ owner's OK in the rollout file.
   `undo`, `retry` and `push` for admins (audited "Share Job Applied", "Share Job
   Undone", "Share Job Retried", "Shares Queued For Push"); `push/auto` for the
   worker. They read the server-only tables with `getPool()`.
+- **Database backfill jobs** (138: `share_jobs.kind` `backfill`, origin `DATABASE`)
+  are listed with the imports' jobs, as "Database backfill" from "the database
+  (backfill)", with a source filter on the Jobs tab. Only Undo and Push shared apply
+  to them: `previewShareJob`, `applyShareJob` and `retryShareJob` answer 409 ("A
+  database backfill job is made by the backfill; only Undo applies to it."). See
+  "Database backfill (migration 138, 2026-11-21)".
 
 ### Keys, tests and rollout
 
@@ -4334,6 +4502,103 @@ filter loaded.
   `default` variant).
 - **Rollout.** Apply 136; on production the lead runs the seed, then a dry run; the
   owner approves the count; then the switch goes on and an admin applies.
+
+## Database backfill (migration 138, 2026-11-21)
+
+Overlap sharing looks only at an import's new leads. The database backfill looks
+at leads already in the database: each hourly firing finds, for each client on its
+list that can receive, leads that fit the client's rules and places and were never
+sent, shared or tagged for it, and queues them for the client's campaigns as
+shares. From there the existing share push takes them (Active or Draft campaigns,
+`push_options.source` `share`), so no push file changed. Built on 2026-11-21 with
+everything off; no service runs it yet (the owner creates `backfill-worker` later).
+
+- **The setting** (`enrich_settings.database_backfill`, 138), read by `backfillFrom`
+  in scripts/lib/backfill/settings.mjs, never through scripts/lib/enrich/settings.mjs
+  (the push-worker imports that file): `enabled` false; `tags` []; `mode` "preview"
+  (anything but "apply" reads preview); `max_per_run` 5000 (1 to 50,000);
+  `max_minutes` 40 (5 to 50); `recheck_days` 7 (1 to 90); `untagged` true (take leads
+  carrying no client's tag, besides leads of other clients of the pool). A value out
+  of range reads as its default. Edited on the Companies settings sheet ("Database
+  backfill": on, mode, clients with a button that adds every Active client of a type,
+  the caps; `cleanDatabaseBackfill`, merged over the stored row, written only when it
+  changes). For its shares to be written a client also needs overlap sharing's push
+  list (`flagOn("share_push")`), and the caps a firing and a day are overlap
+  sharing's `push_max_per_job` and `push_max_per_day`.
+- **Who is served:** the listed clients. A client is skipped, with the reason in the
+  run's counts, when it is not a client, cannot receive (`fn_client_receive_block`),
+  is isolated (its leads are never offered to others either), is not on the push list
+  (apply mode only), has no places, or has reached the day cap. Clients with a place
+  under their minimum go first, then the least recently served, then tag order. A
+  client tagged `DATABASE` stops the firing with an error run.
+- **Where it reads:** an include entry with a city and a state is a city place (its
+  geoname ids resolved as `fn_location_entry_condition` does; an unknown city is never
+  read); one with only a state is a state place. Places under the minimum
+  (`min_leads_per_place`, else `weekly_topup.default_minimum`) are read first, fewest
+  available first from the stored coverage, then the rest, then the uncounted. A place
+  is read a window of lead ids at a time: the uuid space is cut by its first byte, one
+  window up to 50,000 leads, else the smallest power of two that leaves at most 25,000
+  a window (at most 256). The statements use `idx_leads_state_code` or
+  `idx_leads_location_id` with `leads_pkey` for the id range, never a scan of `leads`.
+- **Cursors** (`share_backfill_cursors`, one per client and place): a pass's windows
+  and the next one to read. A window is passed once its shares are written; a window
+  a cap stopped is read again at the next firing. A done place is read again after
+  `recheck_days`, or at once when the client's rules change
+  (`client_targeting.updated_at`). A place removed from the client's list loses its
+  cursor. A preview never writes a cursor.
+- **What a window decides** (scripts/lib/backfill/decide.mjs): candidates are the
+  place's contactable leads that do not carry the receiver's tag; then
+  `fn_share_fits`; then `other_pool` (a lead of a client in another pool, isolated
+  clients included) and `untagged_off`; then, as sharing decides them,
+  `filtered_inbox`, `already_sent`, `in_flight`, `already_shared` and
+  `same_install`. `already_shared` means ANY earlier share row of the lead for the
+  client, so a lead is offered to a client once and an undo is final. `same_install`
+  means a group mate's push, a live share to a group mate, or an owner in the
+  receiver's Bison group whose own rules the lead fits. Anything left is shared, with
+  the include entry it matched. "Already in one of the client's campaigns" is checked
+  when the push runs (the Bison mirror drops them, as for every share).
+- **Writes** (apply mode): one transaction per client and window under
+  `pg_advisory_xact_lock(hashtext('share-backfill:' || tag))`, reading the switch, the
+  push list, the receive rule and today's count again first. The firing's first write
+  makes an `upload_batches` row (type `backfill`, label "Database backfill", kept off
+  the Uploads page) and a `share_jobs` row (kind `backfill`, origin `DATABASE`,
+  applied). Each share is a `lead_shares` row: outcome shared, applied, `applied_by`
+  null, push_state queued. From there the share step's push timer and the share push
+  take them like any share (Held tab, settle, Push shared, Undo, and the tag writer
+  behind `write_tags`, which writes "Shared from DATABASE to <client>"). A firing that
+  shares nothing makes no batch and no job.
+- **Caps:** 1,000 a client a firing and 2,000 a client a UTC day (counting every
+  source, as sharing's cap check does); `max_per_run` a firing; `max_minutes` of work,
+  each client getting at most max(60 s, time left / clients left). A cap reached
+  mid-window writes only what it allows, in id order.
+- **Runs** (`share_backfill_runs`): one row per firing, preview or apply, with counts
+  per client and how it ended: done, stopped (`time`, `run_cap`, `switched_off`) or
+  error. A lead's email is never written there.
+- **The cron script** `scripts/backfill-worker.mjs` (`npm run backfill-worker`;
+  `--preview` runs a preview firing even while off, writing its run row only; `--tag
+  X` serves only that client). It needs DATABASE_URL only, takes a `worker_locks`
+  lease named `backfill-worker`, and has a 50-minute watchdog. When off, or without
+  138, it logs one line, exits 0 and writes nothing.
+- **The Backfill tab** (Sharing page): `GET /api/sharing/backfill` (manager) shows the
+  switch and caps, warns when it is on and no firing ran in 2 hours ("the
+  backfill-worker service may not be running"), and lists the newest 20 runs and the
+  listed clients with their passes. `?preview=TAG` is a read-only preview of one client
+  (25 s at most, else 504). On a database without 138 the route answers `ready: false`
+  and the tab says so; every other code path reads such a database as before.
+- **Known limit:** like the push gate, candidates are read by a lead's primary place
+  only (`location_id` or `state_code`); a lead's other locations are not read.
+- **Tests:** `node --env-file=.env.local scripts/test-backfill.mjs` (local, 107
+  checks, `BFTEST_` clients and `.bftest.example` leads, no network but the local
+  Supabase API). It applies 138 twice and runs its back-out in a transaction that is
+  rolled back, and it refuses to run while foreign share jobs, shares, backfill runs
+  or cursors exist, while a `backfill-worker` lease is held, or while a client is
+  tagged `DATABASE`.
+- **Rollout.** Apply 138 in the SQL editor (the code reads a database without it, so
+  any order works) and deploy the web app. Later the owner creates the
+  `backfill-worker` service (hourly, build command `echo 'worker service: no next
+  build'`). Switch it on in preview for a few clients and read their previews and runs
+  on the Backfill tab; then put those clients on overlap sharing's push list and set
+  the mode to apply.
 
 ## Known issues / TODO
 
