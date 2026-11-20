@@ -164,8 +164,13 @@ async function lookupKey({ inputs, config, table, db }) {
 //   tool           "web_search" (claygent; $10 per 1,000 calls) or "none" (use-ai).
 //   user_location  false: no location is sent (the originals send none).
 //   keep_na        an "N/A" answer stays the answer, as in Clay.
-//   table_examples Clay's table examples, kept as exported and never sent: the
-//                  column does not run until Clay's way of sending them is known (D38).
+//   table_examples Clay's table examples as exported, never sent as they are.
+//   examples_text  the same examples laid out by ai-examples.mjs (examples_count,
+//                  examples_sha beside it): sent with every request as its
+//                  instructions, the prompt staying the input. A column whose
+//                  examples could not be read (examples_error), or whose table
+//                  was compiled before they were laid out, is not run; one with
+//                  none sends exactly what a column without examples sends.
 // One send per attempt: the row's own retry handles a lost answer, and a cell
 // sent twice with no answer is not sent again (http.mjs). OpenAI's billing
 // refusals are never retried. Each call checks the day's OpenAI cap for its
@@ -227,12 +232,16 @@ export const searchesIn = (out) =>
   (out?.output ?? []).filter((o) => o?.type === "web_search_call" && (o.action?.type ?? "search") === "search").length;
 
 async function aiWeb({ inputs, config, env, settings, db, row, column }) {
-  if (config.table_examples != null && !config.examples_supported) {
+  // Table examples held but not laid out (unreadable, or a table compiled before they were): never sent without them.
+  if (config.table_examples != null && config.examples_count !== 0 && typeof config.examples_text !== "string") {
     return {
       status: "skipped",
-      note: "Waiting for the original: how Clay sends this column's table examples to the model is not known yet (D38), so it is not run",
+      note: config.examples_error
+        ? `Its table examples could not be read (${config.examples_error}), so it is not run (nothing was sent)`
+        : "Its table examples are not compiled yet: the client's tables are brought up to date on its next pull or people run",
     };
   }
+  const examples = Number(config.examples_count) > 0 && typeof config.examples_text === "string" ? config.examples_text : null;
   const prompt = text(inputs.prompt);
   if (!prompt) return { status: "empty", note: "Empty prompt" };
   let model = config.model || "gpt-4o-mini";
@@ -267,6 +276,7 @@ async function aiWeb({ inputs, config, env, settings, db, row, column }) {
     body: JSON.stringify({
       model,
       ...(tool ? { tools: [tool] } : {}),
+      ...(examples ? { instructions: examples } : {}),
       input: prompt,
       ...(tool && setting?.max_searches ? { max_tool_calls: setting.max_searches } : {}),
       ...(setting?.reasoning_effort ? { reasoning: { effort: setting.reasoning_effort } } : {}),
@@ -282,6 +292,7 @@ async function aiWeb({ inputs, config, env, settings, db, row, column }) {
     ...(setting?.reasoning_effort ? { reasoning_effort: setting.reasoning_effort } : {}),
     ...(location ? { user_location: location } : {}),
     prompt: prompt.slice(0, 8_000),
+    ...(examples ? { examples: config.examples_count, instructions: examples.slice(0, 8_000) } : {}),
   };
   if (!r.ok) {
     const keyProblem = r.status === 401 || r.status === 403;
