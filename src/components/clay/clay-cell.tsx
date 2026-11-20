@@ -77,8 +77,24 @@ const fmt = (n: number | undefined) => (n ?? 0).toLocaleString("en-US");
  */
 export const ADDED_COLUMN = "add_to_database";
 
+/**
+ * An AI Ark pull table's find_email column: the engine never works it (a
+ * later phase), and the worker's copy of the pull's people with no email
+ * writes it (scripts/lib/enrich/pull-no-email.mjs): "Sent to the People
+ * table", "Found by <vendor>", "Approved by <vendor>", "People table: <Outcome>".
+ */
+export const FOUND_COLUMN = "find_email";
+
+/** What the grid knows of the table on screen. run: an AI Ark run's table, whose find_email cells another step writes. */
+export interface ColumnOpts {
+  run?: boolean;
+}
+
+/** find_email of an AI Ark run's table: built, and written by the pulls' copy. */
+const foundByPulls = (col: EnrichColumn, opts?: ColumnOpts) => Boolean(opts?.run) && col.phase > 1 && col.key === FOUND_COLUMN;
+
 /** Filled by another step: its cells are shown as that step worded them. */
-export const writtenElsewhere = (col: EnrichColumn) => col.phase > 1 && col.key === ADDED_COLUMN;
+export const writtenElsewhere = (col: EnrichColumn, opts?: ColumnOpts) => (col.phase > 1 && col.key === ADDED_COLUMN) || foundByPulls(col, opts);
 
 /**
  * A column this table never runs. On a hand-seeded copy of a client's Clay
@@ -87,12 +103,16 @@ export const writtenElsewhere = (col: EnrichColumn) => col.phase > 1 && col.key 
  * not built yet. enrich_columns.phase holds the October plan's number, which
  * is not the Clay section restart's phases, so the screen never shows it.
  */
-export const notRunHere = (col: EnrichColumn) => col.phase > 1 && col.key !== ADDED_COLUMN;
+export const notRunHere = (col: EnrichColumn, opts?: ColumnOpts) => col.phase > 1 && col.key !== ADDED_COLUMN && !foundByPulls(col, opts);
 
-/** The small count line under a column name. copy: the table is a hand-seeded copy of the client's Clay table. */
-export function HeaderStats({ col, counts, rows, copy }: { col: EnrichColumn; counts?: ColumnCounts; rows: number; copy?: boolean }) {
-  if (notRunHere(col)) return <span className="text-muted-foreground/60">{copy ? "Clay copy · not run here" : "Not built yet"}</span>;
-  const added = writtenElsewhere(col);
+/**
+ * The small count line under a column name. copy: the table is a hand-seeded copy of the client's Clay table;
+ * run: an AI Ark run's table.
+ */
+export function HeaderStats({ col, counts, rows, copy, run }: { col: EnrichColumn; counts?: ColumnCounts; rows: number; copy?: boolean; run?: boolean }) {
+  if (notRunHere(col, { run })) return <span className="text-muted-foreground/60">{copy ? "Clay copy · not run here" : "Not built yet"}</span>;
+  const added = writtenElsewhere(col, { run });
+  const found = added && col.key === FOUND_COLUMN;
   const c = counts ?? {};
   const parts: React.ReactNode[] = [];
   if (col.data_type === "boolean") {
@@ -107,8 +127,8 @@ export function HeaderStats({ col, counts, rows, copy }: { col: EnrichColumn; co
   }
   if (c.needs_key) parts.push(<span key="k" className="text-[var(--warning)]">{fmt(c.needs_key)} need key</span>);
   if (c.error) parts.push(<span key="x" className="text-destructive">{fmt(c.error)} error{c.error === 1 ? "" : "s"}</span>);
-  if (c.running) parts.push(<span key="r" className="text-primary">{fmt(c.running)} {added ? "adding" : "running"}</span>);
-  if (!parts.length && added) return <span className="text-muted-foreground/60">Nothing added yet</span>;
+  if (c.running) parts.push(<span key="r" className="text-primary">{fmt(c.running)} {added && !found ? "adding" : "running"}</span>);
+  if (!parts.length && added) return <span className="text-muted-foreground/60">{found ? "Nothing sent yet" : "Nothing added yet"}</span>;
   if (!parts.length) return <span className="text-muted-foreground/60">{rows ? "—" : "No rows"}</span>;
   return (
     <span className="flex min-w-0 items-center gap-1.5 truncate">
@@ -144,6 +164,7 @@ export function ClayCell({
   rowStatus,
   reference,
   copy,
+  run,
 }: {
   col: EnrichColumn;
   cell: GridCell | undefined;
@@ -151,9 +172,11 @@ export function ClayCell({
   reference?: string;
   /** The table is a hand-seeded copy of the client's Clay table. */
   copy?: boolean;
+  /** The table is an AI Ark run's: its find_email cells are written by the pulls' copy. */
+  run?: boolean;
 }) {
-  if (notRunHere(col)) return <span className="text-[11px] italic text-muted-foreground/40">{copy ? "Not run here" : "Not built yet"}</span>;
-  if (writtenElsewhere(col)) return <AddedValue cell={cell} />;
+  if (notRunHere(col, { run })) return <span className="text-[11px] italic text-muted-foreground/40">{copy ? "Not run here" : "Not built yet"}</span>;
+  if (writtenElsewhere(col, { run })) return col.key === FOUND_COLUMN ? <FoundValue cell={cell} /> : <AddedValue cell={cell} />;
   if (!cell) {
     if (rowStatus === "queued") return <Muted icon={Clock} className="opacity-60">Queued</Muted>;
     if (rowStatus === "held") return <Muted icon={CirclePause} className="opacity-60">Held</Muted>;
@@ -190,6 +213,26 @@ function AddedValue({ cell }: { cell: GridCell | undefined }) {
       <span className="flex items-center gap-1 font-medium text-[var(--success)]">
         <Check className="size-3.5" strokeWidth={2.5} />
         {text}
+      </span>
+    );
+  }
+  return <Muted>{text}</Muted>;
+}
+
+/**
+ * A find_email cell of an AI Ark run's table, in the words of the pulls' copy
+ * that wrote it: green with a check when an address was found or approved,
+ * red on an error, muted otherwise. A row nothing has sent yet stays blank.
+ */
+function FoundValue({ cell }: { cell: GridCell | undefined }) {
+  if (!cell) return <span />;
+  const text = cell.d || (cell.s === "error" ? "Error" : "");
+  if (cell.s === "error") return <Muted icon={AlertTriangle} className="text-destructive">{text}</Muted>;
+  if (/^(Found by|Approved by) /.test(text)) {
+    return (
+      <span className="flex min-w-0 items-center gap-1 font-medium text-[var(--success)]">
+        <Check className="size-3.5 shrink-0" strokeWidth={2.5} />
+        <span className="truncate">{text}</span>
       </span>
     );
   }
