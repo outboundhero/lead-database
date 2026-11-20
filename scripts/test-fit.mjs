@@ -1617,13 +1617,19 @@ try {
     net.dns.length === dnsBefore + 1 && net.dns.every((h) => h === "dns.google.com") && net.refused === refusedBefore,
     JSON.stringify({ action: p58?.action, mx: mx.status, elsewhere: elsewhere.status, dns: net.dns.slice(dnsBefore), refused: net.refused - refusedBefore }));
   const openaiBefore = net.openai.length;
+  // Two made-up answers (this stub answers fit batches only), taken back if not used; no database: no spend counted.
   const asked = [];
+  const failBefore = net.fail.length;
   for (const c of [p61, g49]) {
-    asked.push(await ACTIONS.ai_web.run({ inputs: { prompt: "\"[made-up] one question\"" }, config: c?.config ?? {}, env: {}, settings: settingsFrom([]), db: pool, row: { id: 0 }, column: c }));
+    net.fail.push({ status: 200, body: { output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ response: "Made-up question?" }) }] }], usage: { input_tokens: 10, output_tokens: 5 } } });
+    asked.push(await ACTIONS.ai_web.run({ inputs: { prompt: "[made-up] one question" }, config: c?.config ?? {}, env: FAKE_OPENAI, settings: settingsFrom([]), db: null, row: { id: 0 }, column: c }));
   }
-  check("P#61 and G#49 do not run while 0.4 item 4 waits: their table examples are kept, and nothing is sent",
-    [p61, g49].every((c) => c?.action === "ai_web" && typeof c.config?.table_examples === "string" && !c.config?.examples_supported && (c.config?.flag ?? []).includes("personalisation")) &&
-      asked.every((r) => r.status === "skipped" && /table examples/.test(r.note ?? "")) && net.openai.length === openaiBefore,
+  net.fail.splice(failBefore);
+  const sentAi = net.openai.slice(openaiBefore);
+  check("P#61 and G#49 send their table examples as instructions: two requests, each with the examples' text as its instructions and the prompt as its input",
+    [p61, g49].every((c) => c?.action === "ai_web" && typeof c.config?.table_examples === "string" && c.config.examples_count === 1 && typeof c.config.examples_text === "string" && (c.config?.flag ?? []).includes("personalisation")) &&
+      sentAi.length === 2 && sentAi.every((b, i) => b.instructions === [p61, g49][i].config.examples_text && b.input === "[made-up] one question") &&
+      asked.every((r) => r.status === "done" && r.value?.response === "Made-up question?" && r.run?.request?.examples === 1),
     JSON.stringify(asked.map((r) => [r.status, r.note])));
   check("the stand-ins: a tidy company name in title case, a North American number, and nothing else",
     normalizeCompanyName({ companyName: "  acme FTTEST cleaning, ", titleCase: true }) === "Acme Fttest Cleaning" &&
