@@ -32,6 +32,10 @@ const HELD_NOTES: Record<string, string> = {
 };
 const heldNote = (template: string | null | undefined) =>
   (template && HELD_NOTES[template]) || "Held: nothing runs or is spent on this row until the worker releases it.";
+/** A held People row the worker copied from an AI Ark pull (its source "AI Ark pull <date>: no email"): what it waits for. */
+const PULL_HELD_NOTE =
+  "Held: a person an AI Ark pull bought with no email. The worker starts it while its client is on People runs, at most 2,000 rows of this table at a time; nothing runs or is spent on it until then.";
+const pullHeldNote = (row: { source_label: string | null }) => (row.source_label?.startsWith("AI Ark pull") ? PULL_HELD_NOTE : null);
 
 function Section({ title, children, className }: { title: string; children: React.ReactNode; className?: string }) {
   return (
@@ -107,6 +111,8 @@ export function CellPanel({
   const col = shown?.column;
   const names = shown?.columnNames ?? {};
   const status = shown?.cell?.status;
+  // What a held row waits for: a person copied from an AI Ark pull, else what its table's template holds.
+  const heldText = shown ? (pullHeldNote(shown.row) ?? heldNote(shown.row.template)) : undefined;
 
   const run = async (scope: "cell" | "row") => {
     if (!shown) return;
@@ -174,7 +180,7 @@ export function CellPanel({
               {shown.row.last_error && shown.row.run_status !== "done" && (
                 <p className="text-[12.5px] text-destructive">Row: {shown.row.last_error}</p>
               )}
-              {shown.row.run_status === "held" && <p className="text-[12.5px] text-muted-foreground">{heldNote(shown.row.template)}</p>}
+              {shown.row.run_status === "held" && <p className="text-[12.5px] text-muted-foreground">{heldText}</p>}
             </Section>
 
             {shown.row.reference !== null && shown.row.reference !== undefined && (
@@ -274,7 +280,7 @@ export function CellPanel({
                 size="sm"
                 variant="tinted"
                 disabled={!!busy || shown.row.run_status === "running" || shown.row.run_status === "held"}
-                title={shown.row.run_status === "held" ? heldNote(shown.row.template) : undefined}
+                title={shown.row.run_status === "held" ? heldText : undefined}
                 onClick={() => run("cell")}
               >
                 {busy === "cell" ? <Loader2 className="animate-spin" /> : <RotateCcw />}
@@ -285,7 +291,7 @@ export function CellPanel({
               size="sm"
               variant="outline"
               disabled={!!busy || shown.row.run_status === "running" || shown.row.run_status === "held"}
-              title={shown.row.run_status === "held" ? heldNote(shown.row.template) : undefined}
+              title={shown.row.run_status === "held" ? heldText : undefined}
               onClick={() => run("row")}
             >
               {busy === "row" ? <Loader2 className="animate-spin" /> : <Play />}

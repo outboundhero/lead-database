@@ -849,8 +849,9 @@ async function partS() {
   section("S1. The worker");
   const ws = source("scripts/enrich-worker.mjs");
   check("it offers held_release and upload_people (UPLOAD_CAPABILITY)", /const CAPABILITIES = \[[^\]]*"held_release"[^\]]*UPLOAD_CAPABILITY\];/.test(ws) && UPLOAD_CAPABILITY === "upload_people");
-  check("its 60-second block: the stale sweep, the Maps release, the move, the People release, in that order",
-    /if \(Date\.now\(\) - lastSweep > 60_000\) \{\s*await reclaimStale\(\);\s*await releaseHeld\(\);\s*await moveUploads\(\);\s*await releaseHeldPeople\(\);\s*lastSweep = Date\.now\(\);/.test(ws));
+  // Since 2026-11-21 the AI Ark pulls' copy follows the move and their hand-back follows the People release (pull-no-email.mjs).
+  check("its 60-second block: the stale sweep, the Maps release, the move, the pulls' copy, the People release, the pulls' hand-back, in that order",
+    /if \(Date\.now\(\) - lastSweep > 60_000\) \{\s*await reclaimStale\(\);\s*await releaseHeld\(\);\s*await moveUploads\(\);\s*await copyPulls\(\);\s*await releaseHeldPeople\(\);\s*await handBackPulls\(\);\s*lastSweep = Date\.now\(\);/.test(ws));
   check("the move and the People release never throw, and say once that migration 130 is missing (42P01, 42703, 42883)",
     /const UPLOADS_UNREADY = new Set\(\["42P01", "42703", "42883"\]\);/.test(ws) &&
       /async function moveUploads\(\) \{\s*try \{[\s\S]*?await moveUploadRows\(pool, \{ settings, log \}\);[\s\S]*?\} catch \(e\) \{\s*if \(UPLOADS_UNREADY\.has\(e\?\.code\)\) \{\s*if \(!uploadsUnreadyLogged\)/.test(ws) &&

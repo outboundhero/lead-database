@@ -3,9 +3,13 @@
 // starts an add here, runs the import through the Uploads page's engine
 // (src/lib/uploads/import-rows.ts, duplicates skipped, never merged) and then
 // settles each person here. With no email: the pipeline, unless the database already
-// holds them (lead_lookup, in the Outcome). They wait in the pull's table for the
-// email-finding steps, and emailFound() brings them back: a person given an address
-// is worked again, and goes to the database like anyone else.
+// holds them (lead_lookup, in the Outcome). Once the client is on People runs, the
+// worker copies them into its People (pipeline) table, where the email finders look
+// for their address (scripts/lib/enrich/pull-no-email.mjs), and emailFound() brings
+// an approved one back: a person given an address is worked again, and goes to the
+// database like anyone else, the lead's source and validation status saying who
+// found or approved the address (email_found_source, email_found_status), with the
+// question the People table wrote, if any.
 //
 // The worker starts an add when a pull has finished (pullsToAdd, requestAdd), if
 // AIARK_AUTO_ADD_URL and AIARK_AUTO_ADD_KEY are set on it and the key on the web
@@ -37,10 +41,15 @@ const AUTO_ADD_WAIT_MS = 30_000;
 /** An add whose upload batch is still 'processing' after this long died with the server; its people can be added again. */
 export const STALE_HOURS = 3;
 
-/** The cells an add reads for each person. */
+/**
+ * The cells an add reads for each person. The last three are written only by
+ * emailFound() for an address the People table found (pull-no-email.mjs): who
+ * found or approved it, the validation status that gives, and the question.
+ */
 export const ADD_INPUT_KEYS = [
   "email", "first_name", "last_name", "full_name", "title", "seniority", "company", "domain", "company_industry",
   "company_size", "city", "state", "country", "linkedin", "company_linkedin", "email_verdict",
+  "email_found_source", "email_found_status", "question",
 ];
 
 /**
@@ -69,6 +78,7 @@ export const IMPORT_COLUMNS = [
   ["Employees", "company_size"],
   ["Validation Status", "validation_status"],
   ["Source", "source"],
+  ["Question", "question"],
 ];
 
 /** leads columns the import writes that the Uploads page doesn't offer (ImportConfig.extraFields). */
@@ -90,14 +100,31 @@ export function headcount(size) {
   return m ? m[1].replace(/,/g, "") : "";
 }
 
+const cellText = (v) => (v == null ? "" : String(v).trim());
+
+/**
+ * The source a person's lead gets: AI Ark, with who found or approved the
+ * address added when the People table found it ("AI Ark, found by Findymail").
+ * @param {Record<string, string>} c the person's cells
+ */
+export function rowSource(c) {
+  const found = cellText(c?.email_found_source);
+  return found ? `${SOURCE}, ${found}` : SOURCE;
+}
+
 /**
  * One person as an import row, in IMPORT_COLUMNS order. A Ready to add person's
- * email passed AI Ark's check, as Valid or Catch-all.
+ * email passed AI Ark's check, as Valid or Catch-all. An address the People
+ * table found (email_found_source) takes that table's verdict instead
+ * (email_found_status: valid, catch_all, or empty, which the import writes as
+ * NULL), and the source says who found or approved it. The question is the
+ * one the People table wrote, if any.
  * @param {Record<string, string>} c the person's cells
  * @returns {string[]}
  */
 export function importRow(c) {
   const [first, last] = names(c);
+  const found = cellText(c.email_found_source);
   const v = {
     email: c.email,
     first_name: first,
@@ -113,8 +140,9 @@ export function importRow(c) {
     seniority: c.seniority,
     general_industry: c.company_industry,
     company_size: headcount(c.company_size),
-    validation_status: c.email_verdict === "Catch-all" ? "catch_all" : "valid",
-    source: SOURCE,
+    validation_status: found ? cellText(c.email_found_status) : c.email_verdict === "Catch-all" ? "catch_all" : "valid",
+    source: rowSource(c),
+    question: c.question,
   };
   return IMPORT_COLUMNS.map(([, k]) => String(v[k] ?? ""));
 }
@@ -125,10 +153,12 @@ const LIVE_BATCH = `b.status = 'processing' AND b.created_at > now() - make_inte
 /**
  * Where a run table's people stand. `ready` is who an add would take now: Ready
  * to add and not settled, which includes anyone an earlier add could not store.
- * `pipeline` is who has no email, waiting for the email-finding steps.
+ * `pipeline` is who has no email, waiting for the email-finding steps; `sent`,
+ * of those, who went to the client's People (pipeline) table (their find_email
+ * cell names a People row: pull-no-email.mjs).
  * @param {{ query: Function }} db
  * @param {string} tableId
- * @returns {Promise<{ ready: number, added: number, skipped: number, adding: number, failed: number, pipeline: number }>}
+ * @returns {Promise<{ ready: number, added: number, skipped: number, adding: number, failed: number, pipeline: number, sent: number }>}
  */
 export async function addState(db, tableId) {
   const { rows: [r] } = await db.query(
@@ -137,13 +167,16 @@ export async function addState(db, tableId) {
             count(*) FILTER (WHERE x.status = 'done' AND NOT x.added)::int AS skipped,
             count(*) FILTER (WHERE x.adding)::int AS adding,
             count(*) FILTER (WHERE x.status = 'error')::int AS failed,
-            count(*) FILTER (WHERE x.no_email)::int AS pipeline
+            count(*) FILTER (WHERE x.no_email)::int AS pipeline,
+            count(*) FILTER (WHERE x.no_email AND x.sent)::int AS sent
        FROM (SELECT (o.value #>> '{}') = $2 AS ready, (o.value #>> '{}') = $4 AS no_email, a.status,
                     coalesce((a.value->>'added')::boolean, false) AS added,
-                    coalesce(a.status = 'running' AND ${LIVE_BATCH}, false) AS adding
+                    coalesce(a.status = 'running' AND ${LIVE_BATCH}, false) AS adding,
+                    coalesce(f.value ? 'people_row_id', false) AS sent
                FROM enrich_rows r
                JOIN enrich_cells o ON o.row_id = r.id AND o.column_key = 'outcome' AND o.status = 'done'
                LEFT JOIN enrich_cells a ON a.row_id = r.id AND a.column_key = $3
+               LEFT JOIN enrich_cells f ON f.row_id = r.id AND f.column_key = 'find_email'
                LEFT JOIN upload_batches b ON a.status = 'running' AND b.id::text = a.value->>'batch_id'
               WHERE r.table_id = $1) x`,
     [tableId, READY, ADD_COLUMN, NO_EMAIL]
@@ -213,14 +246,22 @@ export async function requestAdd(config, runId, fetchImpl = fetch) {
  * row is worked again, like a person AI Ark found the address for: the same
  * checks and Outcome, and Ready to add goes to the database. Only someone whose
  * Outcome is still "No email", and whose row isn't being worked, is changed.
+ * `extra`: more text cells written beside those three, each only when it is
+ * not empty (the People table's hand-back gives email_found_source,
+ * email_found_status and question, which the add reads).
  * @param {{ query: Function }} db
- * @param {{ rowId: number, email: string, status?: string, domainType?: string }} found
+ * @param {{ rowId: number, email: string, status?: string, domainType?: string, extra?: Record<string, unknown> | null }} found
  * @returns {Promise<boolean>} whether the person was changed
  */
-export async function emailFound(db, { rowId, email, status = "VALID", domainType = "SMTP" }) {
+export async function emailFound(db, { rowId, email, status = "VALID", domainType = "SMTP", extra = null }) {
   const address = String(email ?? "").trim().toLowerCase();
   if (!address) return false;
+  /** @type {Record<string, string>} */
   const cells = { email: address, email_status: status, email_domain_type: domainType };
+  for (const [k, v] of Object.entries(extra ?? {})) {
+    const value = v == null || typeof v === "object" ? "" : String(v).trim();
+    if (value && !(k in cells)) cells[k] = value;
+  }
   const { rows: [r] } = await db.query(
     `WITH target AS (
        SELECT q.id, q.table_id FROM enrich_rows q
@@ -253,9 +294,11 @@ export async function emailFound(db, { rowId, email, status = "VALID", domainTyp
  * add of this table is still under way. The batch records the run's client tag
  * (add_tags, as the tag the import stamps) and the run (aiark_run_id) when
  * they are given; without them both stay null, as before 133.
+ * Each person taken carries the source their import row gives (rowSource),
+ * which finishAdd compares.
  * @param {{ query: Function }} db
  * @param {{ tableId: string, userId: string | null, filename: string, clientTag?: string | null, runId?: string | null }} opts
- * @returns {Promise<{ busy: true } | { busy: false, batchId: string | null, batchAt: string | null, rows: string[][], people: { row_id: number, email: string }[], skipped: number }>}
+ * @returns {Promise<{ busy: true } | { busy: false, batchId: string | null, batchAt: string | null, rows: string[][], people: { row_id: number, email: string, source: string }[], skipped: number }>}
  */
 export async function beginAdd(db, { tableId, userId, filename, clientTag = null, runId = null }) {
   const { rows: live } = await db.query(
@@ -347,26 +390,29 @@ export async function beginAdd(db, { tableId, userId, filename, clientTag = null
     batchId: batch.id,
     batchAt: batch.created_at instanceof Date ? batch.created_at.toISOString() : String(batch.created_at),
     rows: toAdd.map((p) => importRow(p.cells)),
-    people: toAdd.map(({ row_id, email }) => ({ row_id, email })),
+    people: toAdd.map(({ row_id, email, cells }) => ({ row_id, email, source: rowSource(cells) })),
     skipped: settled.length,
   };
 }
 
 /**
  * Settles each person an add's batch took, from what the database holds after
- * the import: a lead with source AI Ark created since the batch began is this
- * add's; a lead otherwise was there first (another writer won the race); no
- * lead means the import could not store the person. Only cells still marked
- * running for this batch are written.
+ * the import: a lead with the person's own source (AI Ark, with who found the
+ * address added when the People table found it; AI Ark for a person that
+ * names none) created since the batch began is this add's; a lead otherwise
+ * was there first (another writer won the race); no lead means the import
+ * could not store the person. Only cells still marked running for this batch
+ * are written.
  * @param {{ query: Function }} db
- * @param {{ tableId: string, batchId: string, batchAt: string, people: { row_id: number, email: string }[] }} opts
+ * @param {{ tableId: string, batchId: string, batchAt: string, people: { row_id: number, email: string, source?: string }[] }} opts
  */
 export async function finishAdd(db, { tableId, batchId, batchAt, people }) {
   if (!people.length) return;
   await db.query(
     `WITH m AS (
-       SELECT x.row_id, l.id AS lead_id, coalesce(l.source = $5 AND l.created_at >= $4::timestamptz, false) AS mine
-         FROM jsonb_to_recordset($1::jsonb) AS x(row_id bigint, email text)
+       SELECT x.row_id, coalesce(x.source, $5) AS source, l.id AS lead_id,
+              coalesce(l.source = coalesce(x.source, $5) AND l.created_at >= $4::timestamptz, false) AS mine
+         FROM jsonb_to_recordset($1::jsonb) AS x(row_id bigint, email text, source text)
          LEFT JOIN leads l ON l.email = x.email
      )
      INSERT INTO enrich_cells AS c (row_id, column_key, table_id, status, value, display, note, updated_at)
@@ -377,7 +423,7 @@ export async function finishAdd(db, { tableId, batchId, batchAt, people }) {
                  ELSE jsonb_build_object('added', false, 'reason', 'lead', 'lead_id', m.lead_id, 'batch_id', $6::text) END,
             CASE WHEN m.lead_id IS NULL THEN 'Not added' WHEN m.mine THEN 'Added' ELSE 'Already in the database' END,
             CASE WHEN m.lead_id IS NULL THEN 'The import could not store this person (the batch''s errors on the Uploads page say why). The next add tries again.'
-                 WHEN m.mine THEN 'Added to the lead database with source AI Ark, tagged with the client.'
+                 WHEN m.mine THEN 'Added to the lead database with source ' || m.source || ', tagged with the client.'
                  ELSE 'Skipped: a lead with this address reached the database while this add ran; it was left as it was.' END,
             now()
        FROM m

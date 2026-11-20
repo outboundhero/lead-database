@@ -2837,7 +2837,8 @@ async function addToDatabase() {
   await pool.query(`INSERT INTO bison_leads (instance_url, bison_id, email) VALUES ($1, 21, $2)`, [TEST_DOMAIN, email(4).toUpperCase()]);
 
   const state = async () => JSON.stringify(await addState(pool, run.table_id));
-  const counts = (ready, added, skipped, adding, failed) => JSON.stringify({ ready, added, skipped, adding, failed, pipeline: 1 });
+  // sent (2026-11-21): of the people with no email, those copied to the client's People table; none here (the client is off People runs).
+  const counts = (ready, added, skipped, adding, failed) => JSON.stringify({ ready, added, skipped, adding, failed, pipeline: 1, sent: 0 });
   const begin = async () => {
     const c = await pool.connect();
     try {

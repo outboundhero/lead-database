@@ -515,8 +515,9 @@ export function SettingsSheet({
                   />
                   <Clients label="Promotion into leads" tags={pr.tags} onChange={(t) => setPromotion("tags", t)} />
                   <p className="text-[12px] leading-relaxed text-muted-foreground">
-                    No fit score is needed. Only addresses Reoon approved are added, with the source &quot;{prView?.source_label ?? "Companies (AI Ark)"}&quot;; one approved
-                    only by Enrichley, or found by an email finder, waits for now.
+                    No fit score is needed. Addresses approved by Reoon or Enrichley, or found by an email finder, are added, as in Clay; each lead&apos;s
+                    validation status and source say which (source &quot;{prView?.source_label ?? "Companies (AI Ark)"}&quot;, with who found or approved the
+                    address added).
                     {prView?.require_question ? " A question is required, so a contact without one waits too." : ""}
                   </p>
                 </Section>

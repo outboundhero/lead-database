@@ -24,11 +24,20 @@
 //   - the brand check is true (G#37 for an inbox, P#10 for a person);
 //   - a person's outcome is "Approved email" and no name holds "*" (a
 //     Preview's masked last name must never reach leads); an inbox's first
-//     name (G#20) does not hold "undefined" (it needs G#14's stand-in, D38);
-//   - its validation status is valid: Reoon's own stamp (G#40, P#12), and for
-//     a person on the very address Reoon checked. An address approved only by
-//     Enrichley or found by a finder is held back: how it is marked in leads
-//     waits for Akeesh;
+//     name (G#20) does not hold "undefined" (G#20 falls back to "<Company>
+//     Team", which needs G#14's company name);
+//   - its address can be traced to an approval, as Clay takes it
+//     (email-verdict.mjs, 2026-11-21): Reoon's stamp (G#40, P#12 on the very
+//     address), Enrichley's (G#42, P#14, or its check of an Anymail Finder
+//     address, P#49, P#54), or an email finder's own answer (Findymail,
+//     Prospeo, Anymail Finder with "valid"), which Clay sends to Use Work
+//     Email with no Reoon check. An address traced to none of them is held
+//     back. The lead says which: validation_status valid, or catch_all for an
+//     Enrichley catch-all result, or empty (NULL: sendable, no check claimed)
+//     for Findymail and an unverified Prospeo answer; and its source is the
+//     label with who found or approved the address added ("Companies (AI
+//     Ark), found by Findymail"). Reoon's approval adds nothing: that lead is
+//     exactly as before;
 //   - while promotion.require_question is on (it ships on), its question is
 //     filled (D19), as Clay's push required.
 // Held back means not added this round: its add_to_database cell says why, and
@@ -53,6 +62,7 @@
 
 import { evaluate, isEmpty, makeContext } from "./formula.mjs";
 import { addAliases } from "./fit-keys.mjs";
+import { inboxVerdict, personVerdict, VERDICT_CELLS, verdictSource } from "./email-verdict.mjs";
 
 export const PROMOTE_SOURCE = "Companies (AI Ark)";
 export const ADD_COLUMN = "add_to_database";
@@ -87,18 +97,18 @@ export const PROMOTE_COLUMNS = Object.freeze([
 /** leads columns the import writes beyond the Uploads page's fields (ImportConfig.extraFields). */
 export const PROMOTE_EXTRA_FIELDS = Object.freeze(["country", "seniority", "general_industry"]);
 
-/** The cells read from each kind of row: the original columns of 2B.5, the checks, and the address. */
+/** The cells read from each kind of row: the original columns of 2B.5, the checks, the address, and what its verdict reads. */
 export const PROMOTE_CELLS = Object.freeze({
-  general: [
+  general: [...new Set([
     "general_email", "use_first_name", "use_last_name", "normalized_company_name", "company", "use_city", "use_state",
     "use_address", "use_domain", "use_phone_number", "use_google_maps_url", "question", "exclusion_large_company_check",
-    "reoon_stamp_of_approval",
-  ],
-  person: [
+    "reoon_stamp_of_approval", ...VERDICT_CELLS.general,
+  ])],
+  person: [...new Set([
     "use_work_email", "email", "use_first_name", "use_last_name", "full_name", "title", "normalized_company_name", "company",
     "use_city", "use_state", "use_address", "use_domain", "use_phone_number", "use_google_maps_url", "person_linkedin_url",
-    "question", "seniority", "person_country", "exclusion_large_company_check", "reoon_stamp_of_approval",
-  ],
+    "question", "seniority", "person_country", "exclusion_large_company_check", "reoon_stamp_of_approval", ...VERDICT_CELLS.person,
+  ])],
 });
 
 /** The columns whose fallback word is dropped (it is read from the column itself, never written here). */
@@ -107,8 +117,8 @@ export const FALLBACK_COLUMNS = Object.freeze(["use_city", "use_state", "use_add
 /** Why a contact is held back (not taken this round), or refused. */
 export const HOLD = Object.freeze({
   masked: "A name holds \"*\" (a Preview's masked name)",
-  first_name: "The first name holds \"undefined\": it waits for the company-name step (G#14, D38)",
-  validation: "Approved by Enrichley or found by a finder, not by Reoon: how such an address is marked in leads waits for Akeesh",
+  first_name: "The first name holds \"undefined\": the company-name step (G#14) has not given a name",
+  validation: "No approval this address can be traced to (Reoon, Enrichley or an email finder's own answer)",
   blocked: "Blocked under one of the lead's keys",
   no_email: "No address",
   twin: "Another contact in this round has the same address: it waits for the next round",
@@ -177,18 +187,28 @@ function toRow(lead) {
   return PROMOTE_COLUMNS.map(([, k]) => String(lead[k] ?? ""));
 }
 
-/** Validation, as 2B.5 allows it: Reoon's own stamp, on the address being promoted. */
-function reoonValid(cells, address) {
-  if (cells.reoon_stamp_of_approval !== true) return false;
-  if (address === null) return true;
-  return str(cells.email).toLowerCase() === address;
+/**
+ * What a verdict (email-verdict.mjs) gives the lead: its validation status
+ * ("" when the verdict claims none, which the import writes as NULL) and its
+ * source, the label with who found or approved the address added. With no
+ * verdict the contact is held back, so neither is used.
+ *
+ * @param {import("./email-verdict.mjs").Verdict | null} v
+ * @param {string} label
+ */
+function verdictFields(v, label) {
+  if (!v) return { validation_status: "", source: label };
+  const by = verdictSource(v);
+  return { validation_status: v.status ?? "", source: by ? `${label}, ${by}` : label };
 }
 
 /**
  * An inbox row as a lead (G#13 to G#50, D18): "<Company> Team" as G#20 gives
  * it, "(General Email)" as G#21 gives it, email type general, the place,
  * address, phone and Maps link without their fallback words, the question,
- * the company row's industry, validation valid, the pipeline's source label.
+ * the company row's industry, the validation status its verdict gives (valid
+ * for Reoon's approval, valid or catch_all for Enrichley's) and the
+ * pipeline's source label, with "approved by Enrichley" added for Enrichley's.
  *
  * @param {Record<string, any>} cells  the row's done cells, by key
  * @param {RowContext} [ctx]
@@ -198,6 +218,7 @@ export function inboxLeadRow(cells, { fallbacks = {}, industry = null, label = P
   const c = cells ?? {};
   const email = str(c.general_email).toLowerCase();
   const first = str(c.use_first_name);
+  const verdict = inboxVerdict(c);
   const lead = {
     email,
     first_name: first,
@@ -216,15 +237,14 @@ export function inboxLeadRow(cells, { fallbacks = {}, industry = null, label = P
     seniority: "",
     general_industry: str(industry),
     email_type: "general",
-    validation_status: "valid",
-    source: label,
+    ...verdictFields(verdict, label),
   };
   let hold = null;
   let refuse = null;
   if (!email) hold = HOLD.no_email;
   else if (c.exclusion_large_company_check !== true) refuse = REFUSED_BRAND;
   else if (/undefined/i.test(first)) hold = HOLD.first_name;
-  else if (!reoonValid(c, null)) hold = HOLD.validation;
+  else if (!verdict) hold = HOLD.validation;
   return { row: toRow(lead), lead, hold, refuse };
 }
 
@@ -233,8 +253,9 @@ export function inboxLeadRow(cells, { fallbacks = {}, industry = null, label = P
  * name (P#41, P#42), title (P#44), company (P#30, else P#28), the place,
  * address, phone and Maps link without their fallback words, LinkedIn (P#45),
  * the question (P#62), AI Ark's seniority and country, the company row's
- * industry, validation valid, the pipeline's source label. Email type is left
- * to the import's detection.
+ * industry, the validation status its verdict gives and the pipeline's source
+ * label with who found or approved the address added (email-verdict.mjs).
+ * Email type is left to the import's detection.
  *
  * @param {Record<string, any>} cells
  * @param {RowContext} [ctx]
@@ -243,6 +264,7 @@ export function inboxLeadRow(cells, { fallbacks = {}, industry = null, label = P
 export function personLeadRow(cells, { fallbacks = {}, industry = null, label = PROMOTE_SOURCE } = {}) {
   const c = cells ?? {};
   const email = str(c.use_work_email).toLowerCase();
+  const verdict = personVerdict(c);
   const lead = {
     email,
     first_name: str(c.use_first_name),
@@ -261,15 +283,14 @@ export function personLeadRow(cells, { fallbacks = {}, industry = null, label = 
     seniority: str(c.seniority),
     general_industry: str(industry),
     email_type: "",
-    validation_status: "valid",
-    source: label,
+    ...verdictFields(verdict, label),
   };
   let hold = null;
   let refuse = null;
   if (!email) hold = HOLD.no_email;
   else if (c.exclusion_large_company_check !== true) refuse = REFUSED_BRAND;
   else if ([lead.first_name, lead.last_name, str(c.full_name)].some((n) => n.includes("*"))) hold = HOLD.masked;
-  else if (!reoonValid(c, email)) hold = HOLD.validation;
+  else if (!verdict) hold = HOLD.validation;
   return { row: toRow(lead), lead, hold, refuse };
 }
 
@@ -573,7 +594,8 @@ export async function beginPromote(db, { tag, kind, userId, limit, settings, but
     batchId: batch.id,
     batchAt: batch.created_at instanceof Date ? batch.created_at.toISOString() : String(batch.created_at),
     rows: toAdd.map((r) => r.row),
-    contacts: toAdd.map((r) => ({ row_id: r.row_id, table_id: r.table_id, email: r.lead.email })),
+    // Each contact's own source (the label, with who found or approved its address): finishPromote compares it.
+    contacts: toAdd.map((r) => ({ row_id: r.row_id, table_id: r.table_id, email: r.lead.email, label: r.lead.source })),
     settled: settled.length,
     refused: refused.length,
     held,
@@ -582,23 +604,25 @@ export async function beginPromote(db, { tag, kind, userId, limit, settings, but
 
 /**
  * Settles each contact a promote batch took, from what the database holds
- * after the import: a lead with the pipeline's source label created since the
- * batch began is this batch's ('added'); a lead otherwise was there first
+ * after the import: a lead with the contact's own source (its label, the
+ * pipeline's source label with who found or approved the address added;
+ * the batch's label for a contact that names none) created since the batch
+ * began is this batch's ('added'); a lead otherwise was there first
  * ('in_database'); no lead means the import could not store it ('not_added',
  * which the button tries again). Only contacts still running for this batch
  * are written. Then each lead's keys become aliases of its company's score.
  *
  * @param {Db} db
- * @param {{ batchId: string, batchAt: string, contacts: Array<{ row_id: number, table_id: string, email: string }>,
+ * @param {{ batchId: string, batchAt: string, contacts: Array<{ row_id: number, table_id: string, email: string, label?: string }>,
  *           label?: string }} p
  */
 export async function finishPromote(db, { batchId, batchAt, contacts, label = PROMOTE_SOURCE }) {
   if (!contacts?.length) return { added: 0, in_database: 0, not_added: 0 };
   const { rows } = await db.query(
     `WITH m AS (
-       SELECT x.row_id, x.table_id, x.email, l.id AS lead_id,
-              coalesce(l.source = $3 AND l.created_at >= $2::timestamptz, false) AS mine
-         FROM jsonb_to_recordset($1::jsonb) AS x(row_id bigint, table_id uuid, email text)
+       SELECT x.row_id, x.table_id, x.email, coalesce(x.label, $3) AS label, l.id AS lead_id,
+              coalesce(l.source = coalesce(x.label, $3) AND l.created_at >= $2::timestamptz, false) AS mine
+         FROM jsonb_to_recordset($1::jsonb) AS x(row_id bigint, table_id uuid, email text, label text)
          LEFT JOIN leads l ON l.email = x.email
      )
      UPDATE enrich_contacts c
@@ -606,7 +630,7 @@ export async function finishPromote(db, { batchId, batchAt, contacts, label = PR
             lead_id = m.lead_id, promoted_at = now()
        FROM m
       WHERE c.row_id = m.row_id AND c.promote_state = 'running' AND c.batch_id = $4
-     RETURNING c.row_id, c.table_id, m.email, c.promote_state, c.lead_id`,
+     RETURNING c.row_id, c.table_id, m.email, m.label, c.promote_state, c.lead_id`,
     [JSON.stringify(contacts), batchAt, label, batchId]
   );
   await writeCells(db, rows.map((r) => ({
@@ -617,7 +641,7 @@ export async function finishPromote(db, { batchId, batchAt, contacts, label = PR
       : { added: r.promote_state === "added", reason: r.promote_state === "added" ? null : "in_database", lead_id: r.lead_id, batch_id: batchId, email: r.email },
     display: r.promote_state === "added" ? "Added" : r.promote_state === "in_database" ? "Already in the database" : "Not added",
     note: r.promote_state === "added"
-      ? `Added to the lead database with source ${label}, tagged with the client.`
+      ? `Added to the lead database with source ${r.label ?? label}, tagged with the client.`
       : r.promote_state === "in_database"
         ? "Skipped: a lead with this address reached the database while this batch ran; it was left as it was."
         : "The import could not store this contact (the batch's errors on the Uploads page say why). The button tries again.",
