@@ -678,6 +678,9 @@ breakdown) because **two prior hypotheses were wrong**. Measure before tuning.
 
 Railway vars: `PUSH_RATE=45`, `PUSH_CONCURRENCY=64` (cap 96),
 `PUSH_CLAIM_BATCH=400` (cap 1000), `PUSH_BATCH_FOCUS=3`, `PUSH_REFRESH_MS=20000`.
+Since 2026-11-20, unset = default: `PUSH_ALLOW_PARALLEL` (on; `0` = off) and
+`PUSH_SPOT_CHECK` (2, 0–10); see "Parallel sending, and `sent` means in the
+campaign".
 
 ⚠ `Number(undefined) ?? 2` is `NaN`, not `2` — `PUSH_BATCH_FOCUS` was silently
 off. Guard env-var defaults with `Number.isFinite`.
@@ -916,16 +919,59 @@ could not push at all: the Nov-15 clients (ATOH, JMBCS, CCGSOR, SG, LBJ, JATL)
 all got "has no B2B/B2C mapping". Tested by `scripts/test-bison-groups.mts`
 (includes the worker's own routing on install-sided campaigns).
 
-⚠ **`sent` overstates what Bison holds.** Bison does not add a lead to a
-campaign while the lead is "In Sequence" in another campaign on that install
-(its `allow_parallel_sending` flag, which the worker never sends), yet it
-returns 2xx for the chunk; the worker then marks the whole chunk attached.
-Measured 2026-10-05 on JPCO's draft B2C mains: 13,666 recorded, 10,423 in
-Bison — every missing lead already sat in JPCO's own Nurture or another
-client's campaign. Leads the push CREATES on the install land 100%. A later
-push for the same client skips any lead with a `sent` item, so these are never
-retried. Not yet fixed; decision pending on whether a lead already in a
-client's Nurture should be forced into main.
+### Parallel sending, and `sent` means in the campaign (2026-11-20)
+
+**What was wrong.** Bison does not add a lead to a campaign while the lead is
+"in_sequence" in another campaign on that install unless the attach sets
+`allow_parallel_sending`, and it answers 2xx for the chunk anyway ("Leads
+successfully added to … Existing leads were not added.", no counts). The worker
+never set the flag and marked every lead of a 2xx chunk attached. First seen
+2026-10-05 (JPCO: 13,666 recorded, 10,423 in Bison) and left open. On the 18 Nov
+pushes of nine new clients ~284k of ~694k `sent` leads were not in their
+campaigns; live samples (20 per campaign) showed every missing lead in sequence
+in another campaign (almost always another client's in the same service area) or
+bounced. A later push skipped them as "already pushed", so they never retried.
+The Clay tables this push replaced attach with `"allow_parallel_sending": true`
+on the same endpoint (every "Add EB Lead to Campaign" column); dropping it was
+the change the client noticed. The client's rule: clients sharing a service
+area must be able to mail the same leads.
+
+**What the worker does now** (scripts/lib/push-attach.mjs, used by
+scripts/push-worker.mjs):
+- The per-lead lookup it already made (`GET /api/leads/{email}`) returns the
+  lead's `status` and `lead_campaign_data`; it is kept and planned per target
+  campaign (`planTarget`). A retry with a known id reads the lead again by id.
+  - **present**: already in the campaign (any status): no attach call, `sent`.
+  - **blocked**: bounced or unsubscribed in the workspace; or in sequence in the
+    SAME client's own campaign that can still send (draft, active, paused,
+    unknown: never forced, it would put one person in two of a client's
+    sequences, main and nurture or two ESP buckets); or in sequence elsewhere
+    with parallel sending off. No attach call; recorded with the reason.
+  - **attach**: everything else; `force` when it relies on parallel sending
+    (in sequence in another client's campaign, or in this client's archived or
+    completed one). The client of a campaign is the tag its name starts with
+    (`campaignTag`); names and states come from `GET /api/campaigns/{id}`,
+    cached ten minutes per install.
+- Attach bodies carry `allow_parallel_sending: true` while `PUSH_ALLOW_PARALLEL`
+  is not `0` (default on). Off, the leads it would force are `skipped` with the
+  holder named instead of being reported as sent.
+- After a 2xx, up to `PUSH_SPOT_CHECK` (default 2) forced leads per chunk are
+  read back on draft/paused campaigns (an active campaign syncs within ~5 min,
+  so an immediate read proves nothing there); one missing means every forced
+  lead of that chunk is read, and the missing ones are recorded as not added.
+- `itemOutcome`: `sent` = the lead is in every target, or in some with the rest
+  named (`partial: not added to #id: reason`); `skipped` = in none, with the
+  reason(s). Exports groups these reasons (push-batches/errors).
+- Verified live 2026-11-20 on one lead (held by two other clients' active
+  campaigns) into a draft: plan "attach, forced", 200, read back in the campaign
+  at once, total_leads +1. Tests: `scripts/test-push-attach.mts` (pure, includes
+  a simulated install that applies Bison's rule; invariant: recorded `sent` ⇔ in
+  the campaign).
+- Not changed: the synchronous `POST /api/bison/push` (src/lib/bison/push-leads.ts,
+  no UI caller) still attaches without the flag or the plan.
+- Old batches keep their records: items pushed before this deploy may say `sent`
+  for leads Bison left out. Re-pushing a client with "Also send the
+  already-pushed leads" re-plans each lead (present ones cost one lookup).
 
 ## Net-new forecast on export
 
