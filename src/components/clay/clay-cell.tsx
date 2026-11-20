@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   ArrowRightToLine,
   Ban,
-  Building2,
   Check,
   CirclePause,
   Clock,
@@ -44,8 +43,6 @@ export function ColumnIcon({ col, className }: { col: EnrichColumn; className?: 
       return <Link2 className={cn(cls, "text-[oklch(0.6_0.16_200)]")} strokeWidth={2} />;
     case "lookup_key":
       return <ScanSearch className={cn(cls, "text-[oklch(0.7_0.17_160)]")} strokeWidth={2} />;
-    case "domain_from_name":
-      return <Building2 className={cn(cls, "text-[oklch(0.78_0.175_65)]")} strokeWidth={2} />;
     case "ai_web":
       return <Sparkles className={cn(cls, "text-primary")} strokeWidth={2} />;
     case "lead_lookup":

@@ -149,28 +149,6 @@ async function lookupKey({ inputs, config, table, db }) {
   };
 }
 
-// ── get-domain-from-company-name (Clay "Clearbit") ──────────────────────────
-// Clearbit's Name to Domain API. Not yet run against a live key: confirm the
-// response shape on the first real call.
-
-async function domainFromName({ inputs, env }) {
-  const name = text(inputs.companyName);
-  if (!name) return { status: "empty", note: "No company name" };
-  const r = await httpJson(`https://company.clearbit.com/v1/domains/find?name=${encodeURIComponent(name)}`, {
-    headers: { authorization: `Bearer ${env.CLEARBIT_API_KEY}`, accept: "application/json" },
-    timeoutMs: 20_000,
-  });
-  const run = { request: { companyName: name }, response: capped(r.json), http_status: r.status || null, error: r.ok ? null : r.error };
-  if (r.status === 404 || r.status === 422) return { status: "empty", note: "Clearbit has no domain for this name", run };
-  if (!r.ok) {
-    return { status: "error", note: `Clearbit: ${r.error}`, retryable: retryableStatus(r.status), run };
-  }
-  const domain = text(r.json?.domain);
-  return domain
-    ? { status: "done", value: r.json, display: domain, run }
-    : { status: "empty", note: "Clearbit returned no domain", run };
-}
-
 // ── use-ai (Clay "Claygent": an AI agent with web search) ───────────────────
 // OpenAI Responses API with a strict JSON answer. A column names its model
 // setting (config.model_setting, a key of enrich_settings.models): the model,
@@ -371,7 +349,6 @@ export const ACTIONS = {
   check_url: { run: checkUrl, cache: true },
   normalize_url: { run: normalizeUrl, cache: false },
   lookup_key: { run: lookupKey, cache: false },
-  domain_from_name: { run: domainFromName, cache: true },
   ai_web: { run: aiWeb, cache: true, emptyAs: "" },
   later: { run: later, cache: false },
   ...CLIENT_ACTIONS, // AI Ark run tables: lead_lookup, client_area, client_exclusions

@@ -89,8 +89,8 @@
 // on, and prunes. It does nothing at all while overlap_sharing is off or has
 // no "since"; it ships off and covers no client.
 //
-// Env: DATABASE_URL (required). OPENAI_API_KEY, CLEARBIT_API_KEY — optional;
-// without one, the columns that need it show "Needs key" and the row waits.
+// Env: DATABASE_URL (required). OPENAI_API_KEY: optional; without it, the
+// columns that need it show "Needs key" and the row waits.
 // FINDYMAIL_API_KEY, PROSPEO_API_KEY, ANYMAIL_FINDER_API_KEY, ENRICHLEY_API_KEY:
 // optional; without one, its steps show "Needs <KEY> (not held)" and the row
 // never waits for them. With one, each call first takes one of the vendor's
@@ -151,7 +151,7 @@ const STALE_MIN = Math.max(5, num(env.ENRICH_STALE_MIN, 15));
 const MAX_ATTEMPTS = 3;
 const ONCE = env.ENRICH_ONCE === "1";
 const WORKER_ID = env.ENRICH_WORKER_ID || "enrich-worker";
-const PROVIDER_KEYS = ["OPENAI_API_KEY", "CLEARBIT_API_KEY", "ENRICH_REOON_API_KEY"];
+const PROVIDER_KEYS = ["OPENAI_API_KEY", "ENRICH_REOON_API_KEY"];
 const SEARCH_KEYS = [
   ...new Set([
     "company", "address", "website", "domain", "use_website", "use_domain", "place_id", "phone", "use_city", "use_state",

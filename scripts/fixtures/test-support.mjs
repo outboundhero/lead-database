@@ -28,7 +28,7 @@ export function localDatabaseUrl() {
 
 /** Every key a step could spend with: removed from the environment, whatever the shell holds. */
 export const PAID_KEYS = [
-  "OPENAI_API_KEY", "ENRICH_REOON_API_KEY", "REOON_API_KEY", "CLEARBIT_API_KEY", "FINDEMAIL_API_KEY", "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY", "ENRICH_REOON_API_KEY", "REOON_API_KEY", "FINDEMAIL_API_KEY", "ANTHROPIC_API_KEY",
   "AIARK_API_KEY", "AIARK_WEBHOOK_URL", "AIARK_AUTO_ADD_URL", "AIARK_AUTO_ADD_KEY",
   "FINDYMAIL_API_KEY", "PROSPEO_API_KEY", "ANYMAIL_FINDER_API_KEY", "ENRICHLEY_API_KEY", "ICYPEAS_API_KEY",
   // The share push's key and address (overlap sharing): no test asks a real web app to push.

@@ -93,8 +93,9 @@ const STATUS_PILLS: { value: RowStatus | ""; label: string }[] = [
   { value: "held", label: "Held" },
 ];
 
-// Keys whose steps make a row wait until the key is on the worker.
-const KEY_LABELS: Record<string, string> = { OPENAI_API_KEY: "OpenAI", CLEARBIT_API_KEY: "Clearbit", ENRICH_REOON_API_KEY: "Reoon" };
+// Keys whose steps make a row wait until the key is on the worker. Only these get a "No <name> key" pill:
+// a key a worker started from older code still reports, and no step needs any more, gets none.
+const KEY_LABELS: Record<string, string> = { OPENAI_API_KEY: "OpenAI", ENRICH_REOON_API_KEY: "Reoon" };
 // Keys of the pipeline's keyed steps (the email finders and Enrichley): without one its steps are
 // skipped ("Needs <KEY> (not held)") and read as empty, and no row waits for them. With one, each
 // call takes one of the vendor's calls for the day (Companies settings); with no cap set, they wait.
@@ -247,8 +248,8 @@ function ClayTab() {
   if (!canView) return <AccessDenied />;
 
   const missingKeys = Object.entries(worker?.info.keys ?? {})
-    .filter(([k, set]) => !set && !(k in SKIPPED_KEY_LABELS))
-    .map(([k]) => KEY_LABELS[k] ?? k);
+    .filter(([k, set]) => !set && k in KEY_LABELS)
+    .map(([k]) => KEY_LABELS[k]);
   const skippedKeys = Object.entries(worker?.info.keys ?? {})
     .filter(([k, set]) => !set && k in SKIPPED_KEY_LABELS)
     .map(([k]) => ({ key: k, label: SKIPPED_KEY_LABELS[k] }));

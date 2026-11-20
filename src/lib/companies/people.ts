@@ -132,7 +132,6 @@ export function keysView(worker: WorkerState | null): PeopleSetup["keys"] {
   }));
   // Not built: no key in either list (0.3).
   out.push({ key: "ICYPEAS_API_KEY", vendor: "Icypeas", holds: "C#30 (the database and AI Ark take its place)", held: null, built: false });
-  out.push({ key: "CLEARBIT_API_KEY", vendor: "Clearbit", holds: "C#23", held: null, built: false });
   return out;
 }
 

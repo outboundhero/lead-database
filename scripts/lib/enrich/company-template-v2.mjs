@@ -44,7 +44,7 @@ export const COMPANY_REFS = Object.freeze({
   15: "service_area_check", // ours
   21: "domain", // C#21 and C#22 read the source's domain first: AI Ark's domain
   22: "domain",
-  23: "clearbit", // no such column: empty (no key)
+  23: "clearbit", // not used: reads empty
   30: "first_general_email", // C#30's place (D8)
   59: "use_address", // phase 1's office address
   66: "additional_category", // no such column: empty
