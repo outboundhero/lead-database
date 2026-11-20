@@ -19,11 +19,11 @@ import {
 import { toast } from "sonner";
 import { normalizeFilterState, type FilterState } from "@/types/filters";
 import type { FilterPreset } from "@/types/database";
+import { useClientRoster } from "@/lib/clients/roster";
 
 // filter_presets.client_tag (migration 053) isn't in the shared FilterPreset
 // type yet — carry it locally.
 type Preset = FilterPreset & { client_tag?: string | null };
-type ClientTag = { tag: string; group_no: number; owner: string | null; status: string | null };
 
 const NO_TAG = "__none__"; // Radix Select can't use "" as an item value
 
@@ -35,7 +35,10 @@ interface FilterPresetsProps {
 export function FilterPresets({ currentFilters, onLoadPreset }: FilterPresetsProps) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
-  const [clientTags, setClientTags] = useState<ClientTag[]>([]);
+  // The tag scope's options: the shared, cached client list (src/lib/clients/roster.ts),
+  // refreshed in the background when the popover opens and the list is over a minute old.
+  const { clients: roster, refresh: refreshClients } = useClientRoster();
+  const clientTags = roster ?? [];
   const [newName, setNewName] = useState("");
   const [newTag, setNewTag] = useState<string>(NO_TAG);
   const [saving, setSaving] = useState(false);
@@ -50,20 +53,9 @@ export function FilterPresets({ currentFilters, onLoadPreset }: FilterPresetsPro
     }
   }, []);
 
-  const loadClientTags = useCallback(async () => {
-    try {
-      const res = await fetch("/api/bison/client-tags");
-      const data = await res.json();
-      if (res.ok) setClientTags(data.tags ?? []);
-    } catch {
-      // silent — tag scoping is optional
-    }
-  }, []);
-
   useEffect(() => {
     loadPresets();
-    loadClientTags();
-  }, [loadPresets, loadClientTags]);
+  }, [loadPresets]);
 
   async function handleSave() {
     if (!newName.trim()) return;
@@ -160,7 +152,7 @@ export function FilterPresets({ currentFilters, onLoadPreset }: FilterPresetsPro
   });
 
   return (
-    <Popover>
+    <Popover onOpenChange={(open) => { if (open) refreshClients(); }}>
       <PopoverTrigger asChild>
         <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5">
           <FolderOpen className="h-3 w-3" />

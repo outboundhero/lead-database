@@ -15,6 +15,8 @@ import { RulesSyncProvider, RulesSyncButton, RulesSyncPanel } from "@/components
 import { ChurnLine, GroupsTabMark, ReceiveCell } from "@/components/clients/receive-cells";
 import { ReceiveNotice } from "@/components/clients/receive-notice";
 import type { ClientRow } from "@/app/api/clients/route";
+// Every client dropdown shows a cached copy of the client list: each change made here refreshes it at once.
+import { refreshRoster } from "@/lib/clients/roster";
 
 /** What a sync's answer says about the Groups tab's churn cells (scripts/lib/bison-groups.mjs churnReport). */
 type GroupsTabAnswer = {
@@ -80,6 +82,7 @@ export default function ClientsPage() {
       const res = await fetch("/api/clients/refresh", { method: "POST" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Refresh failed");
+      void refreshRoster({ force: true });
       toast.success("Stats refreshed", { id });
       await load();
     } catch (e) {
@@ -100,6 +103,7 @@ export default function ClientsPage() {
       const res = await fetch("/api/clients/sync-groups", { method: "POST" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Group sync failed");
+      void refreshRoster({ force: true });
 
       const gained: string[] = data.gained ?? [];
       const moved: Array<{ tag: string; from: number; to: number }> = data.moved ?? [];
@@ -130,6 +134,7 @@ export default function ClientsPage() {
       const res = await fetch("/api/clients/sync-sheet", { method: "POST" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Sheet sync failed");
+      void refreshRoster({ force: true });
 
       const parts: string[] = [];
       if (data.added?.length) parts.push(`${data.added.length} new (${data.added.join(", ")})`);
@@ -160,6 +165,7 @@ export default function ClientsPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Update failed");
+      void refreshRoster({ force: true });
       load(); // the status decides whether the client can receive: read the reason again
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Update failed");

@@ -1,17 +1,20 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Users } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
+import { useClientRoster } from "@/lib/clients/roster";
 
 // The client roster picker. Lived as a chip in the filter bar until 2026-08-20;
 // it now sits in the top bar beside the search box, because picking a client is
 // how you START a piece of work rather than one filter among twenty.
 //
-// It is deliberately self-contained (own roster fetch, own search box) so it can
-// be rendered anywhere. The leads page portals it into the top bar — see the
-// `#topbar-slot` note in top-bar.tsx.
+// It is deliberately self-contained (own search box) so it can be rendered
+// anywhere. Its list is the shared, cached client list (src/lib/clients/roster.ts):
+// shown at once, refreshed in the background when the dropdown opens and the
+// list is over a minute old. The leads page portals it into the top bar: see
+// the `#topbar-slot` note in top-bar.tsx.
 //
 // NOTE: selecting a client does NOT filter by tag. It applies that client's
 // sheet targeting to the OTHER filters (locations, categories, exclusions), so
@@ -37,35 +40,28 @@ export function ClientSelector({
   onChange: (tag: string | null) => void;
   /** Fired only on a NEW selection — this is what applies the client's targeting. */
   onSelected?: (tag: string) => void;
-  /** Lets the page reuse this fetch instead of making its own. */
+  /** Lets the page reuse the list instead of fetching its own: called whenever a new list arrives, the cached one included. */
   onRosterLoaded?: (roster: ClientRosterEntry[]) => void;
 }) {
-  const [roster, setRoster] = useState<ClientRosterEntry[]>([]);
+  const { clients, refresh } = useClientRoster();
   const [search, setSearch] = useState("");
-  const loadedRef = useRef(false);
 
-  const loadClientTags = useCallback(async (force = false) => {
-    if (loadedRef.current && !force) return;
-    loadedRef.current = true;
-    try {
-      const res = await fetch("/api/bison/client-tags");
-      if (!res.ok) throw new Error(String(res.status));
-      const json = (await res.json()) as { tags?: ClientRosterEntry[] };
-      const tags = (json.tags ?? []).filter((t) => t?.tag);
-      setRoster(tags);
-      onRosterLoaded?.(tags);
-    } catch {
-      // One transient failure must not permanently blank the dropdown —
-      // unlatch so the next open (or the Retry button) refetches.
-      loadedRef.current = false;
-    }
+  // The page is told whenever a new list arrives (the cached one included), so
+  // it can reuse it instead of fetching its own.
+  const onLoadedRef = useRef(onRosterLoaded);
+  useEffect(() => {
+    onLoadedRef.current = onRosterLoaded;
   }, [onRosterLoaded]);
+  useEffect(() => {
+    if (clients) onLoadedRef.current?.(clients);
+  }, [clients]);
 
   const active = !!clientTag;
   const q = search.trim().toLowerCase();
+  const roster = clients ?? [];
 
   return (
-    <Popover onOpenChange={(open) => { if (open) loadClientTags(); }}>
+    <Popover onOpenChange={(open) => { if (open) refresh(); }}>
       <PopoverTrigger asChild>
         <button
           className={`inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full px-4 text-[13px] font-medium transition-all active:scale-[0.97] ${
@@ -98,17 +94,19 @@ export function ClientSelector({
             </button>
           )}
           <div className="max-h-64 space-y-0.5 overflow-y-auto">
-            {roster.length === 0 ? (
+            {clients === null ? (
               <div className="space-y-1 px-1 py-2">
                 <p className="text-[11px] text-muted-foreground">Loading clients…</p>
                 <button
                   type="button"
-                  onClick={() => loadClientTags(true)}
+                  onClick={() => refresh(true)}
                   className="text-[11px] font-medium text-primary hover:underline"
                 >
                   Not loading? Retry
                 </button>
               </div>
+            ) : roster.length === 0 ? (
+              <p className="px-1 py-2 text-[11px] text-muted-foreground">No clients</p>
             ) : (
               roster
                 .filter((c) => !q || c.tag.toLowerCase().includes(q))

@@ -18,6 +18,7 @@ import {
 } from "@/lib/bison/campaign-meta";
 import { Input } from "@/components/ui/input";
 import { LEAD_FIELDS } from "@/lib/uploads/constants";
+import { useClientRoster } from "@/lib/clients/roster";
 import { toast } from "sonner";
 
 export interface BisonCampaign {
@@ -170,12 +171,27 @@ export function ColumnSelector({
   const [showArchived, setShowArchived] = useState(false);
   // Campaign-picker upgrades (client req #7)
   const [tagScope, setTagScope] = useState(""); // client-tag prefix filter ("" = all)
-  const [clientTagOptions, setClientTagOptions] = useState<string[]>([]);
   const [presets, setPresets] = useState<{ id: string; name: string; campaign_keys: string[] }[]>([]);
   const [presetName, setPresetName] = useState("");
-  // Each client's saved installs (from the roster), for the campaign
-  // pre-selection. null until the roster has been read.
-  const [clientInstalls, setClientInstalls] = useState<Map<string, ClientInstalls> | null>(null);
+  // The client scope's options and each client's saved installs (for the campaign
+  // pre-selection), from the shared, cached client list (src/lib/clients/roster.ts):
+  // there at once when cached, refreshed in the background on each open. Installs
+  // are null until the list has been read; a list that could not be read gives no
+  // installs, and the pre-selection then requires one Bison group.
+  const roster = useClientRoster();
+  const rosterClients = roster.clients;
+  const rosterFailed = rosterClients === null && roster.error !== null && !roster.loading;
+  const refreshClients = roster.refresh;
+  const clientTagOptions = useMemo(
+    () => [...new Set((rosterClients ?? []).map((t) => t.tag))].sort(),
+    [rosterClients],
+  );
+  const clientInstalls = useMemo<Map<string, ClientInstalls> | null>(() => {
+    if (rosterClients) {
+      return new Map(rosterClients.map((t) => [t.tag, { b2b_instance: t.b2b_instance ?? null, b2c_instance: t.b2c_instance ?? null }]));
+    }
+    return rosterFailed ? new Map() : null;
+  }, [rosterClients, rosterFailed]);
   // The pre-selection runs once per opening, on a list loaded after the opening.
   const autoPickDoneRef = useRef(false);
   const openedAtRef = useRef(0);
@@ -256,24 +272,11 @@ export function ColumnSelector({
       })
       .catch((e) => setCampaignsError(e instanceof Error ? e.message : String(e)))
       .finally(() => setCampaignsLoading(false));
-    // Best-effort side loads — the picker works without either.
+    // Best-effort side load: the picker works without it.
     fetch("/api/bison/campaign-presets")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => d && setPresets(d.presets ?? []))
       .catch(() => {});
-    fetch("/api/bison/client-tags")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        const rows = ((d?.tags ?? []) as Array<{ tag?: string } & ClientInstalls>).filter((t) => t?.tag);
-        const tags = rows.map((t) => t.tag as string);
-        setClientTagOptions([...new Set(tags)].sort());
-        setClientInstalls(new Map(rows.map((t) => [
-          t.tag as string,
-          { b2b_instance: t.b2b_instance ?? null, b2c_instance: t.b2c_instance ?? null },
-        ])));
-      })
-      // Unknown installs: the pre-selection then requires one Bison group.
-      .catch(() => setClientInstalls(new Map()));
   }, []);
 
   // The component stays mounted across open/close (parent only toggles the
@@ -282,6 +285,7 @@ export function ColumnSelector({
   // Column selection intentionally persists (same columns across chunked exports).
   useEffect(() => {
     if (!open) return;
+    refreshClients(); // the client list: refreshed in the background when over a minute old
     setDestination("bison");
     setSelectedCampaignKeys(new Set());
     setRangeFromStr("");
@@ -298,7 +302,7 @@ export function ColumnSelector({
     setAutoPickNote(null);
     setIncludeAlreadyPushed(false);
     setPushStats(null);
-  }, [open]);
+  }, [open, refreshClients]);
 
   // Typing in the campaign box queries every Bison install by name rather than
   // filtering the cached list. The cache can be incomplete for a big install
