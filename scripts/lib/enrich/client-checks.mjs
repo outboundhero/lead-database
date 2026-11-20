@@ -11,7 +11,12 @@
 //                      title exclusions; on a LinkedIn pull's row also against
 //                      that pull's excluded keywords (all of them, sent to AI
 //                      Ark or not, stored on the pull: migration 128), matched
-//                      the same way
+//                      the same way; on a row an AI Ark tab pull wrote (its run
+//                      table) or an AI Ark company pull wrote (a Companies
+//                      table), against the excluded keywords that pull kept
+//                      (filters.keywords: the standard ones, the built-in
+//                      competitors list and the client's own), found through
+//                      the row's source, as whole words
 //
 // Each mirrors the database's own rule (fn_client_eligibility_conditions):
 // exclusion terms match anywhere in the company name and industry, cleaning
@@ -389,6 +394,50 @@ async function clientArea({ inputs, table, row, db }) {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const linkedinCache = new Map(); // run id -> its keywords (a run's stored filters never change)
+const pullCache = new Map(); // source id -> the keywords its pull kept, or null (a run's stored filters never change)
+const CACHE_MAX = 200;
+
+const lowerUnion = (v) => (Array.isArray(v) ? [...new Set(v.map((s) => text(s).toLowerCase()).filter(Boolean))] : null);
+
+/** The tables whose rows a keeping pull writes: an AI Ark tab run's own, and a client's Companies table. */
+const PULL_TABLE_KINDS = new Set(["ai_ark", "companies"]);
+
+/**
+ * The excluded keywords kept by the AI Ark pull that wrote a row (an AI Ark
+ * tab run's own table, or a client's Companies table for an AI Ark company
+ * pull, bought or copied free): filters.keywords.union, lower case. Null when
+ * the row came from anything else, or from a pull that kept none (one made
+ * before the competitors list, or for a client the standard keywords don't
+ * apply to), and for any other kind of table (a People table's rows were
+ * checked in their pull's table). Read through the row's source
+ * (meta.run_id), cached per source.
+ *
+ * @param {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> }} db
+ * @param {{ id?: string, kind?: string }} table  the row's table (its id and kind; a check with no table reads nothing)
+ * @param {{ id?: number | string } | null | undefined} row
+ * @returns {Promise<string[] | null>}
+ */
+export async function pullKeywordsOf(db, table, row) {
+  if (!table?.id || !PULL_TABLE_KINDS.has(table.kind) || row?.id == null) return null;
+  const { rows: [r] } = await db.query(`SELECT source_id FROM enrich_rows WHERE id = $1 AND table_id = $2`, [row.id, table.id]);
+  const sourceId = r?.source_id ?? null;
+  if (!sourceId) return null;
+  if (pullCache.has(sourceId)) return pullCache.get(sourceId);
+  const { rows: [k] } = await db.query(
+    `SELECT CASE WHEN x.run_id IS NULL THEN NULL
+                 ELSE coalesce((SELECT q.filters -> 'keywords' -> 'union' FROM aiark_runs q WHERE q.id = x.run_id),
+                               (SELECT q.filters -> 'keywords' -> 'union' FROM aiark_company_runs q WHERE q.id = x.run_id)) END AS union
+       FROM enrich_sources s
+       CROSS JOIN LATERAL (SELECT CASE WHEN s.meta ->> 'run_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                                       THEN (s.meta ->> 'run_id')::uuid END AS run_id) x
+      WHERE s.id = $1 AND s.kind IN ('ai_ark', 'registry')`,
+    [sourceId]
+  );
+  const list = lowerUnion(k?.union);
+  if (pullCache.size > CACHE_MAX) pullCache.delete(pullCache.keys().next().value);
+  pullCache.set(sourceId, list);
+  return list;
+}
 
 /**
  * The excluded keywords a LinkedIn pull or people run stored (filters.linkedin.keywords.union:
@@ -402,8 +451,8 @@ export async function linkedinKeywordsOf(db, runId) {
      SELECT filters -> 'linkedin' -> 'keywords' -> 'union' FROM aiark_people_runs WHERE id = $1::uuid`,
     [runId]
   );
-  const list = Array.isArray(rows[0]?.union) ? [...new Set(rows[0].union.map((s) => text(s).toLowerCase()).filter(Boolean))] : null;
-  if (linkedinCache.size > 200) linkedinCache.delete(linkedinCache.keys().next().value);
+  const list = lowerUnion(rows[0]?.union);
+  if (linkedinCache.size > CACHE_MAX) linkedinCache.delete(linkedinCache.keys().next().value);
   if (list) linkedinCache.set(runId, list);
   return list;
 }
@@ -510,7 +559,25 @@ async function clientExclusions({ inputs, table, row, db }) {
     }
     titleNote = ` and the ${titleTerms.length} cleaning title exclusions`;
   }
-  const linkedinNote = run ? ` and the LinkedIn pull's ${linkedinCount} excluded keywords` : "";
+  // A row an AI Ark pull wrote: every keyword that pull kept, sent to AI Ark or not, as whole words, as AI Ark
+  // matches the ones it is sent. The client's own terms among them were matched the stricter way above; as whole
+  // words they also catch what that misses ("Pressure-Washing Pros" for "pressure washing"), as the search would have.
+  let pullCount = 0;
+  if (!run) {
+    const keywords = await pullKeywordsOf(db, table, row);
+    if (keywords) {
+      pullCount = keywords.length;
+      const k = companyKeywordHit(inputs, keywords);
+      if (k) {
+        const display = `Excluded keyword "${k.term}" in the ${k.label}`;
+        return {
+          status: "done", value: display, display,
+          note: `Matches the pull's excluded keyword "${k.term}" (the standard keywords, the built-in competitors list and the client's own terms, as whole words, as AI Ark matches the keywords it is sent; checked after the pull, sent to AI Ark or not)`,
+        };
+      }
+    }
+  }
+  const linkedinNote = run ? ` and the LinkedIn pull's ${linkedinCount} excluded keywords` : pullCount ? ` and the pull's ${pullCount} excluded keywords` : "";
   return { status: "empty", note: `Clear of the client's ${terms.length} exclusion terms${linkedinNote}${titleNote}` };
 }
 
@@ -524,6 +591,7 @@ export const CLIENT_ACTIONS = {
 export function resetClientChecks() {
   targetingCache.clear();
   linkedinCache.clear();
+  pullCache.clear();
   geoCache = null;
   titleCache = null;
 }

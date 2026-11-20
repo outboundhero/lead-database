@@ -12,7 +12,7 @@ import {
   settingsFrom,
 } from "../../../scripts/lib/enrich/settings.mjs";
 import { backfillFrom, cleanDatabaseBackfill } from "../../../scripts/lib/backfill/settings.mjs";
-import { geo, modes, peopleOrDefaults } from "@/lib/aiark/server";
+import { competitorsFor, geo, modes, peopleOrDefaults } from "@/lib/aiark/server";
 import type { RowStatus, WorkerState } from "@/lib/enrich/types";
 import { contactsFor } from "./people";
 import {
@@ -50,6 +50,7 @@ import {
 export {
   cleanTag,
   clientInfo,
+  competitorsFor,
   creditsLeft,
   geo,
   savedPeople,
@@ -103,19 +104,27 @@ export function companyFiltersFor(saved: Record<string, unknown> | null, clientT
   };
 }
 
-/** What AI Ark would be asked for a client: one Company Search per group of places. */
+/**
+ * What AI Ark would be asked for a client: one Company Search per group of
+ * places. A cleaning client's search leaves out the built-in competitors list
+ * beside the standard keywords (`competitors`: competitorsFor() in
+ * src/lib/aiark/server.ts, read by the route); `keywords` is what a pull keeps
+ * for the checks after it (filters.keywords), or null.
+ */
 export function companyPlan(
   targeting: Record<string, unknown> | null,
   filters: CompanyFilters,
   g: Geo,
-  clientType: string | null
-): CompanyPlan & { requests: object[] } {
-  const built = buildCompanyRequests({ targeting, filters, geo: g, cleaning: standardFor(clientType, "ai_ark") }) as {
+  clientType: string | null,
+  competitors: Awaited<ReturnType<typeof competitorsFor>> = null
+): CompanyPlan & { requests: object[]; keywords: Record<string, unknown> | null } {
+  const built = buildCompanyRequests({ targeting, filters, geo: g, cleaning: standardFor(clientType, "ai_ark"), competitors: competitors ?? undefined }) as {
     requests?: object[];
     report?: CompanyPlanReport;
     notes?: string[];
     blockers?: string[];
     pullBlockers?: string[];
+    keywords?: Record<string, unknown> | null;
   };
   const requests = Array.isArray(built.requests) ? built.requests : [];
   return {
@@ -126,6 +135,7 @@ export function companyPlan(
     blockers: built.blockers ?? [],
     pullBlockers: built.pullBlockers ?? [],
     example: requests[0] ?? null,
+    keywords: built.keywords ?? null,
   };
 }
 

@@ -634,9 +634,12 @@ function Standard({ view }: { view: LinkedinSettingsView }) {
           ? "This client's own AI Ark people filters (above) replace the standard titles, sizes and industries: "
           : "Same for every client, the standard filters: "}
         {view.kind === "people" ? `${fmt(s.titles)} job titles (${s.titleMode.toLowerCase()} match), ${fmt(s.excludeTitles)} titles left out, ` : ""}
-        {bands}, {fmt(s.excludeIndustries)} industries left out, no {types} companies, and {fmt(s.keywords.length)} standard keywords left out, sent first.
-        {s.from === "saved" ? " The standard keywords and company types still go." : ""}
+        {bands}, {fmt(s.excludeIndustries)} industries left out, no {types} companies, and {fmt(s.keywords.length)} standard keywords left out, sent first,
+        then the {fmt(s.competitors.terms.length)} terms of the built-in list &ldquo;{s.competitors.name}&rdquo; (
+        <Link href={s.competitors.editHref} className="underline">edit it on the Lists page</Link>).
+        {s.from === "saved" ? " The standard keywords, the list and company types still go." : ""}
       </p>
+      {s.competitors.note && <p className="mt-1 text-[12px] leading-relaxed text-[var(--warning)]">{s.competitors.note}</p>}
       <button type="button" onClick={() => setOpen((v) => !v)} className="mt-1 flex items-center gap-1 text-[12px] font-medium text-primary">
         <ChevronDown className={cn("size-3.5 transition-transform", open && "rotate-180")} />
         {open ? "Hide" : "Show"} the lists
@@ -647,6 +650,7 @@ function Standard({ view }: { view: LinkedinSettingsView }) {
           {view.kind === "people" && <ChipList label="Titles left out" items={s.filters.exclude_titles} />}
           <ChipList label="Industries left out" items={s.filters.exclude_industries} />
           <ChipList label="Standard keywords" items={s.keywords} />
+          <ChipList label={`Competitors list: ${s.competitors.name}`} items={s.competitors.terms} />
         </div>
       )}
     </div>

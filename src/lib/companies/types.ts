@@ -28,8 +28,13 @@ export interface CompanyPlanReport {
     dropped: { entry: unknown; why: string; exclude?: boolean }[];
   };
   excludeLocations?: { total: number; sent: number };
-  /** standard: how many of them are the cleaning clients' standard keywords. */
-  excludeTerms?: { total: number; sent: number; standard?: number };
+  /**
+   * standard: how many of them are the cleaning clients' standard keywords; list and checkedAfter (with the
+   * built-in competitors list): how many the list adds, and how many the search can't hold (checked after the pull).
+   */
+  excludeTerms?: { total: number; sent: number; standard?: number; list?: number; checkedAfter?: number };
+  /** The built-in competitors list the search leaves out (cleaning clients): terms in it, added beside the others. */
+  competitors?: { name: string; from: "database" | "fallback"; terms: number; added: number };
   excludeCompanyTypes?: string[];
   bands?: EmployeeBand[];
   industries?: number;

@@ -15,14 +15,16 @@
 //   live) and the starter keywords (enrich_settings.linkedin_starter_keywords).
 //   Its first save creates its own row from exactly what the page showed.
 //
-// Keywords sent (D-P4-3): the standard keywords first, then the client's own
-// for the kind, once each (case aside), on a company's name, industry and
-// description, as far as AI Ark's request limit allows (accountFilters in
-// filters.mjs: 1,900 bytes and 300 values). Every keyword is enforced: the whole
-// union (standard and own) is checked after the pull, free, before anything is
-// spent on a record or a row is listed (company rows: client_exclusions with the
-// run's keywords; people: at the Look and again after a Buy). Those AI Ark's
-// request could not take are shown as "checked after the pull (AI Ark limit)".
+// Keywords sent (D-P4-3): the standard keywords first, then the built-in
+// competitors list (competitors.mjs, read with the other parts), then the
+// client's own for the kind, once each (case aside), on a company's name,
+// industry and description, as far as AI Ark's request limit allows
+// (accountFilters in filters.mjs: 1,900 bytes and 300 values). Every keyword is
+// enforced: the whole union (standard, the list and own) is checked after the
+// pull, free, before anything is spent on a record or a row is listed (company
+// rows: client_exclusions with the run's keywords; people: at the Look and again
+// after a Buy). Those AI Ark's request could not take are shown as "checked
+// after the pull (AI Ark limit)".
 //
 // Places searched (the sending rules, override O2): the client's own include
 // places narrowed to its database rules (client_targeting.include_locations),
@@ -46,7 +48,8 @@
 // Plain JavaScript: the routes, the worker, the seed script and the tests share it.
 
 import { accountFilters, cleanPeopleFilters, VALUE_MAX } from "./filters.mjs";
-import { hasWords, placeKeyOf } from "./company-filters.mjs";
+import { placeKeyOf } from "./company-filters.mjs";
+import { readCompetitors } from "./competitors.mjs";
 import { cityKey, entryKey, findState, placeString } from "./geo.mjs";
 import { filtersFor } from "./standard-filters.mjs";
 import { normTag, starterFrom } from "../enrich/settings.mjs";
@@ -82,7 +85,9 @@ import { normTag, starterFrom } from "../enrich/settings.mjs";
  *   own: LinkedinOwn,
  *   filters: { value: Record<string, any>, from: "saved" | "cleaning" },
  *   cleaning: true,
- *   keywords: { standard: string[], own: string[], union: string[], sent: string[], checkedAfter: string[] },
+ *   keywords: { standard: string[], list: { name: string, from: "database" | "fallback", terms: number, added: string[] },
+ *     own: string[], union: string[], sent: string[], checkedAfter: string[] },
+ *   competitors: import("./competitors.mjs").Competitors | undefined,
  *   search: PlacesSearched,
  *   outsideRules: PlaceEntry[],
  *   row: LinkedinRow | null,
@@ -94,6 +99,8 @@ import { normTag, starterFrom } from "../enrich/settings.mjs";
  *   own: the client's own lists as stored (the row's, or derived for a client with no row: rules places, starter keywords);
  *   filters.from "cleaning": the standard filters (never "none" on LinkedIn);
  *   keywords.checkedAfter: keywords of the union AI Ark's request could not take: "checked after the pull (AI Ark limit)";
+ *   keywords.list: the built-in competitors list (added: its terms the union holds beside the standard and own ones);
+ *   competitors: the list as read (readCompetitors), which the request builders leave out too (the 069 seed when undefined);
  *   search: the places a search sends, narrowed to the client's sending rules (narrowPlaces), and what was left out;
  *   outsideRules: own include places the client's database area (client_targeting) does not cover (each is either
  *     replaced by the rules' places inside it or not searched: see search);
@@ -182,21 +189,30 @@ export const NOT_SEARCHED_FIX = "Adding them to the client's rules (Clients page
 
 /**
  * The excluded keywords a LinkedIn search sends: the standard ones, then the
- * client's own for the kind not already among them (case aside), as far as
- * AI Ark's limit allows. A sent phrase covers every listed keyword that holds
- * its words in order ("cleaning" covers "cleaning services"), so a covered
- * keyword counts as sent. Every keyword of the union, sent or not, is checked
- * after the pull; the ones AI Ark's request could not take are checkedAfter.
+ * built-in competitors list, then the client's own for the kind, each not
+ * already among them (case aside), as far as AI Ark's limit allows. A sent
+ * phrase covers every listed keyword that holds its words in order
+ * ("cleaning" covers "cleaning services"), so a covered keyword counts as
+ * sent. Every keyword of the union, sent or not, is checked after the pull;
+ * the ones AI Ark's request could not take are checkedAfter.
  *
  * @param {string[]} own  the client's own excluded keywords for the kind
- * @returns {{ standard: string[], own: string[], union: string[], sent: string[], checkedAfter: string[] }}
- *   union: standard first, then the client's own new ones (what the after-pull check reads); sent: what AI Ark is
- *   asked (condensed); checkedAfter: keywords of the union no sent phrase covers
+ * @param {import("./competitors.mjs").Competitors} [competitors]  readCompetitors()'s value (the 069 seed when left out)
+ * @returns {{ standard: string[], list: { name: string, from: "database" | "fallback", terms: number, added: string[] },
+ *             own: string[], union: string[], sent: string[], checkedAfter: string[] }}
+ *   union: standard first, then the list's new terms, then the client's own new ones (what the after-pull check
+ *   reads); sent: what AI Ark is asked (condensed); checkedAfter: keywords of the union no sent phrase covers
  */
-export function keywordsFor(own) {
-  const a = accountFilters({ targeting: { exclude_terms: Array.isArray(own) ? own : [] }, filters: null, cleaning: true });
-  const checkedAfter = a.terms.filter((t) => !a.companyTerms.some((sent) => hasWords(t, sent)));
-  return { standard: [...a.standardTerms], own: [...a.clientTerms], union: [...a.terms], sent: [...a.companyTerms], checkedAfter };
+export function keywordsFor(own, competitors = undefined) {
+  const a = accountFilters({ targeting: { exclude_terms: Array.isArray(own) ? own : [] }, filters: null, cleaning: true, competitors });
+  return {
+    standard: [...a.standardTerms],
+    list: { name: a.list.name, from: a.list.from, terms: a.listAll.length, added: [...a.listAdded] },
+    own: [...a.clientTerms],
+    union: [...a.terms],
+    sent: [...a.companyTerms],
+    checkedAfter: [...a.checkedAfter],
+  };
 }
 
 // ── Places ──────────────────────────────────────────────────────────────────
@@ -501,12 +517,14 @@ export function derivedOwn(targeting, starter) {
  * caller reads the parts). See EffectiveLinkedin.
  *
  * @param {{ tag: string, kind: LinkedinKind, row: LinkedinRow | null, targeting: object | null, starter: Starter | null,
- *           saved: Record<string, any> | null, clientType?: string | null }} parts
+ *           saved: Record<string, any> | null, clientType?: string | null,
+ *           competitors?: import("./competitors.mjs").Competitors }} parts
  *   targeting: client_targeting's row with version (updated_at as text), or null;
- *   saved: client_people_filters' row with version, or null
+ *   saved: client_people_filters' row with version, or null;
+ *   competitors: the built-in competitors list (readCompetitors); left out, the 069 seed
  * @returns {EffectiveLinkedin}
  */
-export function resolveLinkedin({ tag, kind, row, targeting, starter, saved, clientType = null }) {
+export function resolveLinkedin({ tag, kind, row, targeting, starter, saved, clientType = null, competitors = undefined }) {
   if (!LINKEDIN_KINDS.includes(kind)) throw new Error(`kind must be people or companies, not "${kind}"`);
   const t = normTag(tag);
   const blockers = [];
@@ -535,7 +553,8 @@ export function resolveLinkedin({ tag, kind, row, targeting, starter, saved, cli
     own,
     filters,
     cleaning: true,
-    keywords: keywordsFor(own.exclude_keywords),
+    keywords: keywordsFor(own.exclude_keywords, competitors),
+    competitors,
     search,
     outsideRules: outsideRules(own.include_locations, targeting),
     row: row ?? null,
@@ -610,7 +629,8 @@ export async function linkedinSettingsFor(db, { tag, kind }) {
   const targeting = await readTargeting(db, t);
   const saved = await readSavedFilters(db, t);
   const starter = await readStarter(db);
-  return { ...resolveLinkedin({ tag: t, kind, row, targeting, starter, saved, clientType: client?.client_type ?? null }), client: client ?? null };
+  const competitors = await readCompetitors(db);
+  return { ...resolveLinkedin({ tag: t, kind, row, targeting, starter, saved, clientType: client?.client_type ?? null, competitors }), client: client ?? null };
 }
 
 /**

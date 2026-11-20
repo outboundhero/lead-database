@@ -2379,6 +2379,64 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   industries are defaults: a pull with nothing saved uses them, and a client's
   saved filters replace them. Keywords and company types always apply. AI Ark's size
   filter takes ranges only, so the brief's "plus unknown size" can't be sent.
+- **The built-in competitors list in AI Ark searches** (`scripts/lib/aiark/competitors.mjs`,
+  2026-11-21, no migration). Every AI Ark search that sends the standard keywords also
+  leaves out the Lists page's built-in "Janitorial & facility-service competitors"
+  (`custom_lists`, kind `competitors`, `built_in`, seeded by 069): the AI Ark tab's counts
+  and pulls and the Companies tab's AI Ark company pulls of a client whose type is exactly
+  `Cleaning` (the weekly top-up's pulls included; "Canada Cleaning" gets neither, as
+  before), and every client's LinkedIn searches. The Companies tab's people runs (by
+  company id) are unchanged: their companies come from the company pulls.
+  - **Company keywords only.** The list's terms are keywords, not AI Ark industry names:
+    they go with the standard keywords on a company's name, industry and description
+    (whole words). "Leave out industries" stays exact catalog names, and the people
+    keywords (headline, summary) stay the 76 standard ones: "building maintenance" there
+    would drop the facility managers the job titles look for.
+  - **Read at run time** (`readCompetitors`: the built-in row of kind competitors, the one
+    with that name first): the setup, count and runs routes of both tabs, the run start
+    (`competitorsOf` in start-run.mjs, which the topup-worker shares) and the LinkedIn
+    resolver (`linkedinSettingsFor`, `previewView`) read it, so an edit applies to the next
+    plan, count or pull. No version check covers it (no 409 for a list edit). With no such
+    row the 069 seed (21 terms) is used and the plan's notes say so; a row with no usable
+    term leaves nothing out, and says so. Terms are trimmed, at most 120 characters, once
+    each (case aside), and deduplicated against the standard keywords and the client's own.
+  - **Room in the search** (`accountFilters` in filters.mjs: 1,900 bytes and 300 values):
+    (1) the standard keywords, always; (2) the list, in its own order, each term while it
+    fits; (3) the client's own terms, broadest first, until one doesn't fit (as before). A
+    phrase that covers listed ones takes the place of the first group it covers (a sheet
+    term "cleaning" stands for "cleaning company"; the list's "carpet cleaning" for the
+    standard "carpet cleaning company"). With the list as it stood on 2026-11-21 (29 terms,
+    22 of them new beside the standard 76) every search holds all 98 as 83 phrases in 1,634
+    bytes, leaving 266 bytes for the client's own terms (583 before). The client's own first
+    was weighed and not chosen: on the local copy of the rules the median cleaning client
+    has 87 own terms, so standard keywords would leave the search for about three cleaning
+    clients in four, and an export job pays for every person it returns. The client's own terms are
+    still checked after every pull the stricter way (anywhere in the name and industry), and
+    after a keeping pull as whole words too, as the search would have matched them.
+  - **Every term is checked after the pull.** A pull of a cleaning client keeps its keywords
+    in `filters.keywords` (`keywordsRecord`: `union`, `sent`, `checked_after`, `in_search`,
+    the counts, and `list` with its name, `from` database or fallback, id, `updated_at`,
+    `terms` and `added`); a LinkedIn search keeps them in `filters.linkedin.keywords`, now
+    with `list`. A one-at-a-time pull (`sliceSingle`, the weekly top-up's strategy) checks
+    every kept keyword as whole words (`companyKeywordHit`) on what each Preview person's
+    company shows, before buying the person's email, and skips a match: not bought, not
+    registered, counted in `progress.keyword_skipped` (the run's line says "N at a company
+    holding an excluded keyword, not bought"). `client_exclusions` checks every row a
+    keeping pull wrote (the AI Ark tab run's own table; a Companies table row of an AI Ark
+    company pull, bought or copied free; not a People table, whose people were checked in
+    their pull's table) against the kept union (`pullKeywordsOf`: the row's source, its
+    `meta.run_id`, that pull's `filters.keywords.union`, cached per source): a
+    match is "Excluded by the client's rules" with the keyword in the cell. An export job's
+    people are paid for when it returns them, so a keyword its search could not hold costs
+    their credit. Pulls made before this change keep nothing and are judged as before.
+  - **Where it shows:** the AI Ark tab, under "Leave out industries" (the list's name, its
+    term count, a link to the Lists page; the Leads page's Lists chip applies the same list
+    to lead filters), and in "What AI Ark will be asked" (how many terms the list adds, and
+    how many are checked after the pull); the LinkedIn settings card's standard filters;
+    the Lists page's editor of the built-in list.
+  - **Tests:** stop the worker, then `node --env-file=.env.local scripts/test-competitors.mjs`
+    (local database only; made-up `NKTEST_` clients and terms, removed at the end; the
+    built-in list is only changed inside transactions that are rolled back).
 - ⚠ **AI Ark refuses a request as too large at a limit its docs don't state**
   (`request size must less or equal to {0,number} bytes`, 400, nothing charged).
   Bytes alone don't decide it: live 2026-11-05 it took 9,905 bytes and refused 8,502.
@@ -3313,10 +3371,11 @@ spends nothing.
   (`enrich_settings.linkedin_starter_keywords`, written by the seed, empty until then). Its
   first save on the AI Ark tab makes its own row from exactly what was shown. No row and no
   starter list: its searches are blocked.
-- **Keywords sent:** the standard ones first, then the client's own, once each (case aside),
-  on a company's name, industry and description, as far as AI Ark's request holds them
+- **Keywords sent:** the standard ones first, then the built-in competitors list (see "The
+  built-in competitors list in AI Ark searches"), then the client's own, once each (case
+  aside), on a company's name, industry and description, as far as AI Ark's request holds them
   (1,900 bytes and 300 values, `accountFilters`). The rest are **checked after the pull (AI
-  Ark limit)**, never dropped: every keyword of the union (standard and own) is checked
+  Ark limit)**, never dropped: every keyword of the union (standard, the list and own) is checked
   after the pull, free, before anything more is spent on a company or person or a row is
   listed. A LinkedIn
   pull or run keeps the union in `filters.linkedin.keywords` (`union`, `sent`,

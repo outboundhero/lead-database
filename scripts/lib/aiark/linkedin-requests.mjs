@@ -9,13 +9,14 @@
 //                   nothing outside the area the send gate allows is searched;
 //                   people searches filter on the person's place, company
 //                   searches on any office (head offices are judged after the pull)
-//   excluded words  the standard keywords, then the client's own for the kind,
-//                   on the company's name, industry and description, as far as
-//                   AI Ark's limit allows; every keyword of the union, sent or
-//                   not, is checked after the pull (override O1): the rest are
-//                   "checked after the pull (AI Ark limit)". The client's sheet
-//                   exclusion terms are not sent here: they are checked after
-//                   the pull too, as for every row
+//   excluded words  the standard keywords, then the built-in competitors list
+//                   (competitors.mjs, the resolver's `competitors`), then the
+//                   client's own for the kind, on the company's name, industry
+//                   and description, as far as AI Ark's limit allows; every
+//                   keyword of the union, sent or not, is checked after the pull
+//                   (override O1): the rest are "checked after the pull (AI Ark
+//                   limit)". The client's sheet exclusion terms are not sent
+//                   here: they are checked after the pull too, as for every row
 //   filters         the standard ones (titles, excluded titles, sizes,
 //                   excluded industries, company types) for every client, or
 //                   its saved AI Ark people filters; cleaning always on
@@ -107,9 +108,10 @@ function linkedinParts(effective, built, kind, geo) {
   const k = effective.keywords;
   const after = checkedAfterOf(k);
   const where2 = kind === "people" ? "on each person's company at the Look, and on the company's full record after a Buy" : "on each company's name, industry and description";
+  const listAdded = k.list?.added?.length ?? 0;
   if (after.length) {
     notes.push(
-      `${fmt(after.length)} of the ${fmt(k.union.length)} excluded keywords are ${CHECKED_AFTER}: AI Ark's request has room for the standard ${fmt(k.standard.length)} and ${fmt(k.union.length - k.standard.length - after.length)} of this client's own. Every keyword is checked after the pull ${where2}, and a match is Excluded before anything more is spent on it.`
+      `${fmt(after.length)} of the ${fmt(k.union.length)} excluded keywords are ${CHECKED_AFTER}: AI Ark's request has room for ${fmt(k.union.length - after.length)}, given in this order: the ${fmt(k.standard.length)} standard keywords, the ${fmt(listAdded)} new terms of the competitors list, then this client's own ${fmt(k.union.length - k.standard.length - listAdded)}. Every keyword is checked after the pull ${where2}, and a match is Excluded before anything more is spent on it.`
     );
   }
   notes.push(
@@ -140,7 +142,9 @@ function linkedinParts(effective, built, kind, geo) {
       notSearched: search.notSearched,
       replaced: search.replaced,
       excludePlacesSent: ex.sent.length,
-      keywords: { standard: k.standard.length, own: k.own.length, union: k.union.length, sent: k.sent.length, checkedAfter: after },
+      keywords: {
+        standard: k.standard.length, list: listAdded, own: k.own.length, union: k.union.length, sent: k.sent.length, checkedAfter: after,
+      },
     },
   };
   return { requests: blockers.length ? [] : built.requests, report, notes, blockers, pullBlockers: built.pullBlockers };
@@ -157,7 +161,9 @@ function linkedinParts(effective, built, kind, geo) {
 export function linkedinCompanyRequests({ effective, geo }) {
   if (effective?.kind !== "companies") throw new Error("linkedinCompanyRequests needs the resolver's companies settings");
   const targeting = linkedinTargeting(effective);
-  const built = buildCompanyRequests({ targeting, filters: pickCompanyFilters(effective.filters.value), geo, cleaning: true });
+  const built = buildCompanyRequests({
+    targeting, filters: pickCompanyFilters(effective.filters.value), geo, cleaning: true, competitors: effective.competitors,
+  });
   return { ...linkedinParts(effective, built, "companies", geo), targeting };
 }
 
@@ -173,7 +179,7 @@ export function linkedinCompanyRequests({ effective, geo }) {
 export function linkedinPeopleRequests({ effective, geo }) {
   if (effective?.kind !== "people") throw new Error("linkedinPeopleRequests needs the resolver's people settings");
   const targeting = linkedinTargeting(effective);
-  const built = buildRequests({ targeting, people: effective.filters.value, geo, cleaning: true });
+  const built = buildRequests({ targeting, people: effective.filters.value, geo, cleaning: true, competitors: effective.competitors });
   return { ...linkedinParts(effective, built, "people", geo), targeting };
 }
 
@@ -199,7 +205,12 @@ export function linkedinRunFilters(effective) {
     places_replaced: search.replaced,
     exclude_places: search.exclude,
     outside_rules: effective.outsideRules,
-    keywords: { own: effective.keywords.own, union: effective.keywords.union, sent: effective.keywords.sent, checked_after: checkedAfterOf(effective.keywords) },
+    keywords: {
+      own: effective.keywords.own, union: effective.keywords.union, sent: effective.keywords.sent, checked_after: checkedAfterOf(effective.keywords),
+      ...(effective.keywords.list
+        ? { list: { name: effective.keywords.list.name, from: effective.keywords.list.from, terms: effective.keywords.list.terms, added: effective.keywords.list.added.length } }
+        : {}),
+    },
     starter_version: effective.from === "rules_and_starter" ? effective.starter.version : null,
     provenance: row
       ? { source: row.source, copied_from: row.copied_from, clay_source_id: row.clay_source_id, clay_campaign: row.clay_campaign,

@@ -3064,7 +3064,10 @@ function cleaningFilters(geo) {
   check("company keywords: every standard one is covered, and the client's sheet terms are added", CLEANING_EXCLUDE_KEYWORDS.every((x) => coveredBy(co.content, x)) && co.content.includes("Bar") && co.content.includes("cafe"), JSON.stringify(co.content.slice(-6)));
   check("on the three company fields AI Ark accepted, as words", sourcesOf(co) === "NAME:WORD,INDUSTRY:WORD,DESCRIPTION:WORD", sourcesOf(co));
   check("people keywords: the standard list only, in headline and summary", CLEANING_EXCLUDE_KEYWORDS.every((x) => coveredBy(ppl.content, x)) && !ppl.content.includes("Bar") && !ppl.content.includes("cafe") && sourcesOf(ppl) === "HEADLINE:WORD,SUMMARY:WORD", sourcesOf(ppl));
-  check("the plan reports all of it", std.report.excludeTerms.standard === 76 && std.report.excludeTerms.total === 78 && std.report.excludeTerms.sent === 78 && std.report.peopleKeywords === 76 && std.report.excludeCompanyTypes.length === 2, JSON.stringify(std.report.excludeTerms));
+  // No list given: the built-in competitors list's 069 seed, 17 of whose 21 terms are new beside the standard ones (scripts/test-competitors.mjs checks the list itself).
+  check("the plan reports all of it, the built-in competitors list included", std.report.excludeTerms.standard === 76 && std.report.excludeTerms.list === 17 && std.report.excludeTerms.total === 95 &&
+    std.report.excludeTerms.sent === 95 && std.report.excludeTerms.checkedAfter === 0 && std.report.competitors?.from === "fallback" && std.report.peopleKeywords === 76 &&
+    std.report.excludeCompanyTypes.length === 2, JSON.stringify(std.report.excludeTerms));
 
   // What AI Ark accepted live on 2026-11-05, list by list, in bytes.
   const ACCEPTED = { titles: 2203, excludeTitles: 2539, places: 958, people: 1317, company: 1939 };
@@ -3103,6 +3106,7 @@ function cleaningFilters(geo) {
   check("any other client gets none of it: only its own terms, on its company", other.requests.length === 1 && otherCo.content.length === 3 && sourcesOf(otherCo) === "NAME:WORD,INDUSTRY:WORD,DESCRIPTION:WORD" && !other.requests[0].contact.keyword && !other.requests[0].account.type && other.report.excludeTerms.standard === 0 && other.report.peopleKeywords === 0);
 
   const elsewhere = ["scripts/lib/enrich/client-checks.mjs", "scripts/lib/enrich/engine.mjs", "scripts/lib/aiark/add.mjs", "scripts/push-worker.mjs", "scripts/sync-client-targeting-from-sheet.mjs"];
+  // The Outcome reads only the keywords a pull kept (filters.keywords), never these lists themselves.
   check("the lists are for AI Ark's search only: the database's rules, the Outcome, adding leads and pushes never read them", elsewhere.every((f) => !/cleaning-filters|CLEANING_(TITLES|EXCLUDE|DEFAULTS|EMPLOYEE)/.test(source(f))));
 }
 

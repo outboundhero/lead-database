@@ -11,6 +11,13 @@
 //   - the versions the tab loaded, when the caller has them;
 //   - the plan's blockers.
 //
+// A cleaning client's search leaves out the built-in competitors list beside
+// the standard keywords (competitors.mjs), read here when the run starts, so
+// an edit on the Lists page applies to the next pull. The run keeps what it
+// used in filters.keywords (keywordsRecord in filters.mjs): the whole union,
+// which the Outcome (client_exclusions) and a one-at-a-time pull's buying
+// (runs.mjs) check again after the pull.
+//
 // Two optional parts, both for the weekly top-up (migration 135):
 //   - places: a list of the client's own include locations. The search then
 //     covers only those places (a copy of the rules holding just them, the
@@ -27,6 +34,7 @@
 // runs on the caller's client, inside the caller's transaction.
 
 import { buildRequests, cleanPeopleFilters } from "./filters.mjs";
+import { readCompetitors } from "./competitors.mjs";
 import { filtersFor, standardFor } from "./standard-filters.mjs";
 import { placeKeyOf } from "./company-filters.mjs";
 import { brakeFor, createRun } from "./runs.mjs";
@@ -136,16 +144,33 @@ export function peopleFor(saved, clientType) {
 }
 
 /**
- * What AI Ark would be asked: the request bodies, the report, notes and blockers.
+ * The built-in competitors list as stored now (readCompetitors), for a client
+ * whose AI Ark tab searches send the standard keywords (a cleaning client);
+ * undefined for any other, whose searches don't use it.
+ *
+ * @param {Db} db
+ * @param {string | null} clientType
+ * @returns {Promise<import("./competitors.mjs").Competitors | undefined>}
+ */
+export async function competitorsOf(db, clientType) {
+  return standardFor(clientType, "ai_ark") ? readCompetitors(db) : undefined;
+}
+
+/**
+ * What AI Ark would be asked: the request bodies, the report, notes and blockers,
+ * and the excluded keywords a pull keeps (null for a client the standard
+ * keywords don't apply to).
  *
  * @param {Record<string, unknown> | null} targeting
  * @param {object} people
  * @param {any} geo  loadGeo()'s value
  * @param {string | null} [clientType]
- * @returns {{ requests: object[], searches: number, report: any, notes: string[], blockers: string[], pullBlockers: string[], example: object | null }}
+ * @param {import("./competitors.mjs").Competitors} [competitors]  readCompetitors()'s value (the 069 seed when left out)
+ * @returns {{ requests: object[], searches: number, report: any, notes: string[], blockers: string[], pullBlockers: string[],
+ *             example: object | null, keywords: object | null }}
  */
-export function planFor(targeting, people, geo, clientType = null) {
-  const built = buildRequests({ targeting, people, geo, cleaning: standardFor(clientType, "ai_ark") });
+export function planFor(targeting, people, geo, clientType = null, competitors = undefined) {
+  const built = buildRequests({ targeting, people, geo, cleaning: standardFor(clientType, "ai_ark"), competitors });
   return {
     requests: built.requests,
     searches: built.requests.length,
@@ -154,6 +179,7 @@ export function planFor(targeting, people, geo, clientType = null) {
     blockers: built.blockers,
     pullBlockers: built.pullBlockers,
     example: built.requests[0] ?? null,
+    keywords: built.keywords ?? null,
   };
 }
 
@@ -306,7 +332,7 @@ export async function startRun(db, opts) {
     labels = sub.labels;
   }
   const g = typeof geo === "function" ? await geo() : geo;
-  const p = planFor(use, people.value, g, clientType);
+  const p = planFor(use, people.value, g, clientType, await competitorsOf(db, clientType));
   const blocked = [...p.blockers, ...p.pullBlockers];
   if (blocked.length) {
     return { status: 400, error: blocked.join(" "), code: people.from === "none" && p.pullBlockers.length ? "no_people_filters" : "blocked" };
@@ -351,6 +377,7 @@ export async function startRun(db, opts) {
       targeting_updated_at: targeting?.updated_at ?? null,
       report: p.report,
       notes: p.notes,
+      ...(p.keywords ? { keywords: p.keywords } : {}),
       ...(labels ? { places: labels } : {}),
       ...(pull ? { [TOPUP_FILTER_KEY]: { pass: pull.pass_id ?? null, pull: pull.id, places: labels ?? [] } } : {}),
     },

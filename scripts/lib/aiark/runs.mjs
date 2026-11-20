@@ -35,6 +35,16 @@
 // A job AI Ark has taken is never dropped over an error: the run backs off and
 // tries again until AI Ark has had time to deliver or refund it.
 //
+// Excluded keywords: a run that keeps them (filters.keywords, a cleaning
+// client's pull: the standard keywords, the built-in competitors list and the
+// client's own, start-run.mjs) asks AI Ark to leave out those its request can
+// hold. A single run checks every one of them, as whole words, on what each
+// Preview person's company shows (name, industry, description) before buying
+// the person's email, and skips a match (progress.keyword_skipped counts them;
+// the person stays unbought). An export job's people are paid for when it
+// returns them; the Outcome (client_exclusions) checks the same keywords on
+// every row of either strategy.
+//
 // People the Companies tab's people runs bought (people-runs.mjs) are in the
 // same registry, with people_run_id set and no run_id. The tab treats them as
 // it would without the pipeline (D43): its exclusion lists leave them out, a
@@ -48,6 +58,8 @@ import {
 } from "./client.mjs";
 import { createDemoTransport, DEMO_TOKEN } from "./demo.mjs";
 import { PERSON_SEARCH_KEYS, RUN_COLUMNS, RUN_INPUT_KEYS } from "./columns.mjs";
+import { keywordsOfRun } from "./filters.mjs";
+import { companyKeywordHit } from "../enrich/client-checks.mjs";
 import { isTopupRunFilters } from "../overlap-topup.mjs";
 
 export const LEASE_MIN = 10;
@@ -622,6 +634,12 @@ async function otherJob(ctx) {
   return r;
 }
 
+/** What a Preview person's company shows, as the keyword check reads it. */
+function previewCompany(item) {
+  const f = personInputs(item);
+  return { company: f.company ?? "", industry: f.company_industry ?? "", description: f.company_description ?? "" };
+}
+
 async function sliceSingle(ctx) {
   const { run } = ctx;
   if ((ctx.progress.chunk ?? 0) >= run.requests.length) return { done: endReason(ctx.progress) };
@@ -666,6 +684,8 @@ async function sliceSingle(ctx) {
   let lostInARow = 0;
   let stopping = false;
   let braked = false;
+  const keywords = keywordsOfRun(run);
+  let keywordSkipped = 0;
   for (const item of res.content) {
     if (ctx.pulled >= run.size_requested) break;
     if (!item?.id || mine.has(item.id)) continue;
@@ -687,6 +707,11 @@ async function sliceSingle(ctx) {
       };
       await writePerson(ctx, { inputs, credits: 0 });
       mine.add(item.id);
+      continue;
+    }
+    // Every keyword the run keeps, sent to AI Ark or not, before anything is bought for the person.
+    if (keywords.length && companyKeywordHit(previewCompany(item), keywords)) {
+      keywordSkipped++;
       continue;
     }
     if (ctx.spent + 1 > ceiling) {
@@ -714,8 +739,10 @@ async function sliceSingle(ctx) {
   if (skipped) {
     await ctx.pool.query(`UPDATE aiark_runs SET skipped_held = skipped_held + $2 WHERE id = $1`, [run.id, skipped]);
   }
+  // Counted once the page is behind the run (a page repeated after a stop counts its skips then).
+  const kw = keywordSkipped ? { keyword_skipped: Number(ctx.progress.keyword_skipped ?? 0) + keywordSkipped } : {};
   if (braked) {
-    ctx.progress = { ...ctx.progress, matches };
+    ctx.progress = { ...ctx.progress, matches, ...kw };
     return { stop: brakeReason(run, ctx.spent) };
   }
   if (stopping) {
@@ -725,7 +752,7 @@ async function sliceSingle(ctx) {
   }
 
   const lastPage = res.content.length < PAGE_MAX || (page + 1) * PAGE_MAX >= res.totalElements;
-  ctx.progress = { ...ctx.progress, matches, ...(lastPage ? { chunk: chunk + 1, page: 0 } : { page: page + 1 }) };
+  ctx.progress = { ...ctx.progress, matches, ...kw, ...(lastPage ? { chunk: chunk + 1, page: 0 } : { page: page + 1 }) };
   await savePosition(ctx);
   if (ctx.pulled >= run.size_requested) return { done: null };
   if (lastPage && chunk + 1 >= run.requests.length) return { done: endReason(ctx.progress) };

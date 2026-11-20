@@ -22,7 +22,7 @@
 import { settingsFrom } from "../enrich/settings.mjs";
 import { brakeFor } from "../aiark/runs.mjs";
 import {
-  enrichWorkerOnline, peopleFor, placeLabel, planFor, savedPeople, startRun, subsetTargeting, targetingOf, topupPullRefusal,
+  competitorsOf, enrichWorkerOnline, peopleFor, placeLabel, planFor, savedPeople, startRun, subsetTargeting, targetingOf, topupPullRefusal,
 } from "../aiark/start-run.mjs";
 import { budgetAllows, topupBudget, TOPUP_BUDGET_LOCK } from "./budget.mjs";
 
@@ -164,7 +164,8 @@ export async function preparePull(db, { passId, client, settings, low, minimum, 
   const targeting = await targetingOf(db, tag);
   const sub = subsetTargeting(targeting, picked.map((l) => l.entry));
   if (sub.error !== null) return { action: "blocked", reason: sub.error, pull: null };
-  const p = planFor(sub.targeting, people.value, geo, clientType);
+  // The requests kept on the pull are what it would send now; the run's own are built again when it starts.
+  const p = planFor(sub.targeting, people.value, geo, clientType, await competitorsOf(db, clientType));
   const blocked = [...p.blockers, ...p.pullBlockers];
   if (blocked.length) return { action: "blocked", reason: blocked.join(" "), pull: null };
   const need = picked.reduce((s, l) => s + Math.max(0, minimum - l.available), 0);

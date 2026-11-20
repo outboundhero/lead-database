@@ -8,6 +8,7 @@ import {
   cleanPeopleFilters,
   cleanTag,
   clientInfo,
+  competitorsFor,
   geo,
   modes,
   peopleOrDefaults,
@@ -101,7 +102,8 @@ export async function POST(req: NextRequest) {
           use = sub.targeting;
         }
         const people = override ?? peopleOrDefaults(await savedPeople(c, tag), client?.client_type ?? null).value;
-        const planned = { ...plan(use, people, await geo(c), client?.client_type ?? null), rulesVersion: targeting?.version ?? null };
+        const competitors = await competitorsFor(c, client?.client_type ?? null);
+        const planned = { ...plan(use, people, await geo(c), client?.client_type ?? null, competitors), rulesVersion: targeting?.version ?? null };
         if (pull && !planned.blockers.length) {
           // The count's credits (1 a search) and the pull's brake must both fit the budget left.
           const fits = await topupCountFits(c, { tag, pull, searches: planned.searches });

@@ -188,7 +188,9 @@ function ListEditorDialog({ list, onClose, onSaved }: { list: TermList | null; o
               {items.length} items.{" "}
               {list.name === "Commercial cleaning titles"
                 ? "Saving updates the Commercial Cleaning filter toggle AND the push-time title gate."
-                : "Apply this list from the Leads page filter bar (Lists chip)."}
+                : list.built_in && list.kind === "competitors"
+                  ? "Apply this list from the Leads page filter bar (Lists chip). AI Ark searches also leave these terms out as company keywords (cleaning clients' AI Ark tab and company pulls, and every client's LinkedIn searches), from the next count or pull on."
+                  : "Apply this list from the Leads page filter bar (Lists chip)."}
             </p>
           </div>
         )}

@@ -22,6 +22,7 @@ import {
   CLEANING_EXCLUDE_TITLES,
   CLEANING_TITLES,
 } from "./cleaning-filters.mjs";
+import { cleanCompetitorTerms, COMPETITORS_FALLBACK } from "./competitors.mjs";
 import { placeString } from "./geo.mjs";
 
 export { loadGeo } from "./geo.mjs";
@@ -204,29 +205,51 @@ export function pack(values, capacity) {
  * company-filters.mjs), so both send the same company filters: size bands,
  * industries to include (WORD) and leave out (exact catalog values, STRICT),
  * a cleaning client's company types, and the exclusion terms as company
- * keywords. A cleaning client's standard keywords always go; the client's own
- * terms go as room allows, broadest first. The keys keep the order AI Ark has
- * always been sent: employeeSize, industries, type, keyword.
+ * keywords. The keys keep the order AI Ark has always been sent: employeeSize,
+ * industries, type, keyword.
+ *
+ * The excluded keywords, once each (case aside), and the order they get room
+ * in the search (COMPANY_TERMS_BYTES and AI Ark's 300 values):
+ *   1. a cleaning client's standard keywords (cleaning-filters.mjs), always;
+ *   2. the built-in competitors list (competitors.mjs, `competitors`: the
+ *      database's list, read by the caller; the 069 seed when none is given),
+ *      in its own order, each as room allows;
+ *   3. the client's own terms, broadest first, until one does not fit.
+ * A phrase that covers listed ones (a sheet term "cleaning" covers "cleaning
+ * company") takes the place of the first group it covers. The union is checked
+ * again after every pull that keeps it (filters.keywords: client_exclusions,
+ * and before buying in a one-at-a-time pull), so a term the search can't hold
+ * is "checked after the pull", never dropped.
  *
  * `filters` holds employee_bands, industries and exclude_industries (a whole
  * people-filters object is fine; nothing else is read).
  */
-export function accountFilters({ targeting, filters, cleaning = false }) {
+export function accountFilters({ targeting, filters, cleaning = false, competitors = undefined }) {
   const p = { ...EMPTY_PEOPLE_FILTERS, ...(filters ?? {}) };
   const clientTerms = Array.isArray(targeting?.exclude_terms) ? targeting.exclude_terms.map(clean).filter(Boolean) : [];
   const standardTerms = cleaning ? CLEANING_EXCLUDE_KEYWORDS : [];
-  const terms = [...new Map([...standardTerms, ...clientTerms].map((t) => [t.toLowerCase(), t])).values()];
-  // What stands for a standard keyword (itself, or a sheet term that covers it)
-  // goes first and stays, so only terms re-checked after the pull can be cut.
+  const listUsed = cleaning ? competitors ?? COMPETITORS_FALLBACK : null;
+  const listAll = listUsed ? cleanCompetitorTerms(listUsed.terms) : [];
+  const standardKeys = new Set(standardTerms.map((t) => t.toLowerCase()));
+  const ownKeys = new Set(clientTerms.map((t) => t.toLowerCase()));
+  // The list's terms that are not standard keywords; listAdded: nor the client's own either.
+  const listTerms = listAll.filter((t) => !standardKeys.has(t.toLowerCase()));
+  const listAdded = listTerms.filter((t) => !ownKeys.has(t.toLowerCase()));
+  const terms = [...new Map([...standardTerms, ...listTerms, ...clientTerms].map((t) => [t.toLowerCase(), t])).values()];
   const standardWords = standardTerms.map(wordsOf);
+  const listWords = listTerms.map(wordsOf);
+  const covers = (t, group) => group.some((w) => holds(wordsOf(t), w));
   const merged = condensePhrases(terms);
-  const staysTerms = merged.filter((t) => standardWords.some((w) => holds(wordsOf(t), w)));
-  const ownTerms = merged
-    .filter((t) => !standardWords.some((w) => holds(wordsOf(t), w)))
+  const standardGroup = merged.filter((t) => covers(t, standardWords));
+  const listGroup = merged.filter((t) => !covers(t, standardWords) && covers(t, listWords));
+  const ownGroup = merged
+    .filter((t) => !covers(t, standardWords) && !covers(t, listWords))
     .sort((a, b) => wordsOf(a).length - wordsOf(b).length || a.length - b.length);
-  const companyTerms = [...staysTerms];
-  for (const t of ownTerms) {
-    if (companyTerms.length >= ARRAY_MAX || bytes([...companyTerms, t]) > COMPANY_TERMS_BYTES) break;
+  const companyTerms = [...standardGroup];
+  const fits = (t) => companyTerms.length < ARRAY_MAX && bytes([...companyTerms, t]) <= COMPANY_TERMS_BYTES;
+  for (const t of listGroup) if (fits(t)) companyTerms.push(t);
+  for (const t of ownGroup) {
+    if (!fits(t)) break;
     companyTerms.push(t);
   }
 
@@ -253,19 +276,82 @@ export function accountFilters({ targeting, filters, cleaning = false }) {
   }
 
   const sentWords = companyTerms.map(wordsOf);
-  const termsCovered = terms.filter((t) => sentWords.some((w) => holds(w, wordsOf(t)))).length;
-  return { account, terms, merged, companyTerms, termsCovered, standardTerms, clientTerms, bands, industries, excludeIndustries, tooLong };
+  const checkedAfter = terms.filter((t) => !sentWords.some((w) => holds(w, wordsOf(t))));
+  const termsCovered = terms.length - checkedAfter.length;
+  return {
+    account, terms, merged, companyTerms, termsCovered, checkedAfter, standardTerms, clientTerms, list: listUsed, listAll, listTerms, listAdded,
+    bands, industries, excludeIndustries, tooLong,
+  };
 }
+
+/**
+ * What a pull keeps of its excluded keywords (filters.keywords), for the
+ * checks after the pull: the whole union (standard, the competitors list, the
+ * client's own), the phrases AI Ark was sent, the terms no sent phrase covers,
+ * and the list it used. Null when no standard keywords went (the search then
+ * holds only the client's own terms, which the Outcome re-checks as before).
+ *
+ * @param {ReturnType<typeof accountFilters>} acct
+ */
+export function keywordsRecord(acct) {
+  if (!acct.list) return null;
+  return {
+    union: [...acct.terms],
+    sent: [...acct.companyTerms],
+    checked_after: [...acct.checkedAfter],
+    in_search: acct.termsCovered,
+    standard: acct.standardTerms.length,
+    own: acct.clientTerms.length,
+    list: {
+      name: acct.list.name,
+      from: acct.list.from,
+      id: acct.list.id ?? null,
+      updated_at: acct.list.updatedAt ?? null,
+      terms: acct.listAll.length,
+      added: acct.listAdded.length,
+    },
+  };
+}
+
+/** The terms a run keeps for the checks after its pull (filters.keywords.union), lower case; empty when it keeps none. */
+export function keywordsOfRun(run) {
+  const union = run?.filters?.keywords?.union;
+  return Array.isArray(union) ? [...new Set(union.map((s) => clean(s).toLowerCase()).filter(Boolean))] : [];
+}
+
+/**
+ * The note for a search that can't hold every excluded term, with the
+ * competitors list in it: how many it holds, of which kinds, and that the
+ * rest are checked after the pull (`after` says how, for people or companies).
+ * Starts as the note for a client's own terms does ("AI Ark's limits leave
+ * room for"), which the LinkedIn sources replace with their own.
+ */
+export function listTermsNote(acct, after) {
+  const parts = [
+    `${fmtN(acct.standardTerms.length)} standard`,
+    `${fmtN(acct.listAdded.length)} from the competitors list`,
+    `${fmtN(acct.terms.length - acct.standardTerms.length - acct.listAdded.length)} this client's own`,
+  ];
+  return (
+    `AI Ark's limits leave room for ${fmtN(acct.termsCovered)} of the ${fmtN(acct.terms.length)} excluded terms (${parts.join(", ")}) in the search. ` +
+    `The other ${fmtN(acct.checkedAfter.length)} are checked after the pull, as whole words, ${after}`
+  );
+}
+
+const fmtN = (n) => Number(n).toLocaleString("en-US");
 
 /**
  * The AI Ark filter bodies for a client: one per group of titles × group of
  * places, each within what AI Ark is known to take. The exclusions go in every
- * search. A cleaning client's standard filters always go; its own exclusion
- * terms go as room allows, broadest first, at company level only.
+ * search. A cleaning client's standard filters always go; the built-in
+ * competitors list (`competitors`, competitors.mjs) and then its own exclusion
+ * terms go as room allows, at company level only (accountFilters). `keywords`
+ * is what a pull keeps for the checks after it (keywordsRecord), there only
+ * when the standard keywords go, so any other client's answer is as before.
  *
- * @returns {{ requests: object[], report: object, notes: string[], blockers: string[], pullBlockers: string[] }}
+ * @returns {{ requests: object[], report: object, notes: string[], blockers: string[], pullBlockers: string[], keywords?: object }}
  */
-export function buildRequests({ targeting, people, geo, cleaning = false }) {
+export function buildRequests({ targeting, people, geo, cleaning = false, competitors = undefined }) {
   const notes = [];
   const blockers = [];
   const pullBlockers = [];
@@ -302,9 +388,11 @@ export function buildRequests({ targeting, people, geo, cleaning = false }) {
   if (placesOut.length > ARRAY_MAX) notes.push(`Only the first ${ARRAY_MAX} of ${placesOut.length} excluded places are sent; all are re-checked after the pull.`);
 
   // The company part (size, industries, company types, keywords) is shared with company searches.
-  const acct = accountFilters({ targeting, filters: p, cleaning });
+  const acct = accountFilters({ targeting, filters: p, cleaning, competitors });
   const { terms, merged, standardTerms, clientTerms, bands, industries, excludeIndustries, termsCovered } = acct;
+  // The people keywords (headline, summary) stay the standard ones: the competitors list is company keywords.
   const peopleTerms = condensePhrases(standardTerms);
+  if (acct.list?.note) notes.push(acct.list.note);
   if (clientTerms.length) {
     notes.push(`AI Ark matches excluded words as whole words; the lead database matches them anywhere in the text ("bar" also drops "Barbershop"). That stricter check runs after the pull.`);
   }
@@ -379,7 +467,11 @@ export function buildRequests({ targeting, people, geo, cleaning = false }) {
     notes.push(`AI Ark limits how much one request can hold, so this goes out as ${requests.length} searches (${titleGroups.length} ${titleGroups.length === 1 ? "group" : "groups"} of job titles × ${placeGroups.length} ${placeGroups.length === 1 ? "group" : "groups"} of places), and a count costs 1 credit for each. Counts are added up, so someone matching titles in two groups is counted twice; a pull leaves out people it has already bought.`);
   }
   if (termsCovered < terms.length) {
-    notes.push(`AI Ark's limits leave room for ${termsCovered} of this client's ${terms.length} exclusion terms in the search. The others are checked after the pull, when the person is already paid for.`);
+    notes.push(
+      acct.list
+        ? listTermsNote(acct, "on each person's company: a one-at-a-time pull skips such a person before buying their email; an export job's people are paid for when it returns them, and then excluded.")
+        : `AI Ark's limits leave room for ${termsCovered} of this client's ${terms.length} exclusion terms in the search. The others are checked after the pull, when the person is already paid for.`
+    );
   }
 
   return {
@@ -387,7 +479,11 @@ export function buildRequests({ targeting, people, geo, cleaning = false }) {
     report: {
       locations: { total: uniq.length, sent: uniq.length, requests: requests.length, examples: uniq.slice(0, 6), dropped },
       excludeLocations: { total: placesOut.length, sent: excludePlaces.length },
-      excludeTerms: { total: terms.length, sent: termsCovered, standard: standardTerms.length },
+      excludeTerms: {
+        total: terms.length, sent: termsCovered, standard: standardTerms.length,
+        ...(acct.list ? { list: acct.listAdded.length, checkedAfter: acct.checkedAfter.length } : {}),
+      },
+      ...(acct.list ? { competitors: { name: acct.list.name, from: acct.list.from, terms: acct.listAll.length, added: acct.listAdded.length } } : {}),
       peopleKeywords: standardTerms.length,
       excludeCompanyTypes: cleaning ? [...CLEANING_EXCLUDE_COMPANY_TYPES] : [],
       titles: titles.length,
@@ -403,6 +499,7 @@ export function buildRequests({ targeting, people, geo, cleaning = false }) {
     notes,
     blockers,
     pullBlockers,
+    ...(acct.list ? { keywords: keywordsRecord(acct) } : {}),
   };
 }
 

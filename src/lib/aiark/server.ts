@@ -2,8 +2,9 @@ import type { PoolClient } from "pg";
 import { enrichPool } from "@/lib/enrich/db";
 import { loadGeo } from "../../../scripts/lib/aiark/filters.mjs";
 import { aiArkFor as aiArkClient, webhookFor } from "../../../scripts/lib/aiark/runs.mjs";
-import { peopleFor, planFor } from "../../../scripts/lib/aiark/start-run.mjs";
-import type { AiArkModes, AiArkPlan, AiArkRun, PeopleFilters, PlanReport, RunMode } from "./types";
+import { competitorsOf, peopleFor, planFor } from "../../../scripts/lib/aiark/start-run.mjs";
+import { competitorsView, type readCompetitors } from "../../../scripts/lib/aiark/competitors.mjs";
+import type { AiArkModes, AiArkPlan, AiArkRun, CompetitorsListView, PeopleFilters, PlanReport, RunMode } from "./types";
 
 export { cleanPeopleFilters, DEPARTMENT_SUGGESTIONS, INDUSTRY_SUGGESTIONS, SENIORITY } from "../../../scripts/lib/aiark/filters.mjs";
 export { createRun } from "../../../scripts/lib/aiark/runs.mjs";
@@ -79,14 +80,43 @@ export function peopleOrDefaults(saved: Record<string, unknown> | null, clientTy
   };
 }
 
-export function plan(targeting: Record<string, unknown> | null, people: PeopleFilters, g: Geo, clientType: string | null = null): AiArkPlan & { requests: object[] } {
-  const p = planFor(targeting, people, g, clientType);
+type Competitors = Awaited<ReturnType<typeof readCompetitors>>;
+
+/**
+ * The built-in competitors list (scripts/lib/aiark/competitors.mjs) as stored
+ * now, for a client whose searches send the standard keywords (scope "ai_ark":
+ * a cleaning client); null for any other, whose searches don't use it. The
+ * rule is start-run.mjs's competitorsOf(), which a pull's start reads too.
+ */
+export async function competitorsFor(c: PoolClient, clientType: string | null): Promise<Competitors | null> {
+  return (await competitorsOf(c, clientType)) ?? null;
+}
+
+/** What the AI Ark tab shows of the list beside "Leave out industries". */
+export function competitorsListView(list: Competitors | null): CompetitorsListView | null {
+  return list ? (competitorsView(list) as CompetitorsListView) : null;
+}
+
+export function plan(
+  targeting: Record<string, unknown> | null,
+  people: PeopleFilters,
+  g: Geo,
+  clientType: string | null = null,
+  competitors: Competitors | null = null
+): AiArkPlan & { requests: object[] } {
+  const p = planFor(targeting, people, g, clientType, competitors ?? undefined);
   return { ...p, report: p.report as PlanReport };
 }
 
 /** The plan as the page shows it: everything but the request bodies beyond the first. */
-export function planView(targeting: Record<string, unknown> | null, people: PeopleFilters, g: Geo, clientType: string | null = null): AiArkPlan {
-  const p = plan(targeting, people, g, clientType);
+export function planView(
+  targeting: Record<string, unknown> | null,
+  people: PeopleFilters,
+  g: Geo,
+  clientType: string | null = null,
+  competitors: Competitors | null = null
+): AiArkPlan {
+  const p = plan(targeting, people, g, clientType, competitors);
   return { searches: p.searches, report: p.report, notes: p.notes, blockers: p.blockers, pullBlockers: p.pullBlockers, example: p.example };
 }
 
@@ -124,6 +154,7 @@ export const RUN_FIELDS = `r.id, r.client_tag, r.mode, r.strategy, r.status, r.s
   r.finished_at, r.updated_at, jsonb_array_length(r.requests) AS searches,
   (r.status = 'cancelled' AND r.finished_at IS NULL AND jsonb_typeof(r.progress->'job') = 'object') AS finishing,
   r.progress->>'lists_note' AS lists_note, (r.progress->>'excluded')::int AS excluded,
+  (r.progress->>'keyword_skipped')::int AS keyword_skipped,
   r.progress #>> '{job,state}' AS job_state, up.full_name AS created_by_name`;
 
 const OUTCOME_RUNS = 5; // outcomes are counted for the newest runs only: the tab polls this

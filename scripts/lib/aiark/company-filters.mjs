@@ -27,6 +27,8 @@ import {
   bytes,
   CLEANING_DEFAULTS,
   EMPTY_PEOPLE_FILTERS,
+  keywordsRecord,
+  listTermsNote,
   MAX_REQUESTS,
   pack,
   PLACES_BYTES,
@@ -93,11 +95,15 @@ export function companyFiltersFor(saved, clientType) {
  * search of exclusions alone is one AI Ark refuses), or more searches than a
  * pull can hold.
  *
- * @param {{ targeting: object | null, filters?: object | null, geo: object, cleaning?: boolean }} opts
- *   filters: employee_bands, industries and exclude_industries (a whole people-filters object is fine)
- * @returns {{ requests: object[], report: object, notes: string[], blockers: string[], pullBlockers: string[] }}
+ * @param {{ targeting: object | null, filters?: object | null, geo: object, cleaning?: boolean,
+ *           competitors?: import("./competitors.mjs").Competitors }} opts
+ *   filters: employee_bands, industries and exclude_industries (a whole people-filters object is fine);
+ *   competitors: the built-in competitors list as read (readCompetitors), left out with the standard keywords
+ * @returns {{ requests: object[], report: object, notes: string[], blockers: string[], pullBlockers: string[], keywords?: object }}
+ *   keywords: what the pull keeps for the checks after it (keywordsRecord in filters.mjs), there only when the
+ *   standard keywords go
  */
-export function buildCompanyRequests({ targeting, filters = null, geo, cleaning = false }) {
+export function buildCompanyRequests({ targeting, filters = null, geo, cleaning = false, competitors = undefined }) {
   const notes = [];
   const blockers = [];
   const pullBlockers = [];
@@ -135,7 +141,8 @@ export function buildCompanyRequests({ targeting, filters = null, geo, cleaning 
   }
   if (placesOut.length > ARRAY_MAX) notes.push(`Only the first ${ARRAY_MAX} of ${placesOut.length} excluded places are sent; all are re-checked after the pull.`);
 
-  const acct = accountFilters({ targeting, filters: pickCompanyFilters(filters), cleaning });
+  const acct = accountFilters({ targeting, filters: pickCompanyFilters(filters), cleaning, competitors });
+  if (acct.list?.note) notes.push(acct.list.note);
   if (acct.clientTerms.length) {
     notes.push(`AI Ark matches excluded words as whole words; the lead database matches them anywhere in the text ("bar" also drops "Barbershop"). That stricter check runs after the pull.`);
   }
@@ -164,7 +171,11 @@ export function buildCompanyRequests({ targeting, filters = null, geo, cleaning 
     notes.push(`AI Ark limits how much one request can hold, so this goes out as ${requests.length} searches, one for each group of places. Counts are added up, so a company with offices in two groups is counted twice; a pull leaves out the companies it has already bought.`);
   }
   if (acct.termsCovered < acct.terms.length) {
-    notes.push(`AI Ark's limits leave room for ${acct.termsCovered} of this client's ${acct.terms.length} exclusion terms in the search. The others are checked after the pull, when the company is already paid for (${COMPANY_PRICE} credit).`);
+    notes.push(
+      acct.list
+        ? listTermsNote(acct, `on each company's name, industry and description, when it is already paid for (${COMPANY_PRICE} credit) and before anything more is spent on it.`)
+        : `AI Ark's limits leave room for ${acct.termsCovered} of this client's ${acct.terms.length} exclusion terms in the search. The others are checked after the pull, when the company is already paid for (${COMPANY_PRICE} credit).`
+    );
   }
 
   return {
@@ -172,7 +183,11 @@ export function buildCompanyRequests({ targeting, filters = null, geo, cleaning 
     report: {
       locations: { total: uniq.length, sent: uniq.length, requests: requests.length, examples: uniq.slice(0, 6), dropped },
       excludeLocations: { total: placesOut.length, sent: excludePlaces.length },
-      excludeTerms: { total: acct.terms.length, sent: acct.termsCovered, standard: acct.standardTerms.length },
+      excludeTerms: {
+        total: acct.terms.length, sent: acct.termsCovered, standard: acct.standardTerms.length,
+        ...(acct.list ? { list: acct.listAdded.length, checkedAfter: acct.checkedAfter.length } : {}),
+      },
+      ...(acct.list ? { competitors: { name: acct.list.name, from: acct.list.from, terms: acct.listAll.length, added: acct.listAdded.length } } : {}),
       excludeCompanyTypes: acct.account.type?.any?.exclude ?? [],
       bands: acct.bands,
       industries: acct.industries.length,
@@ -185,6 +200,7 @@ export function buildCompanyRequests({ targeting, filters = null, geo, cleaning 
     notes,
     blockers,
     pullBlockers,
+    ...(acct.list ? { keywords: keywordsRecord(acct) } : {}),
   };
 }
 

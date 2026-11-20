@@ -47,6 +47,7 @@ import { CLEANING_EXCLUDE_COMPANY_TYPES, CLEANING_EXCLUDE_KEYWORDS, CLEANING_EXC
 import { bytes, CLEANING_DEFAULTS, COMPANY_TERMS_BYTES, condensePhrases, EMPTY_PEOPLE_FILTERS, loadGeo } from "./lib/aiark/filters.mjs";
 import { buildCompanyRequests, companyFiltersFor, companyHqKeys, companyPlaceKeys, hasWords } from "./lib/aiark/company-filters.mjs";
 import { createAiArk } from "./lib/aiark/client.mjs";
+import { competitorsFrom, readCompetitors } from "./lib/aiark/competitors.mjs";
 import { createDemoTransport, DEMO_TOKEN } from "./lib/aiark/demo.mjs";
 import { excludedByAccount, makeCompany, officeInPlace } from "./lib/aiark/demo-companies.mjs";
 import { advanceOneCompanyRun, createCompanyRun } from "./lib/aiark/company-runs.mjs";
@@ -280,10 +281,13 @@ function partA() {
   const st = starterFrom({ items: [" Quux Diner ", "quux diner", "", 7, "x".repeat(121), "Quux Kiosk"], version: 2, source: "made up", sha256: "f".repeat(64) });
   check("the starter list read: trimmed, once each, too long or not text left out", JSON.stringify(st.items) === JSON.stringify(["Quux Diner", "Quux Kiosk"]) && st.version === 2 && st.sha256 === "f".repeat(64));
 
-  section("A3. Keywords sent: the standard ones first, then the client's own, within AI Ark's limit (D-P4-3)");
-  const few = keywordsFor(["Quuxable Diner", "janitorial", "JANITORIAL services"]);
-  check("standard first, then own new ones, once each (case aside)",
-    few.union.length === CLEANING_EXCLUDE_KEYWORDS.length + 1 && few.union.slice(0, CLEANING_EXCLUDE_KEYWORDS.length).every((t, i) => t.toLowerCase() === CLEANING_EXCLUDE_KEYWORDS[i].toLowerCase()) && few.union.at(-1) === "Quuxable Diner");
+  section("A3. Keywords sent: the standard ones first, then the built-in competitors list, then the client's own, within AI Ark's limit (D-P4-3)");
+  // A made-up built-in list: one new term, one a standard keyword already.
+  const quuxList = competitorsFrom({ id: "l", name: "Janitorial & facility-service competitors", items: ["quux mop crew", "Janitorial"] });
+  const few = keywordsFor(["Quuxable Diner", "janitorial", "JANITORIAL services"], quuxList);
+  check("standard first, then the list's new terms, then own new ones, once each (case aside)",
+    few.union.length === CLEANING_EXCLUDE_KEYWORDS.length + 2 && few.union.slice(0, CLEANING_EXCLUDE_KEYWORDS.length).every((t, i) => t.toLowerCase() === CLEANING_EXCLUDE_KEYWORDS[i].toLowerCase()) &&
+      few.union.at(-2) === "quux mop crew" && few.union.at(-1) === "Quuxable Diner" && few.list.added.length === 1);
   check("few own keywords: all applied", few.checkedAfter.length === 0 && few.sent.includes("Quuxable Diner"));
   const many = keywordsFor(ownWords(120));
   check("over the limit: the rest listed as checked after the pull, never dropped silently (O1)",
@@ -1745,8 +1749,11 @@ async function partR() {
       JSON.stringify(view.checkedAfterOf(base)) === JSON.stringify(base.keywords.checkedAfter) && view.checkedAfterOf(base).length > 0 &&
         view.keywordsView(base).checkedAfter.length === base.keywords.checkedAfter.length);
     const rv = (await get({ tag: R, kind: "companies" })).body.companies;
+    // The built-in competitors list as the database holds it (the 069 seed when it has none) adds its new terms to the union.
+    const listAdded = keywordsFor([], await readCompetitors(pool)).list.added.length;
     check("O1: the keywords AI Ark's request can't hold are listed, to be checked after the pull, none dropped",
-      rv.keywords.checkedAfter.length > 0 && rv.keywords.union === CLEANING_EXCLUDE_KEYWORDS.length + 120 && rv.keywords.checkedAfter.every((k) => rv.own.exclude_keywords.includes(k)));
+      rv.keywords.checkedAfter.length > 0 && rv.keywords.union === CLEANING_EXCLUDE_KEYWORDS.length + listAdded + 120 && rv.keywords.checkedAfter.every((k) => rv.own.exclude_keywords.includes(k)),
+      `${rv.keywords.union} with ${listAdded} from the list`);
     const texts = [...rv.plan.notes, ...(await plan()).notes, ...(await preview({ tag: R, kind: "companies", value: { include_locations: rv.own.include_locations.map((p) => p.entry), exclude_locations: [], unplaced: [], exclude_keywords: rv.own.exclude_keywords } })).body.plan.notes];
     check("O1: nothing on the page or the Companies tab says 'not applied'; the notes say 'checked after the pull (AI Ark limit)'",
       !texts.some((n) => /not applied/i.test(n)) && texts.some((n) => n.includes("checked after the pull (AI Ark limit)")), texts.join(" | ").slice(0, 300));
