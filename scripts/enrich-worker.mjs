@@ -136,7 +136,7 @@ import { moveUploadRows } from "./lib/enrich/upload-move.mjs";
 import { askForFound, foundAutoConfig } from "./lib/enrich/upload-found.mjs";
 import { UPLOAD_CAPABILITY } from "./lib/enrich/upload-people.mjs";
 import { SHARING_CAPABILITY, sharePushConfig } from "./lib/overlap-topup.mjs";
-import { newShareMemory, SHARE_EVERY_MS, shareRound } from "./lib/share/step.mjs";
+import { newShareMemory, SHARE_EVERY_MS, shareRefusals, shareRound } from "./lib/share/step.mjs";
 import { SHARE_UNREADY } from "./lib/share/db.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname, quiet: true });
 
@@ -521,8 +521,9 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
     fit: { ...fitLoopStatus(), loop: { ...fitState }, promote_auto: Boolean(promoteAuto) },
     // Uploads' no-email rows (130): whether found emails are added with no button.
     upload_people: { found_auto: Boolean(foundAuto) },
-    // Overlap sharing (134): whether applied shares are pushed with no button (SHARE_PUSH_KEY and the web address set).
-    sharing: { push_auto: Boolean(sharePush) },
+    // Overlap sharing (134): whether applied shares are pushed with no button (SHARE_PUSH_KEY and the web address set),
+    // and the push timer's last failed ask per receiving client, cleared by its next push that goes through.
+    sharing: { push_auto: Boolean(sharePush), refusals: shareRefusals(shareMemory) },
     host: os.hostname(),
     pid: process.pid,
     stopped: stopping,
