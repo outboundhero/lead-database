@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { clearClientRoster } from "@/lib/clients/roster";
 import { LogOut } from "lucide-react";
 import {
   DropdownMenu,
@@ -29,6 +30,8 @@ export function UserMenu({ email, fullName }: UserMenuProps) {
   useEffect(() => setMounted(true), []);
 
   async function handleLogout() {
+    // The cached client list (memory and this browser's stored copies) goes before the session does.
+    clearClientRoster();
     await supabase.auth.signOut();
     router.push("/login");
     router.refresh();

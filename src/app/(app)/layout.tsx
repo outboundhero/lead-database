@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { SidebarNav } from "@/components/layout/sidebar-nav";
 import { TopBar } from "@/components/layout/top-bar";
 import { RoleProvider } from "@/lib/context/role-context";
+import { ClientRosterPrefetch } from "@/components/clients/client-roster-prefetch";
 import type { UserRole } from "@/types/auth";
 
 export default async function AppLayout({
@@ -32,6 +33,8 @@ export default async function AppLayout({
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
+      {/* The client list every client dropdown reads, loaded as the app opens (src/lib/clients/roster.ts). */}
+      <ClientRosterPrefetch userId={user.id} />
       <SidebarNav
         email={user.email ?? ""}
         fullName={profile?.full_name ?? null}
