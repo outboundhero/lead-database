@@ -771,6 +771,7 @@ async function partF() {
   const pzCo = company("pz", "Harborview Dental Personal");
   net.reoon.set(at("pz", "office"), "safe");
   plan("C31", pzCo, { company_emails_found: at("pz", "office") });
+  plan("G49", pzCo, { response: "Would a made-up question help?" });
   const off = await runCompany(A, pzCo);
   const inbox = off.inboxes[0];
   check("off: the question steps are Switched off, nothing called", ["email_domain", "email_host_lookup_google_dns", "claygent", "question_ai", "question"].every((k) => inbox?.cells[k]?.note === "Switched off: personalisation") && net.calls.dns === 0);
@@ -779,7 +780,13 @@ async function partF() {
   const w = await work(inbox.id, { settings: on });
   check("on for a client with its own originals: the MX lookup calls Google's DNS only, the summary search runs",
     w.cell("email_host_lookup_google_dns")?.status === "done" && net.calls.dns === 1 && w.cell("claygent")?.status === "done" && net.calls.refused === 0);
-  check("... and the question waits for Clay's table examples (D38): no question is written", /table examples/.test(w.cell("question_ai")?.note ?? "") && !w.values.question && (await one(`SELECT has_question FROM enrich_contacts WHERE row_id = $1`, [inbox.id])).has_question === false);
+  const g49Sent = net.bodies.filter((b) => String(b?.input ?? "").includes(`[fx:G49] business=${nameOf(pzCo)};`));
+  const g49Examples = (await one(`SELECT config->>'examples_text' AS t FROM enrich_columns WHERE table_id = $1 AND key = 'question_ai'`, [tables[A].inboxes])).t;
+  check("... and the question runs with its examples: the question is written",
+    w.cell("question_ai")?.status === "done" && w.values.question === "would a made-up question help?" &&
+      (await one(`SELECT has_question FROM enrich_contacts WHERE row_id = $1`, [inbox.id])).has_question === true &&
+      g49Sent.length === 1 && Boolean(g49Examples) && g49Sent[0].instructions === g49Examples,
+    JSON.stringify({ status: w.cell("question_ai")?.status, note: w.cell("question_ai")?.note, question: w.values.question ?? null, sent: g49Sent.length }));
   const shared = settingsWith({ spend_caps: HIGH_CAPS, personalisation: { enabled: true, tags: [A], shared_text_ok: false } });
   const def = await runRow({
     row: { id: 0, created_at: new Date() }, table: { client_tag: A, template: "inboxes_v1", variant: "default" }, cells: new Map(), env: KEYS, db: null, settings: shared,
