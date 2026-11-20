@@ -11,6 +11,7 @@ import {
   normTag,
   settingsFrom,
 } from "../../../scripts/lib/enrich/settings.mjs";
+import { backfillFrom, cleanDatabaseBackfill } from "../../../scripts/lib/backfill/settings.mjs";
 import { geo, modes, peopleOrDefaults } from "@/lib/aiark/server";
 import type { RowStatus, WorkerState } from "@/lib/enrich/types";
 import { contactsFor } from "./people";
@@ -27,6 +28,7 @@ import {
   type CompanyRow,
   type CompanyRun,
   type CompanyWorker,
+  type DatabaseBackfillSettings,
   type Effort,
   type FoundBy,
   type ListHas,
@@ -138,11 +140,13 @@ export function companyPlanView(...args: Parameters<typeof companyPlan>): Compan
 /**
  * The settings rows this tab reads and its sheet edits (linkedin_sources:
  * migration 128; promotion: 126, its switch and client list only;
- * overlap_sharing, weekly_topup, never_contact_inboxes: migrations 134 to 136).
+ * overlap_sharing, weekly_topup, never_contact_inboxes: migrations 134 to 136;
+ * database_backfill: 138, read by scripts/lib/backfill/settings.mjs, since the
+ * worker's settingsFrom does not know it).
  */
 const SETTING_KEYS = [
   "company_pipeline", "people_pipeline", "personalisation", "spend_caps", "models", "linkedin_sources", "promotion",
-  "overlap_sharing", "weekly_topup", "never_contact_inboxes",
+  "overlap_sharing", "weekly_topup", "never_contact_inboxes", "database_backfill",
 ];
 /** aiark_company_runs.size_requested takes at most 10,000. */
 export const PULL_SIZE_LIMIT = 10_000;
@@ -204,7 +208,15 @@ export function normalizeSettings(rows: { key: string; value: unknown }[]): Pipe
         sha12: s.never_contact_inboxes.sha256 ? s.never_contact_inboxes.sha256.slice(0, 12) : null,
       },
     },
+    // A missing row (before 138) reads as switched off.
+    database_backfill: backfillOf(rows),
   };
+}
+
+/** database_backfill as backfillFrom reads it, its client list copied. */
+function backfillOf(rows: { key: string; value: unknown }[]): DatabaseBackfillSettings {
+  const b = backfillFrom(rows);
+  return { ...b, tags: [...b.tags] };
 }
 
 /** What a manager's page needs from the settings: the switch, and what the pull's worst case is worked out from. */
@@ -289,6 +301,7 @@ type SettingsRows = {
   overlap_sharing?: Record<string, unknown>;
   weekly_topup?: Record<string, unknown>;
   never_contact_inboxes?: Record<string, unknown>;
+  database_backfill?: Record<string, unknown>;
 };
 /** LinkedIn people runs: the most people bought at one company (D-P4-6), as settingsFrom reads it. */
 const PEOPLE_PER_COMPANY_MAX = 100;
@@ -428,6 +441,13 @@ export function cleanSettingsInput(
     if (v.value) inboxes = v.value;
     else errors.push(...v.errors);
   }
+  // The database backfill (138): optional, checked by scripts/lib/backfill/settings.mjs, merged over the stored row.
+  let backfill: DatabaseBackfillSettings | null = null;
+  if (body.database_backfill !== undefined) {
+    const v = cleanDatabaseBackfill(body.database_backfill, { previous: current.database_backfill });
+    if (v.value) backfill = v.value as DatabaseBackfillSettings;
+    else errors.push(...v.errors);
+  }
   if (errors.length) return { value: null, errors, changes: [] };
 
   const changes: string[] = [];
@@ -529,6 +549,19 @@ export function cleanSettingsInput(
     diff("general inboxes marked in one step", n0.chunk_rows, inboxes.chunk_rows, fmt);
     inboxesChanged = changes.length > beforeInboxes;
   }
+  const beforeBackfill = changes.length;
+  let backfillChanged = false;
+  if (backfill) {
+    const b0 = current.database_backfill;
+    diff("database backfill", b0.enabled, backfill.enabled, said);
+    diff("database backfill's clients", b0.tags, backfill.tags, listText);
+    diff("database backfill mode", b0.mode, backfill.mode);
+    diff("most shares a backfill firing writes", b0.max_per_run, backfill.max_per_run, fmt);
+    diff("minutes a backfill firing works", b0.max_minutes, backfill.max_minutes, fmt);
+    diff("days before the backfill reads a place again", b0.recheck_days, backfill.recheck_days);
+    diff("the backfill takes untagged leads", b0.untagged, backfill.untagged, said);
+    backfillChanged = changes.length > beforeBackfill;
+  }
 
   const storedModels = obj(stored.models);
   const models: Record<string, unknown> = { ...storedModels };
@@ -567,6 +600,7 @@ export function cleanSettingsInput(
       ...(topup && topupChanged ? { weekly_topup: { ...obj(stored.weekly_topup), ...topup } } : {}),
       // The filter keys (pattern, source, sha256, read_at) stay as the seed wrote them.
       ...(inboxes && inboxesChanged ? { never_contact_inboxes: { ...obj(stored.never_contact_inboxes), ...inboxes } } : {}),
+      ...(backfill && backfillChanged ? { database_backfill: { ...obj(stored.database_backfill), ...backfill } } : {}),
     },
     errors,
     changes,
@@ -622,6 +656,7 @@ export function settingsInputOf(v: PipelineSettings): SettingsInput {
       rows_per_day: v.never_contact_inboxes.rows_per_day,
       chunk_rows: v.never_contact_inboxes.chunk_rows,
     },
+    database_backfill: { ...v.database_backfill, tags: [...v.database_backfill.tags] },
   };
 }
 

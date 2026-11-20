@@ -168,6 +168,8 @@ export interface PipelineSettings {
   weekly_topup: WeeklyTopupSettings;
   /** Never-contact inboxes (migration 136): the switch and pace, and whether the Clay filter is loaded. Never the filter itself. */
   never_contact_inboxes: NeverContactInboxesView;
+  /** The database backfill (migration 138), as scripts/lib/backfill/settings.mjs backfillFrom reads it. Ships off. */
+  database_backfill: DatabaseBackfillSettings;
 }
 
 /**
@@ -228,6 +230,24 @@ export interface WeeklyTopupSettings {
   client_weekly_credits: number;
   max_pull_size: number;
   pulls_per_day: number;
+}
+
+/**
+ * The database backfill (enrich_settings.database_backfill, migration 138): the
+ * switch and its client list, preview or apply, the shares a firing may write,
+ * the minutes it may work, the days before a place is read again, and whether
+ * untagged leads are taken (else only leads of other clients of the pool). Its
+ * caps a client a firing and a day are overlap sharing's push caps, and a
+ * client also needs overlap sharing's push list for its shares to be written.
+ */
+export interface DatabaseBackfillSettings {
+  enabled: boolean;
+  tags: string[];
+  mode: "preview" | "apply";
+  max_per_run: number;
+  max_minutes: number;
+  recheck_days: number;
+  untagged: boolean;
 }
 
 /** The part of never_contact_inboxes the settings sheet edits. The filter is written only by the seed. */
@@ -297,6 +317,8 @@ export interface SettingsInput {
   weekly_topup?: WeeklyTopupSettings;
   /** Optional: left out, what is stored is kept; the filter keys are always kept as stored. */
   never_contact_inboxes?: NeverContactInboxesInput;
+  /** Optional: left out, what is stored is kept. */
+  database_backfill?: DatabaseBackfillSettings;
 }
 
 // ── Runs, worker and counts ─────────────────────────────────────────────────
