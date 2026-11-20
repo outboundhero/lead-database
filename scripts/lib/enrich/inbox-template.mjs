@@ -15,11 +15,11 @@
 // the key the step is skipped with "Needs ENRICHLEY_API_KEY (not held)", the
 // outcome says "Waiting for Enrichley", and the row itself finishes (D6).
 //
-// G#14 and G#16 run our exact copies of Clay's normalize-company-name and
-// extract-email-components (clay-tools.mjs), with the originals' own inputs
-// and run conditions: G#15, G#17 and G#18 read them as in Clay, and G#19 runs
-// as an AI step on its own model setting (inbox_first_name_ai). G#35, Clay's
-// normalize-phone-number, still waits (D38).
+// G#14, G#16 and G#35 run our exact copies of Clay's normalize-company-name,
+// extract-email-components and normalize-phone-number (clay-tools.mjs), with
+// the originals' own inputs and run conditions: G#15, G#17, G#18 and G#36 read
+// them as in Clay, and G#19 runs as an AI step on its own model setting
+// (inbox_first_name_ai).
 
 import { compileColumn, refMap } from "./compile-original.mjs";
 import { CLAY_TOOL_ACTIONS, toolInputs } from "./clay-tools.mjs";
@@ -87,7 +87,7 @@ export const INBOX_COLUMNS = Object.freeze([
   { key: "google_maps_url", from: "G#29", kind: "formula" },
   { key: "use_google_maps_url", from: "G#30", kind: "waterfall" },
   { key: "use_domain", from: "G#32", kind: "waterfall" },
-  { key: "normalize_phone_number", from: "G#35", kind: "action", action: "waiting", note: "Clay's normalize-phone-number: waiting for the original (D38)." },
+  { key: "normalize_phone_number", from: "G#35", kind: "action", action: "clay_normalize_phone_number", provider: "Clay tool (exact copy)", note: "Clay's normalize-phone-number, our exact copy (clay-tools.mjs). G#36 reads its national format." },
   { key: "use_phone_number", from: "G#36", kind: "waterfall" },
   { key: "exclusion_large_company_check", from: "G#37", kind: "formula" },
   { key: "qualified_general_email", from: "G#38", kind: "formula" },
@@ -138,11 +138,6 @@ export const INBOX_OUTCOME_FORMULA = [
   `: "Not checked: a role or junk address"`,
 ].join("\n");
 
-/** Waiting columns: why each waits (D38). */
-const WAITS = {
-  normalize_phone_number: "Clay's normalize-phone-number tool: its rules are not in the export (D38). A named stand-in comes only with the owner's OK.",
-};
-
 /** Names of our own columns (from: null). */
 const OURS = {
   inbox_outcome: { name: "Outcome", formula: INBOX_OUTCOME_FORMULA, description: "The address's result. Approved and Already in the database count toward listing its company." },
@@ -172,11 +167,9 @@ export function inboxColumns(originals) {
       rows.push(compileColumn({ ...spec, name: o.name ?? spec.key, formula: o.formula ?? spec.formula, provider: o.provider, description: o.description }, originals, { own }));
       continue;
     }
-    const extra = spec.action === "waiting"
-      ? { why: WAITS[spec.key] }
-      : spec.action && Object.hasOwn(CLAY_TOOL_ACTIONS, spec.action)
-        ? { inputs: toolInputs(originals, spec.from, own, spec.action) }
-        : {};
+    const extra = spec.action && Object.hasOwn(CLAY_TOOL_ACTIONS, spec.action)
+      ? { inputs: toolInputs(originals, spec.from, own, spec.action) }
+      : {};
     rows.push(compileColumn({ ...spec, ...extra, description: spec.note }, originals, { own }));
   }
   return rows.map((r, i) => ({ ...r, position: i + 1 }));

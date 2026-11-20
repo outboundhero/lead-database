@@ -1,32 +1,45 @@
-// Our exact copies of two of Clay's built-in tools, run where the original
-// Clay columns call them (D38 lifted for these two on 2026-11-20):
+// Our exact copies of Clay's three built-in tools, run where the original
+// Clay columns call them (D38 lifted for the first two on 2026-11-20, for the
+// phone tool on 2026-11-21):
 //
 //   clay_normalize_company_name    Clay's normalize-company-name, G#14 and P#29.
 //                                  G#15 and P#30 read ?.normalized_name, and
 //                                  G#20's second step reads G#15.
 //   clay_extract_email_components  Clay's extract-email-components, G#16. G#17
 //                                  reads ?.username, G#18 ?.guessedName.
+//   clay_normalize_phone_number    Clay's normalize-phone-number, G#35 and P#18.
+//                                  G#36 and P#19 read ?.number?.national, then
+//                                  "there".
 //
 // The rules were worked out from Clay's own answers on real rows (kept out of
-// this public repo) and reproduce every one of them. Clay's quirks are copied,
-// none fixed: one suffix only; a dot in its patterns matches any character, so
-// "Telecom" reads as ending in ".com", "Corp." and "P.C." are kept and "CO2" is
-// cut; "& Co" keeps its "&" in mixed case; title case is lodash's
-// startCase(camelCase()) without lodash's ordinal rule ("5TH" gives "5 Th").
+// this public repo). The company and email rules reproduce every one of them.
+// Clay's quirks are copied, none fixed: one suffix only; a dot in its patterns
+// matches any character, so "Telecom" reads as ending in ".com", "Corp." and
+// "P.C." are kept and "CO2" is cut; "& Co" keeps its "&" in mixed case; title
+// case is lodash's startCase(camelCase()) without lodash's ordinal rule ("5TH"
+// gives "5 Th").
 //
-// Clay's third tool in those tables, normalize-phone-number (P#18, G#35),
-// still waits (D38): its answers need libphonenumber's country metadata.
+// The phone tool is Google's libphonenumber as awesome-phonenumber packs it,
+// pinned at 7.8.0 (libphonenumber 9.0.24): Clay's answers are that library's
+// parsePhoneNumber() under Clay's own names, with the region US when no country
+// code is given. It gives every field of every one of Clay's answers but one:
+// one +57 number whose national part has 10 digits, which Clay calls not
+// possible where this metadata lists 10 among Colombia's lengths (all else in
+// that answer is the same). Pinned: the country metadata decides the region,
+// the validity and the non-US formats, so a new version is checked against
+// Clay's answers before it comes in.
 // tool-standins.mjs (our own stand-ins, never Clay's) stays unused.
 //
-// Both actions are free and local: cache false, so no spinner, no run record,
-// and the answer is worked out again on every pass (as normalize_url). Their
-// inputs are the original's own bindings, compiled by toolInputs() for the
-// template modules; their run conditions are the originals', verbatim.
+// The three actions are free and local: cache false, so no spinner, no run
+// record, and the answer is worked out again on every pass (as normalize_url).
+// Their inputs are the original's own bindings, compiled by toolInputs() for
+// the template modules; their run conditions are the originals', verbatim.
 
 import capitalize from "lodash/capitalize.js";
 import deburr from "lodash/deburr.js";
 import upperFirst from "lodash/upperFirst.js";
 import { getDomain, getDomainWithoutSuffix } from "tldts";
+import { parsePhoneNumber } from "awesome-phonenumber";
 import { bindingOf, originalOf, rewriteRefs } from "./compile-original.mjs";
 
 // ── lodash's word splitting, without its ordinal rule ───────────────────────
@@ -196,12 +209,76 @@ export function extractEmailComponents(email) {
   };
 }
 
+// ── normalize-phone-number ──────────────────────────────────────────────────
+
+/** The region a number is read in when no country code is given and the number has none, as Clay's docs say: US. */
+export const PHONE_DEFAULT_REGION = "US";
+
+/**
+ * Clay's normalize-phone-number: awesome-phonenumber's parsePhoneNumber() in
+ * the region countryCode names (as given), else US, and its answer under
+ * Clay's names, in the key order Clay's answers show:
+ *   number.input        the input as the library echoes it (trimmed)
+ *   number.e164         E.164, the extension dropped
+ *   number.international, .national, .rfc3966
+ *                       the library's formats, each with the extension
+ *                       (" ext. 12", ";ext=12"); a number no format pattern
+ *                       fits comes back unformatted ("+234 " then the digits)
+ *   number.significant  the national significant number
+ *   number.allDigits    Clay's own field: every digit of the input, the
+ *                       calling code's and the extension's too
+ *   isPossible          the library's possible (isPossibleNumber)
+ *   regionCode          the library's region: by the number when it fits one,
+ *                       else the calling code's main region, so an invalid
+ *                       +1 number gets US, a +1 441 number BM
+ *   countryCode         the calling code, a number
+ *   successfullyParsed  the library's valid (isValidNumber): an invalid number
+ *                       still carries every format, and an invalid NANP
+ *                       number US formatting
+ *   canBeInternationallyDialled  the library's (true for US toll-free numbers)
+ * Never seen in Clay's answers: text the library can't read as a number at
+ * all, or an unknown calling code. Then number holds only input and
+ * allDigits, isPossible and successfullyParsed are false, and the other
+ * fields are what the library gives (none for an unknown calling code).
+ *
+ * @param {unknown} phoneNumber
+ * @param {{ countryCode?: unknown }} [opts]
+ * @returns {{ number: { e164?: string, input: string, rfc3966?: string, national?: string, allDigits: string,
+ *   significant?: string, international?: string }, isPossible: boolean, regionCode?: string, countryCode?: number,
+ *   successfullyParsed: boolean, canBeInternationallyDialled?: boolean }}
+ */
+export function normalizePhoneNumber(phoneNumber, { countryCode } = {}) {
+  const input = typeof phoneNumber === "string" ? phoneNumber : String(phoneNumber);
+  const region = countryCode === undefined || countryCode === null || countryCode === "" ? PHONE_DEFAULT_REGION : String(countryCode);
+  const p = parsePhoneNumber(input, { regionCode: region });
+  const n = p.number;
+  const allDigits = input.replace(/\D/g, "");
+  const number = n
+    ? { e164: n.e164, input: n.input, rfc3966: n.rfc3966, national: n.national, allDigits, significant: n.significant, international: n.international }
+    : { input: input.trim(), allDigits };
+  const out = {
+    number,
+    isPossible: p.possible,
+    regionCode: p.regionCode,
+    countryCode: p.countryCode,
+    successfullyParsed: p.valid,
+    canBeInternationallyDialled: p.canBeInternationallyDialled,
+  };
+  // What the library leaves out stays out, so the answer is the same before and after JSON.
+  for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
+  return out;
+}
+
 // ── The cells, as Clay shows them ───────────────────────────────────────────
 
 /** normalize-company-name's cell display. */
 export const companyNameDisplay = (out) => `\u2705 ${out.normalized_name}`;
 /** extract-email-components' cell display. */
 export const emailComponentsDisplay = (out) => `Domain: ${out.domain} | Name: ${out.guessedName}`;
+/** normalize-phone-number's cell display for a number that is not valid. */
+export const PHONE_NOT_VALID = "\u274C Phone number is not valid";
+/** normalize-phone-number's cell display: the E.164 number when it is valid. */
+export const phoneNumberDisplay = (out) => (out.successfullyParsed ? out.number.e164 : PHONE_NOT_VALID);
 
 // ── The actions ─────────────────────────────────────────────────────────────
 
@@ -236,25 +313,40 @@ async function runExtractEmailComponents({ inputs }) {
   }
 }
 
+async function runNormalizePhoneNumber({ inputs }) {
+  try {
+    const phone = inputs?.phoneNumber;
+    if (blank(phone)) return { status: "empty", note: "No phone number" };
+    // A number that is not valid is still Clay's answer, every format included: done, shown as Clay shows it.
+    const out = normalizePhoneNumber(phone, { countryCode: inputs?.countryCode });
+    return { status: "done", value: out, display: phoneNumberDisplay(out), note: "Clay's normalize-phone-number (exact copy)" };
+  } catch (e) {
+    return failure("normalize-phone-number", e);
+  }
+}
+
 /**
- * The two tools as actions, registered in PIPELINE_ACTIONS
+ * The three tools as actions, registered in PIPELINE_ACTIONS
  * (pipeline-actions.mjs). Free and local: cache false.
  */
 export const CLAY_TOOL_ACTIONS = Object.freeze({
   clay_normalize_company_name: Object.freeze({ run: runNormalizeCompanyName, cache: false }),
   clay_extract_email_components: Object.freeze({ run: runExtractEmailComponents, cache: false }),
+  clay_normalize_phone_number: Object.freeze({ run: runNormalizePhoneNumber, cache: false }),
 });
 
 /** The input bindings each tool's original must hold. */
 export const CLAY_TOOL_BINDINGS = Object.freeze({
   clay_normalize_company_name: Object.freeze(["companyName"]),
   clay_extract_email_components: Object.freeze(["email"]),
+  clay_normalize_phone_number: Object.freeze(["phoneNumber"]),
 });
 
 /**
  * A tool column's inputs, compiled from its original: every input binding the
  * original holds with a formula (companyName and titleCase on G#14 and P#29,
- * email on G#16), its {{f_<id>}} references rewritten with the template's map.
+ * email on G#16, phoneNumber on G#35 and P#18; their unset countryCode has
+ * none), its {{f_<id>}} references rewritten with the template's map.
  * So the inputs are the original's own: G#14 compiles to
  * { companyName: "{{company}}", titleCase: "true" } on the default originals.
  * Throws when a required binding is missing or a reference is one the

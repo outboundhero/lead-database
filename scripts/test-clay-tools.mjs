@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-// Our exact copies of Clay's normalize-company-name and extract-email-components
-// (scripts/lib/enrich/clay-tools.mjs), wired into the General and People
-// templates (G#14, G#16 and P#29; G#15, G#17, G#18 and P#30 read them), and
-// G#19 as an AI step on its own model setting (inbox_first_name_ai). Made-up
-// data only: company names holding "Tltest", addresses whose local part holds
-// "tltest" or that end in .tltest.example, and the made-up client TLTEST_A.
+// Our exact copies of Clay's normalize-company-name, extract-email-components
+// and normalize-phone-number (scripts/lib/enrich/clay-tools.mjs), wired into
+// the General and People templates (G#14, G#16, G#35, P#18 and P#29; G#15,
+// G#17, G#18, G#36, P#19 and P#30 read them), and G#19 as an AI step on its own
+// model setting (inbox_first_name_ai). Made-up data only: company names
+// holding "Tltest", addresses whose local part holds "tltest" or that end in
+// .tltest.example, the made-up client TLTEST_A, and phone numbers that are
+// 555-01xx numbers, numbers no numbering plan holds, or libphonenumber's own
+// documented examples (each case labelled NPTEST_).
 //
 //   node --env-file=.env.local scripts/test-clay-tools.mjs
 //
@@ -25,9 +28,12 @@
 //      value worked out by hand from Clay's rules
 //   B. extractEmailComponents: the 14 fields, the providers and flags, the
 //      display; the two actions
+//   B2. normalizePhoneNumber: Clay's 12 fields and the display for each kind
+//      of number Clay's answers hold (and a few they don't), each expected
+//      value written out by hand from libphonenumber's formats; its action
 //   C. wiring: the compiled templates, inbox and People rows worked in
-//      memory, toolInputs' refusals, G#19 and its model setting, what still
-//      waits, the stand-ins left as they were
+//      memory, toolInputs' refusals, G#19 and its model setting, nothing
+//      waiting, the stand-ins left as they were
 
 import pg from "pg";
 import { randomUUID } from "node:crypto";
@@ -44,8 +50,10 @@ import { PIPELINE_ACTIONS } from "./lib/enrich/pipeline-actions.mjs";
 import { MODEL_SETTINGS, settingsFrom, SETTINGS_DEFAULTS } from "./lib/enrich/settings.mjs";
 import * as standins from "./lib/enrich/tool-standins.mjs";
 import {
-  CLAY_TOOL_ACTIONS, CLAY_TOOL_BINDINGS, companyNameDisplay, emailComponentsDisplay, extractEmailComponents, normalizeCompanyName, toolInputs,
+  CLAY_TOOL_ACTIONS, CLAY_TOOL_BINDINGS, companyNameDisplay, emailComponentsDisplay, extractEmailComponents, normalizeCompanyName,
+  normalizePhoneNumber, PHONE_DEFAULT_REGION, PHONE_NOT_VALID, phoneNumberDisplay, toolInputs,
 } from "./lib/enrich/clay-tools.mjs";
+import { evaluate, makeContext } from "./lib/enrich/formula.mjs";
 
 const url = localDatabaseUrl();
 dropPaidKeys();
@@ -245,13 +253,128 @@ async function partB() {
   check("an exception is an error that is not retried", [e1, e2].every((r) => r.status === "error" && r.retryable === false && /made-up failure/.test(r.note)), JSON.stringify([e1, e2]));
 }
 
+// ── B2. normalizePhoneNumber and its action ─────────────────────────────────
+
+/** A US number's answer: the 555-01xx number +1 AAA-555-01SS, as Clay's 12 fields. */
+const usAnswer = (area, line, { input = `+1${area}-555-${line}`, ext = "" } = {}) => ({
+  number: {
+    e164: `+1${area}555${line}`,
+    input,
+    rfc3966: `tel:+1-${area}-555-${line}${ext ? `;ext=${ext}` : ""}`,
+    national: `(${area}) 555-${line}${ext ? ` ext. ${ext}` : ""}`,
+    allDigits: input.replace(/\D/g, ""),
+    significant: `${area}555${line}`,
+    international: `+1 ${area}-555-${line}${ext ? ` ext. ${ext}` : ""}`,
+  },
+  isPossible: true, regionCode: "US", countryCode: 1, successfullyParsed: true, canBeInternationallyDialled: true,
+});
+
+/** One check over several numbers: each [label, input, the fields expected (a subset of the answer), options]. */
+function phones(label, cases) {
+  const wrong = [];
+  for (const [name, input, want, opts] of cases) {
+    const got = normalizePhoneNumber(input, opts);
+    const pick = (o, path) => path.split(".").reduce((x, k) => x?.[k], o);
+    const bad = Object.entries(want).filter(([path, v]) => JSON.stringify(pick(got, path)) !== JSON.stringify(v));
+    if (bad.length) wrong.push(`${name}: ${bad.map(([path, v]) => `${path} gave ${JSON.stringify(pick(got, path))}, not ${JSON.stringify(v)}`).join(", ")}`);
+  }
+  check(label, wrong.length === 0, wrong.join("; "));
+}
+
+async function partB2() {
+  section("B2. normalizePhoneNumber (made-up numbers, labelled NPTEST_)");
+  const us = normalizePhoneNumber("+1212-555-0142");
+  check("NPTEST_us: the 12 fields of a US number, in the key order of Clay's answers",
+    JSON.stringify(us) === JSON.stringify(usAnswer("212", "0142")) && PHONE_DEFAULT_REGION === "US", JSON.stringify(us));
+  check("NPTEST_us_ext: E.164 drops the extension, the other formats keep it, allDigits has its digits",
+    JSON.stringify(normalizePhoneNumber("+1212-555-0142ext.12")) === JSON.stringify(usAnswer("212", "0142", { input: "+1212-555-0142ext.12", ext: "12" })),
+    JSON.stringify(normalizePhoneNumber("+1212-555-0142ext.12")));
+  phones("a number that is not valid keeps every format: an exchange starting 0 gets US formatting and US; too short, unformatted and not possible", [
+    ["NPTEST_us_exchange_0", "+1212-055-0142", {
+      successfullyParsed: false, isPossible: true, regionCode: "US", countryCode: 1, "number.e164": "+12120550142",
+      "number.national": "(212) 055-0142", "number.international": "+1 212-055-0142", "number.rfc3966": "tel:+1-212-055-0142",
+      "number.significant": "2120550142", "number.allDigits": "12120550142", canBeInternationallyDialled: true,
+    }],
+    ["NPTEST_us_short", "+1212-555-014", {
+      successfullyParsed: false, isPossible: false, regionCode: "US", "number.e164": "+1212555014", "number.national": "212555014",
+      "number.international": "+1 212555014", "number.rfc3966": "tel:+1-212555014",
+    }],
+  ]);
+  phones("a US toll-free number can be dialled internationally (true in every one of Clay's answers)", [
+    ["NPTEST_us_tollfree", "+1800-555-0142", { successfullyParsed: true, canBeInternationallyDialled: true, regionCode: "US", "number.national": "(800) 555-0142" }],
+  ]);
+  phones("a +1 441 number is BM, valid or not (the region by its leading digits); the library's documented example", [
+    ["NPTEST_bm", "+1441-412-3456", { successfullyParsed: true, regionCode: "BM", countryCode: 1, "number.national": "(441) 412-3456", "number.international": "+1 441-412-3456" }],
+    ["NPTEST_bm_555", "+1441-555-0142", { successfullyParsed: false, regionCode: "BM", "number.national": "(441) 555-0142" }],
+  ]);
+  phones("other countries by their own metadata (the library's documented examples): GB and IN formats", [
+    ["NPTEST_gb", "+441212345678", {
+      successfullyParsed: true, isPossible: true, regionCode: "GB", countryCode: 44, "number.e164": "+441212345678", "number.international": "+44 121 234 5678",
+      "number.national": "0121 234 5678", "number.rfc3966": "tel:+44-121-234-5678", "number.significant": "1212345678", "number.allDigits": "441212345678",
+    }],
+    ["NPTEST_in", "+918123456789", {
+      successfullyParsed: true, regionCode: "IN", countryCode: 91, "number.international": "+91 81234 56789", "number.national": "081234 56789",
+      "number.rfc3966": "tel:+91-81234-56789", "number.significant": "8123456789",
+    }],
+  ]);
+  phones("a number of a one-country code that is not valid keeps that country, and with no format pattern it comes back unformatted", [
+    ["NPTEST_ng", "+2343005550142", {
+      successfullyParsed: false, isPossible: true, regionCode: "NG", countryCode: 234, "number.international": "+234 3005550142",
+      "number.national": "3005550142", "number.rfc3966": "tel:+234-3005550142", "number.e164": "+2343005550142",
+    }],
+    ["NPTEST_za", "+272035550142", { successfullyParsed: false, isPossible: true, regionCode: "ZA", countryCode: 27, "number.international": "+27 2035550142", "number.national": "2035550142" }],
+    ["NPTEST_in_8", "+9148555014", { successfullyParsed: false, isPossible: true, regionCode: "IN", "number.international": "+91 48555014", "number.national": "48555014", "number.significant": "48555014" }],
+  ]);
+  phones("the one difference from Clay's answers: a +57 number of 10 national digits in no range is possible to this metadata (Clay said not possible to one such number)", [
+    ["NPTEST_co_10", "+579145550100", {
+      successfullyParsed: false, isPossible: true, regionCode: "CO", countryCode: 57, "number.national": "914 5550100", "number.international": "+57 914 5550100",
+      "number.rfc3966": "tel:+57-914-5550100",
+    }],
+  ]);
+  check("NPTEST_national: a number without a calling code is read as US (Clay's default region)",
+    JSON.stringify(normalizePhoneNumber("(212) 555-0142")) === JSON.stringify(usAnswer("212", "0142", { input: "(212) 555-0142" })), JSON.stringify(normalizePhoneNumber("(212) 555-0142")));
+  phones("never in Clay's answers, so the library's: an x extension, the countryCode option, a trimmed input, a number given as a number", [
+    ["NPTEST_x_ext", "212-555-0142 x12", { successfullyParsed: true, "number.national": "(212) 555-0142 ext. 12", "number.rfc3966": "tel:+1-212-555-0142;ext=12", "number.allDigits": "212555014212" }],
+    ["NPTEST_country_gb", "0121 234 5678", { successfullyParsed: true, regionCode: "GB", "number.e164": "+441212345678", "number.allDigits": "01212345678" }, { countryCode: "GB" }],
+    ["NPTEST_us_blank_country", "(212) 555-0142", { successfullyParsed: true, regionCode: "US" }, { countryCode: "" }],
+    ["NPTEST_trimmed", "  +1212-555-0142  ", { "number.input": "+1212-555-0142", "number.e164": "+12125550142", successfullyParsed: true }],
+    ["NPTEST_number", 2125550142, { "number.input": "2125550142", "number.e164": "+12125550142", successfullyParsed: true }],
+  ]);
+  const noDigits = normalizePhoneNumber("NPTEST no digits");
+  const unknownCode = normalizePhoneNumber("+999 555 0142");
+  check("never in Clay's answers: text that is no number, and an unknown calling code, keep only the input and its digits, not possible and not valid",
+    same(noDigits, { number: { input: "NPTEST no digits", allDigits: "" }, isPossible: false, regionCode: "US", successfullyParsed: false }) &&
+      same(unknownCode, { number: { input: "+999 555 0142", allDigits: "9995550142" }, isPossible: false, successfullyParsed: false }) &&
+      !Object.values(unknownCode).includes(undefined),
+    JSON.stringify([noDigits, unknownCode]));
+  check("the display: the E.164 number when valid, else Clay's own words",
+    phoneNumberDisplay(us) === "+12125550142" && phoneNumberDisplay(normalizePhoneNumber("+1212-055-0142")) === PHONE_NOT_VALID &&
+      phoneNumberDisplay(noDigits) === PHONE_NOT_VALID && PHONE_NOT_VALID === "\u274C Phone number is not valid");
+
+  section("B2. The phone action");
+  const run = (inputs) => CLAY_TOOL_ACTIONS.clay_normalize_phone_number.run({ inputs, config: {}, env: {}, db: null });
+  const done = await run({ phoneNumber: "+1212-555-0142" });
+  check("done with the whole answer, Clay's display and our note",
+    done.status === "done" && same(done.value, us) && done.display === "+12125550142" && done.note === "Clay's normalize-phone-number (exact copy)", JSON.stringify(done));
+  const invalid = await run({ phoneNumber: "+1212-055-0142" });
+  check("a number that is not valid is done too, every format kept, shown as not valid",
+    invalid.status === "done" && invalid.value.successfullyParsed === false && invalid.value.number.national === "(212) 055-0142" && invalid.display === PHONE_NOT_VALID,
+    JSON.stringify(invalid));
+  const gb = await run({ phoneNumber: "0121 234 5678", countryCode: "GB" });
+  check("its optional countryCode input is the region", gb.value?.regionCode === "GB" && gb.display === "+441212345678", JSON.stringify(gb));
+  const none = await Promise.all([undefined, null, ""].map((v) => run({ phoneNumber: v })));
+  check("none gives empty, \"No phone number\"", none.every((r) => r.status === "empty" && r.note === "No phone number"));
+  const e3 = await run({ phoneNumber: { toString() { throw new Error("made-up failure"); } } });
+  check("an exception is an error that is not retried", e3.status === "error" && e3.retryable === false && /made-up failure/.test(e3.note), JSON.stringify(e3));
+}
+
 // ── C. Wiring ───────────────────────────────────────────────────────────────
 
 const fixtureOriginals = originalsMap(originalRows(fixtureSeedExports()));
 const compiled = compileTemplates(fixtureOriginals, { settings: null });
 const col = (kind, key) => compiled[kind].find((c) => c.key === key);
 const texts = (c) => [c.formula, c.run_if, ...(c.waterfall ?? []), ...Object.values(c.inputs ?? {})].filter((x) => typeof x === "string");
-const TOOL_ACTIONS = ["clay_normalize_company_name", "clay_extract_email_components"];
+const TOOL_ACTIONS = ["clay_normalize_company_name", "clay_extract_email_components", "clay_normalize_phone_number"];
 
 function partC1() {
   section("C1. The templates compiled from the made-up originals");
@@ -281,15 +404,34 @@ function partC1() {
       g19.config.memory === "inbox_first_name_ai_v1" && same(g19.needs_env, ["OPENAI_API_KEY"]) && typeof g19.config.table_examples === "string" &&
       g19.run_if === "!!{{general_email}} && {{email_valid}} === true && !!{{guessed_name}}" && g19.clay_field_id === fixtureId("inboxes", 19),
     JSON.stringify({ action: g19.action, config: { ...g19.config, answer: undefined, table_examples: undefined }, run_if: g19.run_if }));
-  const phone = [col("inboxes", "normalize_phone_number"), col("people", "normalize_phone_number")];
-  check("P#18 and G#35 (normalize-phone-number) still wait", phone.every((c) => c.action === "waiting" && c.run_if === null && c.config.clay_action === "normalize-phone-number" && /normalize-phone-number/.test(c.config.why)));
+  const g35 = col("inboxes", "normalize_phone_number");
+  const p18 = col("people", "normalize_phone_number");
+  check("G#35 and P#18 run our copy of normalize-phone-number, free and local, each with its Clay field id",
+    [g35, p18].every((c) => c.kind === "action" && c.action === "clay_normalize_phone_number" && c.provider === "Clay tool (exact copy)" && c.needs_env.length === 0 && same(c.config, {}) &&
+      texts(c).every((t) => !/\{\{\s*f_/.test(t))) && g35.clay_field_id === fixtureId("inboxes", 35) && p18.clay_field_id === fixtureId("people", 18),
+    JSON.stringify([g35, p18].map((c) => ({ action: c.action, provider: c.provider, config: c.config }))));
+  check("their inputs are the originals' own: phoneNumber only (the optional countryCode is unset)",
+    same(g35.inputs, { phoneNumber: "{{phone}}" }) && same(p18.inputs, { phoneNumber: "{{company_phone_number}}" }), JSON.stringify([g35.inputs, p18.inputs]));
+  check("their run conditions are the originals', verbatim: G#35 on the phone (G#34), P#18 on the company phone (P#17) and SAFE TO RUN",
+    g35.run_if === "!!{{phone}}" && p18.run_if === "!!{{company_phone_number}} && {{safe_to_run}} === true", JSON.stringify([g35.run_if, p18.run_if]));
+  const ctx = makeContext();
+  const runs = (c, scope) => Boolean(evaluate(ctx, c.run_if, scope));
+  check("... worked out: G#35 runs on any phone, P#18 only with SAFE TO RUN true",
+    runs(g35, { phone: "+1212-555-0142" }) && !runs(g35, { phone: "" }) && !runs(g35, {}) &&
+      runs(p18, { company_phone_number: "+1212-555-0142", safe_to_run: true }) && !runs(p18, { company_phone_number: "+1212-555-0142", safe_to_run: false }) &&
+      !runs(p18, { company_phone_number: "+1212-555-0142" }) && !runs(p18, { company_phone_number: "", safe_to_run: true }));
+  check("G#36 and P#19 read its national format, then \"there\"",
+    same(col("inboxes", "use_phone_number").waterfall, ["{{normalize_phone_number}}?.number?.national", "\"there\""]) &&
+      same(col("people", "use_phone_number").waterfall, ["{{normalize_phone_number}}?.number?.national", "\"there\""]),
+    JSON.stringify([col("inboxes", "use_phone_number").waterfall, col("people", "use_phone_number").waterfall]));
   const waiting = Object.values(compiled).flat().filter((c) => c.action === "waiting").map((c) => c.key);
-  check("nothing else waits", same([...new Set(waiting)], ["normalize_phone_number"]) && waiting.length === 2, waiting.join(", "));
+  check("nothing waits any more", waiting.length === 0, waiting.join(", "));
 
   section("C2. Registration");
-  check("both actions are in PIPELINE_ACTIONS (last) and ACTIONS, free and local (cache false)",
-    same(Object.keys(PIPELINE_ACTIONS).slice(-2), TOOL_ACTIONS) && TOOL_ACTIONS.every((a) => ACTIONS[a] === CLAY_TOOL_ACTIONS[a] && ACTIONS[a].cache === false));
-  check("each names the bindings it needs", same(CLAY_TOOL_BINDINGS, { clay_normalize_company_name: ["companyName"], clay_extract_email_components: ["email"] }));
+  check("the three actions are in PIPELINE_ACTIONS (last) and ACTIONS, free and local (cache false)",
+    same(Object.keys(PIPELINE_ACTIONS).slice(-3), TOOL_ACTIONS) && TOOL_ACTIONS.every((a) => ACTIONS[a] === CLAY_TOOL_ACTIONS[a] && ACTIONS[a].cache === false));
+  check("each names the bindings it needs",
+    same(CLAY_TOOL_BINDINGS, { clay_normalize_company_name: ["companyName"], clay_extract_email_components: ["email"], clay_normalize_phone_number: ["phoneNumber"] }));
   check("no action name starts with normalize_ (the stand-ins' names, which no template column may use)",
     !Object.keys(ACTIONS).some((a) => a.startsWith("normalize_") && a !== "normalize_url") && !ACTIONS.normalize_company_name && !ACTIONS.normalize_phone_number);
   const src = ["inbox-template.mjs", "people-template.mjs", "company-template-v2.mjs"].map((f) => readFileSync(new URL(`./lib/enrich/${f}`, import.meta.url), "utf8")).join("\n");
@@ -318,6 +460,12 @@ function partC1() {
   check("a G#16 whose email reads a column the template does not map: refused",
     thrown(() => toolInputs(unknown, "G#16", refMap(unknown, "inboxes", INBOX_REFS), "clay_extract_email_components")) === "G#16 reads a column this template does not map" &&
       thrown(() => compileTemplates(unknown)) === "G#16 reads a column this template does not map");
+  const noPhone = without("inboxes", 35, (s) => { s.inputsBinding = s.inputsBinding.filter((b) => b.name !== "phoneNumber"); });
+  const strayPhone = without("people", 18, (s) => { s.inputsBinding = s.inputsBinding.map((b) => (b.name === "phoneNumber" ? { ...b, formulaText: "{{f_tltest_nowhere}}" } : b)); });
+  check("a G#35 with no phoneNumber binding, or a P#18 whose phoneNumber reads a column the template does not map: refused, and nothing compiles from either",
+    thrown(() => toolInputs(noPhone, "G#35", refMap(noPhone, "inboxes", INBOX_REFS), "clay_normalize_phone_number")) === "G#35: the original has no phoneNumber input" &&
+      thrown(() => compileTemplates(noPhone)) === "G#35: the original has no phoneNumber input" &&
+      thrown(() => compileTemplates(strayPhone)) === "P#18 reads a column this template does not map");
   check("an action that is not one of the tools: refused", /is not one of the Clay tools/.test(thrown(() => toolInputs(fixtureOriginals, "G#14", own, "normalize_company_name"))));
   check("the made-up originals themselves compile (the refusals came from the edits)", compiled.inboxes.length > 40 && compiled.people.length > 40);
 }
@@ -364,7 +512,10 @@ async function partC3(settings) {
   const inbox = await tableDef(pool, ids.inboxes);
   const people = await tableDef(pool, ids.people);
   const storedCol = (def, key) => def.columns.find((c) => c.key === key);
-  const pairs = [[inbox, "inboxes", "normalize_company_name"], [inbox, "inboxes", "identify_email_type_and_extract_company_domain_from_email"], [people, "people", "normalize_company_name"]];
+  const pairs = [
+    [inbox, "inboxes", "normalize_company_name"], [inbox, "inboxes", "identify_email_type_and_extract_company_domain_from_email"], [inbox, "inboxes", "normalize_phone_number"],
+    [people, "people", "normalize_company_name"], [people, "people", "normalize_phone_number"],
+  ];
   // jsonb keeps no key order, so the inputs are compared with their keys sorted.
   check("the stored tool columns are the compiled ones (action, inputs, run condition), through jsonb",
     ids.variant === variant && variant === variantName(A) &&
@@ -376,10 +527,14 @@ async function partC3(settings) {
   net.openai.set("G19", { response: "not a name" });
   const email = at("info", "plover");
   net.reoon.set(email, "safe");
-  const base = { general_email: email, company: "PLOVER TLTEST CLEANING LLC", client_tag: A, domain: `plover-${RUN}.${HOST}`, website: `plover-${RUN}.${HOST}`, city: "Tltestville", state: "IL" };
+  const base = {
+    general_email: email, company: "PLOVER TLTEST CLEANING LLC", client_tag: A, domain: `plover-${RUN}.${HOST}`, website: `plover-${RUN}.${HOST}`, city: "Tltestville", state: "IL",
+    phone: "+1217-555-0142",
+  };
   const r1 = await work(inbox, base, settings);
   const g14 = r1.cell("normalize_company_name");
   const g16 = r1.cell("identify_email_type_and_extract_company_domain_from_email");
+  const g35 = r1.cell("normalize_phone_number");
   check("G#14: Clay's answer and display, worked out locally (no run record)",
     g14?.status === "done" && same(g14.value, { original_name: "PLOVER TLTEST CLEANING LLC", normalized_name: "Plover Tltest Cleaning" }) &&
       g14.display === `${CHECK_MARK} Plover Tltest Cleaning` && g14.runs === 0 && !r1.runs.some((x) => x.column_key === "normalize_company_name"),
@@ -390,6 +545,10 @@ async function partC3(settings) {
       !r1.runs.some((x) => x.column_key === "identify_email_type_and_extract_company_domain_from_email"),
     JSON.stringify(g16));
   check("G#17 and G#18 hold the username and the guessed name", r1.cell("username")?.value === "info" && r1.cell("guessed_name")?.value === "Info");
+  check("G#35: Clay's answer and display for the row's phone, worked out locally (no run record); G#36 holds its national format",
+    g35?.status === "done" && same(g35.value, normalizePhoneNumber("+1217-555-0142")) && g35.value.number.e164 === "+12175550142" && g35.display === "+12175550142" &&
+      g35.runs === 0 && !r1.runs.some((x) => x.column_key === "normalize_phone_number") && r1.cell("use_phone_number")?.value === "(217) 555-0142",
+    JSON.stringify({ g35, g36: r1.cell("use_phone_number") }));
   check("G#19 runs on its own setting: skipped while its examples are not sent, else the planned answer", g19Settled(r1.cell("first_name_ai")), JSON.stringify(r1.cell("first_name_ai")));
   check("G#20 falls to its second step: \"<normalized name> Team\"", r1.cell("use_first_name")?.value === "Plover Tltest Cleaning Team", JSON.stringify(r1.cell("use_first_name")));
   check("the row is done: approved, nothing in error or waiting",
@@ -406,6 +565,22 @@ async function partC3(settings) {
       r2.cell("normalized_company_name")?.value === "Quillon Tltest Care" && r2.cell("use_first_name")?.value === "Quillon Tltest Care Team" &&
       r2.cell("inbox_outcome")?.value === "Rejected by Reoon" && r2.errors === 0 && r2.needsKey === 0,
     JSON.stringify({ g16: r2.cell("identify_email_type_and_extract_company_domain_from_email"), g20: r2.cell("use_first_name")?.value, outcome: r2.cell("inbox_outcome")?.value }));
+  check("... G#35 still runs: its run condition is the phone alone, as in Clay",
+    r2.cell("normalize_phone_number")?.status === "done" && r2.cell("use_phone_number")?.value === "(217) 555-0142", JSON.stringify(r2.cell("normalize_phone_number")));
+  const noPhone = at("sales", "nophone");
+  net.reoon.set(noPhone, "safe");
+  const r5 = await work(inbox, { ...base, general_email: noPhone, phone: "" }, settings);
+  check("no phone: G#35 is not run, so G#36 falls to \"there\"",
+    r5.cell("normalize_phone_number")?.status === "skipped" && /Run condition not met/.test(r5.cell("normalize_phone_number")?.note ?? "") &&
+      r5.cell("use_phone_number")?.value === "there" && r5.errors === 0,
+    JSON.stringify({ g35: r5.cell("normalize_phone_number"), g36: r5.cell("use_phone_number") }));
+  const badPhone = at("front", "badphone");
+  net.reoon.set(badPhone, "safe");
+  const r6 = await work(inbox, { ...base, general_email: badPhone, phone: "+1217-055-0142" }, settings);
+  check("a phone that is not valid: G#35 is done, shown as not valid, and G#36 still reads its national format, as in Clay",
+    r6.cell("normalize_phone_number")?.status === "done" && r6.cell("normalize_phone_number")?.display === PHONE_NOT_VALID &&
+      r6.cell("normalize_phone_number")?.value?.successfullyParsed === false && r6.cell("use_phone_number")?.value === "(217) 055-0142" && r6.errors === 0,
+    JSON.stringify({ g35: r6.cell("normalize_phone_number"), g36: r6.cell("use_phone_number") }));
   const noCompany = at("team", "nocompany");
   net.reoon.set(noCompany, "safe");
   const r3 = await work(inbox, { ...base, general_email: noCompany, company: "" }, settings);
@@ -431,7 +606,21 @@ async function partC3(settings) {
     p.cell("safe_to_run")?.value === true && p29?.status === "done" && p29.value?.normalized_name === "Plover Tltest Cleaning" &&
       p29.display === `${CHECK_MARK} Plover Tltest Cleaning` && p29.runs === 0 && p.cell("normalized_company_name")?.value === "Plover Tltest Cleaning",
     JSON.stringify({ safe: p.cell("safe_to_run"), p29, p30: p.cell("normalized_company_name") }));
-  check("P#18 still waits on the row", p.cell("normalize_phone_number")?.status === "skipped" && /normalize-phone-number/.test(p.cell("normalize_phone_number")?.note ?? ""));
+  check("no company phone: P#18 is not run, so P#19 falls to \"there\"",
+    p.cell("normalize_phone_number")?.status === "skipped" && /Run condition not met/.test(p.cell("normalize_phone_number")?.note ?? "") && p.cell("use_phone_number")?.value === "there",
+    JSON.stringify({ p18: p.cell("normalize_phone_number"), p19: p.cell("use_phone_number") }));
+  const pp = await work(people, {
+    find_people_from_linkedin_company_url: source, client_tag: A, found_by: "aiark", stage: "no_email", person_country: "US", written_company_phone_number: "+1312-555-0142",
+  }, settings);
+  const p18 = pp.cell("normalize_phone_number");
+  const inError = (r) => [...r.cells].filter(([, c]) => c.status === "error").map(([k, c]) => `${k}: ${c.note}`);
+  check("a company phone (P#17, the written value) and SAFE TO RUN: P#18 gives Clay's answer and display locally, P#19 its national format",
+    pp.cell("company_phone_number")?.value === "+1312-555-0142" && pp.cell("safe_to_run")?.value === true && p18?.status === "done" &&
+      same(p18.value, normalizePhoneNumber("+1312-555-0142")) && p18.display === "+13125550142" && p18.runs === 0 &&
+      !pp.runs.some((x) => x.column_key === "normalize_phone_number") && pp.cell("use_phone_number")?.value === "(312) 555-0142",
+    JSON.stringify({ p19: pp.cell("use_phone_number"), safe: pp.cell("safe_to_run")?.value, p17: pp.cell("company_phone_number")?.value, p18 }));
+  check("... and the phone adds no error: the same cells fail as on the row without one (TLTEST_A has no targeting rules)",
+    same(inError(pp), inError(p)) && !inError(pp).some((e) => /phone/.test(e)), JSON.stringify({ p: inError(p), pp: inError(pp) }));
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────
@@ -462,6 +651,7 @@ const t0 = Date.now();
 try {
   await partA();
   await partB();
+  await partB2();
   partC1();
   await partC2();
 

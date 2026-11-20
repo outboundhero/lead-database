@@ -183,7 +183,7 @@ export const PEOPLE_COLUMNS = Object.freeze([
   { key: "final_validated_email", from: "P#15", kind: "waterfall" },
   { key: "push_to_email_waterfall", from: "P#16", kind: "formula" },
   { key: "company_phone_number", from: "P#17", kind: "waterfall", written: true },
-  { key: "normalize_phone_number", from: "P#18", kind: "action", action: "waiting", note: "Clay's normalize-phone-number: waiting for the original (D38); a stand-in only with the owner's OK." },
+  { key: "normalize_phone_number", from: "P#18", kind: "action", action: "clay_normalize_phone_number", provider: "Clay tool (exact copy)", note: "Clay's normalize-phone-number, our exact copy (clay-tools.mjs). P#19 reads its national format." },
   { key: "use_phone_number", from: "P#19", kind: "waterfall" },
   { key: "city", from: "P#20", kind: "waterfall", written: true },
   { key: "use_city", from: "P#21", kind: "formula" },
@@ -306,11 +306,6 @@ export function sourceObject(p) {
   };
 }
 
-/** Waiting columns: why each waits (D38). */
-const WAITS = {
-  normalize_phone_number: "Clay's normalize-phone-number tool: its rules are not in the export (D38). A named stand-in comes only with the owner's OK.",
-};
-
 /** Names of our own columns and inputs (from: null). */
 const NAMES = {
   in_area: "Inside the client's area",
@@ -403,11 +398,9 @@ export function peopleColumns(originals, tracks = null, { companyKeys = ORIGINAL
       rows.push(compileColumn({ ...spec, name: NAMES[spec.key] ?? spec.key, formula, description: spec.note ?? (spec.key === "person_outcome" ? `The person's result.${trackNote}` : null), provider: spec.key === "add_to_database" ? "Promotion" : spec.provider }, originals, { own }));
       continue;
     }
-    const extra = spec.action === "waiting"
-      ? { why: WAITS[spec.key] }
-      : spec.action && Object.hasOwn(CLAY_TOOL_ACTIONS, spec.action)
-        ? { inputs: toolInputs(originals, spec.from, own, spec.action) }
-        : spec.key === "current_employer" ? { memory_days: "website" } : {};
+    const extra = spec.action && Object.hasOwn(CLAY_TOOL_ACTIONS, spec.action)
+      ? { inputs: toolInputs(originals, spec.from, own, spec.action) }
+      : spec.key === "current_employer" ? { memory_days: "website" } : {};
     rows.push(compileColumn({ ...spec, ...extra, description: spec.note }, originals, { own }));
   }
   const record = companyRecordMap(originals, rows, companyKeys);
