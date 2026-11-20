@@ -26,7 +26,7 @@
 
 import path from "node:path";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { variantName } from "./lib/enrich/templates.mjs";
 
@@ -93,6 +93,20 @@ async function currentWorkspace() {
 
 class Stop extends Error {}
 
+/**
+ * The exports hold the clients' credentials as Clay answers them (API keys in
+ * the HTTP columns' headers and query strings), so every folder is made mode
+ * 0700 and every file mode 0600: readable by this user only.
+ */
+function privateDir(dir) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+}
+function privateFile(file, text) {
+  writeFileSync(file, text, { mode: 0o600 });
+  chmodSync(file, 0o600); // a file there before keeps its mode otherwise
+}
+
 const ids = flag("ids");
 const out = flag("out");
 const pauseMs = Math.max(0, Number(flag("pause-ms") ?? 300) || 0);
@@ -123,6 +137,7 @@ if (!active) {
   process.exit(1);
 }
 console.log(`Active workspace ${active}: only its tables are read; the CLI is never switched here.`);
+console.log("The files written hold the clients' credentials (API keys in the HTTP columns): keep them private (folders 0700, files 0600, never copied).");
 
 const variants = entries.map((e) => variantName(String(e?.tag ?? "")));
 const shared = new Map();
@@ -151,8 +166,9 @@ async function fetchTable(tableId, file) {
       if (ws != null && String(ws) !== active) throw new Stop(`A table answered from workspace ${ws}, not ${active}: the CLI's pointer was moved by someone else`);
       if (ws == null && (await currentWorkspace()) !== active) throw new Stop(`The CLI's active workspace is no longer ${active}: the pointer was moved by someone else`);
       if (!Array.isArray(body?.data)) return { reason: "the answer has no column list" };
-      mkdirSync(path.dirname(file), { recursive: true });
-      writeFileSync(file, r.stdout);
+      privateDir(path.resolve(out));
+      privateDir(path.dirname(file));
+      privateFile(file, r.stdout);
       return { file };
     }
     const code = r.error?.code ?? `exit ${r.code}`;
@@ -209,9 +225,9 @@ try {
   process.exit(2);
 }
 
-mkdirSync(path.resolve(out), { recursive: true });
+privateDir(path.resolve(out));
 const planFile = path.resolve(out, "plan.json");
-writeFileSync(planFile, `${JSON.stringify(plan, null, 2)}\n`);
+privateFile(planFile, `${JSON.stringify(plan, null, 2)}\n`);
 console.log(
   `${totals.entries} clients: ${totals.read} read here (${totals.tables} tables, ${totals.failed} not read, ${totals.retried} retries), ` +
     `${totals.elsewhere} in another workspace (not read here), ${totals.unnamed} with no variant name of their own (not read).`
