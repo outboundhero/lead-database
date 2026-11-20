@@ -31,7 +31,7 @@ export const MINIMUM_RANGE = Object.freeze({ min: 1, max: 100_000 });
 /** How long the refresh lets one client's scan run. The route uses less (a person is waiting). */
 export const COVERAGE_TIMEOUT_MS = 160_000;
 
-const ELIGIBLE =
+export const ELIGIBLE =
   "l.email is not null and l.email <> '' and l.is_bounced = false and l.is_suppressed = false " +
   "and (l.validation_status in ('valid','catch_all') or l.validation_status is null)";
 const esc = (v) => `'${String(v).replace(/'/g, "''")}'`;
