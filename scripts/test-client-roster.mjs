@@ -264,7 +264,7 @@ await rolledBack(async (c) => {
     contactable: statByTag.get(r.tag) ?? null,
   }));
   old.sort(byOldRule);
-  const withoutName = tags.map(({ name: _name, ...rest }) => rest);
+  const withoutName = tags.map((t) => { const rest = { ...t }; delete rest.name; return rest; });
   check(`every client exactly as the old route gave it, in the same order (${old.length} clients)`, same(withoutName, old),
     JSON.stringify(withoutName.find((t, i) => !same(t, old[i]))));
   const { rows: names } = await c.query(`SELECT tag, name FROM client_tags`);
