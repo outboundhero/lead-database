@@ -41,6 +41,7 @@ import { campaignsForLead } from "./lib/push-side.mjs";
 import { espBucket } from "./lib/esp-bucket.mjs";
 import { eligibilitySql, enqueueLeadCompanies, fitCheckOn, FIT_SKIP } from "./lib/enrich/fit-push.mjs";
 import { isSharePush } from "./lib/overlap-topup.mjs";
+import { planTarget, inSequenceElsewhere, attachBody, verifyForced, itemOutcome } from "./lib/push-attach.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname });
 
 const env = process.env;
@@ -77,6 +78,22 @@ const MAX_ATTEMPTS = 3;
 const ATTACH_CHUNK = 100;
 const GATHER_CHUNK = 5000;
 const ONCE = env.PUSH_WORKER_ONCE === "1";
+// PARALLEL SENDING (2026-11-20, the client's decision; scripts/lib/push-attach.mjs).
+// Attach with Bison's allow_parallel_sending, so a lead goes in even while it is
+// in sequence in ANOTHER client's campaign on the install, as the Clay tables
+// this push replaced always did. Without it Bison leaves those leads out while
+// still answering 2xx: ~284k of the 18 Nov pushes' "sent" leads never landed.
+// A lead in sequence in the SAME client's own live campaign is never forced.
+// PUSH_ALLOW_PARALLEL=0 turns forcing off; the leads it would have forced are
+// then recorded as skipped, with the campaign holding them named.
+const ALLOW_PARALLEL = env.PUSH_ALLOW_PARALLEL !== "0";
+// How many forced leads per attach chunk are read back after a 2xx (draft and
+// paused campaigns only: Bison syncs an active campaign within ~5 minutes, so
+// an immediate read could miss a lead that is on its way). 0 = no check.
+// NB Number(undefined) is NaN; guard it, as for PUSH_BATCH_FOCUS above.
+const rawSpot = Number(env.PUSH_SPOT_CHECK);
+const SPOT_CHECK = Math.max(0, Math.min(10,
+  env.PUSH_SPOT_CHECK != null && env.PUSH_SPOT_CHECK !== "" && Number.isFinite(rawSpot) ? Math.floor(rawSpot) : 2));
 
 if (!env.DATABASE_URL) {
   console.error("DATABASE_URL is not set");
@@ -336,7 +353,8 @@ async function createLead(auth, lead, tags) {
     try {
       const json = await bison(auth, "POST", "/api/leads", leadPayload(lead, tags, auth.domain));
       const id = json?.data?.id ?? json?.id ?? json?.lead?.id; // defensive id read
-      if (id != null) return String(id);
+      // lead: null = created just now, so it is in no campaign (see planTarget).
+      if (id != null) return { id: String(id), lead: null };
       throw new Error(`create ${lead.email}: could not read Bison lead id from response`);
     } catch (e) {
       // NB the message continues after the name ("... named subcategory. Please
@@ -351,7 +369,47 @@ async function createLead(auth, lead, tags) {
   const hit = await findLeadByEmail(auth, lead.email, 6);
   if (!hit) throw new Error(`lead ${lead.email} exists in Bison but could not be fetched by email`);
   await bison(auth, "PUT", `/api/leads/${hit.id}`, leadPayload(lead, tags, auth.domain)); // refresh fields + tags
-  return String(hit.id);
+  // The existing lead as Bison holds it (its campaigns did not change with the PUT).
+  return { id: String(hit.id), lead: hit };
+}
+
+// The lead as Bison holds it NOW, by its id on this install: status and
+// lead_campaign_data, for planTarget and the spot check. null when Bison has no
+// such lead.
+async function readLeadById(auth, id) {
+  try {
+    const json = await bison(auth, "GET", `/api/leads/${encodeURIComponent(id)}`);
+    return json?.data ?? json ?? null;
+  } catch (e) {
+    if (e.status === 404) return null;
+    throw e;
+  }
+}
+
+// { name, status } of a campaign on one install, or null when Bison no longer
+// has it. Used to tell the client's own campaigns from other clients' (by the
+// tag the name starts with) and a finished campaign from a live one. Cached ten
+// minutes per install and id (in-flight reads shared); a failed read is not
+// cached, and throws to the caller, whose item is then retried.
+const CAMPAIGN_INFO_TTL_MS = 10 * 60_000;
+const campaignInfoCache = new Map(); // `${domain}|${id}` -> { at, p }
+function campaignInfo(auth, id) {
+  const k = `${auth.domain}|${id}`;
+  const hit = campaignInfoCache.get(k);
+  if (hit && Date.now() - hit.at < CAMPAIGN_INFO_TTL_MS) return hit.p;
+  const p = (async () => {
+    try {
+      const json = await bison(auth, "GET", `/api/campaigns/${encodeURIComponent(id)}`);
+      const d = json?.data ?? json ?? {};
+      return { name: d.name ?? null, status: d.status ?? null };
+    } catch (e) {
+      if (e.status === 404) return null;
+      throw e;
+    }
+  })();
+  campaignInfoCache.set(k, { at: Date.now(), p });
+  p.catch(() => campaignInfoCache.delete(k));
+  return p;
 }
 
 // ---------------------------------------------------------------------------
@@ -787,6 +845,20 @@ async function pushCycle() {
   const toAttach = new Map();     // `${domain}|${campaignId}` -> { auth, campaignId, entries: [{item, leadId}] }
   const finals = [];              // items that reached the attach phase
   const keyOf = (i) => `${i.batch_id}|${i.lead_id}`;
+  // Per-item tallies across this cycle's targets. Declared before processItem,
+  // which now records "already in the campaign" and "Bison will not add it"
+  // itself, before any attach call (scripts/lib/push-attach.mjs).
+  const okByItem = new Map();      // item key -> Set of campaign ids the lead is now in
+  const blockedByItem = new Map(); // item key -> Map campaign id -> why it was not added
+  const errByItem = new Map();     // item key -> last attach error
+  const markOk = (item, campaignId) => {
+    if (!okByItem.has(keyOf(item))) okByItem.set(keyOf(item), new Set());
+    okByItem.get(keyOf(item)).add(String(campaignId));
+  };
+  const markBlocked = (item, campaignId, reason) => {
+    if (!blockedByItem.has(keyOf(item))) blockedByItem.set(keyOf(item), new Map());
+    blockedByItem.get(keyOf(item)).set(String(campaignId), reason);
+  };
 
   // Per-cycle cache of each client tag's eligibility WHERE clause. Rebuilt
   // every cycle so targeting-config edits apply to in-flight batches.
@@ -972,6 +1044,9 @@ async function pushCycle() {
       return;
     }
     const bisonIds = { ...(item.bison_ids ?? {}) };
+    // The lead as Bison holds it, per install: null = created by this push (in
+    // no campaign yet). planTarget reads its status and campaigns.
+    const bisonLeads = {};
     try {
       // One create per DISTINCT instance involved (Bison lead ids are
       // per-workspace); crash recovery reuses any previously-persisted id.
@@ -988,9 +1063,18 @@ async function pushCycle() {
           const existing = await findLeadByEmail(auth, lead.email, 1);
           if (existing && existing.id != null) {
             bisonIds[auth.domain] = String(existing.id);
+            bisonLeads[auth.domain] = existing;
           } else {
-            bisonIds[auth.domain] = await createLead(auth, lead, tagsForLead(batch.client_tag, lead.tags));
+            const made = await createLead(auth, lead, tagsForLead(batch.client_tag, lead.tags));
+            bisonIds[auth.domain] = made.id;
+            bisonLeads[auth.domain] = made.lead;
           }
+        } else if (!(auth.domain in bisonLeads)) {
+          // A retry with the id already known: read the lead again, so the plan
+          // sees what Bison holds NOW. An attempt that attached but never
+          // finalized left it IN the campaign, and re-attaching that would come
+          // back as Bison's blanket "in other sequences" 422.
+          bisonLeads[auth.domain] = await readLeadById(auth, bisonIds[auth.domain]);
         }
       }
       // Persist BEFORE any attach — crash recovery must never duplicate creates.
@@ -1003,9 +1087,20 @@ async function pushCycle() {
       for (const t of targets) {
         if (attached.has(String(t.id))) continue; // already attached on an earlier attempt
         const auth = authFor(t.instance_url);
+        const bisonLead = bisonLeads[auth.domain] ?? null;
+        // Names and states of the campaigns the lead is in sequence in, so
+        // planTarget can tell this client's own live campaigns from the rest.
+        const info = new Map();
+        for (const id of inSequenceElsewhere(bisonLead, t.id)) info.set(id, await campaignInfo(auth, id));
+        const plan = planTarget({
+          bisonLead, campaignId: t.id, clientTag: batch.client_tag,
+          campaignInfo: (id) => info.get(String(id)) ?? null, force: ALLOW_PARALLEL,
+        });
+        if (plan.action === "present") { markOk(item, t.id); continue; }            // nothing to attach
+        if (plan.action === "blocked") { markBlocked(item, t.id, plan.reason); continue; } // recorded, never sent
         const key = `${auth.domain}|${t.id}`;
         if (!toAttach.has(key)) toAttach.set(key, { auth, campaignId: t.id, entries: [] });
-        toAttach.get(key).entries.push({ item, leadId: bisonIds[auth.domain] });
+        toAttach.get(key).entries.push({ item, leadId: bisonIds[auth.domain], forced: plan.force === true });
       }
       finals.push(item);
     } catch (e) {
@@ -1071,17 +1166,7 @@ async function pushCycle() {
   // separate genuinely-blocked leads (a terminal Bison business rule, not a
   // failure) from collateral chunk-mates.
   const BISON_BLOCKED_RE = /No leads were added|other sequences|previously bounced|unsubscribed/i;
-  const okByItem = new Map();      // item key -> Set of campaign ids attached this cycle
-  const blockedByItem = new Map(); // item key -> Set of campaign ids Bison refused
-  const errByItem = new Map();     // item key -> last attach error
-  const markOk = (item, campaignId) => {
-    if (!okByItem.has(keyOf(item))) okByItem.set(keyOf(item), new Set());
-    okByItem.get(keyOf(item)).add(String(campaignId));
-  };
-  const markBlocked = (item, campaignId) => {
-    if (!blockedByItem.has(keyOf(item))) blockedByItem.set(keyOf(item), new Set());
-    blockedByItem.get(keyOf(item)).add(String(campaignId));
-  };
+  const BISON_REFUSED = "Bison refused it: in another sequence, previously bounced, or unsubscribed there";
   mark("items", tItems);
   const tAttach = Date.now();
   // Campaigns are attached CONCURRENTLY. They are independent, frequently on
@@ -1092,8 +1177,33 @@ async function pushCycle() {
       const chunk = entries.slice(i, i + ATTACH_CHUNK).filter((e) => !fatalBatches.has(e.item.batch_id));
       if (chunk.length === 0) continue;
       try {
-        await bison(auth, "POST", `/api/campaigns/${campaignId}/leads/attach-leads`, { lead_ids: chunk.map((e) => e.leadId) });
-        for (const { item } of chunk) markOk(item, campaignId);
+        await bison(auth, "POST", `/api/campaigns/${campaignId}/leads/attach-leads`,
+          attachBody(chunk.map((e) => e.leadId), ALLOW_PARALLEL));
+        // A 2xx is not proof: Bison leaves out what it will not add and still
+        // answers 2xx. Leads planTarget expected to land without forcing do
+        // (every one checked live, 2026-11-20). Forced ones are read back, a
+        // couple per chunk, on campaigns that update at once.
+        const forced = chunk.filter((e) => e.forced);
+        let missing = null;
+        if (forced.length && SPOT_CHECK > 0) {
+          const target = await campaignInfo(auth, campaignId).catch(() => null);
+          const state = String(target?.status ?? "").toLowerCase();
+          if (target && state !== "active") {
+            const v = await verifyForced({
+              leadIds: forced.map((e) => e.leadId), campaignId, sample: SPOT_CHECK,
+              getLead: (id) => readLeadById(auth, id).catch(() => undefined),
+            });
+            missing = v.missing;
+            if (missing.size) {
+              console.warn(`attach ${auth.domain} #${campaignId}: ${missing.size} of ${forced.length} forced lead(s) ` +
+                `not in the campaign after a 2xx (read ${v.read})`);
+            }
+          }
+        }
+        for (const e of chunk) {
+          if (missing?.has(String(e.leadId))) markBlocked(e.item, campaignId, "Bison did not add it, even with parallel sending on");
+          else markOk(e.item, campaignId);
+        }
       } catch (e) {
         if (e.status === 401 || e.status === 403) {
           for (const { item } of chunk) {
@@ -1111,10 +1221,11 @@ async function pushCycle() {
           // time to find them. Same calls, no longer in series.
           await runPool(chunk, CONCURRENCY, async (entry) => {
             try {
-              await bison(auth, "POST", `/api/campaigns/${campaignId}/leads/attach-leads`, { lead_ids: [entry.leadId] });
+              await bison(auth, "POST", `/api/campaigns/${campaignId}/leads/attach-leads`,
+                attachBody([entry.leadId], ALLOW_PARALLEL));
               markOk(entry.item, campaignId);
             } catch (e2) {
-              if (e2.status === 422 && BISON_BLOCKED_RE.test(e2.message)) markBlocked(entry.item, campaignId);
+              if (e2.status === 422 && BISON_BLOCKED_RE.test(e2.message)) markBlocked(entry.item, campaignId, BISON_REFUSED);
               else errByItem.set(keyOf(entry.item), e2);
             }
           });
@@ -1137,20 +1248,19 @@ async function pushCycle() {
       await releaseItems([item], token);
       return;
     }
-    const attached = new Set(item.attached_ids ?? []);
+    const attached = new Set((item.attached_ids ?? []).map(String));
     for (const cid of okByItem.get(keyOf(item)) ?? []) attached.add(cid);
-    const blocked = blockedByItem.get(keyOf(item)) ?? new Set();
+    const blocked = blockedByItem.get(keyOf(item)) ?? new Map();
     const attachedArr = [...attached];
-    // 'done' = every target either attached or terminally refused by Bison's
-    // business rules (already in another sequence / bounced / unsubscribed
-    // THERE) — retrying a refusal never succeeds.
-    const done = item.target_campaigns.every((t) => attached.has(String(t.id)) || blocked.has(String(t.id)));
-    if (done && attached.size > 0) {
-      await setItem(item, token, { status: "sent", attempts: 0, attached_ids: attachedArr, claimed_at: null,
-        error: blocked.size ? `partial: Bison refused campaigns [${[...blocked].join(",")}] (in another sequence / bounced / unsubscribed)` : null });
-    } else if (done) {
-      await setItem(item, token, { status: "skipped", attached_ids: attachedArr, claimed_at: null,
-        error: "Bison refused all target campaigns: lead is in another sequence, previously bounced, or unsubscribed on that instance" });
+    // Done = every target either holds the lead or will not take it (bounced,
+    // unsubscribed, in the same client's other live sequence, or refused by
+    // Bison) — retrying a refusal never succeeds. The reason is recorded per
+    // campaign, so Exports says why (scripts/lib/push-attach.mjs itemOutcome).
+    const outcome = itemOutcome({ targets: item.target_campaigns, attached, blocked });
+    if (outcome?.status === "sent") {
+      await setItem(item, token, { status: "sent", attempts: 0, attached_ids: attachedArr, claimed_at: null, error: outcome.error });
+    } else if (outcome?.status === "skipped") {
+      await setItem(item, token, { status: "skipped", attached_ids: attachedArr, claimed_at: null, error: outcome.error });
     } else {
       await failOrRetry(item, token, errByItem.get(keyOf(item)) ?? new Error("attach incomplete"), { attached_ids: attachedArr });
     }
@@ -1177,6 +1287,7 @@ console.log(
   `poll ${POLL_MS}ms, stale ${STALE_MIN}m, refresh ${REFRESH_MS / 1000}s, ` +
   `focus ${BATCH_FOCUS === 0 ? "all batches" : `${BATCH_FOCUS} per install`}, ` +
   `owns ${INSTANCE ?? (SPAN_ONLY ? "batches spanning 2 installs" : "every install")}, ` +
+  `parallel sending ${ALLOW_PARALLEL ? "on" : "off"}, spot check ${SPOT_CHECK}, ` +
   `keys: ${Object.keys(KEY_MAP).length} mapped${DEFAULT_KEY ? " + default" : ""}${ONCE ? ", once" : ""}`
 );
 let lastSweep = 0;
