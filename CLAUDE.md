@@ -3553,8 +3553,9 @@ owner's OK in the rollout file.
 - **The share step** (scripts/lib/share/step.mjs): every 60 s, not awaited, with a
   busy flag, on its own pool of 2 connections (70 s query timeout, each statement in
   a transaction with its own `statement_timeout`). The worker reports the `sharing`
-  capability and `info.sharing.push_auto` in its heartbeat. Off, or with no `since`,
-  it runs no statement. A missing migration (42P01, 42703, 42883) is said once and
+  capability, `info.sharing.push_auto` and `info.sharing.refusals` (the push timer's
+  failed asks, item 7) in its heartbeat. Off, or with no `since`, it runs no
+  statement. A missing migration (42P01, 42703, 42883) is said once and
   the step stays idle. Each round, in order:
   1. **Discover** (`discoverJobs`, jobs.mjs): up to 50 finished `leads` batches with
      a field mapping, made at or after `since`, with no job (a batch left
@@ -3605,21 +3606,31 @@ owner's OK in the rollout file.
   5. **Recheck**: once a day while `recheck_until` is ahead, the job's leads with no
      share row that changed since the last look (`leads.updated_at`) and now have a
      place are decided against the clients that may receive them now.
-  6. **Push timer** (upkeep.mjs): for each receiver with queued shares, at most once
+  6. **Settle ended pushes** (settle.mjs, 2026-11-20): share and top-up pushes that
+     ended give each of their rows still `pushed` an end state, as "Settling ended
+     share pushes" under Share pushes says. It runs before the push timer, so the
+     same round's timer already sees the rows it held.
+  7. **Push timer** (upkeep.mjs): for each receiver with queued shares, at most once
      every `push_every_minutes`, `POST /api/sharing/push/auto { receiver }` with
      Bearer `SHARE_PUSH_KEY`, to `SHARE_PUSH_URL` or the origin of
      `AIARK_AUTO_ADD_URL`; once a day per receiver with held shares inside
      `held_retry_days`, with `retryHeld`; at most 10 asks a round, 120 s per answer.
      A 409 or a failure is tried again after `push_every_minutes`. Without the key
-     and the address the shares stay queued and the step says so once.
-  7. **Tags.** While `write_tags` is on, applied live `shared` rows get the
+     and the address the shares stay queued and the step says so once. Each failed
+     ask (a 409, any other error, or no answer) is kept per receiver in the worker's
+     memory (`pushRefusals`: when, the status, the error, `kept`, and whether held
+     shares were being tried again) and reported in the heartbeat's
+     `info.sharing.refusals`, at most 200. The next ask for that receiver that goes
+     through clears it, and so does nothing waiting for that receiver any more. A
+     worker restart forgets them until the next try.
+  8. **Tags.** While `write_tags` is on, applied live `shared` rows get the
      receiver's exact `client_tags.tag` on the lead (`fn_merge_tags`, only where the
      lead lacks it) with a `lead_history` row ("Shared from AAA to BBB"), in one
      transaction; `tag_added_at` marks every row looked at, `tag_added` the ones
      written. Undone shares whose tag was written get it taken off (`fn_remove_tag`)
      whenever sharing is on, `write_tags` or not. At most 2,000 rows a round and
      `tag_rows_per_day` a UTC day, adds and removals together.
-  8. **Prune**, at most hourly: lead lists 30 days after their job is done (never a
+  9. **Prune**, at most hourly: lead lists 30 days after their job is done (never a
      waiting, deciding or error job's, nor while a recheck is ahead), lists of batches
      with no job after 30 days, and rows that are not shares 90 days after they were
      decided.
@@ -3677,7 +3688,8 @@ owner's OK in the rollout file.
     the receive rule and the push list are read again under it. At most 100,000 rows
     a call; the rest stay queued and show in `left`.
 - **push_note**: a held row's note is plain words; a dropped row's is `in_campaign`,
-  `undone` or `no_lead`.
+  `undone` or `no_lead`, or, from the settle below, `already_sent`, `not_eligible`
+  or `bison_refused` (src/lib/sharing/labels.ts says each in words).
 - **"Push shared"** (`POST /api/sharing/push` `{batchId?, receiver?, held?, dryRun?}`,
   admin): queues applied, live, never pushed rows (and held ones with `held`) of
   clients on the push list, then pushes each client at once. `dryRun` gives the
@@ -3696,9 +3708,51 @@ owner's OK in the rollout file.
   ⚠ Redeploy push-worker and its four install workers before any client is on
   `push_tags`: an old worker gathers a share batch with no receive check and no
   skipAlreadySent.
-- ⚠ **Known gap**: share rows of a batch that is cancelled other than by an undo (the
-  push worker's receive check, or an operator on the Exports page) stay `pushed` and
-  are never sent or put back. Undo handles its own cancels.
+- **Settling ended share pushes** (scripts/lib/share/settle.mjs, item 6 of the share
+  step's round, 2026-11-20; it closes the gap where rows of a cancelled share push
+  stayed `pushed` for good). A share or top-up push that ended (complete, cancelled
+  or error), with no item pushing and, when cancelled, none pending, gives each of
+  its rows still `pushed` an end state, by the first rule that applies:
+  - its item was sent: it stays `pushed`;
+  - undone: dropped `undone`;
+  - no item although the push gathered (the gather left the lead out): dropped
+    `no_lead` (gone or no email), `already_sent` (sent for the client by another
+    push) or `not_eligible`;
+  - skipped at push time as not eligible: dropped `not_eligible`; Bison refused all
+    its campaigns: dropped `bison_refused`;
+  - a cancelled push: held "cannot receive: <reason>" (the push worker's receive
+    check) or "push cancelled: <why>" (its no-ids cancel, or an undo's). Any other
+    cancel was an operator's on the Exports page: held "push cancelled on the
+    Exports page" with `held_since` NULL, so the daily held retry never takes it
+    and "Push shared" (held) sends it;
+  - its item failed: held "push failed for this lead";
+  - any other skip: held with a note in words ("not sent: company not scored yet
+    (fit gate)", "not sent: no company key to score (fit gate)", "not sent: the
+    client's B2B and B2C installs are not set", "not sent: no campaign for its side
+    or mail provider", "not sent: its push was cancelled", "not sent: skipped by the
+    push worker");
+  - a push in error: held "push failed: Bison refused the key", "push failed: the
+    gather failed" or "push failed: the push stopped with an error".
+
+  Held rows other than an operator's cancel keep their `held_since` (or get now)
+  and are retried daily for `held_retry_days`. `push_batch_id` and `pushed_at` stay
+  on every row, so the job detail still lists the push. The push is then stamped
+  `push_options.sharesSettledAt` and never looked at again. At most 20 pushes a
+  round, and none started after 15 s. Each push is one transaction under
+  `pg_try_advisory_xact_lock(hashtext('share-settle:' || id))`, its rows locked
+  before the push row, as the undo locks them. Notes never carry the raw error
+  (it can hold an email); that stays on the push and its items (Exports page).
+  One log line per push that moved rows. While sharing is off, or the enrich-worker
+  runs older code, nothing settles and rows stay `pushed` (nothing pushes share
+  rows then either).
+- **The Exports page's Retry** (`POST /api/bison/push-batches/retry`) leaves share
+  and top-up pushes out: `{batchId}` of one answers 409 ("its leads are pushed again
+  from the Sharing page (Held tab), not from here"), and `{all: true}` requeues only
+  other pushes' failed items. A share is pushed again only from the Sharing page, in
+  a new push with `skipAlreadySent`, so a lead sent before is never gathered again.
+- Unchanged from before: `skipAlreadySent` leaves out only leads with a `sent` item,
+  so a routine export-popup push of the same client can gather a lead that a share
+  push holds pending; Bison's own sequence refusal stops the second attach.
 - src/lib/bison/push-stamp.ts holds the side and bucket stamping and the freemail
   split, shared by the push route and the share push.
 
@@ -3713,6 +3767,19 @@ owner's OK in the rollout file.
   text; installs the mirror does not cover), Low places (the weekly top-up) and
   General inboxes (never-contact inboxes). A warning shows when the running worker
   lacks the `sharing` capability.
+- **How a push ended, and refused pushes** (2026-11-20). The job detail's line for
+  each push names how it ended (`cancelled on the Exports page`, the push worker's or
+  the undo's reason, or the note of a push in error; built on the server, never the
+  raw error) and, once it ended, says `settled` or `not settled yet`. The Held tab
+  marks the groups of a push cancelled on the Exports page "Not retried: Push shared
+  sends them", aged from when they were held, and its footer says such shares are
+  never tried again by themselves. Above the held table, **Pushes refused** lists the
+  push timer's last failed ask per receiving client as the newest worker's heartbeat
+  reports it (when, the status or "no answer", the error, how many shares stay
+  queued, and whether held shares were being tried again); entries that are not
+  well formed are left out, and when the worker is offline the block says this is
+  what it reported last. The three new drop notes read in words in the job detail
+  and the lead detail; the CSV shows the push state only, as before.
 - Routes under src/app/api/sharing/: `jobs`, `job`, `csv`, `clients`, `held`,
   `batches?ids=` (the Uploads page's "Shared to N clients"), `lead?id=` (the lead
   detail's shares) for managers; `apply` (with `preview: true` for the confirm),
@@ -3734,10 +3801,22 @@ owner's OK in the rollout file.
   `SPTEST_` clients, the campaign search and Bison stubbed, no network; the push
   worker's statements and stop rule are read from its file and run in transactions
   that are rolled back; the settings route's three new keys).
+  `node --env-file=.env.local scripts/test-share-gaps.mjs` (local, 95 checks,
+  `GSTEST_` clients and `.gstest.example` leads, no network: the settle's rules and
+  statements, with the push worker's own texts and statements read from its file;
+  the Exports Retry; the retry window after settling; never sending twice; the
+  refusals; and the held and job routes through the TypeScript loader with a
+  stand-in campaign search and push route). It refuses to run while the database
+  holds share jobs, shares or lead lists that are not its own, an ended share push
+  not settled, a failed push item, or a cancelled push with items still pending.
 - **Rollout.** Apply 133 and 134 before deploying. Redeploy location-worker
   (cron_runs), upload the enrich-worker, redeploy push-worker and its install
   workers. Update every copy of the repo used for folder imports: an old copy
-  imports fine, and its batches show as "no lead list".
+  imports fine, and its batches show as "no lead list". The settle and the refused
+  pushes (2026-11-20) need no migration and leave push-worker as it was: deploy the
+  web app (Retry route, Held tab, job detail) before or with the enrich-worker
+  upload, because an old Retry route could reopen a share push a new worker has
+  settled.
 
 ## Weekly top-up (migration 135, 2026-11-20)
 
@@ -3777,7 +3856,8 @@ everything ships off.
   a 50-minute watchdog and works for at most 40 minutes, in this order:
   - **(a) Cancel:** queued or running top-up runs (`filters ? 'topup'`) of clients
     that `fn_client_receive_block` blocks are cancelled, the reason as stop_reason.
-    Runs started by hand are never touched.
+    Runs started by hand are never touched; the Low places tab lists those going
+    for clients that cannot receive (below).
   - **(b) The pass** (scripts/lib/topup/pass.mjs): when `weekly_topup` is on and the
     last finished pass is 7 or more days old, or someone pressed Run now. It visits
     every Active or Healthy client. Covered types get flag rows (`topup_flags`):
@@ -3789,7 +3869,8 @@ everything ships off.
     (`payload.generalInboxFilter`); otherwise coverage is computed again and stored.
     A pass carries on across firings through `clients_done`; a client that fails two
     firings is left out and named in `counts.failed_tries`; a pass still open after
-    3 days ends as error, and after an error the schedule waits 6 hours.
+    3 days ends as error, and after an error the schedule waits 6 hours. The pass
+    also counts "free first" (below).
   - **(c) Pulls** (scripts/lib/topup/pulls.mjs), only for clients with
     `flagOn("topup_pull")` and no receive block. A pull covers the client's low
     places the geo reference knows (at most 200); its requests come from
@@ -3833,14 +3914,57 @@ everything ships off.
   used and reserved) and `POST /api/topup/run` (admin, audited `topup_run_now`;
   refused while the top-up is off or a pass is open). Count and Start of a prepared
   pull go through the AI Ark count and runs routes with `topupPullId` (manager).
+- **Free first** (plan 2.4, scripts/lib/topup/free-first.mjs, 2026-11-20). For each
+  covered client with a low city place, the pass counts the leads already in the
+  database that a place fix would count there, at no cost:
+  - `partial`: contactable leads with location_status `partial`, no location_id and
+    city text, in the (country, state) of its low city places. They count for no city
+    place today, and the Locations page cannot fix them yet. State-wide low places
+    get no partial count (partial leads already count there).
+  - `unresolved`: contactable unresolved leads whose place text (the Locations
+    page's queue text, lower-cased, letters only) is the key of one of its low
+    cities, in any state, so a same-named city elsewhere counts too.
+  - Contactable is coverage's `ELIGIBLE` and, while a General inboxes filter is
+    loaded, not a general inbox it matches. Once a pass it also counts every
+    unresolved lead (`unresolved_total`, no filter).
+  - Stored on the pass as `counts.free_first`: `at`, `unresolved_total`, `states`
+    {"US|IL": n} and `clients` {tag: {partial, unresolved, states, cities}};
+    `cities` lists low cities with unresolved leads, most first, at most 10.
+  - Each state and the unresolved map are counted at most once a firing; states an
+    earlier firing of the same pass counted are read back from the pass. Each
+    statement runs in its own read-only transaction with a 120 s `SET LOCAL
+    statement_timeout`, through the state and location status indexes. A count that
+    fails reads "not counted" (null) and never stops the pass; a client re-flagged
+    with no low city loses its entry; the finished pass keeps `free_first` next to
+    `failed_tries`. Nothing is counted when the tab loads.
+  - The Low places tab shows the total with a link to `/locations?tab=unresolved`
+    (the Locations page opens its Unresolved queue for that parameter), a "Free
+    first" pill per client and a line in its open part. A pass from before this has
+    no `free_first` and shows nothing new.
+- **Runs started by hand** (plan 2.7, scripts/lib/topup/hand-runs.mjs). `GET
+  /api/topup` also lists AI Ark runs started by hand (`aiark_runs` without
+  `filters.topup`) that are queued or running for a client `fn_client_receive_block`
+  blocks now: live, read only, oldest first, with who started each (full name, else
+  email) and the reason. The hourly cancel never touches them; the tab says to cancel
+  one on the AI Ark tab. Shown whether or not the top-up is on; Companies pipeline
+  runs are not listed. Until the first good Groups tab read after 132, every hand run
+  going is listed ("not on the Groups tab").
 - **Tests.** `node --env-file=.env.local scripts/test-topup.mjs` (local, 105 checks,
   `TPTEST_` clients, the AI Ark demo transport only, no paid call). It refuses to
   run while the database has an open pass, a top-up run or pull, an AI Ark run due or
-  a lease.
+  a lease. `node --env-file=.env.local scripts/test-topup-gaps.mjs` (local, 76
+  checks, `GTTEST_` clients, `.gttest.example` leads, made-up users and a made-up
+  stand-in filter, no network, no AI Ark run worked: free first and the hand-run
+  list, with plan checks on 2,000 seeded leads). It refuses to run while the
+  database has an open pass, a topup-worker lease, a `GTTEST_` leftover or a lead
+  with an empty email.
 - **Rollout.** Apply 135. Redeploy client-sync (until it runs this code the pass
   computes every covered client's coverage again once a filter is loaded), upload the
   enrich-worker (the slice check), and the owner creates the topup-worker service.
-  Flags first; pulls in prepare mode for a few clients before auto.
+  Flags first; pulls in prepare mode for a few clients before auto. Free first and
+  the hand-run list (2026-11-20) need no migration: the web app shows them, and the
+  topup-worker must run this code for the pass to count free first. While
+  `weekly_topup` is off no pass runs, so the free-first fields stay empty.
 
 ## Never-contact general inboxes (migration 136, 2026-11-20)
 
