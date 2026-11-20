@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -24,6 +24,7 @@ import { byNewestCampaign, describeCampaign, isArchivedCampaign } from "@/lib/bi
 import { RefreshCw } from "lucide-react";
 import type { FilterState } from "@/types/filters";
 import { suggestBucketFromName } from "@/lib/bison/esp-bucket";
+import { useClientRoster, type ClientTagRow } from "@/lib/clients/roster";
 
 // ── Send to Email Bison — the split-aware push wizard ──
 // A caller (leads page) opens this with the current filters + totalCount and an
@@ -34,16 +35,8 @@ import { suggestBucketFromName } from "@/lib/bison/esp-bucket";
 //   4. reconfirms, then queues TWO push-batches (one per side).
 // Progress is shown by the existing PushBatchesPanel — this dialog polls nothing.
 
-interface ClientTagRow {
-  tag: string;
-  group_no: number | null;
-  b2b_instance: string | null;
-  b2c_instance: string | null;
-  owner: string | null;
-  status: string | null;
-  churned: boolean;
-  sendable: boolean; // has an instance pair; roster-only churned clients don't
-}
+// Step 1's list before the client list has been read.
+const NO_TAGS: ClientTagRow[] = [];
 
 interface PreviewCampaign {
   id: number | string;
@@ -151,11 +144,14 @@ export function SendToBisonWizard({
 
   const [step, setStep] = useState(1);
 
-  // Step 1 — client tags
-  const [tags, setTags] = useState<ClientTagRow[]>([]);
-  const [tagsLoading, setTagsLoading] = useState(false);
-  const [tagsError, setTagsError] = useState<string | null>(null);
-  const [tagsAttempted, setTagsAttempted] = useState(false);
+  // Step 1: client tags, from the shared, cached client list (src/lib/clients/roster.ts):
+  // shown at once, refreshed in the background on each open when over a minute old.
+  // "Loading" and the error show only while there is no list at all.
+  const roster = useClientRoster();
+  const tags = roster.clients ?? NO_TAGS;
+  const tagsLoading = roster.clients === null && (roster.loading || !roster.error);
+  const tagsError = roster.clients === null && !roster.loading ? roster.error : null;
+  const refreshTags = roster.refresh;
   const [tagSearch, setTagSearch] = useState("");
   const [selectedTag, setSelectedTag] = useState<ClientTagRow | null>(null);
 
@@ -185,21 +181,7 @@ export function SendToBisonWizard({
 
   const [confirming, setConfirming] = useState(false);
 
-  const loadTags = useCallback(() => {
-    setTagsAttempted(true);
-    setTagsLoading(true);
-    setTagsError(null);
-    fetch("/api/bison/client-tags")
-      .then(async (r) => {
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((d) => setTags(Array.isArray(d.tags) ? d.tags : []))
-      .catch((e) => setTagsError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setTagsLoading(false));
-  }, []);
-
-  // Reset everything on each open; load tags once.
+  // Reset everything on each open.
   useEffect(() => {
     if (!open) return;
     setStep(1);
@@ -209,7 +191,6 @@ export function SendToBisonWizard({
     setPreviewError(null);
     setB2bChoice(emptyChoice());
     setB2cChoice(emptyChoice());
-    setTagsAttempted(false);
     setAmountChoice("full");
     setAmountOther("");
     setOptIncludePushed(false);
@@ -237,9 +218,10 @@ export function SendToBisonWizard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, preview?.clientTag]);
 
+  // Each open refreshes the client list in the background when it is over a minute old.
   useEffect(() => {
-    if (open && !tagsAttempted && !tagsLoading) loadTags();
-  }, [open, tagsAttempted, tagsLoading, loadTags]);
+    if (open) refreshTags();
+  }, [open, refreshTags]);
 
   const filteredTags = useMemo(() => {
     const q = tagSearch.trim().toLowerCase();
@@ -469,7 +451,7 @@ export function SendToBisonWizard({
             ) : tagsError ? (
               <div className="flex items-center gap-2">
                 <p className="flex-1 text-xs text-destructive">Couldn&apos;t load tags: {tagsError}</p>
-                <Button variant="outline" size="sm" className="h-7 shrink-0 text-xs" onClick={loadTags}>
+                <Button variant="outline" size="sm" className="h-7 shrink-0 text-xs" onClick={() => refreshTags(true)}>
                   Retry
                 </Button>
               </div>

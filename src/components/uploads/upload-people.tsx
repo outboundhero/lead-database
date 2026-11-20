@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import { AlertTriangle, CirclePause, Database, Loader2, Send, Table2, Users } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { useClientRoster } from "@/lib/clients/roster";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -311,21 +311,27 @@ export function SendDialog({
   rows: number;
   onSent: () => void;
 }) {
-  const [clients, setClients] = useState<ClientOption[] | null>(null);
+  // The clients: the shared, cached client list (src/lib/clients/roster.ts), Active first, then by
+  // tag; refreshed in the background when the dialog opens and the list is over a minute old.
+  const roster = useClientRoster();
+  const rosterClients = roster.clients;
+  const rosterFailed = rosterClients === null && roster.error !== null && !roster.loading;
+  const refreshClients = roster.refresh;
+  const clients = useMemo<ClientOption[] | null>(
+    () =>
+      rosterClients
+        ? rosterClients
+            .map(({ tag, name, status }) => ({ tag, name, status }))
+            .sort((a, b) => Number(b.status === "Active") - Number(a.status === "Active") || a.tag.localeCompare(b.tag))
+        : null,
+    [rosterClients],
+  );
   const [tag, setTag] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!open || clients) return;
-    createClient()
-      .from("client_tags")
-      .select("tag, name, status")
-      .order("tag")
-      .then(({ data }) => {
-        const list = (data ?? []) as ClientOption[];
-        setClients([...list].sort((a, b) => Number(b.status === "Active") - Number(a.status === "Active") || a.tag.localeCompare(b.tag)));
-      });
-  }, [open, clients]);
+    if (open) refreshClients();
+  }, [open, refreshClients]);
 
   const send = async () => {
     if (!tag) return;
@@ -359,7 +365,7 @@ export function SendDialog({
         </DialogHeader>
         <Select value={tag} onValueChange={setTag}>
           <SelectTrigger className="w-full" aria-label="Client">
-            <SelectValue placeholder={clients ? "Choose a client" : "Loading the clients…"} />
+            <SelectValue placeholder={clients ? "Choose a client" : rosterFailed ? "Could not load the clients" : "Loading the clients…"} />
           </SelectTrigger>
           <SelectContent>
             {(clients ?? []).map((c) => (
