@@ -430,8 +430,14 @@ async function cleanup() {
   await pool.query(`DELETE FROM enrich_memory WHERE starts_with(client_tag, $1)`, [PREFIX]);
   await pool.query(`DELETE FROM email_validations WHERE email LIKE $1`, [`%.${HOST}`]);
   if (spendBefore) {
+    // Only the rows this run added or changed are touched: rewriting the others would move them in the table, and
+    // a suite that compares the table's rows in the order they are read would then see them moved.
     await pool.query(`DELETE FROM enrich_spend_daily WHERE NOT ((day::text || kind) = ANY($1::text[]))`, [spendBefore.map((r) => `${r.day}${r.kind}`)]);
-    for (const r of spendBefore) await pool.query(`UPDATE enrich_spend_daily SET used = $3 WHERE day::text = $1 AND kind = $2`, [r.day, r.kind, r.used]);
+    const now = await all(`SELECT day::text AS day, kind, used::text AS used FROM enrich_spend_daily`);
+    for (const r of spendBefore) {
+      if (now.find((x) => x.day === r.day && x.kind === r.kind)?.used === r.used) continue;
+      await pool.query(`UPDATE enrich_spend_daily SET used = $3 WHERE day::text = $1 AND kind = $2`, [r.day, r.kind, r.used]);
+    }
   }
 }
 
