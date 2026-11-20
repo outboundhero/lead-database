@@ -333,9 +333,15 @@ const A2_GEO = {
   countryName: new Map([["US", "United States"]]),
   countryCode: new Map([["unitedstates", "US"], ["us", "US"], ["usa", "US"]]),
 };
+// Fixtures 1 and 3 are cleaning searches: since 2026-11-21 they also leave out the
+// built-in competitors list (here its 069 seed, as no list is given), so their
+// snapshots were taken again. Against the old answer only the company keywords
+// (the list's new terms, the shorter phrases they cover with, and what is left of
+// the room), the report's excludeTerms and competitors, the notes and `keywords`
+// changed. Fixture 2 sends no standard keywords and is byte for byte as before.
 const A2_FIXTURES = [
   {
-    hash: "cd26fd1ed42dcfac882cad4443c0925caae1aa9d4d4bca2bcae01c0b65ad94f3",
+    hash: "0381f455f6e2dcc091fe6a891da7617f55a0619e99286b9dda2e364049fb7e6e",
     targeting: { include_locations: [{ city: "Armonk", state: "NY", country: "US" }, { state: "CT", country: "US" }, { country: "US" }, { city: "Nowhere" }], exclude_locations: [{ city: "Bedford", state: "NY", country: "US" }], exclude_terms: ["bar", "cafe", "janitorial", "law firm"], commercial_cleaning: true },
     people: "cleaning",
     cleaning: true,
@@ -347,7 +353,7 @@ const A2_FIXTURES = [
     cleaning: false,
   },
   {
-    hash: "2bb8e476f206ad92ac3f3df0614c324e46113bb22539fd3a05e235598a4abf99",
+    hash: "29882b669d4eb4966627b04b87f4a17693d8cff86442f551760eadafd35c39d3",
     targeting: { include_locations: [{ city: "Springfield", state: "IL", country: "US" }, { city: "Peoria", state: "IL", country: "US" }], exclude_locations: [{ city: "Normal", state: "IL", country: "US" }], exclude_terms: Array.from({ length: 120 }, (_, i) => `client exclusion phrase number ${i}`), commercial_cleaning: true },
     people: { titles: ["Owner"], title_mode: "SMART", employee_bands: [{ start: 8, end: 6800 }], exclude_industries: ["janitorial service"] },
     cleaning: true,
@@ -421,7 +427,7 @@ async function partA(geo) {
   check("every search has places to include", [...r.requests, ...many.requests].every((q) => q.account.location.any.include.length > 0));
   check("the brake: a 100-company pull with 1 search stops at 16 credits", companySpendCeiling(100, 1) === 16);
 
-  section("A2. People requests send the same bytes as before the refactor");
+  section("A2. People requests send the same bytes as before the refactor (cleaning ones with the competitors list since 2026-11-21)");
   for (const [i, f] of A2_FIXTURES.entries()) {
     const out = buildRequests({ targeting: f.targeting, people: f.people === "cleaning" ? CLEANING_DEFAULTS : f.people, geo: A2_GEO, cleaning: f.cleaning });
     const hash = createHash("sha256").update(JSON.stringify(out)).digest("hex");
