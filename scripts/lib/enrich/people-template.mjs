@@ -41,6 +41,7 @@
 import { TRACKS } from "./settings.mjs";
 import { bareDomain } from "./domain.mjs";
 import { compileColumn, parseFrom, refMap } from "./compile-original.mjs";
+import { CLAY_TOOL_ACTIONS, toolInputs } from "./clay-tools.mjs";
 import { ORIGINAL_KEYS } from "./original-keys.mjs";
 import { NOT_UPLOAD_ROW, UPLOAD_AREA_GATED, UPLOAD_FOUND_BY, UPLOAD_NEVER, UPLOAD_SPEND_GATE, UPLOAD_STAGE } from "./upload-people.mjs";
 
@@ -192,7 +193,7 @@ export const PEOPLE_COLUMNS = Object.freeze([
   { key: "use_google_maps_url", from: "P#25", kind: "waterfall" },
   { key: "current_employer", from: "P#27", kind: "action", action: "ai_web", model_setting: "current_employer", tool: "web_search", flag: ["linkedin_profile_reads"] },
   { key: "company", from: "P#28", kind: "waterfall", written: true },
-  { key: "normalize_company_name", from: "P#29", kind: "action", action: "waiting", note: "Clay's normalize-company-name: waiting for the original (D38)." },
+  { key: "normalize_company_name", from: "P#29", kind: "action", action: "clay_normalize_company_name", provider: "Clay tool (exact copy)", note: "Clay's normalize-company-name, our exact copy (clay-tools.mjs). P#30 reads it." },
   { key: "normalized_company_name", from: "P#30", kind: "formula" },
   { key: "company_address", from: "P#31", kind: "waterfall", written: true },
   { key: "use_address", from: "P#32", kind: "waterfall" },
@@ -220,7 +221,7 @@ export const PEOPLE_COLUMNS = Object.freeze([
   { key: "email_domain", from: "P#57", kind: "formula", flag: ["personalisation"] },
   { key: "email_provider_check_api", from: "P#58", kind: "action", action: "dns_mx", flag: ["personalisation"] },
   { key: "claygent", from: "P#60", kind: "action", action: "ai_web", model_setting: "people_claygent", tool: "web_search", flag: ["personalisation"] },
-  { key: "question_ai", from: "P#61", kind: "action", action: "ai_web", model_setting: "people_question_ai", tool: "none", flag: ["personalisation"], note: "Its 5 table examples are kept as exported; it does not run until Clay's way of sending them is known (0.4 item 4, D38)." },
+  { key: "question_ai", from: "P#61", kind: "action", action: "ai_web", model_setting: "people_question_ai", tool: "none", flag: ["personalisation"], note: "Its table examples go with every request." },
   { key: "question", from: "P#62", kind: "formula", flag: ["personalisation"] },
   { key: "person_outcome", from: null, kind: "formula" },
   { key: "add_to_database", from: null, kind: "action", action: "later", phase: 4, note: "Written only by promotion (phase 3), and on an upload's row by the adding of its found email (130); the engine never works it." },
@@ -308,7 +309,6 @@ export function sourceObject(p) {
 /** Waiting columns: why each waits (D38). */
 const WAITS = {
   normalize_phone_number: "Clay's normalize-phone-number tool: its rules are not in the export (D38). A named stand-in comes only with the owner's OK.",
-  normalize_company_name: "Clay's normalize-company-name tool: its rules are not in the export (D38). A named stand-in comes only with the owner's OK.",
 };
 
 /** Names of our own columns and inputs (from: null). */
@@ -374,7 +374,9 @@ export function companyRecordMap(originals, rows, companyKeys) {
  * originals: PEOPLE_INPUTS as input columns, then PEOPLE_COLUMNS through
  * compileColumn() with PEOPLE_REFS, the D30 waterfalls for PEOPLE_WRITTEN_KEYS
  * and person_outcome from PERSON_OUTCOME_FORMULA. lookup_company_data's record
- * names are worked out from the columns that read it (companyRecordMap).
+ * names are worked out from the columns that read it (companyRecordMap). A
+ * Clay tool column (CLAY_TOOL_ACTIONS) takes the original's own inputs
+ * (toolInputs) and its run condition verbatim.
  *
  * @param {import("./compile-original.mjs").Originals} originals
  * @param {import("./settings.mjs").PeopleTracks | null} [tracks]  settings.people_tracks, for the descriptions
@@ -401,7 +403,11 @@ export function peopleColumns(originals, tracks = null, { companyKeys = ORIGINAL
       rows.push(compileColumn({ ...spec, name: NAMES[spec.key] ?? spec.key, formula, description: spec.note ?? (spec.key === "person_outcome" ? `The person's result.${trackNote}` : null), provider: spec.key === "add_to_database" ? "Promotion" : spec.provider }, originals, { own }));
       continue;
     }
-    const extra = spec.action === "waiting" ? { why: WAITS[spec.key] } : spec.key === "current_employer" ? { memory_days: "website" } : {};
+    const extra = spec.action === "waiting"
+      ? { why: WAITS[spec.key] }
+      : spec.action && Object.hasOwn(CLAY_TOOL_ACTIONS, spec.action)
+        ? { inputs: toolInputs(originals, spec.from, own, spec.action) }
+        : spec.key === "current_employer" ? { memory_days: "website" } : {};
     rows.push(compileColumn({ ...spec, ...extra, description: spec.note }, originals, { own }));
   }
   const record = companyRecordMap(originals, rows, companyKeys);

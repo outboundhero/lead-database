@@ -168,7 +168,7 @@ function partA() {
   check("a select field becomes an enum of its option texts", JSON.stringify(answerSchema(c50.config).schema.properties.result.enum) === '["Yes","No"]');
   const ai = Object.values(compiled).flat().filter((c) => c.action === "ai_web");
   check("claygent sends the web search tool; use-ai sends none",
-    ai.filter((c) => c.config.use_case === "claygent").every((c) => c.config.tool === "web_search") && ai.filter((c) => c.config.use_case === "use-ai").every((c) => c.config.tool === "none") && ai.length === 12,
+    ai.filter((c) => c.config.use_case === "claygent").every((c) => c.config.tool === "web_search") && ai.filter((c) => c.config.use_case === "use-ai").every((c) => c.config.tool === "none") && ai.length === 13,
     ai.map((c) => `${c.key}:${c.config.tool}`).join());
   check("each names its own model setting, which defaults to gpt-6-luna; the original's model is kept beside it",
     ai.every((c) => MODEL_SETTINGS.includes(c.config.model_setting) && SETTINGS_DEFAULTS.models[c.config.model_setting].model === "gpt-6-luna") && c24.config.original_model === "gpt-4o-mini" && col("people", "claygent").config.original_model === "gpt-6-luna");
@@ -177,7 +177,7 @@ function partA() {
   check("most tool calls as design 6.2", sortedJson(caps) === sortedJson({
     companys_website: 3, email_extraction_claygent: 2, email_extraction_claygent_2: 2, company_decision_maker_facilities_1_claygent: 2,
     company_decision_maker_facilities_2_claygent: 3, company_decision_maker_location_company_check: 1, company_decision_maker_ceo_claygent: 2,
-    current_employer: 2, people_claygent: 2, people_question_ai: null, inbox_claygent: 3, inbox_question_ai: null,
+    current_employer: 2, people_claygent: 2, people_question_ai: null, inbox_first_name_ai: null, inbox_claygent: 3, inbox_question_ai: null,
   }), sortedJson(caps));
   check("no reasoning effort by default but for the fit score's low", MODEL_SETTINGS.every((k) => (k === "fit_score" ? SETTINGS_DEFAULTS.models[k].reasoning_effort === "low" : !SETTINGS_DEFAULTS.models[k].reasoning_effort)));
   check("no user location, N/A kept, the OpenAI key needed, memory by setting", ai.every((c) => c.config.user_location === false && c.config.keep_na === true && c.needs_env.join() === "OPENAI_API_KEY" && c.config.memory === `${c.config.model_setting}_v1`));

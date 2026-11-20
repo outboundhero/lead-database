@@ -14,8 +14,15 @@
 // worker: a role, catch-all or unknown address is checked by it then; without
 // the key the step is skipped with "Needs ENRICHLEY_API_KEY (not held)", the
 // outcome says "Waiting for Enrichley", and the row itself finishes (D6).
+//
+// G#14 and G#16 run our exact copies of Clay's normalize-company-name and
+// extract-email-components (clay-tools.mjs), with the originals' own inputs
+// and run conditions: G#15, G#17 and G#18 read them as in Clay, and G#19 runs
+// as an AI step on its own model setting (inbox_first_name_ai). G#35, Clay's
+// normalize-phone-number, still waits (D38).
 
 import { compileColumn, refMap } from "./compile-original.mjs";
+import { CLAY_TOOL_ACTIONS, toolInputs } from "./clay-tools.mjs";
 
 export const INBOX_TEMPLATE = "inboxes_v1";
 export const INBOX_TABLE_NAME = "General (pipeline)";
@@ -66,13 +73,13 @@ export const INBOX_COLUMNS = Object.freeze([
     note: "The database check in DUPE CHECK's place: the address alone, in leads, the Email Bison copy and the never-contact list.",
   },
   { key: "safe_to_run", from: "G#5", change: true, kind: "formula", formula: "!{{in_database}}?.lead_id && !{{in_database}}?.in_bison && !{{in_database}}?.never_contact && !{{in_database}}?.bounced" },
-  { key: "normalize_company_name", from: "G#14", kind: "action", action: "waiting", note: "Clay's normalize-company-name: waiting for the original (D38). G#15 and G#20's second step read it." },
+  { key: "normalize_company_name", from: "G#14", kind: "action", action: "clay_normalize_company_name", provider: "Clay tool (exact copy)", note: "Clay's normalize-company-name, our exact copy (clay-tools.mjs). G#15 and G#20's second step read it." },
   { key: "normalized_company_name", from: "G#15", kind: "formula" },
-  { key: "identify_email_type_and_extract_company_domain_from_email", from: "G#16", kind: "action", action: "waiting", note: "Clay's extract-email-components: no stand-in (D38). G#17 to G#19 stay empty." },
-  { key: "username", from: "G#17", kind: "formula", note: "Empty while G#16 waits." },
-  { key: "guessed_name", from: "G#18", kind: "formula", note: "Empty while G#16 waits." },
-  { key: "first_name_ai", from: "G#19", kind: "action", action: "waiting", note: "No model setting: it can't run until G#16's logic and Clay's table examples are known (D38)." },
-  { key: "use_first_name", from: "G#20", kind: "waterfall", note: "Falls to its second step, \"<Company> Team\", while G#19 waits." },
+  { key: "identify_email_type_and_extract_company_domain_from_email", from: "G#16", kind: "action", action: "clay_extract_email_components", provider: "Clay tool (exact copy)", note: "Clay's extract-email-components, our exact copy (clay-tools.mjs). G#17 and G#18 read it." },
+  { key: "username", from: "G#17", kind: "formula" },
+  { key: "guessed_name", from: "G#18", kind: "formula" },
+  { key: "first_name_ai", from: "G#19", kind: "action", action: "ai_web", model_setting: "inbox_first_name_ai", tool: "none", note: "Clay's First Name AI; its table examples go with every request. G#20's first step reads it." },
+  { key: "use_first_name", from: "G#20", kind: "waterfall", note: "Falls to its second step, \"<Company> Team\", when G#19 gives no usable first name." },
   { key: "use_last_name", from: "G#21", kind: "formula" },
   { key: "use_city", from: "G#23", kind: "formula" },
   { key: "use_state", from: "G#25", kind: "waterfall" },
@@ -93,7 +100,7 @@ export const INBOX_COLUMNS = Object.freeze([
   { key: "email_domain", from: "G#45", kind: "formula", flag: ["personalisation"] },
   { key: "email_host_lookup_google_dns", from: "G#46", kind: "action", action: "dns_mx", flag: ["personalisation"] },
   { key: "claygent", from: "G#48", kind: "action", action: "ai_web", model_setting: "inbox_claygent", tool: "web_search", flag: ["personalisation"] },
-  { key: "question_ai", from: "G#49", kind: "action", action: "ai_web", model_setting: "inbox_question_ai", tool: "none", flag: ["personalisation"], note: "Its 4 table examples are kept as exported; it does not run until Clay's way of sending them is known (0.4 item 4, D38)." },
+  { key: "question_ai", from: "G#49", kind: "action", action: "ai_web", model_setting: "inbox_question_ai", tool: "none", flag: ["personalisation"], note: "Its table examples go with every request." },
   { key: "question", from: "G#50", kind: "formula", flag: ["personalisation"] },
   { key: "inbox_outcome", from: null, kind: "formula" },
   { key: "add_to_database", from: null, kind: "action", action: "later", phase: 4, note: "Written only by promotion (phase 3); the engine never works it." },
@@ -133,9 +140,6 @@ export const INBOX_OUTCOME_FORMULA = [
 
 /** Waiting columns: why each waits (D38). */
 const WAITS = {
-  normalize_company_name: "Clay's normalize-company-name tool: its rules are not in the export (D38). A named stand-in comes only with the owner's OK.",
-  identify_email_type_and_extract_company_domain_from_email: "Clay's extract-email-components tool: how it splits an address and guesses a name is not in the export (D38). No stand-in.",
-  first_name_ai: "It reads the guessed name (waiting above), and how Clay sends its table examples is not known (D38). No model setting until then.",
   normalize_phone_number: "Clay's normalize-phone-number tool: its rules are not in the export (D38). A named stand-in comes only with the owner's OK.",
 };
 
@@ -149,7 +153,8 @@ const OURS = {
  * The General template's enrich_columns rows, compiled from a
  * variant's originals: INBOX_INPUTS as input columns, then INBOX_COLUMNS
  * through compileColumn() with INBOX_REFS, and inbox_outcome from
- * INBOX_OUTCOME_FORMULA.
+ * INBOX_OUTCOME_FORMULA. A Clay tool column (CLAY_TOOL_ACTIONS) takes the
+ * original's own inputs (toolInputs) and its run condition verbatim.
  *
  * @param {import("./compile-original.mjs").Originals} originals
  * @returns {Array<Record<string, any>>}
@@ -167,7 +172,11 @@ export function inboxColumns(originals) {
       rows.push(compileColumn({ ...spec, name: o.name ?? spec.key, formula: o.formula ?? spec.formula, provider: o.provider, description: o.description }, originals, { own }));
       continue;
     }
-    const extra = spec.action === "waiting" ? { why: WAITS[spec.key] } : {};
+    const extra = spec.action === "waiting"
+      ? { why: WAITS[spec.key] }
+      : spec.action && Object.hasOwn(CLAY_TOOL_ACTIONS, spec.action)
+        ? { inputs: toolInputs(originals, spec.from, own, spec.action) }
+        : {};
     rows.push(compileColumn({ ...spec, ...extra, description: spec.note }, originals, { own }));
   }
   return rows.map((r, i) => ({ ...r, position: i + 1 }));
