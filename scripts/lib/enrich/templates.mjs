@@ -9,9 +9,12 @@
 // while the originals are not loaded (the routes answer 409), and otherwise
 // makes or updates the three tables. A client whose own Clay tables were
 // exported has its own variant of the originals (its tag in lower case);
-// every other client compiles from "default" (D15).
+// every other client compiles from "default" (D15). When a client's own
+// variant does not compile (a template changed since it was loaded, say), its
+// tables compile from "default" instead and their note says why; the worker
+// then reads them as "default", so personalisation stays off for the client.
 
-import { loadOriginals } from "./compile-original.mjs";
+import { loadOriginals, OriginalsMissing } from "./compile-original.mjs";
 import { ORIGINAL_COUNTS, ORIGINAL_KEYS } from "./original-keys.mjs";
 import { COMPANY_REFS, COMPANY_TABLE_NAME_V2, COMPANY_TEMPLATE_V2, companyColumnsV2 } from "./company-template-v2.mjs";
 import { INBOX_TABLE_NAME, INBOX_TEMPLATE, inboxColumns } from "./inbox-template.mjs";
@@ -109,10 +112,12 @@ export async function hasRetiredV1(db, tag) {
  * @param {Db} db  a client inside the caller's transaction
  * @param {string} tag
  * @param {TemplateKind} kind
- * @param {{ variant?: string }} [opts]
+ * @param {{ variant?: string, note?: string | null }} [opts]
+ *   note: the table's source_note in full, instead of the one naming the variant
+ *   (ensurePipelineTables' fallback note; variantOfNote must still read it)
  * @returns {Promise<{ id: string, created: boolean }>}
  */
-export async function ensureTable(db, tag, kind, { variant = "default" } = {}) {
+export async function ensureTable(db, tag, kind, { variant = "default", note = null } = {}) {
   const t = PIPELINE_TEMPLATES[kind];
   if (!t) throw new Error(`Unknown template kind "${kind}"`);
   const { rows: [table] } = await db.query(
@@ -123,10 +128,23 @@ export async function ensureTable(db, tag, kind, { variant = "default" } = {}) {
      RETURNING id, (xmax = 0) AS created`,
     [
       normTag(tag), t.kind, t.name,
-      `Pipeline template ${t.template}, compiled from the Clay originals (variant ${variant})`, t.template,
+      note ?? `Pipeline template ${t.template}, compiled from the Clay originals (variant ${variant})`, t.template,
     ]
   );
   return { id: table.id, created: table.created };
+}
+
+/**
+ * The note of a client's table compiled from "default" because its own
+ * variant did not compile: variantOfNote reads "default" from it.
+ *
+ * @param {TemplateKind} kind
+ * @param {string} own  the client's own variant
+ * @param {string} reason  the first line of the compile failure
+ * @returns {string}
+ */
+export function fallbackNote(kind, own, reason) {
+  return `Pipeline template ${PIPELINE_TEMPLATES[kind].template}, compiled from the Clay originals (variant default); the client's own variant ${own} did not compile: ${reason}`;
 }
 
 /** The variant a table's columns were compiled from, as ensureTable notes it on the table. */
@@ -240,22 +258,52 @@ export async function lockPipelineTables(db, tag) {
  * Throws RetiredV1Table (D24) or OriginalsMissing; the routes answer 409 to
  * both.
  *
+ * A client's own variant (complete: variantFor) that does not compile with
+ * the templates of this code, for any reason but OriginalsMissing, is set
+ * aside for the call: the tables compile from "default", and their note names
+ * the variant and the first line of the failure (fallbackNote, 300
+ * characters at most). variantOfNote reads "default" from that note, so the
+ * worker never treats them as the client's own (personalisation stays off).
+ *
  * @param {Db} db  a client inside the caller's transaction
  * @param {string} tag
  * @param {{ settings?: import("./settings.mjs").PipelineSettings | null }} [opts]
- * @returns {Promise<{ companies: string, inboxes: string, people: string, variant: string,
- *   created: { companies: boolean, inboxes: boolean, people: boolean } }>}  table ids, and which were made now
+ * @returns {Promise<{ companies: string, inboxes: string, people: string, variant: string, own_variant: string | null,
+ *   fallback: string | null, created: { companies: boolean, inboxes: boolean, people: boolean } }>}
+ *   table ids, the variant they were compiled from, the client's own variant when all of it is loaded (else null),
+ *   why its own variant was set aside (null when it was not), and which tables were made now
  */
 export async function ensurePipelineTables(db, tag, { settings = null } = {}) {
   const t = normTag(tag);
   if (!t) throw new Error("No client tag");
   if (await hasRetiredV1(db, t)) throw new RetiredV1Table(t);
-  const variant = await variantFor(db, t);
-  const originals = await loadOriginals(db, variant);
-  const c = await ensureTable(db, t, "companies", { variant });
-  const i = await ensureTable(db, t, "inboxes", { variant });
-  const p = await ensureTable(db, t, "people", { variant });
+  const own = await variantFor(db, t);
+  let variant = own;
+  let originals = await loadOriginals(db, own);
+  /** @type {string | null} */
+  let fallback = null;
+  if (own !== "default") {
+    try {
+      compileTemplates(originals, { settings });
+    } catch (e) {
+      if (e instanceof OriginalsMissing) throw e;
+      fallback = String(e?.message ?? e).split("\n")[0].slice(0, 300);
+      variant = "default";
+      originals = await loadOriginals(db, "default");
+    }
+  }
+  /** @param {TemplateKind} kind */
+  const note = (kind) => (fallback == null ? null : fallbackNote(kind, own, fallback));
+  const c = await ensureTable(db, t, "companies", { variant, note: note("companies") });
+  const i = await ensureTable(db, t, "inboxes", { variant, note: note("inboxes") });
+  const p = await ensureTable(db, t, "people", { variant, note: note("people") });
   const ids = { companies: c.id, inboxes: i.id, people: p.id };
   await syncTemplateColumns(db, ids, originals, { settings, variant });
-  return { ...ids, variant, created: { companies: c.created, inboxes: i.created, people: p.created } };
+  return {
+    ...ids,
+    variant,
+    own_variant: own === "default" ? null : own,
+    fallback,
+    created: { companies: c.created, inboxes: i.created, people: p.created },
+  };
 }
