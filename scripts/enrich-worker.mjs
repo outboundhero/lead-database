@@ -134,6 +134,7 @@ import { advanceBackfill } from "./lib/enrich/fit-backfill.mjs";
 import { promoteAutoConfig, promoteDue, requestPromote } from "./lib/enrich/promote.mjs";
 import { releaseHeldPeopleRows, releaseHeldRows } from "./lib/enrich/held.mjs";
 import { moveUploadRows } from "./lib/enrich/upload-move.mjs";
+import { copyPullNoEmail, handBackFound, PULL_NO_EMAIL_CAPABILITY } from "./lib/enrich/pull-no-email.mjs";
 import { askForFound, foundAutoConfig } from "./lib/enrich/upload-found.mjs";
 import { UPLOAD_CAPABILITY } from "./lib/enrich/upload-people.mjs";
 import { SHARING_CAPABILITY, sharePushConfig } from "./lib/overlap-topup.mjs";
@@ -328,6 +329,49 @@ async function releaseHeldPeople() {
       return;
     }
     log(`releasing held People rows: ${e.message}`);
+  }
+}
+
+// AI Ark tab pulls' people with no email (pull-no-email.mjs): copied held into
+// their clients' People (pipeline) tables once the client is on People runs,
+// right after the uploads' move, and an approved address found there handed
+// back to the pull's row right after the People release. Both free: nothing
+// is queued, paid or added to leads here. The heartbeat lists pull_no_email.
+CAPABILITIES.push(PULL_NO_EMAIL_CAPABILITY);
+let pullsUnreadyLogged = false;
+let handBackUnreadyLogged = false;
+
+/** People with no email from finished AI Ark pulls into their clients' People tables, held. Never throws. */
+async function copyPulls() {
+  try {
+    const settings = await readSettings(pool);
+    const { runs, copied, already, waiting } = await copyPullNoEmail(pool, { settings, log });
+    if (runs || waiting) {
+      log(`AI Ark pulls' people with no email: ${copied} copied held into People tables, ${already} followed in a row there already, from ${runs} pull(s)` +
+        (waiting ? `; ${waiting} pull(s) waiting for their client's tables` : ""));
+    }
+  } catch (e) {
+    if (UPLOADS_UNREADY.has(e?.code)) {
+      if (!pullsUnreadyLogged) log("AI Ark pulls' people with no email are not copied: migration 130 is not applied");
+      pullsUnreadyLogged = true;
+      return;
+    }
+    log(`copying AI Ark pulls' people with no email: ${e.message}`);
+  }
+}
+
+/** Addresses the People tables found for AI Ark pulls' people, handed back to the pulls' rows. Never throws. */
+async function handBackPulls() {
+  try {
+    const { found, closed } = await handBackFound(pool, { log });
+    if (found || closed) log(`AI Ark pulls: ${found} address(es) found in People tables handed back to their pull rows, ${closed} search(es) closed with none`);
+  } catch (e) {
+    if (UPLOADS_UNREADY.has(e?.code)) {
+      if (!handBackUnreadyLogged) log("AI Ark pulls' found addresses are not handed back: migration 130 is not applied");
+      handBackUnreadyLogged = true;
+      return;
+    }
+    log(`handing back AI Ark pulls' found addresses: ${e.message}`);
   }
 }
 
@@ -854,7 +898,9 @@ async function main() {
         await reclaimStale();
         await releaseHeld();
         await moveUploads();
+        await copyPulls();
         await releaseHeldPeople();
+        await handBackPulls();
         lastSweep = Date.now();
       }
       if (Date.now() - lastBeat > 10_000) {
