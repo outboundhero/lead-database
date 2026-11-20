@@ -42,7 +42,7 @@ export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "x
 const LUNA_MODEL = /luna/;
 
 /**
- * One model setting per AI step: the twelve original Clay AI columns, then the
+ * One model setting per AI step: the thirteen original Clay AI columns, then the
  * fit scorer. The key is the column's own key, except the personalisation
  * columns, whose keys repeat in two templates (people_claygent is P#60's
  * claygent, inbox_claygent G#48's, and so on).
@@ -58,6 +58,7 @@ export const MODEL_SETTINGS = [
   "current_employer", // P#27
   "people_claygent", // P#60
   "people_question_ai", // P#61
+  "inbox_first_name_ai", // G#19
   "inbox_claygent", // G#48
   "inbox_question_ai", // G#49
   "fit_score", // the fit scorer (phase 3), no original
@@ -180,6 +181,7 @@ export const SETTINGS_DEFAULTS = frozen({
     current_employer: { model: LUNA, max_searches: 2 },
     people_claygent: { model: LUNA, max_searches: 2 },
     people_question_ai: { model: LUNA },
+    inbox_first_name_ai: { model: LUNA },
     inbox_claygent: { model: LUNA, max_searches: 3 },
     inbox_question_ai: { model: LUNA },
     fit_score: { model: LUNA, reasoning_effort: "low" },
