@@ -13,7 +13,14 @@
 // prompt or list is in this public repo. A missing original raises
 // OriginalsMissing, which the pull and people-run routes answer with 409
 // "The Clay originals are not loaded".
+//
+// An AI column's table examples (P#61, G#49, G#19) are laid out by
+// ai-examples.mjs into the text sent as each request's instructions
+// (config.examples_text), next to the binding kept as exported
+// (config.table_examples). Its remembered answers then depend on the examples
+// too, so two variants with one prompt and other examples never share one.
 
+import { examplesFor } from "./ai-examples.mjs";
 import { ORIGINAL_COUNTS, ORIGINAL_KEYS } from "./original-keys.mjs";
 
 /** {{f_<id>}}: how a Clay formula reads another column. */
@@ -412,9 +419,10 @@ function applyChanges(row, changes) {
  * the maps, with the column's changes applied and its spec's own settings
  * (model setting, tool, flags, key_env) in config. Rules for AI columns (2A.1):
  * the model from the setting named after the column, max_tool_calls from it,
- * no user location, Clay's answer fields with their types, keep_na, and the
- * table examples and runBudget kept in config, never sent. Each paid column
- * gets its own memory kind ("<setting key>_v1", or "<action>_v1").
+ * no user location, Clay's answer fields with their types, keep_na, the table
+ * examples and runBudget kept in config as exported, and the examples' text
+ * sent as the request's instructions (ai-examples.mjs). Each paid column gets
+ * its own memory kind ("<setting key>_v1", or "<action>_v1").
  *
  * A reference the maps don't hold is refused, never guessed: the compiled text
  * would otherwise read nothing.
@@ -478,7 +486,7 @@ export function compileColumn(spec, originals, maps) {
   } else if (spec.kind === "action") {
     if (!spec.action) throw new Error(`${spec.key}: an action column needs an action`);
     row.action = spec.action;
-    compileAction(spec, def, rw, row, maps, runIf);
+    compileAction(spec, def, rw, row, maps, runIf, originals);
   } else {
     throw new Error(`${spec.key}: unknown column kind "${spec.kind}"`);
   }
@@ -501,7 +509,7 @@ export function compileColumn(spec, originals, maps) {
 }
 
 /** An action column's inputs, config and run condition, by the action it compiles to. */
-function compileAction(spec, def, rw, row, maps, runIf) {
+function compileAction(spec, def, rw, row, maps, runIf, originals) {
   const original = Boolean(def);
   switch (spec.action) {
     case "ai_web": {
@@ -514,7 +522,19 @@ function compileAction(spec, def, rw, row, maps, runIf) {
       const budget = literal(bindingText(def, "runBudget"));
       const cents = Number(literal(bindingText(def, "maxCostInCents")));
       const answer = answerFields(def);
+      // The examples laid out for the requests (ai-examples.mjs), or why they can't be read: never a guess. Their
+      // references name columns of the column's own table, read from the variant's originals, not from this template.
+      /** @type {Record<string, any>} */
+      const shown = {};
+      if (examples != null) {
+        const ex = examplesFor(def, originals, /** @type {{ kind: any }} */ (parseFrom(spec.from)).kind, Object.keys(answer)[0]);
+        if ("error" in ex) shown.examples_error = ex.error;
+        else Object.assign(shown, { examples_text: ex.text, examples_count: ex.count, examples_sha: ex.sha });
+      }
       row.inputs = { prompt, memory_key: prompt };
+      // Sent with examples, the remembered answer depends on them too: two variants with one prompt and other
+      // examples never share an answer. The memory kind stays "<setting>_v1".
+      if (shown.examples_count > 0) row.inputs.memory_key = `[(${prompt}\n), ${JSON.stringify(`examples:${shown.examples_sha}`)}].join("\\n")`;
       row.config = {
         model_setting: spec.model_setting,
         tool: spec.tool ?? (useCase === "claygent" ? "web_search" : "none"),
@@ -528,8 +548,10 @@ function compileAction(spec, def, rw, row, maps, runIf) {
         original_model: literal(bindingText(def, "model")) ?? null,
         use_case: useCase ?? null,
         ...(Number.isFinite(cents) && cents > 0 ? { max_cost_cents: cents } : {}),
-        // Kept as exported and never sent: how Clay sends them is not known (D38).
-        ...(examples != null ? { table_examples: examples, run_budget: budget ?? null } : {}),
+        // The examples as exported (table_examples, never sent as they are), and as sent: examples_text goes as
+        // each request's instructions (actions.mjs aiWeb) with examples_count and examples_sha beside it, or
+        // examples_error says why they could not be read, and the column is then never run.
+        ...(examples != null ? { table_examples: examples, run_budget: budget ?? null, ...shown } : {}),
       };
       row.run_if = runIf();
       row.needs_env = ["OPENAI_API_KEY"];
