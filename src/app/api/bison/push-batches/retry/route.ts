@@ -1,10 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { getPool } from "@/lib/db/pool";
+import { SHARE_PUSH_SOURCES } from "../../../../../../scripts/lib/overlap-topup.mjs";
 
 // POST /api/bison/push-batches/retry
 //   { batchId }   requeue that batch's failed contacts
 //   { all: true } requeue failed contacts across EVERY finished batch
+//
+// Share and top-up pushes (push_options.source "share" or "topup", overlap
+// sharing) are left out: their leads are pushed again from the Sharing page
+// (the Held tab), never by reopening the old batch here, so a share is only
+// ever re-pushed from one place (the share step settles an ended share push
+// once, scripts/lib/share/settle.mjs). { batchId } of one answers 409;
+// { all: true } skips them. With sharing off no such batch exists, so the
+// route behaves as before.
 //
 // Only status = 'failed' is requeued — a genuine error where a retry can
 // succeed. 'skipped' is deliberately NEVER retried: those are leads Bison
@@ -40,8 +49,25 @@ export async function POST(request: NextRequest) {
     // One transaction so item requeues and batch counters can never disagree.
     await client.query("begin");
 
+    if (!retryAll) {
+      const { rows: [b] } = await client.query<{ source: string }>(
+        `select coalesce(push_options->>'source', '') as source from push_batches where id = $1`,
+        [batchId]
+      );
+      if (b && (SHARE_PUSH_SOURCES as readonly string[]).includes(b.source)) {
+        await client.query("rollback");
+        return NextResponse.json(
+          { error: "This is a share push: its leads are pushed again from the Sharing page (Held tab), not from here." },
+          { status: 409 }
+        );
+      }
+    }
+
     const scope = retryAll
-      ? { where: `status = 'failed'`, params: [] as unknown[] }
+      ? {
+          where: `status = 'failed' and batch_id not in (select id from push_batches where coalesce(push_options->>'source', '') = any($1::text[]))`,
+          params: [[...SHARE_PUSH_SOURCES]] as unknown[],
+        }
       : { where: `batch_id = $1 and status = 'failed'`, params: [batchId] };
 
     const { rows: touched } = await client.query<{ batch_id: string; n: string }>(
