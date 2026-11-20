@@ -129,6 +129,8 @@ export interface AddState {
   failed: number;
   /** No email: waiting for the email-finding steps. */
   pipeline: number;
+  /** Of those, copied to the client's People (pipeline) table, where the email finders look for an address (their find_email cell says so). */
+  sent: number;
 }
 
 export interface CountResult {

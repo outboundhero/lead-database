@@ -87,7 +87,7 @@ const COLUMNS = [
   {
     key: "find_email", name: "Find email", kind: "action", action: "later", phase: 3, provider: "Email finders",
     run_if: `{{outcome}} === "No email"`,
-    description: "People whose Outcome is No email wait here for the email-finding steps (Findymail, Prospeo, Anymail Finder), which aren't switched on yet. An address found goes through the same checks, then to the database. Built in Phase 3.",
+    description: "People whose Outcome is No email are copied to the client's People (pipeline) table once the client is on People runs; the email finders look for an address there, and one found comes back here, is checked again and goes to the database.",
   },
   // Phase 4 keeps the engine off it: only adding to the database (scripts/lib/aiark/add.mjs) writes these cells.
   {

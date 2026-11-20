@@ -511,7 +511,7 @@ function AddToDatabase({ table, onAdded }: { table: EnrichTableSummary; onAdded:
     state.added ? `${fmt(state.added)} added` : "",
     state.skipped ? `${fmt(state.skipped)} skipped` : "",
     state.failed ? `${fmt(state.failed)} not stored` : "",
-    state.pipeline ? `${fmt(state.pipeline)} no email, not worked yet` : "",
+    state.pipeline ? `${fmt(state.pipeline)} no email${state.sent ? ` (${fmt(state.sent)} sent to the People table)` : ", not sent yet"}` : "",
   ].filter(Boolean);
   const why = !state.run.finished
     ? "Add its people once the pull has finished"
