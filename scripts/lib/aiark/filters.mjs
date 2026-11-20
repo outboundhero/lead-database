@@ -346,9 +346,10 @@ const fmtN = (n) => Number(n).toLocaleString("en-US");
  * search. A cleaning client's standard filters always go; the built-in
  * competitors list (`competitors`, competitors.mjs) and then its own exclusion
  * terms go as room allows, at company level only (accountFilters). `keywords`
- * is what a pull keeps for the checks after it (keywordsRecord), or null.
+ * is what a pull keeps for the checks after it (keywordsRecord), there only
+ * when the standard keywords go, so any other client's answer is as before.
  *
- * @returns {{ requests: object[], report: object, notes: string[], blockers: string[], pullBlockers: string[], keywords: object | null }}
+ * @returns {{ requests: object[], report: object, notes: string[], blockers: string[], pullBlockers: string[], keywords?: object }}
  */
 export function buildRequests({ targeting, people, geo, cleaning = false, competitors = undefined }) {
   const notes = [];
@@ -358,7 +359,7 @@ export function buildRequests({ targeting, people, geo, cleaning = false, compet
 
   if (!targeting) {
     blockers.push("This client has no targeting rules yet. Add its locations and exclusions on the Clients page (Rules) or sync the sheet.");
-    return { requests: [], report: { locations: { total: 0, sent: 0, requests: 0, examples: [], dropped: [] } }, notes, blockers, pullBlockers, keywords: null };
+    return { requests: [], report: { locations: { total: 0, sent: 0, requests: 0, examples: [], dropped: [] } }, notes, blockers, pullBlockers };
   }
 
   const placesIn = [];
@@ -498,7 +499,7 @@ export function buildRequests({ targeting, people, geo, cleaning = false, compet
     notes,
     blockers,
     pullBlockers,
-    keywords: keywordsRecord(acct),
+    ...(acct.list ? { keywords: keywordsRecord(acct) } : {}),
   };
 }
 

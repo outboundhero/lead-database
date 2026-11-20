@@ -185,7 +185,7 @@ function partA(geo) {
   const other = buildRequests({ targeting: rules, people: peopleFilters("NKTEST Office Manager"), geo, cleaning: false, competitors: OVERFLOW });
   const before = buildRequests({ targeting: rules, people: peopleFilters("NKTEST Office Manager"), geo, cleaning: false });
   check("a client the standard keywords don't apply to: no list, nothing kept, the request as before",
-    !other.report.competitors && other.keywords === null && JSON.stringify(other.requests) === JSON.stringify(before.requests) &&
+    !other.report.competitors && !("keywords" in other) && JSON.stringify(other) === JSON.stringify(before) &&
       JSON.stringify([...other.requests[0].account.keyword.any.exclude.content].sort()) === JSON.stringify([...OWN_TERMS].sort()));
 
   section("A5. Company searches and the LinkedIn keywords");
@@ -196,7 +196,8 @@ function partA(geo) {
   check("... within the budget, and says the rest are checked on each company after the pull", bytes(coCut.requests[0].account.keyword.any.exclude.content) <= COMPANY_TERMS_BYTES &&
     coCut.notes.some((n) => n.startsWith("AI Ark's limits leave room for") && n.includes("each company")) && coCut.keywords.checked_after.includes("fitness club"));
   const coOther = buildCompanyRequests({ targeting: rules, filters: null, geo, cleaning: false, competitors: OVERFLOW });
-  check("... and a company search for any other client has none of it", !coOther.report.competitors && coOther.keywords === null);
+  check("... and a company search for any other client has none of it, its answer as before",
+    !coOther.report.competitors && !("keywords" in coOther) && JSON.stringify(coOther) === JSON.stringify(buildCompanyRequests({ targeting: rules, filters: null, geo, cleaning: false })));
   const k = keywordsFor(["nktest linkedin own"], madeUpList(["nktest mop crew", "janitorial"]));
   check("LinkedIn: the standard keywords, then the list's new terms, then the client's own",
     k.union.length === 76 + 2 && k.union.at(-2) === "nktest mop crew" && k.union.at(-1) === "nktest linkedin own" && k.list.name === COMPETITORS_LIST_NAME && k.list.terms === 2 &&

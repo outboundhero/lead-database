@@ -99,8 +99,9 @@ export function companyFiltersFor(saved, clientType) {
  *           competitors?: import("./competitors.mjs").Competitors }} opts
  *   filters: employee_bands, industries and exclude_industries (a whole people-filters object is fine);
  *   competitors: the built-in competitors list as read (readCompetitors), left out with the standard keywords
- * @returns {{ requests: object[], report: object, notes: string[], blockers: string[], pullBlockers: string[], keywords: object | null }}
- *   keywords: what the pull keeps for the checks after it (keywordsRecord in filters.mjs), or null
+ * @returns {{ requests: object[], report: object, notes: string[], blockers: string[], pullBlockers: string[], keywords?: object }}
+ *   keywords: what the pull keeps for the checks after it (keywordsRecord in filters.mjs), there only when the
+ *   standard keywords go
  */
 export function buildCompanyRequests({ targeting, filters = null, geo, cleaning = false, competitors = undefined }) {
   const notes = [];
@@ -109,7 +110,7 @@ export function buildCompanyRequests({ targeting, filters = null, geo, cleaning 
 
   if (!targeting) {
     blockers.push("This client has no targeting rules yet. Add its locations and exclusions on the Clients page (Rules) or sync the sheet.");
-    return { requests: [], report: { locations: { total: 0, sent: 0, requests: 0, examples: [], dropped: [] } }, notes, blockers, pullBlockers, keywords: null };
+    return { requests: [], report: { locations: { total: 0, sent: 0, requests: 0, examples: [], dropped: [] } }, notes, blockers, pullBlockers };
   }
 
   const placesIn = [];
@@ -199,7 +200,7 @@ export function buildCompanyRequests({ targeting, filters = null, geo, cleaning 
     notes,
     blockers,
     pullBlockers,
-    keywords: keywordsRecord(acct),
+    ...(acct.list ? { keywords: keywordsRecord(acct) } : {}),
   };
 }
 
