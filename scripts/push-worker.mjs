@@ -42,6 +42,7 @@ import { espBucket } from "./lib/esp-bucket.mjs";
 import { eligibilitySql, enqueueLeadCompanies, fitCheckOn, FIT_SKIP } from "./lib/enrich/fit-push.mjs";
 import { isSharePush } from "./lib/overlap-topup.mjs";
 import { planTarget, inSequenceElsewhere, attachBody, verifyForced, itemOutcome } from "./lib/push-attach.mjs";
+import { directLookupUnsafe, exactEmailMatch } from "./lib/bison-lookup.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname });
 
 const env = process.env;
@@ -213,7 +214,11 @@ async function rateGate(base) {
   if (at > now) await sleep(at - now);
 }
 
-async function bison(auth, method, path, body, attempt = 1) {
+// opts (optional): { timeoutMs, maxAttempts } for a call that must stay cheap
+// when Bison is slow (the address search); every other call keeps 30 s and
+// MAX_ATTEMPTS.
+async function bison(auth, method, path, body, attempt = 1, opts = {}) {
+  const maxAttempts = opts.maxAttempts ?? MAX_ATTEMPTS;
   await rateGate(auth.base);
   let res;
   try {
@@ -221,18 +226,18 @@ async function bison(auth, method, path, body, attempt = 1) {
       method,
       headers: { Authorization: `Bearer ${auth.key}`, "Content-Type": "application/json", Accept: "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? 30000),
     });
   } catch (e) {
-    if (attempt < MAX_ATTEMPTS) {
+    if (attempt < maxAttempts) {
       await sleep(1000 * attempt);
-      return bison(auth, method, path, body, attempt + 1);
+      return bison(auth, method, path, body, attempt + 1, opts);
     }
     throw new Error(`Bison ${method} ${auth.base}${path}: ${e instanceof Error ? e.message : "network error"}`);
   }
-  if ((res.status === 429 || res.status >= 500) && attempt < MAX_ATTEMPTS) {
+  if ((res.status === 429 || res.status >= 500) && attempt < maxAttempts) {
     await sleep(1500 * attempt); // 429/5xx are retryable
-    return bison(auth, method, path, body, attempt + 1);
+    return bison(auth, method, path, body, attempt + 1, opts);
   }
   const text = await res.text();
   let json = null;
@@ -327,15 +332,46 @@ async function findLeadByEmail(auth, email, tries = 1) {
   //
   // `tries` still covers the post-create indexing delay, but now retries the
   // direct route at ~0.25s a go instead of the 30s search.
+  //
+  // THE ONE EXCEPTION (2026-11-21, scripts/lib/bison-lookup.mjs): an address
+  // that does not start with a letter. Bison reads a path that starts with
+  // digits as a numeric id (GET /api/leads/360abc@… returns lead #360, someone
+  // else), so the direct route can never find such a lead: 831 of the 832
+  // failures of the 20 Nov re-run. Those addresses, ~0.1% of leads, go through
+  // ?search= (measured ~0.2 s on 2026-11-21), each call capped at 20 s with no
+  // retries, so a slow search can cost one odd address 20 s, never a stall.
+  // Every other lead stays on the direct route, as above.
+  const viaSearch = directLookupUnsafe(email);
   for (let t = 0; t < tries; t++) {
     if (t > 0) await sleep(1000);
     try {
+      if (viaSearch) {
+        const found = await searchLeadByEmail(auth, email);
+        if (found) return found;
+        continue;
+      }
       const direct = await bison(auth, "GET", `/api/leads/${encodeURIComponent(email)}`);
       const hit = direct?.data ?? direct;
       if (hit && hit.id != null && (hit.email || "").toLowerCase() === email.toLowerCase()) return hit;
     } catch (e) {
       if (e.status !== 404 && e.status !== 422) throw e; // real error, not "absent"
     }
+  }
+  return null;
+}
+
+// GET /api/leads?search=<address>: the exact (any case) match, or null. Bison
+// drops search= from its own next-links, so pages are asked for by number; a
+// page holds at most 15 rows, and three are plenty for one full address.
+const SEARCH_CALL = { timeoutMs: 20_000, maxAttempts: 1 };
+async function searchLeadByEmail(auth, email) {
+  const q = encodeURIComponent(String(email).trim());
+  for (let page = 1; page <= 3; page++) {
+    const json = await bison(auth, "GET", `/api/leads?search=${q}&page=${page}`, undefined, 1, SEARCH_CALL);
+    const rows = Array.isArray(json?.data) ? json.data : [];
+    const hit = exactEmailMatch(rows, email);
+    if (hit) return hit;
+    if (rows.length < 15) return null;
   }
   return null;
 }
@@ -366,7 +402,11 @@ async function createLead(auth, lead, tags) {
       throw e;
     }
   }
-  const hit = await findLeadByEmail(auth, lead.email, 6);
+  // Bison says the address is taken, so the lead exists. If the direct route
+  // still cannot read it, one search before giving up (an address
+  // directLookupUnsafe does not flag has already been searched for otherwise).
+  const hit = (await findLeadByEmail(auth, lead.email, 6))
+    ?? (directLookupUnsafe(lead.email) ? null : await searchLeadByEmail(auth, lead.email));
   if (!hit) throw new Error(`lead ${lead.email} exists in Bison but could not be fetched by email`);
   await bison(auth, "PUT", `/api/leads/${hit.id}`, leadPayload(lead, tags, auth.domain)); // refresh fields + tags
   // The existing lead as Bison holds it (its campaigns did not change with the PUT).
