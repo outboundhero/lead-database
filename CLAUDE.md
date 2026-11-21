@@ -973,6 +973,23 @@ scripts/push-worker.mjs):
   for leads Bison left out. Re-pushing a client with "Also send the
   already-pushed leads" re-plans each lead (present ones cost one lookup).
 
+### Addresses that start with a digit (2026-11-21)
+
+Bison's `GET /api/leads/{id-or-email}` reads a path that starts with digits as a
+numeric id: `GET /api/leads/360abc@…` returns lead #360, someone else. The
+worker's email check never matched, the create answered "taken", and the item
+failed with "exists in Bison but could not be fetched by email": 831 of the 832
+failures of the 20 Nov re-run of nine clients (887,021 leads; the 832nd started
+with "/"), and the same cause behind the 18 Nov ones. Such addresses (~0.1%)
+now go through `GET /api/leads?search=<email>&page=N` (exact match, any case;
+`directLookupUnsafe` / `exactEmailMatch` in scripts/lib/bison-lookup.mjs,
+measured 0.2–1.2 s), each call capped at 20 s with no retries (`bison()`'s
+optional `{ timeoutMs, maxAttempts }`). After a "taken" create, any address the
+direct route still cannot read gets one search before the item fails. Every
+other lookup stays direct: the general search fallback stays gone (see
+findLeadByEmail). Tests: `scripts/test-bison-lookup.mts` (includes a simulated
+install with the quirk). Live check: 30 of the 832 failed leads, all found.
+
 ## Net-new forecast on export
 
 After choosing campaigns, the export popup shows how many of the selected leads
