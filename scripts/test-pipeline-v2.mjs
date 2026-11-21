@@ -822,7 +822,7 @@ try {
   const ready = await one(`SELECT to_regclass('public.enrich_contacts') IS NOT NULL AS ok`);
   if (!ready.ok) throw new Error("migration 125 is not in this database");
   await cleanup();
-  spendBefore = await all(`SELECT day::text AS day, kind, used::text AS used FROM enrich_spend_daily`);
+  spendBefore = await all(`SELECT day::text AS day, kind, used::text AS used FROM enrich_spend_daily ORDER BY day, kind`);
   Object.assign(baseline, { leads: (await one(`SELECT count(*)::int AS n FROM leads`)).n, push: (await one(`SELECT count(*)::int AS n FROM push_items`)).n });
   BASE_ROWS.push(...(await all(`SELECT key, value FROM enrich_settings`)));
   SA = settingsWith({ spend_caps: HIGH_CAPS });
@@ -853,7 +853,7 @@ try {
             (SELECT count(*)::int FROM aiark_people_runs WHERE starts_with(client_tag, $1)) AS people_runs`,
     [PREFIX, `%.${HOST}`]
   );
-  const spendBack = spendBefore ? JSON.stringify(await all(`SELECT day::text AS day, kind, used::text AS used FROM enrich_spend_daily`)) === JSON.stringify(spendBefore) : true;
+  const spendBack = spendBefore ? JSON.stringify(await all(`SELECT day::text AS day, kind, used::text AS used FROM enrich_spend_daily ORDER BY day, kind`)) === JSON.stringify(spendBefore) : true;
   const clean = Object.values(left).every((n) => n === 0) && spendBack;
   console.log(`\ncleaned up: ${clean ? "yes" : `NO ${JSON.stringify({ ...left, spendBack })}`}`);
   console.log(`${count.passed} passed, ${count.failed} failed (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
