@@ -38,6 +38,8 @@ interface Preview {
   changedCount: number;
   totalInSheet: number;
   unmatched: number;
+  /** Changed clients whose places were edited by hand (migration 139): their places are kept, only their exclusions change. */
+  placesKept?: string[];
   estimatedCostUsd: number;
 }
 
@@ -195,6 +197,12 @@ export function RulesSyncProvider({ children }: { children: React.ReactNode }) {
                 ))}
               </div>
             </div>
+            {(preview?.placesKept?.length ?? 0) > 0 && (
+              <p className="text-muted-foreground">
+                Places kept (edited by hand): {preview?.placesKept?.join(", ")}. The sync leaves their places
+                and countries as they are and updates only their exclusions.
+              </p>
+            )}
             <p className="text-muted-foreground">
               Estimated AI cost: <span className="font-medium text-foreground">
                 ~${preview?.estimatedCostUsd.toFixed(2)}

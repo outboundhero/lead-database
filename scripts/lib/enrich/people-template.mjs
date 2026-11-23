@@ -136,6 +136,21 @@ function withUploadGate(spec) {
 }
 
 /**
+ * The client's service area (migration 139), ours: its area in words, which a
+ * prompt reads as {{Service Area}}. The client_variable action (client-checks.mjs)
+ * reads it at run time (serviceAreaFor in service-area.mjs: the value typed on
+ * the Clay tab, else the onboarding sheet's places text, else a label of the
+ * client's places), so a change applies to the rows worked after it with no
+ * recompile. Free, no switch: it runs before the personalisation steps that
+ * read it. The General template has the same column.
+ */
+export const SERVICE_AREA_COLUMN = Object.freeze({
+  key: "service_area", from: null, kind: "action", action: "client_variable", provider: "Client variables", data_type: "text",
+  config: { name: "service_area" },
+  note: "The client's service area, for prompts ({{Service Area}}): the value typed on the Clay tab (Client setup, Location), else the onboarding sheet's places text, else a label of the client's places. Read at run time, free.",
+});
+
+/**
  * The computed columns, in order. kind and action are what each compiles to;
  * flag: switches (config.flag, settings.mjs flagOn); key_env: the key a keyed
  * step runs with (absent: skipped, never waits); written: a D30 waterfall.
@@ -218,6 +233,7 @@ export const PEOPLE_COLUMNS = Object.freeze([
   { key: "validate_email_anymail_finder_from_linkedin", from: "P#54", kind: "action", action: "enrichley_verify_email", key_env: "ENRICHLEY_API_KEY" },
   { key: "use_work_email", from: "P#55", kind: "waterfall" },
   { key: "qualified_work_email", from: "P#56", kind: "formula" },
+  SERVICE_AREA_COLUMN,
   { key: "email_domain", from: "P#57", kind: "formula", flag: ["personalisation"] },
   { key: "email_provider_check_api", from: "P#58", kind: "action", action: "dns_mx", flag: ["personalisation"] },
   { key: "claygent", from: "P#60", kind: "action", action: "ai_web", model_setting: "people_claygent", tool: "web_search", flag: ["personalisation"] },
@@ -310,6 +326,7 @@ export function sourceObject(p) {
 const NAMES = {
   in_area: "Inside the client's area",
   rule_match: "Client exclusions",
+  service_area: "Service Area",
   person_outcome: "Outcome",
   add_to_database: "Added to the database",
   company_row: "Company row",

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
-import { placeInputs } from "../../../scripts/lib/enrich/maps-place.mjs";
+import { parseLocationFilter, placeInputs } from "../../../scripts/lib/enrich/maps-place.mjs";
+import { COMPANY_MAPS_INPUT_KEYS } from "../../../scripts/lib/enrich/company-template-v2.mjs";
 import { ensurePipelineTables, PIPELINE_TEMPLATES } from "../../../scripts/lib/enrich/templates.mjs";
 import { normName, type NameCheck } from "./inbound";
 import type { IncomingRow } from "./insert-rows";
@@ -12,13 +13,31 @@ export { placeRowKey } from "../../../scripts/lib/enrich/maps-place.mjs";
 // (POST /api/enrich/intake/<token>, migration 129). The scraper app sends each
 // chunk exactly as it would send it to Clay:
 //   { taskId, originalTaskId?, chunkIndex?, totalChunks?,
-//     extra: { client, keyword, city, state, category, scrape_queue_id } (or null),
+//     extra: { client, keyword, city, state, category, scrape_queue_id, location_filter? } (or null),
 //     postbackData: { tasks: [ { result: [ { items: [ ...up to 25 places... ] } ] } ] } }
 // Every place of every task and result becomes one row of the client's
 // Companies (pipeline) table (placeInputs, scripts/lib/enrich/maps-place.mjs),
 // keyed "maps:" and its place id. A place with no place id is skipped and
 // counted. A blank search city, state or category is fine: the place's own
 // address places it.
+//
+// The location filter (optional, migration 139): what the scrape was limited
+// to, sent in the extra block, versioned:
+//   extra.location_filter = { version: 1, name?, countries?: [ISO2],
+//     include?: [{country, state?, city?}], exclude?: [{country, state?, city?}],
+//     zips?: [string], radius?: { miles, center: {city?, state?, country?} | {lat, lng} }, text? }
+// The places' shape is client_targeting's. It is read leniently
+// (parseLocationFilter): unknown keys are left out, text is cleaned as the meta
+// is, each list keeps 500 entries, and the whole must fit 4,000 characters.
+// It never refuses a chunk: an unknown version, a bad shape or a filter too
+// long is not kept, and the delivery's meta says why. A kept filter is in the
+// delivery's meta (enrich_sources.meta.location_filter, with
+// location_filter_note) and on each of its places as the hidden input
+// location_filter (compact JSON). It filters nothing: whether it should replace
+// the client's places or narrow them is a later decision. A place already in
+// the table keeps its first delivery's cells, as every input does. The
+// scraper app's Test may send one at the top level ({ test: true,
+// location_filter }); the Test's answer then says whether it would be kept.
 //
 // Also here: the intake's slots (3 deliveries at once in this process) and
 // the client's Companies (pipeline) table, made under a per-client lock when
@@ -43,10 +62,10 @@ const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 /** Lone UTF-16 halves made U+FFFD: Postgres refuses them inside jsonb, which would fail the chunk on every try. */
 const wellFormed = (s: string) => s.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "�");
 
-/** Text as stored in a label or the meta: white space made single, no NUL, well formed, at most 200 characters. */
+/** Text as stored in a label or the meta: white space made single, no NUL, at most 200 characters, well formed (cut first, so a cut never leaves half a pair). */
 function text(v: unknown, max = TEXT_MAX): string {
   if (typeof v !== "string" && typeof v !== "number") return "";
-  return wellFormed(String(v).replace(/\u0000/g, "").replace(/\s+/g, " ").trim()).slice(0, max);
+  return wellFormed(String(v).replace(/\u0000/g, "").replace(/\s+/g, " ").trim().slice(0, max));
 }
 
 const whole = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) ? v : null);
@@ -114,16 +133,21 @@ export function chunkId(body: unknown): string | null {
 /**
  * One chunk as rows of the client's Companies (pipeline) table, with the
  * delivery's label and meta. `how` is the name check's answer, kept in the
- * meta with the name the chunk carried.
+ * meta with the name the chunk carried. A chunk that sends a location filter
+ * (extra.location_filter) has it in the meta as kept (null when it was not)
+ * with the note why, and each place has the kept one as its location_filter
+ * input; a chunk that sends none has neither key in its meta.
  */
 export function mapsDelivery(body: unknown, tag: string, how: NameCheck["how"]) {
   const b = obj(body);
   const extra = obj(b.extra);
+  const sentFilter = extra.location_filter != null;
+  const lf = sentFilter ? parseLocationFilter(extra.location_filter) : { filter: null, note: null };
   const items = list(obj(b.postbackData).tasks)
     .flatMap((t) => list(obj(t).result))
     .flatMap((r) => list(obj(r).items));
   const rows: IncomingRow[] = items.map((item) => ({
-    inputs: Object.fromEntries(Object.entries(placeInputs(item, b.extra ?? null, tag)).map(([k, v]) => [k, wellFormed(v)])),
+    inputs: Object.fromEntries(Object.entries(placeInputs(item, b.extra ?? null, tag, lf.filter)).map(([k, v]) => [k, wellFormed(v)])),
   }));
   const keyword = text(extra.keyword);
   const city = text(extra.city);
@@ -140,6 +164,7 @@ export function mapsDelivery(body: unknown, tag: string, how: NameCheck["how"]) 
     name_check: how,
     chunk_index: whole(b.chunkIndex),
     total_chunks: whole(b.totalChunks),
+    ...(sentFilter ? { location_filter: lf.filter, location_filter_note: lf.note } : {}),
   };
   return { rows, chunkId: chunkId(body), label, meta };
 }
@@ -209,15 +234,21 @@ async function findMapsTable(c: PoolClient, tag: string) {
     [tag]
   );
   const t = rows[0];
-  return t ? { id: t.id, inputKeys: t.keys, ready: t.keys.includes("place_id") } : null;
+  // Ready only with every Maps input (COMPANY_MAPS_INPUT_KEYS): insertRows keeps only the inputs a table has, so a
+  // table made before an input was added would drop it without a word. Such a table is compiled again first.
+  return t
+    ? { id: t.id, inputKeys: t.keys, ready: COMPANY_MAPS_INPUT_KEYS.every((k) => t.keys.includes(k)), hasPlaceId: t.keys.includes("place_id") }
+    : null;
 }
 
 /**
- * The client's Companies (pipeline) table as Maps places need it (with its
- * place_id input), inside the caller's transaction. When it is missing, or
- * older than the Maps inputs, the client's three pipeline tables are made or
+ * The client's Companies (pipeline) table as Maps places need it (with every
+ * Maps input), inside the caller's transaction. When it is missing, or older
+ * than the Maps inputs, the client's three pipeline tables are made or
  * brought up to date under the per-client lock, in a savepoint. Null when
- * they can't be made now (isTablesRefusal); nothing is then written.
+ * they can't be made now (isTablesRefusal); nothing is then written. A table
+ * that already takes places (it has the place id input) but can't be brought
+ * up to date now takes them as it did before: without the newer inputs.
  */
 export async function mapsTableFor(c: PoolClient, tag: string): Promise<{ id: string; inputKeys: string[] } | null> {
   let t = await findMapsTable(c, tag);
@@ -232,7 +263,7 @@ export async function mapsTableFor(c: PoolClient, tag: string): Promise<{ id: st
     } catch (e) {
       if (!isTablesRefusal(e)) throw e;
       await c.query("ROLLBACK TO SAVEPOINT maps_table");
-      return null;
+      return t?.hasPlaceId ? { id: t.id, inputKeys: t.inputKeys } : null;
     }
     t = await findMapsTable(c, tag);
   }

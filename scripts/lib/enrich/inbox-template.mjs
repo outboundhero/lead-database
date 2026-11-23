@@ -25,6 +25,7 @@
 
 import { compileColumn, refMap } from "./compile-original.mjs";
 import { CLAY_TOOL_ACTIONS, toolInputs } from "./clay-tools.mjs";
+import { SERVICE_AREA_COLUMN } from "./people-template.mjs";
 
 export const INBOX_TEMPLATE = "inboxes_v1";
 export const INBOX_TABLE_NAME = "General (pipeline)";
@@ -102,6 +103,7 @@ export const INBOX_COLUMNS = Object.freeze([
   { key: "enrichly_stamp_of_approval", from: "G#42", kind: "formula" },
   { key: "result", from: "G#43", kind: "formula" },
   { key: "email_valid", from: "G#44", kind: "formula" },
+  SERVICE_AREA_COLUMN, // the client's service area (139), before the personalisation steps that read it
   { key: "email_domain", from: "G#45", kind: "formula", flag: ["personalisation"] },
   { key: "email_host_lookup_google_dns", from: "G#46", kind: "action", action: "dns_mx", flag: ["personalisation"] },
   { key: "claygent", from: "G#48", kind: "action", action: "ai_web", model_setting: "inbox_claygent", tool: "web_search", flag: ["personalisation"] },
@@ -145,6 +147,7 @@ export const INBOX_OUTCOME_FORMULA = [
 
 /** Names of our own columns (from: null). */
 const OURS = {
+  service_area: { name: "Service Area", provider: SERVICE_AREA_COLUMN.provider, description: SERVICE_AREA_COLUMN.note },
   inbox_outcome: { name: "Outcome", formula: INBOX_OUTCOME_FORMULA, description: "The address's result. Approved and Already in the database count toward listing its company." },
   add_to_database: { name: "Added to the database", provider: "Promotion", description: "Written only by promotion (phase 3); the engine never works it." },
 };

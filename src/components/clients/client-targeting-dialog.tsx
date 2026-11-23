@@ -8,46 +8,29 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { TagInput } from "@/components/ui/ios/tag-input";
 import { IosToggle } from "@/components/ui/ios/ios-toggle";
+import { useHasPermission } from "@/lib/context/role-context";
+import { entryLabel, parseEntry, TARGET_COUNTRIES as COUNTRIES, type LocationEntry as Entry } from "@/lib/clients/targeting-validate";
 import { toast } from "sonner";
 
 // Per-client targeting rules editor. Location entries are typed naturally —
 // "Spokane, WA" (city), "Washington" or "WA" (state), "Canada" (country) —
 // and validated against the geo reference on save; unknown places are
 // rejected, never stored. Explicit exclusions override broader inclusions.
+// Changed places are locked against the onboarding-sheet sync (migration 139):
+// the dialog says so, and "Follow the sheet again" hands them back to it.
 
-const COUNTRIES = [
-  { code: "US", label: "USA" },
-  { code: "CA", label: "Canada" },
-  { code: "AU", label: "Australia" },
-  { code: "NZ", label: "New Zealand" },
-  { code: "GB", label: "United Kingdom" },
-  { code: "IE", label: "Ireland" },
-];
-const COUNTRY_WORDS: Record<string, string> = {
-  usa: "US", us: "US", "united states": "US", america: "US",
-  canada: "CA", australia: "AU", "new zealand": "NZ",
-  "united kingdom": "GB", uk: "GB", ireland: "IE",
-};
-
-type Entry = { country: string; state?: string; city?: string };
-
-// "Spokane, WA" -> {US, WA, Spokane}; "Washington" -> {US, state}; "Canada" -> country
-function parseEntry(raw: string): Entry {
-  const t = raw.trim();
-  const asCountry = COUNTRY_WORDS[t.toLowerCase()];
-  if (asCountry) return { country: asCountry };
-  const parts = t.split(",").map((p) => p.trim()).filter(Boolean);
-  if (parts.length >= 2) {
-    // "City, ST" or "City, ST, Country"
-    const country = parts[2] ? COUNTRY_WORDS[parts[2].toLowerCase()] ?? parts[2].toUpperCase() : "US";
-    return { country, state: parts[1], city: parts[0] };
-  }
-  return { country: "US", state: t }; // bare state name/code (server validates)
-}
-function entryLabel(e: Entry): string {
-  if (e.city) return `${e.city}, ${e.state}${e.country !== "US" ? `, ${e.country}` : ""}`;
-  if (e.state) return `${e.state}${e.country !== "US" ? `, ${e.country}` : ""}`;
-  return COUNTRIES.find((c) => c.code === e.country)?.label ?? e.country;
+/** "Follow the sheet again": the places' lock comes off (PUT /api/clients/location {unlock}); the next sync applies the sheet. */
+async function followSheet(tag: string): Promise<void> {
+  const g = await fetch(`/api/clients/location?tag=${encodeURIComponent(tag)}`);
+  const view = await g.json().catch(() => ({}));
+  if (!g.ok) throw new Error(typeof view.error === "string" ? view.error : "Could not read the client's places");
+  const res = await fetch("/api/clients/location", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tag, unlock: true, version: view.version }),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(typeof j.error === "string" ? j.error : "Could not hand the places back to the sheet");
 }
 
 interface Props {
@@ -56,8 +39,13 @@ interface Props {
 }
 
 export function ClientTargetingDialog({ tag, onClose }: Props) {
+  const canEdit = useHasPermission("admin");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  // The places' lock (migration 139): edited by hand, when and by whom; reload bumps to read the rules again.
+  const [lock, setLock] = useState<{ at: string | null; by: string | null } | null>(null);
+  const [unlocking, setUnlocking] = useState(false);
+  const [reload, setReload] = useState(0);
   const [countries, setCountries] = useState<string[]>(["US"]);
   const [include, setInclude] = useState<Entry[]>([]);
   const [exclude, setExclude] = useState<Entry[]>([]);
@@ -85,6 +73,7 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
         const isCleaning = d.client_type === "Cleaning";
         setDefaultMinimum(typeof d.default_min_leads_per_place === "number" ? d.default_min_leads_per_place : null);
         setMinimum(t && typeof t.min_leads_per_place === "number" ? String(t.min_leads_per_place) : "");
+        setLock(t?.locations_locked ? { at: t.locations_locked_at ?? null, by: typeof d.locked_by_email === "string" ? d.locked_by_email : null } : null);
         if (!t) { // fresh config defaults
           setCountries(["US"]); setInclude([]); setExclude([]);
           setExcludeTerms([]); setIncludeTerms([]);
@@ -112,7 +101,22 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
       })
       .catch(() => toast.error("Failed to load targeting"))
       .finally(() => setLoading(false));
-  }, [tag]);
+  }, [tag, reload]);
+
+  async function unlock() {
+    if (!tag) return;
+    if (!window.confirm(`Hand ${tag}'s places back to the onboarding sheet? The next sheet sync replaces them with what the sheet says. Changes not saved in this dialog are dropped.`)) return;
+    setUnlocking(true);
+    try {
+      await followSheet(tag);
+      toast.success(`${tag}'s places follow the onboarding sheet again: the next sync applies it.`);
+      setReload((n) => n + 1);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not hand the places back to the sheet");
+    } finally {
+      setUnlocking(false);
+    }
+  }
 
   async function save() {
     if (!tag) return;
@@ -142,7 +146,11 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      toast.success(`Targeting saved for ${tag}. Applies to previews and every future push.`);
+      toast.success(
+        data.locked
+          ? `Targeting saved for ${tag}. Its places are now kept from the onboarding sheet sync. Applies to previews and every future push.`
+          : `Targeting saved for ${tag}. Applies to previews and every future push.`
+      );
       onClose();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Save failed");
@@ -161,12 +169,25 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
           <p className="py-6 text-center text-xs text-muted-foreground">Loading…</p>
         ) : (
           <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
-            {sheetSyncedAt && (
-              <div className="rounded-xl bg-muted px-3 py-2 text-[11px] text-muted-foreground">
-                Synced from the onboarding sheet {new Date(sheetSyncedAt).toLocaleDateString()}.
-                Manual edits persist until that sheet row changes.
+            {lock ? (
+              <div className="flex flex-wrap items-center gap-2 rounded-xl bg-[var(--warning)]/10 px-3 py-2 text-[12px]">
+                <span className="min-w-0 flex-1">
+                  Places edited by hand{lock.at ? ` on ${new Date(lock.at).toLocaleDateString()}` : ""}{lock.by ? ` by ${lock.by}` : ""}: the
+                  onboarding sheet no longer changes them.
+                </span>
+                {canEdit && (
+                  <Button size="xs" variant="outline" onClick={unlock} disabled={unlocking || saving}>
+                    {unlocking ? "Handing back…" : "Follow the sheet again"}
+                  </Button>
+                )}
               </div>
-            )}
+            ) : sheetSyncedAt ? (
+              <div className="rounded-xl bg-muted px-3 py-2 text-[12px] text-muted-foreground">
+                Synced from the onboarding sheet {new Date(sheetSyncedAt).toLocaleDateString()}.
+                Places you change here are kept from the sheet sync after that; exclusion terms follow
+                the sheet whenever its row changes.
+              </div>
+            ) : null}
             <div>
               <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Countries</p>
               <div className="flex flex-wrap gap-1.5">
@@ -195,7 +216,10 @@ export function ClientTargetingDialog({ tag, onClose }: Props) {
                 splitOn={null}
                 onChange={(arr) => setInclude(arr.map(parseEntry))}
               />
-              <p className="mt-1 px-1 text-[10px] text-muted-foreground">Empty = the whole targeted country list.</p>
+              <p className="mt-1 px-1 text-[12px] text-muted-foreground">
+                Empty = the whole targeted country list. Saving changed places (or countries) keeps them from the
+                onboarding sheet sync until you follow the sheet again.
+              </p>
             </div>
             <div>
               <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Exclude locations</p>

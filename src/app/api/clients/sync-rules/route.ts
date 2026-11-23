@@ -14,7 +14,10 @@ import {
 // /api/clients/sync-groups, which is instant and free — this one can spend money,
 // so it is its own button and always previews first.
 //
-//   GET  ?preview=1  which clients' onboarding text changed, and the AI cost
+//   GET  ?preview=1  which clients' onboarding text changed, and the AI cost;
+//                    placesKept: those of them whose places were edited by hand
+//                    (locations_locked, migration 139): the sync keeps their
+//                    places and countries and changes only their exclusions
 //   GET              the latest jobs, for the progress panel
 //   POST             queue a job (the worker picks it up within ~5s)
 //
@@ -66,7 +69,7 @@ async function requireRole(allowed: string[]) {
  * which is what makes re-clicking this button safe.
  */
 async function computeChanged(): Promise<
-  { tags: string[]; totalInSheet: number; unmatched: number }
+  { tags: string[]; totalInSheet: number; unmatched: number; placesKept: string[] }
 > {
   const saB64 = process.env.GOOGLE_SERVICE_ACCOUNT_B64;
   if (!saB64) throw new Error("GOOGLE_SERVICE_ACCOUNT_B64 is not configured on this service.");
@@ -108,10 +111,13 @@ async function computeChanged(): Promise<
   const pool = getPool();
   const { rows: known } = await pool.query<{ tag: string }>(`select tag from client_tags`);
   const knownTags = new Set(known.map((r) => r.tag));
-  const { rows: existing } = await pool.query<{ client_tag: string; sheet_raw: unknown }>(
-    `select client_tag, sheet_raw from client_targeting`
+  // locations_locked read through to_jsonb, so the preview works before migration 139 too (no row is locked then).
+  const { rows: existing } = await pool.query<{ client_tag: string; sheet_raw: unknown; locked: boolean }>(
+    `select client_tag, sheet_raw, coalesce((to_jsonb(t) ->> 'locations_locked')::boolean, false) as locked
+       from client_targeting t`
   );
   const rawByTag = new Map(existing.map((r) => [r.client_tag, r.sheet_raw]));
+  const lockedTags = new Set(existing.filter((r) => r.locked).map((r) => r.client_tag));
 
   const tags: string[] = [];
   let unmatched = 0;
@@ -120,7 +126,8 @@ async function computeChanged(): Promise<
     const stored = rawByTag.get(tag) ?? null;
     if (JSON.stringify(stored) !== JSON.stringify(cur)) tags.push(tag);
   }
-  return { tags: tags.sort(), totalInSheet: sheetClients.size, unmatched };
+  tags.sort();
+  return { tags, totalInSheet: sheetClients.size, unmatched, placesKept: tags.filter((t) => lockedTags.has(t)) };
 }
 
 export async function GET(request: NextRequest) {
@@ -129,12 +136,13 @@ export async function GET(request: NextRequest) {
 
   if (request.nextUrl.searchParams.get("preview") === "1") {
     try {
-      const { tags, totalInSheet, unmatched } = await computeChanged();
+      const { tags, totalInSheet, unmatched, placesKept } = await computeChanged();
       return NextResponse.json({
         changed: tags,
         changedCount: tags.length,
         totalInSheet,
         unmatched,
+        placesKept,
         estimatedCostUsd: Number((tags.length * EST_USD_PER_CLIENT).toFixed(2)),
       });
     } catch (e) {
