@@ -200,6 +200,14 @@ function partB() {
     cat61.find((e) => e.key === "company")?.ref === "{{f_fxP28}}" && cat61.find((e) => e.key === "in_area")?.ref === "{{in_area}}" && cat61.find((e) => e.key === "in_database")?.ref === "{{f_fxP04}}");
   const names = cat61.map((e) => normName(e.name));
   check("names are unique", new Set(names).size === names.length);
+  // The client's service area (an own column before the personalisation steps, 139) is read as {{Service Area}}.
+  const areas = [["people", "claygent"], ["people", "question_ai"], ["inboxes", "claygent"], ["inboxes", "question_ai"]]
+    .map(([kind, key]) => promptCatalogue(fixtureCompiled[kind], fixture, kind, key).find((e) => e.key === "service_area"));
+  const fArea = textToPrompt("[fx:P61] area={{Service Area}}; One short question.", cat61).formula;
+  const eArea = colOf(compileTemplates(withPromptOverrides(fixture, [{ template_kind: "people", position: 61, formula: fArea }], { variant: "xq1_memory" })), "people", "question_ai");
+  check("the client's Service Area is a placeholder of the four editable steps, by its key, and an edit reading it renders its value",
+    areas.every((e) => e?.name === "Service Area" && e.ref === "{{service_area}}" && !e.fields) &&
+      evaluate(makeContext(), eArea.inputs.prompt, emptyAsText({ service_area: "Made-up County" })) === "[fx:P61] area=Made-up County; One short question.", JSON.stringify(areas));
   check("a step that is no editable one is refused by position", isPromptPosition("people", 60) && isPromptPosition("inboxes", 49) && !isPromptPosition("people", 48) && !isPromptPosition("companies", 24) && !isPromptPosition("x", 60));
 
   section("B2. An edit compiled in memory");
