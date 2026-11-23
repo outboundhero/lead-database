@@ -482,6 +482,17 @@ src/lib/clients/roster.ts                  - The cached client list every client
 src/app/api/bison/client-tags/route.ts     - The client list: the session check, then one statement through getPool; Server-Timing on every answer
 scripts/backfill-worker.mjs                - Hourly cron, not created yet: the database backfill, shipped off (scripts/lib/backfill/)
 src/app/api/sharing/backfill/route.ts      - The Sharing page's Backfill tab: the switch, runs, passes, and a read-only preview per client
+
+── Client places, the service area and question variables (139, 2026-11-23) ──
+src/lib/clients/targeting-validate.ts      - Place parsing and checks shared by the Rules dialog, the targeting route and the location route
+src/lib/clients/location-server.ts         - GET/PUT /api/clients/location: the view, the save, the lock and its log, the service area
+scripts/lib/enrich/service-area.mjs        - serviceAreaFor: the one place a client's service area is chosen (pipeline column, route, question writer)
+scripts/lib/questions/                     - Question variables: names, settings, render (placeholders), writer, gather, jobs (the enrich-worker's step)
+src/app/api/questions/                     - The question variable routes (variables, client, context, bison, readiness, jobs, values, copy-check)
+src/lib/questions/                         - Their server helpers, the popup's selection checked as push-batch checks it, Bison calls, answer types
+src/components/clay/question-variable-tab.tsx - The Client setup sheet's Question variable tab (location-tab.tsx: its Location tab)
+src/components/exports/question-variable-row.tsx - The export popup's Question variable row (readiness, the write job, the Bison and copy checks)
+scripts/lib/push-question-var.mjs          - The push-worker's side of a batch's question variable: values, the install check, create and PATCH
 ```
 
 ⚠ **Legacy vs live scripts.** `scripts/` also holds ~20 one-off and
@@ -3379,7 +3390,7 @@ original" deletes the edit. Nothing changes for a client until an admin saves an
   a 409 loads the tab again and keeps the text typed. After a save the page reads its
   tables and the open table again.
 - **Tests:** `node --env-file=.env.local scripts/test-prompt-overrides.mjs` (local database
-  only, migration 139 applied; 80 checks, under 1 s): the conversion and its refusals,
+  only, migration 139 applied; 81 checks, under 1 s): the conversion and its refusals,
   round trips on the fixture originals that render the same prompt, what a step may
   read, the compile in memory and the text variants, an edit compiled into the tables,
   reset, a broken edit left out with its note, the route through the TypeScript loader
@@ -4908,6 +4919,144 @@ everything off; no service runs it yet (the owner creates `backfill-worker` late
   build'`). Switch it on in preview for a few clients and read their previews and runs
   on the Backfill tab; then put those clients on overlap sharing's push list and set
   the mode to apply.
+
+## Question variables (migration 139, 2026-11-23)
+
+A client can send its own question variable instead of the default `{QUESTION}`: a
+Bison custom variable such as "acme-os question", written `{ACME-OS QUESTION}` in
+campaign copy, whose value the enrich-worker writes for the leads about to be pushed
+(a research call per company with web search, then a question call per lead), and
+which the push sends with the batch. Built for OS clients (client type OS, or a tag
+with an isolated ending, default "-OS"), offered for every client. **Ships off:**
+`enrich_settings.question_variables` is `{enabled: false, tags: []}`, and nothing is
+written, checked or sent for a client until it is on and lists that client
+(`questionSwitchOn`, `scripts/lib/questions/settings.mjs`).
+
+- **The data** (139, all server-only: RLS on, no policies): `question_variables`
+  (name lower case and unique, never one of the 11 fixed names; services, client
+  context, a research prompt, a People and a General question prompt, max words 4
+  to 40; `version` for saves, `prompt_version` bumped by any change to what gets
+  written; archived, not deleted) with `question_variable_log`;
+  `client_question_settings` (a client's choice, null = the default `{QUESTION}`);
+  `question_research` (one answer per variable and company); `lead_question_values`
+  (one value per variable and lead: done, error or skipped; an error never replaces
+  a done value); `question_jobs` and `question_job_items`; and
+  `push_batches.question_variable_id` / `question_variable_name`. Names, copy tags
+  and the OS rule: `scripts/lib/questions/names.mjs`.
+- **Placeholders** (`scripts/lib/questions/render.mjs`): `{{Company}}`, `{{Company
+  Website}}` (the domain, else the email's), `{{Category}}`, `{{Sub-Category}}`,
+  `{{Additional Category}}`, `{{Title}}`, `{{City}}`, `{{State}}`, `{{First Name}}`,
+  `{{Services}}`, `{{Client Context}}`, `{{Service Area}}` and, in the question
+  prompts, `{{research.<field>}}`; names match in any case and spacing. The research
+  prompt takes company-level ones only (its answer is shared by the company's
+  leads). An unknown name, an empty pair, an unclosed `{{` or a stray `}}` is refused
+  at save. `{{Service Area}}` is the pipeline's own service area (`serviceAreaFor`,
+  see "Places edited by hand win"), read by `scripts/lib/questions/service-area.mjs`.
+- **The writer** (`writer.mjs`; db, fetch and env are handed to it, so the tests run
+  offline): research once per company (`company_key` = the domain, else
+  company|city|state; a done answer of the current prompt version is reused) on the
+  OpenAI Responses API with `web_search` (at most `max_searches` calls; 0 sends no
+  tool) and a strict schema `{company_summary, service_spaces, best_fit}`, on
+  `research_model`, else the pipeline's `people_claygent` model; then a question per
+  lead (the People prompt for a personal address, the General prompt for anything
+  else; no tool; strict `{question}`; `question_model`, else `people_question_ai`).
+  The answer must be at most max words, with no long dash and no curly brace: a broken
+  rule is asked once more with a short correction, then dashes become a comma or a
+  space and braces are taken out; still too long, the value is an error "over N
+  words". The value is the answer with its first letter lower case, as Clay's
+  "question" column writes it. Priced as the pipeline's AI steps (`openAiCost`);
+  every call adds to `enrich_spend_daily` kind `openai_usd_questions`, its own kind:
+  the pipeline's caps are untouched and the Companies tab's spend pills do not show
+  it (the jobs card does). At or over `usd_per_day` the job pauses until the next UTC
+  day.
+- **Jobs** (`jobs.mjs`, `gather.mjs`): a job writes the variable for the leads the
+  export popup's push would send for the same selection (the push-batch route's
+  checks, copied in `src/lib/questions/selection.ts`, and the push-worker's
+  `gatherCycle`, copied in `gather.mjs`; the suite pins both), minus leads holding a
+  current done value unless `rewrite`, at most `maxLeads` (else 250,000). It goes
+  queued, gathering (a snapshot in pages of 5,000, `SET LOCAL` only), running (slices
+  of `concurrency * 5` items, `concurrency` at a time, 3 tries a lead), then done,
+  error or cancelled. One step holds a job at a time (a claim token, taken over after
+  10 minutes). A job pauses with its reason (the switch off for its client, the
+  variable archived, the day's budget, no OpenAI key or model, a key or billing
+  refusal) and resumes by itself. Finished jobs' items are not pruned yet.
+- **The enrich-worker** runs one question step a loop, not awaited, on a pool of its
+  own (3 connections), looking every 10 s while idle; its heartbeat lists the
+  capability `question_jobs` and a `questions` block, and the routes start no job
+  while the worker running lacks it. Without 139 the step logs once and idles.
+- **Routes** (`src/app/api/questions/`, `requireRole` + `withTx`, audit lines with
+  lengths only; answer types in `src/lib/questions/types.ts`): `variables` (GET the
+  client's choice and every variable, manager; POST create, admin, 201),
+  `variables/<id>` (GET, manager; PUT with `version`, admin, 409 `{changed}`),
+  `variables/<id>/archive` (admin), `client` (PUT the client's choice, manager),
+  `context` (the onboarding sheet's target answer, for "Fill from onboarding"),
+  `bison` (GET whether each of the client's installs, `b2b_instance` and
+  `b2c_instance`, has the variable, live; POST makes it where missing, admin),
+  `readiness` (counts over the push set, read only, 20 s, else 504), `jobs` (GET the
+  20 newest; POST start, 409 without the worker's capability, with the switch off, or
+  with a job of the same client and variable open), `jobs/cancel`, `values` (the
+  newest values for review, never an email) and `copy-check` (whether each picked
+  campaign's copy uses `{X}`, and whether it still uses `{QUESTION}`; 20 campaigns at
+  most).
+- **The Clay tab:** Client setup, Question variable (`question-variable-tab.tsx`): the
+  client's choice (Default `{QUESTION}` or a variable), the OS badge, the switch and
+  worker state; the editor (name fixed after create, with its copy tag and rules;
+  services; client context with Fill from onboarding; the three prompts with
+  placeholder chips; max words; Start from another variable; Save with `version`, a
+  409 loads again; Archive and Restore); a Bison card with Create in Bison; the jobs
+  card (progress, spend, note, cancel; read every 4 s while one is open); the newest
+  20 values. Edits are admin only. No job starts here: jobs start from the export
+  popup, where the selection is.
+- **Settings** (Companies tab, Settings sheet, admin): Question variables: on or off,
+  the clients, OpenAI dollars a day, max words (a new variable's default), most web
+  searches, the research and question models.
+- **The export popup** (`column-selector.tsx`, `question-variable-row.tsx`): a
+  Question variable row in the client's panel, for every client, open and highlighted
+  for an OS client; picking one saves the client's choice. With the switch on for the
+  client and a variable picked: "N of M leads have {X} · K to write (about C
+  companies)" for the popup's selection (`src/lib/exports/push-selection.ts` builds the
+  same selection the push sends), "Write {X} for K leads" starts a job and follows it,
+  an install without the variable blocks the push ("Create {X} in Bison first", with a
+  link to `/leads/clay?setup=TAG&tab=question`), and a picked campaign whose copy does
+  not use `{X}` gets a warning. The confirm says "Leads without {X} are skipped".
+  `questionVariableId` is sent only with `clientTag`.
+- **The push** (`POST /api/bison/push-batch`): `questionVariableId` only with
+  `clientTag`; 400 when it is not an id, the switch is off for the client, or the
+  variable is unknown or archived. The batch stores its id and name; the audit
+  metadata gets the name, never a value. The Exports page shows `{X}` beside the
+  client tag. A push without one is stored and answered exactly as before.
+- **The push-worker** (`scripts/lib/push-question-var.mjs`), for a batch that names a
+  variable: the cycle reads its items' done values once, one statement per variable
+  (a value of an older prompt version is sent as written); a lead with no value is
+  skipped, "no {X} written yet"; before the first create or attach on an install it
+  checks the install has the variable (GET /api/custom-variables, cached 10 minutes, a
+  miss read again after 1 minute) and else fails the lead, "{X} isn't set up on
+  <install>: create it on the Clay tab"; a new lead gets it after the 11 fixed names;
+  a lead the install already holds gets a PATCH with only that variable, unless it
+  holds the same value (PUT clears every field it is not sent, so it is never used for
+  this; after the "taken" PUT a PATCH follows). A batch whose variable was deleted
+  after it was queued skips its leads. For every batch, Bison's missing-variable
+  error is read for the whole name (quoted, or up to ". Please"); only the 11 fixed
+  names are learned and dropped, and any other refused name fails the lead at once
+  with Bison's message (it used to loop 7 passes). Share and top-up pushes and
+  `scripts/queue-repush.mts` make batches without a variable.
+- **Tests:** `node --env-file=.env.local scripts/test-question-variables.mjs` (161
+  checks, about 2 s; made-up `XQ3A-OS`, `XQ3B` and `XQ3C` clients and
+  `.xq3.xxtest.example` leads; OpenAI and Bison stubbed; it refuses while a worker's
+  heartbeat is fresh): placeholders, the writer's rules, the gather against the
+  push-worker's own `gatherCycle` (cut from its source) and the pinned lines, every
+  route through the TypeScript loader, the Bison routes, jobs end to end, the settings
+  and the worker wiring. `node --env-file=.env.local scripts/test-push-question-var.mjs`
+  (94 checks, about 2 s; made-up `XQ4A-OS`, `XQ4B` and `XQ4C-OS` clients and `xq4`
+  variables): the pure module, the selection helper against the old push body, the
+  push-worker run once per made-up install (`PUSH_WORKER_ONCE=1`) against a made-up
+  Bison, and the push routes; it needs no other active push batch locally. Both need
+  139 locally and the shared database lock.
+- **Rollout** (everything ships off): apply 139 first. Deploy the web app, upload the
+  enrich-worker (the routes start no job until its heartbeat lists `question_jobs`),
+  and redeploy push-worker and its four install workers while no batch is processing,
+  all before the switch is on for any client: an older push-worker ignores
+  `question_variable_id` and would push those leads without the variable.
 
 ## Known issues / TODO
 
