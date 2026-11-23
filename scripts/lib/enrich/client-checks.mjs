@@ -29,9 +29,21 @@
 // The Companies template shares them (company-actions.mjs): client_office judges
 // each of a company's offices with judgePlace(), the rule client_area applies,
 // and held_general_email looks addresses up with heldAddresses().
+//
+// And one value, not a check (migration 139):
+//
+//   client_variable    a named per-client value, read at run time: the People
+//                      and General tables' service_area column (the client's
+//                      area in words, which a prompt reads as {{Service
+//                      Area}}), chosen by serviceAreaFor() (service-area.mjs)
+//                      from the client's client_variables row and its
+//                      client_targeting row. Free, cached 30 seconds like the
+//                      rules, never an error for a missing row (it is then
+//                      empty), and no spend.
 
 import { names } from "../aiark/add.mjs";
 import { cityKey, entryKey, findState, loadGeo } from "../aiark/geo.mjs";
+import { SERVICE_AREA, serviceAreaFor } from "./service-area.mjs";
 
 const TTL_MS = 30_000;
 const text = (v) => (v == null ? "" : String(v).trim());
@@ -581,17 +593,94 @@ async function clientExclusions({ inputs, table, row, db }) {
   return { status: "empty", note: `Clear of the client's ${terms.length} exclusion terms${linkedinNote}${titleNote}` };
 }
 
+// ── client_variable ─────────────────────────────────────────────────────────
+
+const variableCache = new Map(); // "<tag>|<name>" -> { at, readAt, targeting, variable }
+let variablesTable = null; // { at, ok }: whether client_variables exists (migration 139)
+
+/** Is client_variables in the database? Read again every 10 minutes; before 139 every client has no variable. */
+async function hasVariablesTable(db) {
+  if (variablesTable && Date.now() - variablesTable.at < 10 * 60_000) return variablesTable.ok;
+  const { rows: [r] } = await db.query(`SELECT to_regclass('public.client_variables') IS NOT NULL AS ok`);
+  variablesTable = { at: Date.now(), ok: r?.ok === true };
+  return variablesTable.ok;
+}
+
+/**
+ * A client's variable `name` (its client_variables row) and the parts of its
+ * rules a service area falls back to (client_targeting's sheet_raw and
+ * include_locations), each null when the client has none. Cached for 30
+ * seconds, and never older than `since` (the row's next_run_at), as
+ * targetingFor() is.
+ *
+ * @param {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> }} db
+ * @param {string} tag
+ * @param {string} name
+ * @param {Date | string | null | undefined} [since]
+ * @returns {Promise<{ targeting: { sheet_raw: unknown, include_locations: unknown } | null, variable: { value: string, source: string } | null }>}
+ */
+export async function clientVariableFor(db, tag, name, since) {
+  const key = `${tag}|${name}`;
+  const hit = variableCache.get(key);
+  if (current(hit, since)) return hit;
+  const withVariables = await hasVariablesTable(db);
+  const { rows: [r] } = await db.query(
+    withVariables
+      ? `SELECT now() AS read_at, t.client_tag, t.sheet_raw, t.include_locations, v.value, v.source
+           FROM (SELECT $1::text AS tag, $2::text AS name) q
+           LEFT JOIN client_targeting t ON t.client_tag = q.tag
+           LEFT JOIN client_variables v ON v.client_tag = q.tag AND v.name = q.name`
+      : `SELECT now() AS read_at, t.client_tag, t.sheet_raw, t.include_locations, NULL::text AS value, NULL::text AS source
+           FROM (SELECT $1::text AS tag, $2::text AS name) q
+           LEFT JOIN client_targeting t ON t.client_tag = q.tag`,
+    [tag, name]
+  );
+  const out = {
+    at: Date.now(),
+    readAt: r.read_at,
+    targeting: r.client_tag ? { sheet_raw: r.sheet_raw, include_locations: r.include_locations } : null,
+    variable: r.value != null ? { value: r.value, source: r.source } : null,
+  };
+  variableCache.set(key, out);
+  return out;
+}
+
+const SERVICE_AREA_FROM = {
+  variable: (source) =>
+    source === "scraper" ? "The client's service area, as the scraper sent it"
+      : source === "sheet" ? "The client's service area, from the onboarding sheet"
+        : "The client's service area, as typed on the Clay tab (Client setup, Location)",
+  sheet: () => "The onboarding sheet's places text (no service area typed for the client)",
+  places: () => "Made from the client's places (no service area typed, no places text in the onboarding sheet)",
+};
+
+/** client_variable: the client's value named config.name (service_area: serviceAreaFor()), read at run time. */
+async function clientVariable({ table, row, db, config }) {
+  const name = text(config?.name) || SERVICE_AREA;
+  const r = await clientVariableFor(db, table.client_tag, name, row?.next_run_at);
+  if (name !== SERVICE_AREA) {
+    const v = text(r.variable?.value);
+    return v ? { status: "done", value: v, display: v, note: `The client's ${name}` } : { status: "empty", note: `${table.client_tag} has no ${name}` };
+  }
+  const { value, from, source } = serviceAreaFor(r.targeting, r.variable);
+  if (!value) return { status: "empty", note: "No service area: none typed for the client, no places text in the onboarding sheet and no places" };
+  return { status: "done", value, display: value, note: SERVICE_AREA_FROM[from](source) };
+}
+
 export const CLIENT_ACTIONS = {
   lead_lookup: { run: leadLookup, cache: false },
   client_area: { run: clientArea, cache: false },
   client_exclusions: { run: clientExclusions, cache: false },
+  client_variable: { run: clientVariable, cache: false },
 };
 
-/** For tests: forget cached rules and titles. */
+/** For tests: forget cached rules, titles and client variables. */
 export function resetClientChecks() {
   targetingCache.clear();
   linkedinCache.clear();
   pullCache.clear();
+  variableCache.clear();
+  variablesTable = null;
   geoCache = null;
   titleCache = null;
 }
