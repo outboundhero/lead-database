@@ -66,7 +66,7 @@ export async function targetingFor(db, tag, since) {
   const hit = targetingCache.get(tag);
   if (current(hit, since)) return hit.row;
   const { rows: [r] } = await db.query(
-    `SELECT now() AS read_at, t.client_tag, t.countries, t.include_locations, t.exclude_locations, t.exclude_terms, t.commercial_cleaning
+    `SELECT now() AS read_at, t.client_tag, t.countries, t.include_locations, t.exclude_locations, t.exclude_terms, t.include_terms, t.commercial_cleaning
        FROM (SELECT $1::text AS tag) q
        LEFT JOIN client_targeting t ON t.client_tag = q.tag`,
     [tag]
@@ -593,6 +593,32 @@ async function clientExclusions({ inputs, table, row, db }) {
   return { status: "empty", note: `Clear of the client's ${terms.length} exclusion terms${linkedinNote}${titleNote}` };
 }
 
+// ── client_inclusions ───────────────────────────────────────────────────────
+// C#69's place (company-template-v2.mjs): the client's own inclusion terms
+// (client_targeting.include_terms, the Rules dialog's Include box), matched as
+// its exclusion terms are (companyTermHit). An inclusion list is each client's
+// own, never another client's: a client with none lets every company through,
+// as the own Clay tables of most clients had no inclusion filter at all.
+// Always an explicit true or false, since the Master Filter (C#17) reads it.
+
+async function clientInclusions({ inputs, table, row, db }) {
+  const t = await targetingFor(db, table.client_tag, row?.next_run_at);
+  if (!t) return { status: "error", note: `${table.client_tag} has no targeting rules`, retryable: false };
+  const terms = (Array.isArray(t.include_terms) ? t.include_terms : []).map((s) => text(s).toLowerCase()).filter(Boolean);
+  if (!terms.length) {
+    return { status: "done", value: true, display: "No inclusion terms", note: `${table.client_tag} has no inclusion terms of its own, so every company passes` };
+  }
+  const hit = companyTermHit(inputs, terms);
+  if (hit) {
+    const display = `"${hit.term}" in the ${hit.label}`;
+    return { status: "done", value: true, display, note: `Matches the client's inclusion term "${hit.term}"` };
+  }
+  return {
+    status: "done", value: false, display: "No inclusion term matched",
+    note: `None of the client's ${terms.length} inclusion terms is in the company name, industry or description`,
+  };
+}
+
 // ── client_variable ─────────────────────────────────────────────────────────
 
 const variableCache = new Map(); // "<tag>|<name>" -> { at, readAt, targeting, variable }
@@ -671,6 +697,7 @@ export const CLIENT_ACTIONS = {
   lead_lookup: { run: leadLookup, cache: false },
   client_area: { run: clientArea, cache: false },
   client_exclusions: { run: clientExclusions, cache: false },
+  client_inclusions: { run: clientInclusions, cache: false },
   client_variable: { run: clientVariable, cache: false },
 };
 

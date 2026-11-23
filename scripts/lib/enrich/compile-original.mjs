@@ -593,6 +593,19 @@ export function compileColumn(spec, originals, maps) {
   return row;
 }
 
+/**
+ * Fixed place names a client's prompt must not carry (the owner's rule, 2026-11-23): one sentence in most client
+ * variants' question and research prompts named Northern Virginia and Maryland for every client. The clause is
+ * dropped and its period kept, so the sentence reads as the default variant's own.
+ */
+export const FIXED_PLACE_CLAUSES = Object.freeze([", especially in the Northern Virginia and Maryland areas."]);
+/** A compiled prompt without FIXED_PLACE_CLAUSES. */
+export function withoutFixedPlaces(prompt) {
+  let out = String(prompt ?? "");
+  for (const c of FIXED_PLACE_CLAUSES) out = out.split(c).join(".");
+  return out;
+}
+
 /** An action column's inputs, config and run condition, by the action it compiles to. */
 function compileAction(spec, def, rw, row, maps, runIf, originals) {
   const original = Boolean(def);
@@ -600,7 +613,7 @@ function compileAction(spec, def, rw, row, maps, runIf, originals) {
     case "ai_web": {
       if (!original) throw new Error(`${spec.key}: ai_web compiles from an original use-ai column`);
       if (!spec.model_setting) throw new Error(`${spec.key}: an AI column needs its model setting`);
-      const prompt = rw(bindingText(def, "prompt"));
+      const prompt = withoutFixedPlaces(rw(bindingText(def, "prompt")));
       if (!prompt) throw new Error(`${spec.key}: ${spec.from} has no prompt`);
       const useCase = literal(bindingText(def, "useCase"));
       const examples = bindingText(def, "tableExamples");

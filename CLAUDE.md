@@ -2964,7 +2964,16 @@ out of AI Ark searches wherever the standard keywords go, with no switch of its 
   third duplicate check, P#89 and G#77 a second duplicate check each. The Companies
   template compiles C#69 (`inclusion_keywords_filter`, right before the Master Filter,
   which reads it) only when the originals hold it, so the 11-14 `default` and the
-  fixtures compile as before. The duplicate checks are stored and never compiled; our
+  fixtures compile as before. **Since 2026-11-24 C#69 is never the template client's
+  list:** it is the action `client_inclusions` (`client-checks.mjs`), the client's own
+  `client_targeting.include_terms` (the Rules dialog's Include box) matched as its
+  exclusion terms are (name and industry anywhere, description as whole words); a
+  client with none lets every company through (an explicit `true`). An inclusion list
+  is each client's own, never another client's: most clients' own Clay tables had no
+  inclusion filter (46 of the 48 active clients with a loaded variant), and the
+  template client's own 11-19 run ran before the clause was added to its Master Filter.
+  Typed Include terms are wiped by the sheet sync on update today (`include_terms =
+  '{}'`), so keep that in mind before relying on them. The duplicate checks are stored and never compiled; our
   database check stays in SAFE TO RUN's place.
 - **Shapes** (`shapeOf` in `compile-original.mjs`): a variant is `complete` (every
   canonical position, extensions allowed: `default`, and the exact-layout and by-name
@@ -3034,8 +3043,12 @@ out of AI Ark searches wherever the standard keywords go, with no switch of its 
   --plan` without `--dry` against the production database. Never at the same time as
   another Clay CLI job. Afterwards `variantFor` names a client's overlay, and its next
   pull or people run notes "(variant <v>)" on its tables; a fallback note means the
-  overlay did not compile. The inclusion filter (C#69) then applies to every client's
-  Companies rows once its tables are compiled again.
+  overlay did not compile. C#69 reads each client's own inclusion terms (see above),
+  never another client's list.
+- **Fixed place names** (2026-11-24, `withoutFixedPlaces` in `compile-original.mjs`): every
+  compiled AI prompt drops the clause ", especially in the Northern Virginia and Maryland
+  areas." (one sentence in most client variants' question and research prompts) and
+  keeps its period, so no client's question names those places.
 - **The tables** (`ensurePipelineTables()`, `templates.mjs`, run inside the pull route's
   transaction): "Companies (pipeline)" (`companies_v2`), "General (pipeline)"
   (`inboxes_v1`, one row per general address the company row wrote) and "People

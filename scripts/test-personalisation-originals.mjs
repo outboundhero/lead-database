@@ -314,10 +314,12 @@ async function partC() {
   const keys = compiled.companies.map((c) => c.key);
   const incl = compiled.companies.find((c) => c.key === "inclusion_keywords_filter");
   const master = compiled.companies.find((c) => c.key === "master_filter");
-  check("compiled: the inclusion filter right before the Master Filter, which reads it",
+  check("compiled: the inclusion filter right before the Master Filter, which reads it; it is the client's own terms (client_inclusions), never the template client's list",
     keys.indexOf("inclusion_keywords_filter") === keys.indexOf("master_filter") - 1 && master.formula.includes("{{inclusion_keywords_filter}}") &&
-      ["{{company}}", "{{domain}}", "{{category}}", "{{sub_category}}"].every((k) => incl.formula.includes(k)) && incl.clay_field_id === "f_psX69" && incl.formula.includes(`${FIXTURE_MARKER}-incl`),
-    JSON.stringify({ at: keys.indexOf("inclusion_keywords_filter"), master: master?.formula?.slice(0, 160) }));
+      incl.kind === "action" && incl.action === "client_inclusions" && incl.clay_field_id === "f_psX69" && !incl.formula &&
+      ["{{company}}", "{{industry}}", "{{description}}"].every((k) => Object.values(incl.inputs ?? {}).includes(k)) &&
+      !JSON.stringify(incl).includes(`${FIXTURE_MARKER}-incl`),
+    JSON.stringify({ at: keys.indexOf("inclusion_keywords_filter"), master: master?.formula?.slice(0, 160), incl: { kind: incl?.kind, action: incl?.action, inputs: incl?.inputs } }));
   const baseOriginals = await loadOriginals(pool, BASE);
   const baseCompiled = compileTemplates(baseOriginals);
   check("the base, with no extensions, compiles exactly as the fixtures do (every field, keys sorted: jsonb keeps no key order), with no inclusion filter",

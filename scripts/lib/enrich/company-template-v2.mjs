@@ -140,7 +140,12 @@ export const COMPANY_COLUMNS_V2 = Object.freeze([
   { key: "category", from: "C#64", kind: "formula" },
   { key: "sub_category", from: "C#65", kind: "formula" },
   { key: "exclusion_large_company_check", from: "C#16", kind: "formula" },
-  { key: "inclusion_keywords_filter", from: "C#69", kind: "formula", optional: true, note: "Clay's inclusion keyword list (the template client's, compiled verbatim): Master Filter (C#17) reads it. Compiled only when the originals hold it." },
+  {
+    key: "inclusion_keywords_filter", from: "C#69", change: true, kind: "action", action: "client_inclusions", optional: true,
+    data_type: "boolean", provider: "Client rules", run_if: null,
+    inputs: { company: "{{company}}", industry: "{{industry}}", description: "{{description}}" },
+    note: "The client's own inclusion terms (client_targeting.include_terms) in C#69's place, matched as its exclusion terms are; a client with none lets every company through. Never the template client's list: an inclusion list is each client's own. Master Filter (C#17) reads it. Compiled only when the originals hold C#69.",
+  },
   { key: "master_filter", from: "C#17", kind: "formula" },
   { key: "passes_filters", from: "T#23", change: true, kind: "formula", formula: "{{master_filter}} === true" },
   { key: "held_email", from: "T#24", kind: "action", action: "held_general_email" },
