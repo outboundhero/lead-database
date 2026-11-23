@@ -107,17 +107,11 @@ export function ExportButton({ filters, totalCount, selectedIds = [], filteredCo
               force,
             }),
           });
-        let res = await queue(false);
-        let data = await res.json();
-        if (res.status === 409) {
-          if (!window.confirm(data.error ?? "A recent push for this client already exists. Queue anyway?")) {
-            toast.info("Push not queued", { id: toastId });
-            setExporting(false);
-            return;
-          }
-          res = await queue(true);
-          data = await res.json();
-        }
+        // Every push is forced (the owner's rule, 2026-11-24): a recent push for the same client and email side
+        // (the route's 24 h double-push guard) never holds it back, and no confirm dialog asks. In Bison every push
+        // already forces past another client's campaign and archived sends (allow_parallel_sending, push-attach.mjs).
+        const res = await queue(true);
+        const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? "Failed to queue push");
         const leadsLabel = isSelected
           ? `${selectedIds.length.toLocaleString()} selected leads`

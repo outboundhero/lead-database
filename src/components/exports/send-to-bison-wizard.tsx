@@ -342,7 +342,8 @@ export function SendToBisonWizard({
     side: "b2b" | "b2c",
     sideData: PreviewSide,
     choice: SideChoice,
-    force = false
+    // Every push is forced (the owner's rule, 2026-11-24), as the Exports button's is.
+    force = true
   ): Promise<void> {
     const res = await fetch("/api/bison/push-batch", {
       method: "POST",
