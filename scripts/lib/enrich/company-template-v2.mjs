@@ -25,6 +25,7 @@ import { ORIGINAL_KEYS } from "./original-keys.mjs";
 import { INBOX_INPUT_KEYS } from "./inbox-template.mjs";
 import { PEOPLE_INPUT_KEYS, PEOPLE_REFS, PEOPLE_WRITERS, PEOPLE_WRITTEN_KEYS, writtenKey } from "./people-template.mjs";
 import { INBOX_REFS } from "./inbox-template.mjs";
+import { PAGE_READ_COLUMNS } from "./page-read.mjs";
 
 export const COMPANY_TEMPLATE_V2 = "companies_v2";
 /** The same name as phase 1's table: a client with a companies_v1 table is refused until the owner decides (D24). */
@@ -475,6 +476,9 @@ export function companyColumnsV2(originals) {
         sources: "({ first: {{first_general_email}}, claygent_1: {{email_extraction_claygent}}?.company_emails_found, claygent_2: {{email_extraction_claygent_2}}?.company_emails_found })",
       };
     }
+    // The two email searches open the company's own pages first (page-read.mjs): the place's page (a Maps row's
+    // website, with its path) when it is on the site of the website the waterfall chose, else that website.
+    if (Object.hasOwn(PAGE_READ_COLUMNS, spec.key)) extra.extra_inputs = { page_url: "{{website}}", site: "{{use_website}}" };
     if (spec.action === "write_to_table" && PEOPLE_WRITERS[spec.key]) extra.config = { writer: { ...PEOPLE_WRITERS[spec.key] } };
     rows.push(compileColumn({ ...spec, ...extra, changes, description: spec.note }, originals, { own, targets, cellFor: writeToCell }));
   }

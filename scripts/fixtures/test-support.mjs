@@ -15,6 +15,7 @@ import { runRow } from "../lib/enrich/engine.mjs";
 import { order } from "../lib/enrich/formula.mjs";
 import { projectCompanyV2 } from "../lib/enrich/project-company.mjs";
 import { projectContact } from "../lib/enrich/project-contacts.mjs";
+import { setPageReadDeps } from "../lib/enrich/page-read.mjs";
 
 /** DATABASE_URL, refused unless it is the local database. */
 export function localDatabaseUrl() {
@@ -115,7 +116,14 @@ export function installNet() {
     vendors: { findymail: new Map(), prospeo: new Map(), anymail: new Map(), enrichley: new Map() },
     vendorFail: {}, // vendor -> status to answer once
     requests: [], // { vendor, path, auth, body }: what the finders and Enrichley were sent
+    // The pages the email searches open (page-read.mjs, a fetch with redirect "manual"), by "<origin><path>": an
+    // HTML string, or { status, body, headers }. Any other page of a .example site is "<html></html>".
+    pages: new Map(),
+    read: [], // the page addresses opened, in order
   };
+  net.calls.page = 0;
+  // The page reader's host check: a .example host resolves to a public address, nothing else resolves (no DNS).
+  setPageReadDeps({ lookup: testLookup });
   globalThis.fetch = async (input, init = {}) => {
     const u = new URL(typeof input === "string" ? input : input.url);
     const headers = Object.fromEntries(Object.entries(init.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
@@ -193,6 +201,16 @@ export function installNet() {
       const hit = plans.get(body?.email);
       return json(200, { email: body?.email, valid: hit?.valid ?? false, result: hit?.result ?? "invalid", credits_consumed: true });
     }
+    if (u.hostname.endsWith(".example") && init.redirect === "manual") {
+      net.calls.page++;
+      net.read.push(u.href);
+      if (net.dead.has(u.hostname.replace(/^www\./, ""))) throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } });
+      const page = net.pages.get(`${u.origin}${u.pathname}`) ?? net.pages.get(`${u.origin}${u.pathname.replace(/\/$/, "")}`);
+      if (page && typeof page === "object") {
+        return new Response(page.body ?? "", { status: page.status ?? 200, headers: { "content-type": "text/html", ...(page.headers ?? {}) } });
+      }
+      return new Response(typeof page === "string" ? page : "<html></html>", { status: 200, headers: { "content-type": "text/html" } });
+    }
     if (u.hostname.endsWith(".example")) {
       net.calls.probe++;
       if (net.dead.has(u.hostname.replace(/^www\./, ""))) throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } });
@@ -204,12 +222,23 @@ export function installNet() {
   return net;
 }
 
-/** The same rule for a spawned worker: websites under .example answer, nothing else does. */
+/** The page reader's host lookup in the tests: a .example host is a public address, nothing else resolves. */
+export async function testLookup(host) {
+  if (String(host).endsWith(".example")) return [{ address: "93.184.215.14", family: 4 }];
+  throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
+}
+
+/** The same rule for a spawned worker: websites under .example answer, nothing else does, and no host is looked up. */
 export const WORKER_PRELOAD = `globalThis.fetch = async (input) => {
   const u = new URL(typeof input === "string" ? input : input.url);
   if (u.hostname.endsWith(".example")) return new Response("<html></html>", { status: 200 });
   throw Object.assign(new TypeError("fetch failed: no network in this test"), { cause: { code: "ECONNREFUSED" } });
-};`;
+};
+const pageRead = await import(${JSON.stringify(new URL("../lib/enrich/page-read.mjs", import.meta.url).href)});
+pageRead.setPageReadDeps({ lookup: async (host) => {
+  if (String(host).endsWith(".example")) return [{ address: "93.184.215.14", family: 4 }];
+  throw Object.assign(new Error("getaddrinfo ENOTFOUND " + host), { code: "ENOTFOUND" });
+} });`;
 
 // ── The worker's pass over one row ──────────────────────────────────────────
 

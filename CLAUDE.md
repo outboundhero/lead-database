@@ -3077,7 +3077,40 @@ out of AI Ark searches wherever the standard keywords go, with no switch of its 
   visit pages, `max_tool_calls` from the setting, no reasoning effort, no user
   location, and answers kept as returned ("N/A" included, as in Clay). One send per
   attempt; a cell sent twice with no answer is not sent again (a timed-out request may
-  still be billed); OpenAI's billing refusals are never retried.
+  still be billed); OpenAI's billing refusals are never retried. An "N/A" answer is
+  remembered for the `nothing_found` days (30), not the column's own (2026-11-24).
+- **The email searches read the company's pages (2026-11-24,
+  `scripts/lib/enrich/page-read.mjs`).** Before, C#31 and C#32 (Email Extraction
+  Claygent 1 and 2) were one OpenAI call each with the web search capped at
+  `max_tool_calls` 2: on one client's replayed places all 14 runs answered "N/A" with no
+  source read, while Clay's Claygent (Google, then a visit to the page) found a
+  first general email on 29% of 911 Maps rows. Now each run first opens the
+  company's own pages, as the Claygent visits them: the place's page (input
+  `page_url` = `{{website}}`, a Maps row's own URL with its path) when it is on the
+  site of `{{use_website}}` (input `site`), else that website (on a table compiled
+  before those inputs, the site the prompt names), then the contact, location and
+  about pages it links to (or /contact-us and /contact), at most 4 pages in 20 s,
+  8 s and 1.5 MB a page. Addresses come from mailto links, the text,
+  Cloudflare-protected ones, "name [at] domain [dot] com", and the page's own data
+  (JSON-LD, scripts, component props; inline base64 left out); placeholders, file
+  names, no-reply, Wix and Sentry addresses are dropped. The pages, the addresses
+  and an excerpt of each go after the prompt; both keep their web search, as
+  Clay's Claygent always has Google beside its page visits (parity first; a
+  cheaper rule is for later). Only public sites are read: http or https on the usual ports, a host that
+  resolves to public addresses only (no loopback, private, link-local or metadata
+  address, no `.internal`, `.local` or `localhost`), checked on every redirect hop.
+  The run record keeps the pages read (`request.pages`, `request.pages_text`). The
+  engine remembers these two columns under `<memory>_pages1` and hashes their
+  inputs with that version, so an answer from before the pages were read is never
+  reused. A site that turns non-browser clients away (403, a Sucuri or Cloudflare
+  challenge) gives nothing; the second search's web search is then the fallback.
+  Checked offline on the 40 replayed places Clay searched: the pages hold an
+  address for 16, and Clay's own answer for 5 of its 9 (the rest: 3 sites that
+  refuse non-browsers, 1 address only a Google search finds).
+- **Website waterfalls** (`data_type` url, e.g. C#26 Use Website): a step whose answer is
+  text that is not a website ("N/A" from the website AI) no longer wins; the next
+  step is tried, and the note says so (2026-11-24). Before, "N/A" became the
+  website and the URL check and both email searches ran on it.
 - **Clay's built-in tools** (`scripts/lib/enrich/clay-tools.mjs`, 2026-11-21): G#14 and
   P#29 run our exact copy of Clay's normalize-company-name, and G#16 our exact copy of
   extract-email-components (actions `clay_normalize_company_name` and

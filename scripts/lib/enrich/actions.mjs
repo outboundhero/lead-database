@@ -19,6 +19,7 @@ import { COMPANY_ACTIONS } from "./company-actions.mjs";
 import { bareDomain } from "./domain.mjs";
 import { capped, httpJson, lostSendGuard, retryableStatus } from "./http.mjs";
 import { FIT_ACTIONS } from "./fit-keys.mjs";
+import { pageStart, pagesForPrompt, readSite, readsPages, siteInPrompt } from "./page-read.mjs";
 import { PIPELINE_ACTIONS } from "./pipeline-actions.mjs";
 import { addOpenAiSpend, spendAllowed } from "./spend.mjs";
 
@@ -175,6 +176,14 @@ async function lookupKey({ inputs, config, table, db }) {
 // sent twice with no answer is not sent again (http.mjs). OpenAI's billing
 // refusals are never retried. Each call checks the day's OpenAI cap for its
 // loop first and adds what it cost after (spend.mjs).
+//
+// The two email searches (page-read.mjs readsPages) open the company's own
+// pages first, as Clay's Claygent visits them: the place's page (input
+// page_url) when it is on the website's site, else the website (input site,
+// or the site the prompt names on a table compiled before those inputs), then
+// its contact, location and about pages. The pages, the addresses found on
+// them and an excerpt of each go after the prompt; both keep their web search,
+// as Clay's Claygent does. The run record keeps which pages were read.
 
 /** OpenAI's approximate user location, from the inputs, or null. country is a 2-letter code. */
 function userLocation(inputs) {
@@ -266,9 +275,17 @@ async function aiWeb({ inputs, config, env, settings, db, row, column }) {
   if (stop) return stop;
 
   const toolType = config.tool || "web_search_preview";
-  const noTool = toolType === "none";
   const location = config.user_location === false ? null : userLocation(inputs);
+  // The company's own pages, read first by the email searches (free).
+  let read = null;
+  if (readsPages(column)) {
+    const start = pageStart(inputs.page_url, text(inputs.site) || siteInPrompt(prompt));
+    if (start) read = await readSite(start);
+  }
+  const noTool = toolType === "none";
   const tool = noTool ? null : { type: toolType, ...(location ? { user_location: location } : {}) };
+  const pagesText = read ? pagesForPrompt(read, { tools: Boolean(tool) }) : "";
+  const input = pagesText ? `${prompt}\n\n${pagesText}` : prompt;
   const { fields, schema } = answerSchema(config);
   const r = await httpJson("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -277,7 +294,7 @@ async function aiWeb({ inputs, config, env, settings, db, row, column }) {
       model,
       ...(tool ? { tools: [tool] } : {}),
       ...(examples ? { instructions: examples } : {}),
-      input: prompt,
+      input,
       ...(tool && setting?.max_searches ? { max_tool_calls: setting.max_searches } : {}),
       ...(setting?.reasoning_effort ? { reasoning: { effort: setting.reasoning_effort } } : {}),
       text: { format: { type: "json_schema", name: "answer", schema, strict: true } },
@@ -293,6 +310,18 @@ async function aiWeb({ inputs, config, env, settings, db, row, column }) {
     ...(location ? { user_location: location } : {}),
     prompt: prompt.slice(0, 8_000),
     ...(examples ? { examples: config.examples_count, instructions: examples.slice(0, 8_000) } : {}),
+    ...(read
+      ? {
+          pages: {
+            start: read.start,
+            emails: read.emails,
+            read: read.pages.map((p) => ({ url: p.url, kind: p.kind, ...(p.status ? { status: p.status } : {}), ...(p.error ? { error: p.error } : { emails: p.emails?.length ?? 0 }) })),
+          },
+          pages_text: pagesText.slice(0, 9_000),
+        }
+      : readsPages(column)
+        ? { pages: { start: null, note: "No website to open" } }
+        : {}),
   };
   if (!r.ok) {
     const keyProblem = r.status === 401 || r.status === 403;

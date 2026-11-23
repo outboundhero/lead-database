@@ -616,7 +616,9 @@ function compileAction(spec, def, rw, row, maps, runIf, originals) {
         if ("error" in ex) shown.examples_error = ex.error;
         else Object.assign(shown, { examples_text: ex.text, examples_count: ex.count, examples_sha: ex.sha });
       }
-      row.inputs = { prompt, memory_key: prompt };
+      // A template's own extra inputs (spec.extra_inputs, e.g. the page the email searches open first) come first,
+      // so they can never stand in for the prompt or its memory key.
+      row.inputs = { ...(spec.extra_inputs ?? {}), prompt, memory_key: prompt };
       // Sent with examples, the remembered answer depends on them too: two variants with one prompt and other
       // examples never share an answer. The memory kind stays "<setting>_v1".
       if (shown.examples_count > 0) row.inputs.memory_key = `[(${prompt}\n), ${JSON.stringify(`examples:${shown.examples_sha}`)}].join("\\n")`;

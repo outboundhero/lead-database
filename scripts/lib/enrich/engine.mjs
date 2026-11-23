@@ -61,8 +61,11 @@ import { emptyAsText, evaluate, isEmpty, makeContext, refs } from "./formula.mjs
 import { ACTIONS, capped } from "./actions.mjs";
 import { absentKeyNote } from "./pipeline-actions.mjs";
 import { flagOn, SETTINGS_DEFAULTS, settingsFrom } from "./settings.mjs";
+import { PAGE_READ_MEMORY, readsPages, startUrl } from "./page-read.mjs";
 
 const DISPLAY_MAX = 300;
+/** An AI answer of "N/A" (kept as the answer, as in Clay): remembered for the nothing-found days only. */
+const isNaAnswer = (col, res) => col.config?.keep_na === true && res.status === "done" && /^n\/?a\.?$/i.test(text(res.display));
 /** The note suffix of a failed on_error "empty" cell (G#19): the steps after it read it as empty, as in Clay. */
 export const READ_AS_EMPTY = " (read as empty, as in Clay: the steps after it go on)";
 const msg = (e) => String(e?.message ?? e).slice(0, 300);
@@ -293,7 +296,10 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {}, 
         stop = read && blocked(read, `Step ${i + 1} not worked out`);
         if (stop) break;
         if (err) errs.push(`step ${i + 1}: ${msg(err)}`);
-        else if (!isEmpty(r) && r !== false) {
+        else if (col.data_type === "url" && typeof r === "string" && text(r) && !startUrl(r)) {
+          // A website column never takes an answer that is not a website (the website AI's "N/A"): the next step is tried.
+          errs.push(`step ${i + 1}: "${text(r).slice(0, 40)}" is not a website`);
+        } else if (!isEmpty(r) && r !== false) {
           won = i + 1;
           v = r;
         }
@@ -354,15 +360,22 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {}, 
       put(col, { status: "error", note: `Input error — ${inputErr}` });
       continue;
     }
-    const hash = createHash("sha1").update(stable([col.action, col.config ?? {}, inputs])).digest("hex").slice(0, 24);
+    // A column that reads the company's pages (page-read.mjs) hashes the page reading's version too, so an answer
+    // given before the pages were read is asked again; every other column's hash is what it always was.
+    const pagesRead = readsPages(col);
+    const hash = createHash("sha1")
+      .update(stable(pagesRead ? [col.action, col.config ?? {}, inputs, PAGE_READ_MEMORY] : [col.action, col.config ?? {}, inputs]))
+      .digest("hex")
+      .slice(0, 24);
     const prev = cells.get(col.key);
     if (impl.cache && !forced(col.key) && prev && (prev.status === "done" || prev.status === "empty") && prev.input_hash === hash) {
       // Same inputs as the last run: reuse the answer, never pay for it twice.
       values[col.key] = prev.status === "done" && !isEmpty(prev.value) ? prev.value : undefined;
       continue;
     }
-    // Another row, table or client paid for this answer already: reuse it.
-    const kind = text(col.config?.memory);
+    // Another row, table or client paid for this answer already: reuse it. A page-reading column remembers under
+    // its own kind, so an answer remembered before the pages were read is never reused.
+    const kind = text(col.config?.memory) && pagesRead ? `${text(col.config.memory)}_${PAGE_READ_MEMORY}` : text(col.config?.memory);
     const rawKey = kind ? text(inputs.memory_key) : "";
     const model = col.action === "ai_web" && col.config?.model_setting ? config.models?.[col.config.model_setting]?.model ?? "" : null;
     const memKey = rawKey ? memoryKey(rawKey, { model }) : "";
@@ -413,7 +426,7 @@ export async function runRow({ row, table, columns, cells, env, db, hooks = {}, 
       const days = config.company_pipeline?.memory_days ?? SETTINGS_DEFAULTS.company_pipeline.memory_days;
       const fixed = col.config?.memory_days;
       const span =
-        res.status !== "done"
+        res.status !== "done" || isNaAnswer(col, res)
           ? days.nothing_found
           : typeof fixed === "number" && Number.isInteger(fixed) && fixed > 0
             ? fixed
