@@ -42,6 +42,8 @@ const NOT_LISTED: { outcome: string; label: string; status?: "waiting" | "error"
   { outcome: "Outside the client's area", label: "Outside the area" },
   { outcome: "Excluded by the client's rules", label: "Excluded by the rules" },
   { outcome: "A large company (brand list)", label: "A large company" },
+  { outcome: "No inclusion keyword matched", label: "No inclusion keyword" },
+  { outcome: "Stopped by the client's filters", label: "Stopped by the filters" },
   { outcome: "On the never-contact list", label: "Never contact" },
   { outcome: "General inbox already in the database", label: "Inbox already held" },
   { outcome: "People already in the database", label: "People already held" },

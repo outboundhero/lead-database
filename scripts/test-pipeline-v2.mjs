@@ -31,6 +31,8 @@ import { requeueRowsForHeldKeys, requeueWaitingTemplateRows, resetCompanyActions
 import { absentKeyNote, OPTIONAL_KEYS } from "./lib/enrich/pipeline-actions.mjs";
 import { runRow } from "./lib/enrich/engine.mjs";
 import { settingsFrom } from "./lib/enrich/settings.mjs";
+import { evaluate, makeContext } from "./lib/enrich/formula.mjs";
+import { companyOutcomeFormula, COMPANY_OUTCOMES } from "./lib/enrich/company-template-v2.mjs";
 
 const url = localDatabaseUrl();
 dropPaidKeys();
@@ -207,6 +209,28 @@ async function partC() {
   check("the client's own exclusions (C#14's place) stop a company, with nothing paid", excluded.s.outcome === "Excluded by the client's rules" && valueOf(excluded.cells, "exclusion_keywords_filter") === false && excluded.w.paid.openai + excluded.w.paid.reoon + excluded.w.paid.probe === 0);
   const outside = await runCompany(A, company("away", "Lakeside Dental Away", { hq: BISMARCK }));
   check("outside the client's places (C#15's place): its outcome, nothing paid", outside.s.outcome === "Outside the client's area" && valueOf(outside.cells, "service_area_check") === false && outside.w.paid.openai + outside.w.paid.probe === 0);
+
+  // The Outcome names why the Master Filter stopped a company: the inclusion
+  // keyword list (C#69, where compiled), or any other clause of its own; both
+  // used to read "No general email found". Evaluated on plain values (the
+  // fixture originals hold no C#69), then the compiled fixture table is read.
+  const outcomeFromValues = (values, inclusion = true) => evaluate(makeContext(), companyOutcomeFormula({ inclusion }), values);
+  const passing = { in_area: true, rule_match: false, exclusion_large_company_check: true, never_contact: false, use_website: "acme.xxtest.example" };
+  check("Outcome: a company the inclusion keyword list stops says so",
+    outcomeFromValues({ ...passing, inclusion_keywords_filter: false, master_filter: false, passes_filters: false }) === "No inclusion keyword matched");
+  check("Outcome: another Master Filter clause says the client's filters stopped it (inclusion list passed, or not compiled)",
+    outcomeFromValues({ ...passing, inclusion_keywords_filter: true, master_filter: false, passes_filters: false }) === "Stopped by the client's filters"
+      && outcomeFromValues({ ...passing, master_filter: false, passes_filters: false }, false) === "Stopped by the client's filters");
+  check("Outcome: the earlier reasons still come first (area, exclusions, brand list) and a passing company is unchanged",
+    outcomeFromValues({ ...passing, in_area: false, inclusion_keywords_filter: false, passes_filters: false }) === "Outside the client's area"
+      && outcomeFromValues({ ...passing, rule_match: true, inclusion_keywords_filter: false, passes_filters: false }) === "Excluded by the client's rules"
+      && outcomeFromValues({ ...passing, exclusion_large_company_check: false, inclusion_keywords_filter: false, passes_filters: false }) === "A large company (brand list)"
+      && outcomeFromValues({ ...passing, inclusion_keywords_filter: true, master_filter: true, passes_filters: true }) === "No general email found");
+  check("Outcome: every outcome the formula can give is in COMPANY_OUTCOMES",
+    [...companyOutcomeFormula().matchAll(/"([^"]+)"/g)].map((m) => m[1]).filter((s) => /^[A-Z]/.test(s)).every((s) => COMPANY_OUTCOMES.includes(s)));
+  const compiledOutcome = (await one(`SELECT formula FROM enrich_columns WHERE table_id = $1 AND key = 'company_outcome'`, [tables[A].companies])).formula;
+  check("Outcome: a table without the inclusion list compiles the Outcome without it, with the filters line",
+    !compiledOutcome.includes("inclusion_keywords_filter") && compiledOutcome.includes("Stopped by the client's filters"));
 
   section("C2. The database first (D28)");
   const heldCo = company("heldp", "Harborview Dental Held");

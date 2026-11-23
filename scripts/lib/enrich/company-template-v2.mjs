@@ -234,6 +234,8 @@ export const COMPANY_OUTCOMES = Object.freeze([
   "Outside the client's area",
   "Excluded by the client's rules",
   "A large company (brand list)",
+  "No inclusion keyword matched",
+  "Stopped by the client's filters",
   "On the never-contact list",
   "General inbox already in the database",
   "People already in the database",
@@ -242,17 +244,36 @@ export const COMPANY_OUTCOMES = Object.freeze([
   "No general email found",
 ]);
 
-export const COMPANY_OUTCOME_FORMULA = [
+// The Master Filter (C#17) also reads the inclusion keyword list (C#69, when
+// the originals hold it) and clauses of its own: a company it stopped for any of
+// those used to fall through to "No general email found", since no email step
+// runs without passes_filters. The inclusion line is left out where C#69 is not
+// compiled (companyColumnsV2), so the formula never reads a missing column.
+const INCLUSION_OUTCOME_LINE = `: {{inclusion_keywords_filter}} === false ? "No inclusion keyword matched"`;
+const COMPANY_OUTCOME_LINES = Object.freeze([
   `!{{in_area}} ? "Outside the client's area"`,
   `: {{rule_match}} ? "Excluded by the client's rules"`,
   `: {{exclusion_large_company_check}} === false ? "A large company (brand list)"`,
+  INCLUSION_OUTCOME_LINE,
+  `: {{passes_filters}} === false ? "Stopped by the client's filters"`,
   `: {{never_contact}} ? "On the never-contact list"`,
   `: {{held_usable}} ? "General inbox already in the database"`,
   `: {{held_people}}?.count > 0 ? "People already in the database"`,
   `: {{general_email_write_to}}?.written > 0 ? "General emails sent to checks"`,
   `: (!{{use_website}} || /^n\\/?a\\.?$/i.test(String({{use_website}}))) ? "No working website"`,
   `: "No general email found"`,
-].join("\n");
+]);
+
+/**
+ * The Outcome formula; inclusion: whether the table compiles the inclusion
+ * keyword list (C#69).
+ * @param {{ inclusion?: boolean }} [opts]
+ */
+export function companyOutcomeFormula({ inclusion = true } = {}) {
+  return COMPANY_OUTCOME_LINES.filter((l) => inclusion || l !== INCLUSION_OUTCOME_LINE).join("\n");
+}
+
+export const COMPANY_OUTCOME_FORMULA = companyOutcomeFormula();
 
 /**
  * What enrich_companies.outcome shows: a listed company's, by what it has
@@ -406,6 +427,9 @@ export function companyColumnsV2(originals) {
   const own = refMap(originals, "companies", COMPANY_REFS);
   const targets = { inboxes: refMap(originals, "inboxes", INBOX_REFS), people: refMap(originals, "people", PEOPLE_REFS) };
   const instance = instanceMap(originals, "inboxes", AIARK_EMAIL_INSTANCE_REFS);
+  // Whether the inclusion keyword list (C#69, optional) is compiled: the Outcome reads it only then.
+  const inclusionAt = parseFrom(COMPANY_COLUMNS_V2.find((s) => s.key === "inclusion_keywords_filter")?.from);
+  const hasInclusion = Boolean(inclusionAt && originals.has(`${inclusionAt.kind}:${inclusionAt.position}`));
   const rows = [];
   for (const key of COMPANY_INPUT_KEYS_V2) {
     const p = PHASE1[key];
@@ -426,7 +450,8 @@ export function companyColumnsV2(originals) {
     }
     if (!spec.from) {
       const o = OURS[spec.key] ?? {};
-      rows.push(compileColumn({ ...spec, name: o.name ?? spec.key, data_type: o.data_type, provider: o.provider, formula: spec.formula ?? o.formula, description: o.description ?? spec.note }, originals, { own }));
+      const formula = spec.key === "company_outcome" ? companyOutcomeFormula({ inclusion: hasInclusion }) : spec.formula ?? o.formula;
+      rows.push(compileColumn({ ...spec, name: o.name ?? spec.key, data_type: o.data_type, provider: o.provider, formula, description: o.description ?? spec.note }, originals, { own }));
       continue;
     }
     if (String(spec.from).startsWith("G#")) {
