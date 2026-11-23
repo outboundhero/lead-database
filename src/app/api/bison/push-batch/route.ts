@@ -1,16 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isNurtureCampaign } from "@/lib/bison/campaigns";
 import { idsOfSide, stampCampaigns } from "@/lib/bison/push-stamp";
+import {
+  checkPushCampaigns,
+  groupToSave,
+  selectedIdsError,
+  sideAcrossInstalls,
+  TARGET_MARKET_COLUMNS,
+  UUID_RE,
+  type PushBatchCampaign,
+} from "@/lib/bison/push-batch-core";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeFilterState } from "@/types/filters";
 import { buildRpcFilters } from "@/lib/filters/build-rpc-filters";
-import { bisonInstances, normalizeDomain } from "@/lib/bison/keys";
+import { bisonInstances } from "@/lib/bison/keys";
 import { getPool } from "@/lib/db/pool";
 import { logAudit } from "@/lib/api/log-audit";
 import { gateEnabled, scoringStatusFor } from "../../../../../scripts/lib/enrich/fit-push.mjs";
-import { BISON_GROUPS, sideCampaignsByInstall } from "../../../../../scripts/lib/bison-groups.mjs";
 import { isSharePush } from "../../../../../scripts/lib/overlap-topup.mjs";
+import { PROMOTE_PUSH_SOURCE } from "../../../../../scripts/lib/enrich/promote-push.mjs";
 import { loadQuestionSettings, questionSwitchOn } from "../../../../../scripts/lib/questions/settings.mjs";
 import { copyTag } from "../../../../../scripts/lib/questions/names.mjs";
 
@@ -19,32 +27,11 @@ import { copyTag } from "../../../../../scripts/lib/questions/names.mjs";
 // push_batches row and returns immediately — scripts/push-worker.mjs gathers
 // the leads into push_items and does the create/attach work. Every selected
 // campaign gets EVERY lead; campaigns may span multiple Bison instances.
-
-const MAX_CAMPAIGNS = 10;
-const MAX_SELECTED_IDS = 100000;
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-interface PushBatchCampaign {
-  id: number | string;
-  name?: string;
-  instance_url: string;
-  workspace_name?: string;
-  // ESP routing (client req #9): when any campaign in the batch carries a
-  // bucket, each lead is attached ONLY to the campaign matching its email
-  // provider — outlook (Microsoft/Outlook), seg (security gateways), default
-  // (Google/custom/everything else). Bucket-less batches attach to all.
-  bucket?: "outlook" | "seg" | "default";
-  // WORKSPACE ROUTING: which of the client's two Bison installs this campaign
-  // belongs to. Business emails are sent from the B2B install and personal
-  // ones from the B2C install, so a lead must only attach to campaigns on its
-  // own side. Absent = campaign is on neither of this client's instances, and
-  // is left open to any lead.
-  side?: "b2b" | "b2c";
-  // Bison's status as the picker read it; only used to refuse "archived" at
-  // queue time. Not stored on the batch.
-  status?: string;
-}
+//
+// The checks that need no session (the campaigns, the lead ids, the sides
+// across installs, the group to save) live in src/lib/bison/push-batch-core.ts,
+// shared with the automatic push of promoted leads
+// (src/lib/companies/promote-push.ts), so both meet the same guards.
 
 /** A recent batch of the client, as the double-push guard reads it. */
 interface RecentBatch {
@@ -121,73 +108,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  // Campaigns — every one gets every lead, so keep the fan-out bounded.
-  if (!Array.isArray(body.campaigns) || body.campaigns.length === 0) {
-    return NextResponse.json({ error: "campaigns is required (at least one campaign)" }, { status: 400 });
-  }
-  if (body.campaigns.length > MAX_CAMPAIGNS) {
-    return NextResponse.json(
-      { error: `Too many campaigns (${body.campaigns.length}). Max ${MAX_CAMPAIGNS} per batch.` },
-      { status: 400 }
-    );
-  }
-  const campaigns: PushBatchCampaign[] = [];
-  for (const c of body.campaigns) {
-    if (!c || typeof c !== "object" || c.id === undefined || c.id === null || c.id === "" || !/^\d+$/.test(String(c.id))) {
-      return NextResponse.json({ error: "Every campaign needs an id" }, { status: 400 });
-    }
-    // Never send a Bison token to a host that isn't one of ours.
-    const domain = typeof c.instance_url === "string" ? normalizeDomain(c.instance_url) : "";
-    if (!domain || !instances.some((i) => i.domain === domain)) {
-      return NextResponse.json(
-        { error: `Unknown Bison instance "${c.instance_url}" — not one of the configured instances` },
-        { status: 400 }
-      );
-    }
-    // Only MAIN campaigns may be pushed to. The pickers already hide Nurture
-    // campaigns, but a picker is not a boundary — this route is, and it is what
-    // the API consumers hit directly.
-    if (isNurtureCampaign(c.name)) {
-      return NextResponse.json(
-        { error: `"${String(c.name)}" is a Nurture campaign — leads are only ever pushed to main campaigns.` },
-        { status: 400 }
-      );
-    }
-    // An archived campaign cannot send. The pickers hide them, but a preset
-    // saved before the campaign was archived still names it; the status rides
-    // along from the picker's own Bison read so this can be refused here.
-    if (typeof c.status === "string" && c.status.trim().toLowerCase() === "archived") {
-      return NextResponse.json(
-        { error: `"${String(c.name ?? c.id)}" is archived in Bison and cannot send — pick a live campaign.` },
-        { status: 400 }
-      );
-    }
-    campaigns.push({
-      id: c.id,
-      name: typeof c.name === "string" ? c.name : undefined,
-      instance_url: domain,
-      workspace_name: typeof c.workspace_name === "string" ? c.workspace_name : undefined,
-      ...(c.bucket === "outlook" || c.bucket === "seg" || c.bucket === "default" ? { bucket: c.bucket } : {}),
-    });
-  }
+  // Campaigns — every one gets every lead, so keep the fan-out bounded
+  // (checkPushCampaigns: an id, one of our installs, not Nurture, not archived).
+  const checkedCampaigns = checkPushCampaigns(body.campaigns, instances);
+  if ("error" in checkedCampaigns) return NextResponse.json({ error: checkedCampaigns.error }, { status: 400 });
+  const campaigns: PushBatchCampaign[] = checkedCampaigns.campaigns;
 
   // Selected IDs — explicit picks; must be uuids, capped, exclusive with ranges.
   const selectedIds = body.selectedIds;
   const hasSelectedIds = Array.isArray(selectedIds) && selectedIds.length > 0;
-  if (selectedIds !== undefined && !Array.isArray(selectedIds)) {
-    return NextResponse.json({ error: "selectedIds must be an array of lead ids" }, { status: 400 });
-  }
-  if (hasSelectedIds) {
-    if (selectedIds.length > MAX_SELECTED_IDS) {
-      return NextResponse.json(
-        { error: `Too many leads (${selectedIds.length}). Max ${MAX_SELECTED_IDS} per batch.` },
-        { status: 400 }
-      );
-    }
-    if (!selectedIds.every((id) => typeof id === "string" && UUID_RE.test(id))) {
-      return NextResponse.json({ error: "selectedIds must be uuid strings" }, { status: 400 });
-    }
-  }
+  const idsError = selectedIdsError(selectedIds);
+  if (idsError) return NextResponse.json({ error: idsError }, { status: 400 });
 
   const { rangeFrom, rangeTo } = body;
   if (rangeFrom !== undefined || rangeTo !== undefined) {
@@ -343,51 +274,15 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // A BATCH ACROSS TWO INSTALLS MUST KNOW WHICH SIDE EACH CAMPAIGN IS.
-  //
-  // The worker refuses to guess (push-side.mjs): a lead in a two-install batch
-  // whose campaigns carry no side would otherwise land in both workspaces, the
-  // 2026-09-24 incident. On 2026-10-05 four exports (CVJCIN, SCAS, RICS, TTT —
-  // 148,550 leads) were queued for clients whose B2B/B2C install mapping had not
-  // been synced yet, gathered in full, and then every lead was skipped — so this
-  // is settled HERE, before anything is queued.
-  //
-  // Campaigns on the client's saved installs were sided above. The rest take
-  // their install's own side (an install never changes side: OutboundHero and
-  // FacilityReach are B2B, CleaningOutbound and OutboundClean are B2C), but only
-  // when every install in the batch belongs to ONE group, so a business lead can
-  // never reach B2B campaigns in both groups. The group is then saved on the
-  // client. Until 2026-11-18 this refused with "has no B2B/B2C mapping" and asked
-  // for a sheet fix + "Sync groups"; the Nov-15 clients (ATOH, JMBCS, CCGSOR, SG,
-  // LBJ, JATL) were in no group sheet and could not push at all.
-  const installs = new Set(campaigns.map((c) => c.instance_url));
-  if (installs.size > 1) {
-    if (!clientTag) {
-      return NextResponse.json(
-        {
-          error:
-            "These campaigns are on two Bison installs, so the leads must be split into B2B and B2C — " +
-            "select the client (top bar) before exporting, or pick campaigns from one install only.",
-        },
-        { status: 400 }
-      );
-    }
-    if (campaigns.some((c) => !c.side)) {
-      const { group } = sideCampaignsByInstall(campaigns);
-      if (group === null) {
-        return NextResponse.json(
-          {
-            error:
-              `These campaigns are on ${[...installs].join(", ")}, which are not the two installs of one Bison group, ` +
-              `so the leads could not be split into B2B and B2C. Pick ${clientTag}'s campaigns from one group: ` +
-              "OutboundHero + CleaningOutbound, or FacilityReach + OutboundClean.",
-          },
-          { status: 400 }
-        );
-      }
-      resolvedGroup = group;
-    }
-  }
+  // A BATCH ACROSS TWO INSTALLS MUST KNOW WHICH SIDE EACH CAMPAIGN IS, settled
+  // HERE before anything is queued (sideAcrossInstalls says why). Campaigns on
+  // the client's saved installs were sided above; the rest take their install's
+  // own side when every install is in ONE group, and the group is then saved
+  // on the client. Until 2026-11-18 this refused with "has no B2B/B2C mapping"
+  // and clients in no group sheet could not push at all.
+  const sided = sideAcrossInstalls(campaigns, clientTag);
+  if ("error" in sided) return NextResponse.json({ error: sided.error }, { status: 400 });
+  resolvedGroup = sided.group;
 
   // DOUBLE-PUSH GUARD (client req #8/#10): a batch for the same client tag that
   // is still running, or completed within the last 24h, blocks a new queue
@@ -400,6 +295,8 @@ export async function POST(request: NextRequest) {
   // email_side, like an export popup push, so without this the next popup push
   // for the client would answer 409 and operators would learn to force it.
   // They are named in the answer instead (sharePushes, only when there are some).
+  // Nor does the automatic push of promoted leads (source "promote", migration
+  // 140): it pushes only leads promotion has just made.
   let sharePushes: Array<{ id: string; status: string; created_at: string; total: number | null; source: string }> = [];
   if (clientTag && body.force !== true) {
     const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
@@ -411,7 +308,7 @@ export async function POST(request: NextRequest) {
             where client_tag = $1
               and status in ('pending', 'gathering', 'processing', 'complete', 'scoring')
               and created_at >= $2::timestamptz
-              and coalesce(push_options->>'source', '') ${shares ? "in" : "not in"} ('share', 'topup')
+              and coalesce(push_options->>'source', '') ${shares ? "in ('share', 'topup')" : `not in ('share', 'topup', '${PROMOTE_PUSH_SOURCE}')`}
             order by created_at desc
             limit $3`,
           [clientTag, since, limit]
@@ -465,7 +362,7 @@ export async function POST(request: NextRequest) {
   if (clientTag) {
     const { data: targeting } = await admin
       .from("client_targeting")
-      .select("countries, include_locations, exclude_locations, exclude_industries, exclude_keywords, require_location, allow_inferred_location, commercial_cleaning")
+      .select(TARGET_MARKET_COLUMNS)
       .eq("client_tag", clientTag)
       .maybeSingle();
     targetMarket = targeting ?? null;
@@ -554,26 +451,21 @@ export async function POST(request: NextRequest) {
   // is queued — a refused push changes nothing — and best-effort: the batch
   // already carries its sides, so a failed save cannot misroute it.
   let clientGroupSet: { tag: string; group: number; previous: number | null } | null = null;
-  if (clientTag && resolvedGroup !== null) {
-    const pair = (BISON_GROUPS as Record<number, { b2b: string; b2c: string }>)[resolvedGroup];
-    const changed = !savedMapping || savedMapping.group !== resolvedGroup ||
-      savedMapping.b2b !== pair.b2b || savedMapping.b2c !== pair.b2c;
-    if (changed) {
-      const { error: groupErr } = await admin
-        .from("client_tags")
-        .update({ group_no: resolvedGroup, b2b_instance: pair.b2b, b2c_instance: pair.b2c, source: "push" })
-        .eq("tag", clientTag);
-      if (groupErr) {
-        console.error(`[push-batch] could not save group ${resolvedGroup} for ${clientTag}: ${groupErr.message}`);
-      } else {
-        const previous = savedMapping?.group ?? null;
-        clientGroupSet = { tag: clientTag, group: resolvedGroup, previous };
-        await logAudit({
-          action: "Client Group Set From Push",
-          performedBy: user.email ?? user.id,
-          details: `${clientTag}: group ${resolvedGroup} (was ${previous ?? "none"}), from the installs of push batch ${batch.id}`,
-        });
-      }
+  const toSave = clientTag ? groupToSave(savedMapping, resolvedGroup) : null;
+  if (clientTag && toSave) {
+    const { error: groupErr } = await admin
+      .from("client_tags")
+      .update({ group_no: toSave.group, b2b_instance: toSave.b2b, b2c_instance: toSave.b2c, source: "push" })
+      .eq("tag", clientTag);
+    if (groupErr) {
+      console.error(`[push-batch] could not save group ${toSave.group} for ${clientTag}: ${groupErr.message}`);
+    } else {
+      clientGroupSet = { tag: clientTag, group: toSave.group, previous: toSave.previous };
+      await logAudit({
+        action: "Client Group Set From Push",
+        performedBy: user.email ?? user.id,
+        details: `${clientTag}: group ${toSave.group} (was ${toSave.previous ?? "none"}), from the installs of push batch ${batch.id}`,
+      });
     }
   }
 

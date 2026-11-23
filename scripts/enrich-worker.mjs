@@ -77,7 +77,12 @@
 // promoted into leads through the web app (POST /api/companies/promote/auto,
 // the AIARK_AUTO_ADD_URL origin and AIARK_AUTO_ADD_KEY), at most one round per
 // client every 10 minutes; promotion ships off and covers no client, and needs
-// no fit score (fit scoring is kept for v2, switched off).
+// no fit score (fit scoring is kept for v2, switched off). On the same minute,
+// not awaited and with a busy flag of its own, clients whose promoted leads
+// are placed and ready are asked to be pushed into their campaigns
+// (POST /api/companies/promote/auto/push, the same address and key), at most
+// once every 2 minutes per client, while promotion.auto_push is on (migration
+// 140, scripts/lib/enrich/promote-push.mjs; ships off).
 // FIT_POLL_MS (5000): the fit loop's sleep when it had nothing to do.
 //
 // Overlap sharing (migrations 133 and 134, scripts/lib/share/): every 60 s,
@@ -143,6 +148,9 @@ import { fitLoopOnce, fitLoopStatus, refreshBlockedOnce } from "./lib/enrich/fit
 import { advanceScoringBatch } from "./lib/enrich/fit-push.mjs";
 import { advanceBackfill } from "./lib/enrich/fit-backfill.mjs";
 import { promoteAutoConfig, promoteDue, requestPromote } from "./lib/enrich/promote.mjs";
+import {
+  PROMOTION_PUSH_CAPABILITY, promotePushConfig, PUSH_ASK_EVERY_MS, pushDue, pushLogLine, requestPromotePush,
+} from "./lib/enrich/promote-push.mjs";
 import { releaseHeldPeopleRows, releaseHeldRows } from "./lib/enrich/held.mjs";
 import { moveUploadRows } from "./lib/enrich/upload-move.mjs";
 import { copyPullNoEmail, handBackFound, PULL_NO_EMAIL_CAPABILITY } from "./lib/enrich/pull-no-email.mjs";
@@ -744,6 +752,38 @@ async function promoteWaiting() {
   }
 }
 
+// Promoted leads into the client's campaigns (migration 140): the web app picks
+// the campaigns and queues the push batch (TypeScript); the worker only asks,
+// for a client whose leads are placed and ready, at most once every 2 minutes.
+// Its own busy flag, so a slow Bison read never holds up the promotion asks.
+CAPABILITIES.push(PROMOTION_PUSH_CAPABILITY);
+const promotePush = promotePushConfig(env);
+const pushAskedAt = new Map();
+let pushBusy = false;
+let pushUnreadyLogged = false;
+
+async function pushPromoted() {
+  if (!promotePush || pushBusy) return;
+  pushBusy = true;
+  try {
+    const settings = await readSettings(pool);
+    for (const tag of await pushDue(pool, settings)) {
+      if (Date.now() - (pushAskedAt.get(tag) ?? 0) < PUSH_ASK_EVERY_MS) continue;
+      pushAskedAt.set(tag, Date.now());
+      log(pushLogLine(tag, await requestPromotePush(promotePush, tag)));
+    }
+  } catch (e) {
+    if (UPLOADS_UNREADY.has(e?.code)) {
+      if (!pushUnreadyLogged) log("promoted leads are not pushed: migration 140 is not applied");
+      pushUnreadyLogged = true;
+      return;
+    }
+    log(`pushing promoted leads: ${e.message}`);
+  } finally {
+    pushBusy = false;
+  }
+}
+
 // An upload's approved found emails into leads: the web app runs the import
 // (TypeScript); the worker only asks, at most once per upload every 10 minutes
 // (FOUND_EVERY_MS, upload-found.mjs). Off without the auto-add address and key.
@@ -957,6 +997,7 @@ async function main() {
       if (Date.now() - lastPromote > PROMOTE_CHECK_MS) {
         lastPromote = Date.now();
         promoteWaiting();
+        pushPromoted();
       }
       if (Date.now() - lastFound > FOUND_CHECK_MS) {
         lastFound = Date.now();

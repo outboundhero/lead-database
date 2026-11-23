@@ -929,7 +929,8 @@ try {
   const sv = sheet.body?.value?.promotion;
   check("the sheet shows promotion as shipped: off, no client, a question required, its source label (min_fit_score is not shown)",
     sheet.status === 200 && sv?.promote_to_leads === false && same(sv.tags, []) && sv.require_question === true && sv.source_label === "Companies (AI Ark)" &&
-      !("min_fit_score" in sv) && same(settingsInputOf(sheet.body.value).promotion, { promote_to_leads: false, tags: [] }) && /promotion@/.test(sheet.body.version),
+      !("min_fit_score" in sv) && same(settingsInputOf(sheet.body.value).promotion, { promote_to_leads: false, tags: [], auto_push: false }) &&
+      /promotion@/.test(sheet.body.version),
     JSON.stringify({ sv, version: sheet.body?.version }));
   const sheetEdit = (body, f) => {
     const x = structuredClone(settingsInputOf(body.value));

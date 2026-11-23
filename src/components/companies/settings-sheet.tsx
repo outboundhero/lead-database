@@ -28,8 +28,9 @@ import {
 import type { SharingClient } from "@/lib/sharing/types";
 
 // The pipeline's settings (enrich_settings), admins only: company pulls, people
-// runs, the LinkedIn searches, personalisation and promotion into leads, each
-// switch with its client list (an empty list covers no client), their caps,
+// runs, the LinkedIn searches, personalisation and promotion into leads (with
+// the push of the leads it adds into the clients' campaigns, migration 140),
+// each switch with its client list (an empty list covers no client), their caps,
 // the daily spend caps (OpenAI, Reoon, and the calls of each email finder and
 // Enrichley), and for each original Clay AI step its model, reasoning effort
 // and most searches. Saved through PUT /api/companies/settings; the worker
@@ -80,7 +81,7 @@ function toInput(v: PipelineSettings): SettingsInput {
     },
     models,
     linkedin_sources: { ...v.linkedin_sources, tags: [...v.linkedin_sources.tags] },
-    promotion: { promote_to_leads: v.promotion.promote_to_leads, tags: [...v.promotion.tags] },
+    promotion: { promote_to_leads: v.promotion.promote_to_leads, tags: [...v.promotion.tags], auto_push: v.promotion.auto_push },
     overlap_sharing: {
       ...v.overlap_sharing,
       tags: [...v.overlap_sharing.tags],
@@ -543,6 +544,16 @@ export function SettingsSheet({
                     }
                     checked={pr.promote_to_leads}
                     onChange={(v) => setPromotion("promote_to_leads", v)}
+                  />
+                  <Switch
+                    label="Push into campaigns"
+                    hint={
+                      pr.auto_push
+                        ? "On, for the clients listed below: the leads promotion adds are pushed into each client's campaigns once the location backfill has placed them, forced, into the campaigns the export popup would pre-select. A client whose campaigns can't be picked keeps its new leads for a push from Leads, Export; the fit panel says why."
+                        : "Off: promoted leads wait in Leads for a push from Leads, Export. Leads added while it is off are never pushed by it later."
+                    }
+                    checked={pr.auto_push}
+                    onChange={(v) => setPromotion("auto_push", v)}
                   />
                   <Clients label="Promotion into leads" tags={pr.tags} onChange={(t) => setPromotion("tags", t)} />
                   <p className="text-[12px] leading-relaxed text-muted-foreground">

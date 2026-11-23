@@ -195,10 +195,12 @@ export function normalizeSettings(rows: { key: string; value: unknown }[]): Pipe
     spend_caps: s.spend_caps as PipelineSettings["spend_caps"],
     models: s.models as PipelineSettings["models"],
     linkedin_sources: { enabled: s.linkedin_sources.enabled, tags: [...s.linkedin_sources.tags], people_per_company: s.linkedin_sources.people_per_company },
-    // Promotion's switch and client list, and what the sheet says of it; min_fit_score and batch_max stay server side.
+    // Promotion's switch and client list, the push into campaigns (140), and what the sheet says of it; min_fit_score
+    // and batch_max stay server side.
     promotion: {
       promote_to_leads: s.promotion.promote_to_leads,
       tags: [...s.promotion.tags],
+      auto_push: s.promotion.auto_push,
       require_question: s.promotion.require_question,
       source_label: s.promotion.source_label,
     },
@@ -341,9 +343,10 @@ const PEOPLE_PER_COMPANY_MAX = 100;
  * out, the stored row is kept and not written. So is spend_caps'
  * vendor_calls_per_day (migration 129: the daily calls of the email finders
  * and Enrichley, checked with cleanVendorCaps): left out, the stored caps are
- * kept. So is promotion (126): only its switch and client list are taken,
- * merged over the stored row (batch_max, require_question, source_label and
- * min_fit_score stay as stored), and the row is written only when they change.
+ * kept. So is promotion (126): only its switch, its client list and the
+ * push into campaigns (140, auto_push) are taken, merged over the stored row
+ * (batch_max, require_question, source_label and min_fit_score stay as
+ * stored), and the row is written only when they change.
  */
 export function cleanSettingsInput(
   input: unknown,
@@ -430,7 +433,9 @@ export function cleanSettingsInput(
     }
   }
   // Promotion into leads (126): the switch and its client list, as the other
-  // pipeline switches. Left out (an older sheet): kept as stored, not written.
+  // pipeline switches, and the push of the leads it adds into the clients'
+  // campaigns (140; left out by an older sheet, it keeps what is stored). Left
+  // out (an older sheet): kept as stored, not written.
   let promotion: PromotionInput | null = null;
   if (body.promotion !== undefined) {
     const raw = body.promotion;
@@ -441,6 +446,7 @@ export function cleanSettingsInput(
       promotion = {
         promote_to_leads: bool(pr.promote_to_leads, "Promotion into leads"),
         tags: cleanTags(pr.tags, "Promotion into leads", errors),
+        auto_push: pr.auto_push === undefined ? current.promotion.auto_push : bool(pr.auto_push, "Pushing promoted leads into campaigns"),
       };
     }
   }
@@ -553,6 +559,7 @@ export function cleanSettingsInput(
     const r0 = current.promotion;
     diff("promotion into leads", r0.promote_to_leads, promotion.promote_to_leads, said);
     diff("promotion's clients", r0.tags, promotion.tags, listText);
+    diff("pushing promoted leads into campaigns", r0.auto_push, promotion.auto_push, said);
     promotionChanged = changes.length > beforePromotion;
   }
   const before = changes.length;
@@ -710,7 +717,7 @@ export function settingsInputOf(v: PipelineSettings): SettingsInput {
     },
     models,
     linkedin_sources: { ...v.linkedin_sources, tags: [...v.linkedin_sources.tags] },
-    promotion: { promote_to_leads: v.promotion.promote_to_leads, tags: [...v.promotion.tags] },
+    promotion: { promote_to_leads: v.promotion.promote_to_leads, tags: [...v.promotion.tags], auto_push: v.promotion.auto_push },
     overlap_sharing: {
       ...v.overlap_sharing,
       tags: [...v.overlap_sharing.tags],

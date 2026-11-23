@@ -240,6 +240,33 @@ export function FitPanel({ tag }: { tag: string | null }) {
               )}
             </span>
           </Line>
+          <Line label="Into campaigns">
+            <span className="flex flex-wrap items-center gap-2">
+              <Pill tone={state.promotion.auto_push ? "good" : "plain"}>{state.promotion.auto_push ? "Automatic push on" : "Automatic push off"}</Pill>
+              <span>
+                the leads promotion adds go into the client&apos;s campaigns once placed, forced, into the campaigns the export popup would
+                pre-select; switched on {isAdmin ? "in Settings" : "by an admin"}
+              </span>
+              {!state.promotion.push_ready && <span className="text-muted-foreground">Migration 140 is not applied here, so nothing is pushed.</span>}
+              {state.promotion.auto_push && state.worker && !state.worker.promotion_push && (
+                <Pill tone="warn" title="Deploy the latest enrichment worker">
+                  <AlertTriangle className="size-3" /> The worker running does not push yet
+                </Pill>
+              )}
+              {tag && state.promotion.push && (
+                <span>
+                  {tag}: {fmt(state.promotion.push.pushed)} pushed, {fmt(state.promotion.push.queued)} queued
+                  {state.promotion.push.waiting_why ? ` (${state.promotion.push.waiting_why})` : ""}, {fmt(state.promotion.push.held)} held for a push
+                  from Leads, Export, {fmt(state.promotion.push.dropped)} dropped
+                </span>
+              )}
+              {tag && state.promotion.push?.last_held && (
+                <span className="text-[var(--warning)]" title={state.promotion.push.last_held.at ?? undefined}>
+                  Last held: {state.promotion.push.last_held.note}
+                </span>
+              )}
+            </span>
+          </Line>
         </div>
       )}
 

@@ -59,6 +59,11 @@
 // When the company has a score, each promoted contact's email domain and its
 // lead's name key become aliases of it (2B.2), so a later re-score or manual
 // score reaches the lead at once. A company with no score gets no alias.
+//
+// While the automatic push is on for the client (promotion.auto_push,
+// migration 140), finishPromote also queues each contact it settles 'added'
+// for the push into the client's campaigns (auto_push_state 'queued'), in the
+// same fenced statement; promote-push.mjs takes it from there.
 
 import { evaluate, isEmpty, makeContext } from "./formula.mjs";
 import { addAliases } from "./fit-keys.mjs";
@@ -66,6 +71,27 @@ import { inboxVerdict, personVerdict, VERDICT_CELLS, verdictSource } from "./ema
 
 export const PROMOTE_SOURCE = "Companies (AI Ark)";
 export const ADD_COLUMN = "add_to_database";
+
+/**
+ * The first words of each sentence the automatic push (promote-push.mjs)
+ * ends an added contact's add_to_database note with, so a later sentence
+ * replaces an earlier one.
+ */
+export const PUSH_NOTE = Object.freeze({
+  queued: "It goes into the client's campaigns",
+  pushed: "Pushed into the client's campaigns",
+  held: "Not pushed into the client's campaigns",
+});
+const PUSH_NOTE_TAIL = new RegExp(` (${Object.values(PUSH_NOTE).join("|")})[\\s\\S]*$`);
+/** The sentence a queued contact's note ends with. */
+export const QUEUED_SENTENCE = `${PUSH_NOTE.queued} by the automatic push, once the location backfill has placed it.`;
+
+/** An added contact's note with the push's sentence in place of any earlier one. */
+export function notePush(note, sentence) {
+  const base = String(note ?? "").replace(PUSH_NOTE_TAIL, "").trim();
+  return base ? `${base} ${sentence}` : sentence;
+}
+
 /** A promote batch still 'processing' after this long died with the server; its contacts can be taken again. */
 export const PROMOTE_STALE_HOURS = 3;
 const PROMOTE_KINDS = ["general", "person"];
@@ -612,12 +638,23 @@ export async function beginPromote(db, { tag, kind, userId, limit, settings, but
  * which the button tries again). Only contacts still running for this batch
  * are written. Then each lead's keys become aliases of its company's score.
  *
+ * With queuePush (the automatic push is on for the client, and migration 140
+ * is applied: the caller checks both), each contact settled 'added' is also
+ * queued for the push (auto_push_state 'queued') in the same statement, and
+ * only one never queued before. A lead that was there first is never queued.
+ *
  * @param {Db} db
  * @param {{ batchId: string, batchAt: string, contacts: Array<{ row_id: number, table_id: string, email: string, label?: string }>,
- *           label?: string }} p
+ *           label?: string, queuePush?: boolean }} p
  */
-export async function finishPromote(db, { batchId, batchAt, contacts, label = PROMOTE_SOURCE }) {
-  if (!contacts?.length) return { added: 0, in_database: 0, not_added: 0 };
+export async function finishPromote(db, { batchId, batchAt, contacts, label = PROMOTE_SOURCE, queuePush = false }) {
+  if (!contacts?.length) return { added: 0, in_database: 0, not_added: 0, queued: 0 };
+  const queueMine = `m.lead_id IS NOT NULL AND m.mine AND c.auto_push_state IS NULL`;
+  const queue = queuePush
+    ? `,
+            auto_push_state = CASE WHEN ${queueMine} THEN 'queued' ELSE c.auto_push_state END,
+            auto_push_at = CASE WHEN ${queueMine} THEN now() ELSE c.auto_push_at END`
+    : "";
   const { rows } = await db.query(
     `WITH m AS (
        SELECT x.row_id, x.table_id, x.email, coalesce(x.label, $3) AS label, l.id AS lead_id,
@@ -627,10 +664,10 @@ export async function finishPromote(db, { batchId, batchAt, contacts, label = PR
      )
      UPDATE enrich_contacts c
         SET promote_state = CASE WHEN m.lead_id IS NULL THEN 'not_added' WHEN m.mine THEN 'added' ELSE 'in_database' END,
-            lead_id = m.lead_id, promoted_at = now()
+            lead_id = m.lead_id, promoted_at = now()${queue}
        FROM m
       WHERE c.row_id = m.row_id AND c.promote_state = 'running' AND c.batch_id = $4
-     RETURNING c.row_id, c.table_id, m.email, m.label, c.promote_state, c.lead_id`,
+     RETURNING c.row_id, c.table_id, m.email, m.label, c.promote_state, c.lead_id${queuePush ? ", c.auto_push_state" : ""}`,
     [JSON.stringify(contacts), batchAt, label, batchId]
   );
   await writeCells(db, rows.map((r) => ({
@@ -638,10 +675,13 @@ export async function finishPromote(db, { batchId, batchAt, contacts, label = PR
     status: r.promote_state === "not_added" ? "error" : "done",
     value: r.promote_state === "not_added"
       ? { batch_id: batchId, email: r.email }
-      : { added: r.promote_state === "added", reason: r.promote_state === "added" ? null : "in_database", lead_id: r.lead_id, batch_id: batchId, email: r.email },
+      : {
+          added: r.promote_state === "added", reason: r.promote_state === "added" ? null : "in_database", lead_id: r.lead_id, batch_id: batchId, email: r.email,
+          ...(r.auto_push_state === "queued" ? { push: "queued" } : {}),
+        },
     display: r.promote_state === "added" ? "Added" : r.promote_state === "in_database" ? "Already in the database" : "Not added",
     note: r.promote_state === "added"
-      ? `Added to the lead database with source ${r.label ?? label}, tagged with the client.`
+      ? `Added to the lead database with source ${r.label ?? label}, tagged with the client.${r.auto_push_state === "queued" ? ` ${QUEUED_SENTENCE}` : ""}`
       : r.promote_state === "in_database"
         ? "Skipped: a lead with this address reached the database while this batch ran; it was left as it was."
         : "The import could not store this contact (the batch's errors on the Uploads page say why). The button tries again.",
@@ -667,6 +707,7 @@ export async function finishPromote(db, { batchId, batchAt, contacts, label = PR
     added: rows.filter((r) => r.promote_state === "added").length,
     in_database: rows.filter((r) => r.promote_state === "in_database").length,
     not_added: rows.filter((r) => r.promote_state === "not_added").length,
+    queued: rows.filter((r) => r.auto_push_state === "queued").length,
   };
 }
 

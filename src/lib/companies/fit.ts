@@ -3,6 +3,7 @@ import { cleanModelSetting, REASONING_EFFORTS, settingsFrom } from "../../../scr
 import { capFor, spentToday } from "../../../scripts/lib/enrich/spend.mjs";
 import { COPY_TO_COMPANIES_SQL } from "../../../scripts/lib/enrich/fit-keys.mjs";
 import { promoteCounts, promotionAllowed } from "../../../scripts/lib/enrich/promote.mjs";
+import { PROMOTION_PUSH_CAPABILITY, pushColumnsReady, pushWaiting, waitingWhy } from "../../../scripts/lib/enrich/promote-push.mjs";
 import type { WorkerState } from "@/lib/enrich/types";
 import type {
   FitGateView,
@@ -266,6 +267,7 @@ function fitWorker(w: WorkerState | null): FitState["worker"] {
   return {
     online: w.online,
     fit_scoring: caps.includes("fit_scoring"),
+    promotion_push: caps.includes(PROMOTION_PUSH_CAPABILITY),
     state: str(fit.state),
     why: str(fit.why),
     last_error: str(fit.last_error),
@@ -308,6 +310,33 @@ export async function fitState(c: Db, s: FitSettings, tag: string | null, worker
     if (!allowed.ok) blockedWhy = allowed.why;
     counts = (await promoteCounts(c, { tag, settings: s })) as FitState["promotion"]["counts"];
   }
+  // The automatic push (140): a catalog check first, so a database without its columns reads as not set up.
+  const pushReady = await pushColumnsReady(c);
+  let push: FitState["promotion"]["push"] = null;
+  if (tag && pushReady) {
+    const w = await pushWaiting(c, tag);
+    const { rows: [n] } = await c.query(
+      `SELECT count(*) FILTER (WHERE auto_push_state = 'pushed')::int AS pushed, count(*) FILTER (WHERE auto_push_state = 'held')::int AS held,
+              count(*) FILTER (WHERE auto_push_state = 'dropped')::int AS dropped, max(auto_push_at) FILTER (WHERE auto_push_state = 'pushed') AS last_pushed_at
+         FROM enrich_contacts WHERE client_tag = $1 AND auto_push_state IS NOT NULL`,
+      [tag]
+    );
+    const { rows: [h] } = await c.query(
+      `SELECT auto_push_note, auto_push_at FROM enrich_contacts
+        WHERE client_tag = $1 AND auto_push_state = 'held' ORDER BY auto_push_at DESC NULLS LAST LIMIT 1`,
+      [tag]
+    );
+    push = {
+      queued: w.queued,
+      ready: w.ready,
+      waiting_why: waitingWhy(w),
+      pushed: n?.pushed ?? 0,
+      held: n?.held ?? 0,
+      dropped: n?.dropped ?? 0,
+      last_pushed_at: iso(n?.last_pushed_at),
+      last_held: h ? { note: String(h.auto_push_note ?? ""), at: iso(h.auto_push_at) } : null,
+    };
+  }
   return {
     rule: { set: Boolean(s.fit_rule.prompt), version: s.fit_rule.version },
     model: (s.models.fit_score as FitModel | null) ?? null,
@@ -334,6 +363,10 @@ export async function fitState(c: Db, s: FitSettings, tag: string | null, worker
       source_label: p.source_label,
       blocked_why: blockedWhy,
       counts,
+      auto_push: p.auto_push,
+      push_on_for_client: tag ? s.flagOn("promotion_push", tag) : null,
+      push_ready: pushReady,
+      push,
     },
   };
 }

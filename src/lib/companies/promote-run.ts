@@ -11,6 +11,7 @@ import {
   PROMOTE_STALE_HOURS,
   promotionAllowed,
 } from "../../../scripts/lib/enrich/promote.mjs";
+import { pushColumnsReady } from "../../../scripts/lib/enrich/promote-push.mjs";
 import { readFitSettings } from "@/lib/companies/fit";
 import type { PromoteKind } from "./fit-types";
 
@@ -29,6 +30,14 @@ import type { PromoteKind } from "./fit-types";
 // Refused while promotion is off or the client is not on its list, and while a
 // batch of the client is still being imported. Fit scoring is not needed (kept
 // for v2, switched off): no rule, model, gate or score is asked for.
+//
+// While the automatic push is on for the client (promotion.auto_push,
+// migration 140), each contact a batch settles as a lead it made is queued for
+// the push into the client's campaigns (scripts/lib/enrich/promote-push.mjs,
+// src/lib/companies/promote-push.ts). A batch's final status is written only
+// after its contacts are settled: until then it is live, so another round
+// never retakes them and settles them as already in the database, and the
+// push never takes a round that is still being settled.
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const KINDS: PromoteKind[] = ["general", "person"];
@@ -57,7 +66,16 @@ export async function startPromote({
   const kinds = kind ? [kind] : KINDS;
   let out:
     | { error: string; status: number }
-    | { started: Started[]; settled: number; refused: number; held: Record<string, number>; busy: PromoteKind[]; label: string };
+    | {
+        started: Started[];
+        settled: number;
+        refused: number;
+        held: Record<string, number>;
+        busy: PromoteKind[];
+        label: string;
+        queuePush: boolean;
+        pushOff: string | null;
+      };
   try {
     out = await withTx(
       async (c) => {
@@ -114,7 +132,11 @@ export async function startPromote({
         if (busy.length === kinds.length) {
           return { status: 409, error: `${tag}'s contacts are being promoted already. Wait for that round to finish.` };
         }
-        return { started, settled, refused, held, busy, label: settings.promotion.source_label };
+        // The automatic push needs migration 140's columns: without them the round runs as before and queues nothing.
+        const pushOn = settings.flagOn("promotion_push", tag);
+        const queuePush = pushOn && (await pushColumnsReady(c));
+        const pushOff = pushOn && !queuePush ? "the automatic push is on but migration 140 is not applied, so nothing is queued for it" : null;
+        return { started, settled, refused, held, busy, label: settings.promotion.source_label, queuePush, pushOff };
       },
       { timeoutMs: 60_000 }
     );
@@ -124,11 +146,12 @@ export async function startPromote({
   }
   if ("error" in out) return { status: out.status, body: { error: out.error } };
 
-  const { started, settled, refused, held, busy, label } = out;
+  const { started, settled, refused, held, busy, label, queuePush, pushOff } = out;
+  if (pushOff) console.warn(`[companies/promote] ${tag}: ${pushOff}`);
   if (started.length) {
     after(async () => {
       // Inboxes first, then people: one batch at a time, as the design's round.
-      for (const b of started) await importAndSettle(tag, b, label);
+      for (const b of started) await importAndSettle(tag, b, label, queuePush);
     });
   }
   const adding = started.reduce((n, b) => n + b.contacts.length, 0);
@@ -140,7 +163,9 @@ export async function startPromote({
     details:
       `${tag}: ${automatic ? "automatic " : ""}promotion round, ${adding} to add, ${settled} already in the database, ` +
       `${refused} refused, ${heldCount} held back` +
-      (started.length ? `, upload ${started.map((b) => b.batchId).join(", ")}` : ""),
+      (started.length ? `, upload ${started.map((b) => b.batchId).join(", ")}` : "") +
+      (started.length && queuePush ? ", its new leads queued for the automatic push" : "") +
+      (pushOff ? `; ${pushOff}` : ""),
   });
   return {
     status: 202,
@@ -155,8 +180,13 @@ export async function startPromote({
   };
 }
 
-/** One batch: the import, its counters, then each contact settled (3 tries). */
-async function importAndSettle(tag: string, b: Started, label: string) {
+/**
+ * One batch: the import, then each contact settled (3 tries), then the
+ * batch's counters and final status. The status comes last: see the note at
+ * the top.
+ */
+async function importAndSettle(tag: string, b: Started, label: string, queuePush: boolean) {
+  let final: { counters: ImportCounters; status: "complete" | "error" } | { failed: string };
   try {
     const counters = await importRows(getPool(), b.rows, {
       batchId: b.batchId,
@@ -170,23 +200,28 @@ async function importAndSettle(tag: string, b: Started, label: string) {
       onProgress: (c) => writeProgress(b.batchId, c),
     });
     const nothingLanded = counters.inserted + counters.skipped === 0;
-    await writeProgress(b.batchId, counters, counters.errors > 0 && nothingLanded ? "error" : "complete");
+    final = { counters, status: counters.errors > 0 && nothingLanded ? "error" : "complete" };
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";
     console.error(`[companies/promote] import ${b.batchId} failed: ${msg}`);
-    await enrichPool()
-      .query(`UPDATE upload_batches SET status = 'error', error_log = $2::jsonb, completed_at = now() WHERE id = $1`, [b.batchId, JSON.stringify([msg])])
-      .catch(() => {});
+    final = { failed: msg };
   }
   // Whatever the import did, each contact's cell says so and stops reading as being added.
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      await finishPromote(enrichPool(), { batchId: b.batchId, batchAt: b.batchAt, contacts: b.contacts, label });
-      return;
+      await finishPromote(enrichPool(), { batchId: b.batchId, batchAt: b.batchAt, contacts: b.contacts, label, queuePush });
+      break;
     } catch (err) {
       console.error(`[companies/promote] settling ${b.batchId} failed: ${err instanceof Error ? err.message : err}`);
       await sleep(2_000 * attempt);
     }
+  }
+  if ("failed" in final) {
+    await enrichPool()
+      .query(`UPDATE upload_batches SET status = 'error', error_log = $2::jsonb, completed_at = now() WHERE id = $1`, [b.batchId, JSON.stringify([final.failed])])
+      .catch(() => {});
+  } else {
+    await writeProgress(b.batchId, final.counters, final.status);
   }
 }
 

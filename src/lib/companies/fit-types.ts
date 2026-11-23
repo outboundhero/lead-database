@@ -44,6 +44,8 @@ export interface FitState {
   worker: {
     online: boolean;
     fit_scoring: boolean;
+    /** The worker asks for the automatic push of promoted leads (migration 140). */
+    promotion_push: boolean;
     state: string | null;
     why: string | null;
     last_error: string | null;
@@ -70,6 +72,22 @@ export interface FitState {
     /** Why promotion can't run for the client now, or null. */
     blocked_why: string | null;
     counts: Record<PromoteKind, { ready: number; no_question: number }> | null;
+    /** The push of the leads promotion adds into the client's campaigns (promotion.auto_push, migration 140). */
+    auto_push: boolean;
+    push_on_for_client: boolean | null;
+    /** Migration 140's columns are in this database. */
+    push_ready: boolean;
+    /** The client's promoted leads by push state, and the latest reason one was held; null with no client or no 140. */
+    push: {
+      queued: number;
+      ready: number;
+      waiting_why: string | null;
+      pushed: number;
+      held: number;
+      dropped: number;
+      last_pushed_at: string | null;
+      last_held: { note: string; at: string | null } | null;
+    } | null;
   };
 }
 

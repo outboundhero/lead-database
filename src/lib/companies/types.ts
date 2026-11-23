@@ -204,11 +204,14 @@ export type QuestionVariablesInput = Omit<QuestionVariablesSettings, "concurrenc
 /**
  * The part of promotion (enrich_settings.promotion, migration 126) the
  * settings sheet edits: the switch and its client list. Pipeline emails go
- * into leads only for a client on the list while it is on.
+ * into leads only for a client on the list while it is on. auto_push
+ * (migration 140): the leads a round adds are pushed into the listed
+ * clients' campaigns; a body without it keeps what is stored.
  */
 export interface PromotionInput {
   promote_to_leads: boolean;
   tags: string[];
+  auto_push: boolean;
 }
 
 /**

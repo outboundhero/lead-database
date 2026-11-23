@@ -70,7 +70,7 @@ export const TRACKS = ["operations", "facility_office", "ceo"];
 /** Every switch flagOn() knows. The first four are the ones a template column can carry in config.flag. */
 export const FLAGS = [
   "people_pipeline", "ai_searches", "linkedin_profile_reads", "personalisation",
-  "company_pipeline", "auto_buy", "promotion", "fit_gate", "fit_scoring",
+  "company_pipeline", "auto_buy", "promotion", "promotion_push", "fit_gate", "fit_scoring",
   "linkedin_sources", "linkedin_companies", "linkedin_people",
   "overlap_sharing", "share_push", "share_tag_writes", "weekly_topup", "topup_pull", "never_contact_inboxes",
 ];
@@ -194,6 +194,8 @@ export const SETTINGS_DEFAULTS = frozen({
    * Promotion into leads: the switch and its client list are set on the
    * Companies tab's settings sheet. No fit score is needed (2026-11-20: fit
    * scoring is kept for v2), so min_fit_score is kept as stored and not read.
+   * auto_push (migration 140, set on the same sheet) pushes the leads a round
+   * adds into the client's campaigns, for the clients on promotion.tags.
    */
   promotion: {
     promote_to_leads: false,
@@ -202,6 +204,7 @@ export const SETTINGS_DEFAULTS = frozen({
     batch_max: 1000,
     require_question: true,
     source_label: "Companies (AI Ark)",
+    auto_push: false,
   },
   fit_gate: { enabled: false, tags: [], threshold: 2, client_types: ["Cleaning", "Canada Cleaning"], require_scored: true },
   fit_gate_refresh: { pending: false, since: null },
@@ -731,7 +734,7 @@ function tracksOf(v) {
  *   fit_rule: { prompt: string | null, version: string | null },
  *   fit_scoring: { enabled: boolean, batch_size: number, calls_in_flight: number },
  *   promotion: { promote_to_leads: boolean, tags: string[], min_fit_score: number, batch_max: number,
- *                require_question: boolean, source_label: string },
+ *                require_question: boolean, source_label: string, auto_push: boolean },
  *   fit_gate: { enabled: boolean, tags: string[], threshold: number, client_types: string[], require_scored: boolean },
  *   fit_gate_refresh: { pending: boolean, since: string | null },
  *   linkedin_sources: { enabled: boolean, tags: string[], people_per_company: number },
@@ -842,6 +845,7 @@ export function settingsFrom(rows) {
     batch_max: whole(pr.batch_max, 1, 2000, D.promotion.batch_max),
     require_question: bool(pr.require_question, D.promotion.require_question),
     source_label: textOrNull(pr.source_label, 80) ?? D.promotion.source_label,
+    auto_push: bool(pr.auto_push, D.promotion.auto_push),
   };
 
   const fg = objectOr(byKey.get("fit_gate"));
@@ -950,6 +954,8 @@ export function settingsFrom(rows) {
  *                           loaded (ctx.variant other than "default") unless shared_text_ok.
  *                           Without ctx.variant the client counts as on the default variant.
  *   promotion               promote_to_leads, tag on promotion.tags
+ *   promotion_push          promotion on for the client, and promotion.auto_push (the leads a round
+ *                           adds are pushed into the client's campaigns, migration 140)
  *   fit_gate                enabled, tag (or "*") on fit_gate.tags, and ctx.clientType on
  *                           fit_gate.client_types; false without ctx.clientType. The SQL
  *                           fn_fit_gate_applies(tag) (migration 126) is what the gate itself reads.
@@ -996,6 +1002,9 @@ export function flagOn(settings, name, tag, ctx = {}) {
     }
     case "promotion":
       return Boolean(t) && s.promotion.promote_to_leads === true && listed(s.promotion.tags);
+    case "promotion_push":
+      // Fails closed on a settings object made before 140 (no auto_push key).
+      return flagOn(s, "promotion", t) && s.promotion.auto_push === true;
     case "fit_gate":
       return (
         Boolean(t) &&

@@ -4,6 +4,7 @@ import { withTx } from "@/lib/enrich/db";
 import { logAudit } from "@/lib/api/log-audit";
 import { cleanSettingsInput, readPipelineSettings, storedSettings } from "@/lib/companies/server";
 import type { SettingsState } from "@/lib/companies/types";
+import { pushColumnsReady } from "../../../../../scripts/lib/enrich/promote-push.mjs";
 
 // GET /api/companies/settings: the pipeline's settings as the worker reads them
 //     (enrich_settings: company pulls, people runs, personalisation, the spend
@@ -42,6 +43,9 @@ import type { SettingsState } from "@/lib/companies/types";
 //     scripts/lib/enrich/settings.mjs (cleanOverlapSharing, cleanWeeklyTopup,
 //     cleanNeverContactInboxes); each row is written only when it changes. The
 //     answer never carries the filter, only whether it is loaded.
+//     promotion.auto_push (migration 140: the leads promotion adds are pushed
+//     into the listed clients' campaigns) is refused (400) while 140 is not
+//     applied here; left out, it keeps what is stored.
 
 export const dynamic = "force-dynamic";
 
@@ -76,6 +80,11 @@ export async function PUT(req: NextRequest) {
         }
         const { value, errors, changes } = cleanSettingsInput(body, current.value, await storedSettings(c));
         if (!value) return { status: 400, error: errors.join(" "), errors };
+        // The push into campaigns keeps its state in enrich_contacts' push columns (140): never on without them.
+        if (value.promotion?.auto_push === true && !current.value.promotion.auto_push && !(await pushColumnsReady(c))) {
+          const error = "Pushing promoted leads into campaigns needs migration 140 (enrich_contacts' push columns): apply it first, then switch it on.";
+          return { status: 400, error, errors: [error] };
+        }
         if (!changes.length) return { saved: current, changes };
         for (const [key, v] of Object.entries(value)) {
           await c.query(

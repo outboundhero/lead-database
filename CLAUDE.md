@@ -3539,7 +3539,10 @@ score; `promotion.min_fit_score` is kept as stored and not read).
   company with none gets no key, score or alias from promotion.
   Promotion never takes an upload row (130): `projectContact()` writes no contact for
   one, and its found email goes to leads through the upload's own import instead (see
-  "Upload no-email rows (migration 130)").
+  "Upload no-email rows (migration 130)"). The leads a round makes can go on into the
+  client's campaigns with no button: see "Automatic push of promoted leads (migration
+  140)". A batch's final status is written after its contacts are settled (since
+  2026-11-24), so a round still being settled stays live.
 - **The gate** (switch `fit_gate.enabled` with `fit_gate.tags`; `threshold` 2,
   `client_types` Cleaning and Canada Cleaning, `require_scored` true). While it applies to
   a client: its eligibility gains the fit condition (counts, availability, the wizard's
@@ -5123,6 +5126,82 @@ written, checked or sent for a client until it is on and lists that client
   workers while no batch is processing, all before the question variables switch is on
   for any client: an older push-worker ignores `question_variable_id` and would push
   those leads without the variable.
+
+## Automatic push of promoted leads (migration 140, 2026-11-24)
+
+Clay's General table pushed each approved inbox straight into the client's Email Bison
+campaigns. Promotion stopped at the leads table, so a person had to push from Leads,
+Export. The switch `promotion.auto_push` (ships off; "Push into campaigns" on the
+Companies tab's settings sheet, beside "Promotion into leads"; it covers the clients on
+`promotion.tags`, flagOn `promotion_push`) pushes the leads a promotion round makes into
+the client's campaigns, the way an Exports push of those rows would.
+
+- **Queued at the settle.** While the switch is on (and 140 is applied: `startPromote`
+  checks both), `finishPromote` marks each contact it settles 'added' `auto_push_state
+  = 'queued'` in the same fenced statement, so a contact is queued once and only for a
+  lead its own batch made. A contact whose lead was there first (in_database, in_bison,
+  never_contact) is never queued, and neither is one settled while the switch was off:
+  nothing older is pushed unasked. The `add_to_database` cell's note says so.
+- **A batch's final status comes after its settle** (`importAndSettle`). Until then the
+  batch stays live, so another round never retakes its contacts and settles them as
+  already in the database (which would lose their push), and the push never takes a
+  round that is still being settled.
+- **Ready once placed.** The import leaves a lead's place to the location cron, and the
+  push worker checks the client's targeting again at push time, where
+  `require_location` needs a country: a lead pushed before its place is known is
+  skipped there. So a client's queued leads wait for a location run that started after
+  their round finished (`cron_runs.location_backfill`, as the share step waits), or 180
+  minutes after it (`PUSH_WAIT_MINUTES`). A round's two batches (made in one
+  transaction, one `created_at`) go together, and nothing is taken while a round of the
+  client is still importing (`scripts/lib/enrich/promote-push.mjs`).
+- **Asked by the worker.** On the promotion minute, beside the promotion asks but with
+  a busy flag of its own, the enrich-worker asks `POST /api/companies/promote/auto/push
+  {tag}` (Bearer `AIARK_AUTO_ADD_KEY`, the `AIARK_AUTO_ADD_URL` origin: no new setting;
+  the path is under the middleware's `api/companies/promote/auto` exception) for a
+  client with ready leads, at most once every 2 minutes per client. Its heartbeat lists
+  the capability `promotion_push`.
+- **The push** (`src/lib/companies/promote-push.ts`): the client's campaigns read live
+  with the export popup's own search (any error, "partial" included: 409, the leads stay
+  queued for the next ask), picked exactly as the popup pre-selects them
+  (`autoPickCampaigns`, all of the client's or none), then sent through the push route's
+  own checks, now in `src/lib/bison/push-batch-core.ts` and used by the route too
+  (campaign ids, installs, Nurture, archived, lead ids, the sides across installs, the
+  group to save), and stamped as the route stamps them. In one transaction under
+  `pg_advisory_xact_lock(hashtext('promote-push:' || tag))` it queues ONE `push_batches`
+  row: those campaigns, exactly the ready lead ids (at most 25,000), the client's tag, no
+  email side, no filters, `created_by` NULL, the fit gate's status, and `push_options`
+  `{ includeAlreadyPushed: false, onlyNewSinceLast: false, retryFailed: false, source:
+  "promote", skipAlreadySent: true, force: true }`. The same transaction marks exactly
+  those contacts 'pushed' with the batch (fenced on 'queued'). An empty id list is never
+  inserted. The worker treats a `promote` batch as any batch (not a share source), and
+  the push route's 24-hour guard leaves it out, as it leaves shares out. The audit log
+  gets a `bison_push_batch_queued` row worded as the route words it.
+- **Held or dropped, with the reason** (`auto_push_note`, the cell's note, a
+  `promotion_push_held` or `promotion_push_dropped` audit row, and the fit panel's "Into
+  campaigns" line with the last held reason). Held, left for a push from Leads, Export
+  and never taken again: nothing picked (the popup's own reason, for example no
+  campaign named "TAG: …", or two in one install and bucket), a route check refusing, no
+  picked campaign on the lead's B2B or B2C side (Clay put a freemail inbox in the B2C
+  install), a Mimecast address (the Leads page and shares leave Mimecast out by
+  default), the client's question variable (its new leads have no value written for
+  it), or the client missing from `client_tags`. Dropped: the lead is gone, or it is in
+  one of the client's pushes already.
+- **Migration 140** adds to `enrich_contacts` `auto_push_state` (queued, pushed, held,
+  dropped), `auto_push_note`, `auto_push_batch_id` (no foreign key) and `auto_push_at`,
+  two validated checks (a state only on an 'added' contact; a pushed one names its
+  batch) and a partial index on `(client_tag, auto_push_state)`. The settings sheet
+  refuses to switch the push on until 140 is applied, and no code reads the columns
+  before. Back-out steps are at the end of the file.
+- **Rollout:** apply 140 by hand, then deploy the web app and the enrich-worker (until
+  the new worker runs, the fit panel says "The worker running does not push yet"), then
+  switch "Push into campaigns" on. The push-worker needs no change.
+- **Tests:** `node --env-file=.env.local scripts/test-auto-push.mjs` (local database
+  only, 140 applied, under the shared lock; made-up `APTEST_` clients on two made-up
+  installs, `*.aptest.example`, whose campaign search a stand-in answers; no network;
+  about 2 s): the switch and the sheet, switched off, the queue, the wait for places
+  and the wait limit, one forced batch for exactly the new leads, never twice (a second
+  ask, a second round, two asks at once, a retried settle), held and dropped with their
+  reasons, the route's key, the worker's ask and wiring, the fit panel.
 
 ## Known issues / TODO
 

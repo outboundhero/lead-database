@@ -21,7 +21,8 @@ export const config = {
      * - api/aiark/webhook (AI Ark's export callback — answers 200 and reads nothing)
      * - api/aiark/add/auto (the enrichment worker — Bearer AIARK_AUTO_ADD_KEY only)
      * - api/companies/promote/auto (the enrichment worker's promotion of approved
-     *   pipeline emails into leads: Bearer AIARK_AUTO_ADD_KEY only)
+     *   pipeline emails into leads, and at api/companies/promote/auto/push its
+     *   push of the leads promotion added: Bearer AIARK_AUTO_ADD_KEY only)
      * - api/uploads/found/auto (the enrichment worker's adding of the emails
      *   found for an upload's no-email rows: Bearer AIARK_AUTO_ADD_KEY only)
      * - api/sharing/push/auto (the enrichment worker's push of a client's
