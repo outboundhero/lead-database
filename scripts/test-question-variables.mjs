@@ -44,7 +44,8 @@ import { openAiCost } from "./lib/enrich/spend.mjs";
 import { readSettings, resetSettingsCache } from "./lib/enrich/settings.mjs";
 import { questionSettingsFrom } from "./lib/questions/settings.mjs";
 import { contextFor, placeholderErrors, QUESTION_PLACEHOLDERS, RESEARCH_PLACEHOLDERS, renderQuestionPrompt } from "./lib/questions/render.mjs";
-import { loadServiceArea, serviceAreaOf } from "./lib/questions/service-area.mjs";
+import { loadServiceArea } from "./lib/questions/service-area.mjs";
+import { serviceAreaFor } from "./lib/enrich/service-area.mjs";
 import { QUESTION_JOBS_CAPABILITY } from "./lib/questions/capability.mjs";
 import * as G from "./lib/questions/gather.mjs";
 import * as W from "./lib/questions/writer.mjs";
@@ -329,14 +330,17 @@ function partA() {
     e2.some((e) => /unclosed/.test(e)) && e2.some((e) => /stray/.test(e)), JSON.stringify(e2));
   check("plain text and single braces are no error", placeholderErrors("A {json} like {\"a\": 1} text", QUESTION_PLACEHOLDERS).length === 0);
 
+  // {{Service Area}} is the pipeline's service area: serviceAreaFor's value (scripts/lib/enrich/service-area.mjs,
+  // checked in full by test-client-location), which loadServiceArea gives the writer.
+  const areaOf = (t, v) => serviceAreaFor(t, v).value;
   const sheet = { sheet_raw: { locations: `  ${"x".repeat(700)}  ` }, include_locations: [{ state: "IL", city: "Springfield" }] };
-  check("service area: the client's own value first", serviceAreaOf(sheet, { value: " Own area " }) === "Own area");
-  check("... else the sheet's places text, trimmed, at most 600 characters", serviceAreaOf(sheet, null) === "x".repeat(600));
+  check("service area: the client's own value first", areaOf(sheet, { value: " Own area " }) === "Own area");
+  check("... else the sheet's places text, trimmed, at most 600 characters", areaOf(sheet, null) === "x".repeat(600));
   const places = Array.from({ length: 14 }, (_, i) => ({ country: "US", state: i % 2 ? "IL" : "mo", city: `City${i + 1}` }));
-  const label = serviceAreaOf({ sheet_raw: null, include_locations: [...places, { country: "US", state: "TX" }] }, { value: "  " });
-  check("... else the distinct states, then the first 12 cities as \"City, ST\"",
-    label === `MO, IL, TX: ${places.slice(0, 12).map((p) => `${p.city}, ${p.state.toUpperCase()}`).join("; ")}`, label);
-  check("... and \"\" with none of the three", serviceAreaOf(null, null) === "");
+  const label = areaOf({ sheet_raw: null, include_locations: [...places, { country: "US", state: "TX" }] }, { value: "  " });
+  check("... else the first 12 cities as \"City, ST\" and how many more, then the distinct states",
+    label === `${places.slice(0, 12).map((p) => `${p.city}, ${p.state.toUpperCase()}`).join("; ")} and 2 more (MO, IL, TX)`, label);
+  check("... and \"\" with none of the three", areaOf(null, null) === "");
 }
 
 // ── B. The writer's rules ───────────────────────────────────────────────────
@@ -981,7 +985,7 @@ async function partF() {
   check("the service area as the writer reads it: the sheet's text", (await loadServiceArea(pool, A)) === "Made-up County and nearby");
   await pool.query(`INSERT INTO client_variables (client_tag, name, value) VALUES ($1, 'service_area', 'A made-up own area')`, [A]);
   check("... the client's own value first, and the places label for a client with neither",
-    (await loadServiceArea(pool, A)) === "A made-up own area" && (await loadServiceArea(pool, B)) === "IL, MO: Springfield, IL; Peoria, IL");
+    (await loadServiceArea(pool, A)) === "A made-up own area" && (await loadServiceArea(pool, B)) === "Springfield, IL; Peoria, IL (IL, MO)");
   await pool.query(`DELETE FROM client_variables WHERE client_tag = $1`, [A]);
 }
 
