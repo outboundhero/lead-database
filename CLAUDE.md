@@ -1504,6 +1504,88 @@ gate reads as the whole country. It stops new damage only: clients already
 damaged need a separate repair. Pure test, no AI and no database:
 `node scripts/test-targeting-answers.mjs`.
 
+## Places edited by hand win, and the service area (migration 139, 2026-11-23)
+
+A client's places (`client_targeting.countries`, `include_locations`,
+`exclude_locations`) are edited in the Clients page's Rules dialog and on the Clay
+tab (Client setup, Location), and a hand edit is never overwritten by the
+6-hourly onboarding-sheet sync. Each client also has a service area: its area in
+words, which prompts read as `{{Service Area}}`. A client nobody edits behaves as
+before.
+
+- **The lock.** A save that changes the places or the countries (`PUT
+  /api/clients/targeting` from the Rules dialog, `PUT /api/clients/location` from
+  the Clay tab) sets `locations_locked`, `locations_locked_by` and
+  `locations_locked_at`, writes a `client_targeting_log` row ('save': the three
+  lists before and after, nothing else) and an audit line with counts only. A save
+  that leaves them as they were locks nothing (places compare by country, state
+  code and city, order and spelling aside). Both routes check places with
+  `src/lib/clients/targeting-validate.ts` (`validateEntries`, moved out of the
+  targeting route, and the dialog's `parseEntry`/`entryLabel`), countries against
+  `supported_countries`, and both take the per-client lock `client-places:<tag>`.
+  The targeting route's PUT now runs on `requireRole("admin")` and `withTx` (the
+  same owner and admin as before); its GET is unchanged and adds
+  `locked_by_email`.
+- **The sheet sync** (`scripts/sync-client-targeting-from-sheet.mjs`): a locked
+  client gets no places pass (no AI call), and the write leaves its `countries` and
+  `include_locations` alone, checked again inside the statement (`CASE WHEN
+  client_targeting.locations_locked`), so a lock taken while a run works still
+  wins. Its terms, `sheet_raw` and `sheet_synced_at` are written as for any client.
+  Its line and the run's summary say "places kept (edited by hand)", and the dry
+  run marks it. The Clients page's preview (`GET /api/clients/sync-rules?preview=1`)
+  lists such clients as `placesKept`, and the confirm dialog names them. Before 139
+  is applied the sync reads every client as not locked and writes as it always
+  did. The script's work after the sheet is read is `syncSheetClients(pool,
+  sheetClients, opts)`, exported for the tests; the script runs only when run as a
+  script (`IS_MAIN`, as sync-clients-from-sheet.mjs).
+- **Follow the sheet again** (the dialog's lock line and the Location tab, admin):
+  `PUT /api/clients/location {tag, unlock: true, version}` clears the lock, logs
+  'unlock', and removes `locations` from `sheet_raw`, so the next sync sees the
+  row as changed and reads the places from the sheet even when the sheet has not
+  changed since the lock (it parses the exclusions again too, as for any changed
+  row). A sheet cell with no answer still keeps the places. Reverting a sync job
+  (`/api/clients/sync-rules/revert`) restores the places of its snapshot whatever
+  the lock says (not changed by this build).
+- **`GET/PUT /api/clients/location`** (manager reads, admin writes;
+  `src/lib/clients/location-server.ts`): the places, the lock (when, and the email
+  of who locked them), the sheet's places text (read only), the service area
+  (`value`, `source`, `effective`, `from`, `fallback`, `updatedAt`) and a `version`
+  (`client_targeting.updated_at` and `client_variables.updated_at`). PUT takes
+  `countries`, `includeLocations`, `excludeLocations`, `serviceArea` (text, or null
+  to remove it), `unlock` and `version`: 409 `{changed}` for a stale version, 400
+  with every reason, unlock together with changed places refused. A client's first
+  places make its rules row, with the commercial-cleaning exclusions on for a
+  cleaning client, as the sync does. Both answer 409 before 139 is applied.
+- **The service area**: the client's `client_variables` row `service_area` (typed:
+  source manual, at most 5,000 characters; every save and removal in
+  `client_variables_log`). `serviceAreaFor()` in
+  `scripts/lib/enrich/service-area.mjs` is the one place it is chosen: the typed
+  value; else the sheet's places text (`sheet_raw.locations`, trimmed, at most 600
+  characters, a cell with no answer skipped); else a label of the places (the first
+  12 cities as "City, ST", how many more, then the state codes); else empty.
+- **The pipeline column**: People and General have `service_area` ("Service
+  Area"), our own column on the action `client_variable` (client-checks.mjs),
+  placed before the personalisation steps. It reads the client's variable and rules
+  at run time, cached 30 seconds as the rules are (never older than the row's
+  `next_run_at`), costs nothing, has no switch, and is empty, never an error, for a
+  client with nothing. A prompt reads it as `{{Service Area}}` (`{{service_area}}`).
+  A client's tables get the column at their next `ensurePipelineTables()`. A
+  changed service area changes the rendered prompts that read it, so their AI
+  steps ask (and pay) again for the rows run after it.
+- **The Clay tab:** `src/components/clay/location-tab.tsx` (`LocationTab({ tag })`,
+  in the Client setup sheet): countries, include and exclude places, the lock line
+  with Follow the sheet again, the sheet's text, the service area with a preview of
+  what prompts get and from where, and "Use the sheet's text". Save sends the
+  version back; a 409 loads again.
+- **Tests:** `node --env-file=.env.local scripts/test-client-location.mjs` (local
+  database only, 139 applied; made-up `XQ2A` to `XQ2E` clients and a fixture
+  variant, removed at the end; OpenAI's chat answers stubbed for the sync's passes,
+  every other address refused; 73 checks, under a second): serviceAreaFor, the
+  compiled columns, the action through `runRow`, both routes through `routeLoader`
+  (roles, 409, every validation reason, the lock and its log), and the sync's write
+  with a locked client, a client locked while it runs, the dry run, Follow the
+  sheet again and the next sync.
+
 ## Client locations apply as city+state PAIRS (2026-08-19)
 
 Selecting a client on the Leads page puts its `include_locations` into the
@@ -3609,6 +3691,27 @@ scraper: a URL is pasted on the client's card there like a Clay URL.
   client's row: on another client's row, the URL is on the wrong card; on no row, the
   URL is wrong, even though the card said the Test passed (the scraper app follows
   redirects).
+- **The location filter** (migration 139, optional): a chunk may say what its scrape
+  was limited to, in `extra.location_filter = { version: 1, name?, countries?:
+  [ISO2], include?: [{country, state?, city?}], exclude?: [...], zips?: [string],
+  radius?: { miles, center: {city?, state?, country?} | {lat, lng} }, text? }` (the
+  contract is in `src/lib/enrich/gmaps.ts`'s header). `parseLocationFilter()`
+  (maps-place.mjs) keeps the known keys only, cleans text as the meta's (no NUL,
+  single spaces, well formed), keeps a list's first 500 entries (noted), and keeps
+  nothing (a note says why) for an unknown version, a known key of the wrong shape,
+  or a filter over 4,000 characters once cleaned. It never refuses a chunk and never
+  throws. A chunk that sends one has `meta.location_filter` (as kept, or null) and
+  `meta.location_filter_note` on its source, and each of its places the hidden
+  input `location_filter` (compact JSON); a chunk that sends none has neither. It
+  filters nothing yet: whether it replaces or narrows the client's places is a later
+  decision. A Companies table counts as ready for Maps places only with every Maps
+  input (`COMPANY_MAPS_INPUT_KEYS`, seven since 139), so an older one is compiled
+  again before such places land (one that can't be compiled now but has the place
+  id input takes them as before, without the newer inputs). A Test that sends a
+  top-level `location_filter` is answered `location_filter: { accepted, version,
+  note }`. Recent deliveries above a Companies (pipeline) table show a Filter column
+  (the version and counts, or the note), from the table route's
+  `deliveries[].filter`.
 - **Held rows** (`enrich_rows.run_status = 'held'`): the worker claims queued rows
   only, so a held row is never worked and costs nothing. Only the worker releases
   held rows (to queued), and only in `companies_v2` tables whose client
@@ -3713,7 +3816,8 @@ scraper: a URL is pasted on the client's card there like a Clay URL.
   (local database only, 129 applied; made-up `IBTEST_A` to `IBTEST_C` clients with the
   made-up Clay originals as their own variants, `.ibtest.example` places, removed at
   the end; the settings it changes are put back; about 25 s, one check waits out the
-  15 s statement timeout). No network: `fetch` refuses every address. The routes run
+  15 s statement timeout; since 139 it also checks the location filter, T7). No
+  network: `fetch` refuses every address. The routes run
   for real through the TypeScript loader (`routeLoader`), whose `call()` passes a
   route's `params` and gives the request `text()`. The worker's side: `node
   --env-file=.env.local scripts/test-held-caps.mjs` (local database only, 129 applied;
