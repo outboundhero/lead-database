@@ -39,6 +39,24 @@ function filterText(f: MapsDelivery["filter"] | undefined): string {
   ].filter(Boolean);
   return `v${f.version}: ${parts.length ? parts.join(", ") : "empty"}`;
 }
+
+/**
+ * A delivery's Skipped cell: the count, and how many were Google Maps ads ("12 (ads)", "12 (10 ads)"), with the
+ * reason as its title. A delivery stored before ads were counted (skipped_ads null) shows the count alone.
+ */
+function skippedCell(d: Pick<MapsDelivery, "skipped" | "skipped_ads">): { text: string; title?: string } {
+  const skipped = d.skipped ?? 0;
+  if (!skipped || d.skipped_ads === null || d.skipped_ads === undefined) return { text: fmt(skipped) };
+  const ads = Math.min(d.skipped_ads, skipped);
+  const other = skipped - ads;
+  const why = [
+    ads ? `${fmt(ads)} Google Maps ad${ads === 1 ? "" : "s"}: Google sends an ad with a name and a rating, no place id or address` : null,
+    other ? `${fmt(other)} place${other === 1 ? "" : "s"} with no place id or cid` : null,
+  ].filter(Boolean).join("; ");
+  const text = !ads ? fmt(skipped) : ads === skipped ? `${fmt(skipped)} (ads)` : `${fmt(skipped)} (${fmt(ads)} ads)`;
+  return { text, title: why };
+}
+
 const when = (iso: string | null | undefined) =>
   iso ? new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : null;
 
@@ -601,7 +619,7 @@ export function InboundStrip({
                   <td className="py-0.5 pr-3">{fmt(d.received)}</td>
                   <td className="py-0.5 pr-3">{fmt(d.created)}</td>
                   <td className="py-0.5 pr-3">{fmt(d.duplicates)}</td>
-                  <td className="py-0.5 pr-3">{fmt(d.skipped)}</td>
+                  <td className="py-0.5 pr-3" title={skippedCell(d).title}>{skippedCell(d).text}</td>
                   <td
                     className={cn("max-w-[220px] truncate py-0.5", d.filter?.version === null && "text-[var(--warning)]", !d.filter && "text-muted-foreground")}
                     title={d.filter?.note ?? undefined}

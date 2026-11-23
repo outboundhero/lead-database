@@ -145,7 +145,7 @@ async function deliver(t, items, { runStatus = "held" } = {}) {
       inputKeys,
       rows: items.map((it) => ({ inputs: placeInputs(it, EXTRA, t) })),
       runStatus,
-      rowKey: (i) => placeRowKey(i.place_id),
+      rowKey: (i) => placeRowKey(i.place_id, i.cid),
       source: { kind: "maps", externalId: `ibtest-${RUN}-chunk-${++seq}`, label: "Held caps test", meta: {} },
     })
   );
@@ -352,15 +352,16 @@ async function partM(h) {
     `SELECT key, kind, provider, hidden, data_type FROM enrich_columns WHERE table_id = $1 AND key = ANY($2::text[]) ORDER BY position`,
     [tables[HA].companies, [...COMPANY_MAPS_INPUT_KEYS]]
   );
-  check("the seven Maps inputs, each from Google Maps; Place id shown, the other six hidden; the location filter is JSON (139)",
-    cols.length === 7 && cols.every((c) => c.kind === "input" && c.provider === "Google Maps") &&
+  check("the eight Maps inputs, each from Google Maps; Place id shown, the other seven (the cid among them) hidden; the location filter is JSON (139)",
+    cols.length === 8 && cols.some((c) => c.key === "cid") && cols.every((c) => c.kind === "input" && c.provider === "Google Maps") &&
       cols.find((c) => c.key === "place_id")?.hidden === false && cols.filter((c) => c.key !== "place_id").every((c) => c.hidden === true) &&
       cols.find((c) => c.key === "location_filter")?.data_type === "json",
     JSON.stringify(cols));
   const shared = await all(`SELECT key, provider FROM enrich_columns WHERE table_id = $1 AND key = ANY($2::text[])`, [tables[HA].companies, ["company", "website", "domain", "offices", "source", "client_tag"]]);
   check("... and the inputs both sources write name AI Ark or Google Maps", shared.length === 6 && shared.every((c) => c.provider === "AI Ark or Google Maps"), JSON.stringify(shared));
   const officeCol = await one(`SELECT action, inputs FROM enrich_columns WHERE table_id = $1 AND key = 'office'`, [tables[HA].companies]);
-  check("the office step reads the place id", officeCol?.action === "client_office" && officeCol.inputs?.place_id === "{{place_id}}", JSON.stringify(officeCol));
+  check("the office step reads the place id and the cid",
+    officeCol?.action === "client_office" && officeCol.inputs?.place_id === "{{place_id}}" && officeCol.inputs?.cid === "{{cid}}", JSON.stringify(officeCol));
 
   section("M2. The office check places a place by its own city and state");
   resetClientChecks();
@@ -384,6 +385,12 @@ async function partM(h) {
   check("no state and a city that settles none: Can't tell, naming Google Maps and the place, never AI Ark or a person",
     stateless.display === "Can't tell" && /^Can't tell whether the place is in the client's area: Google Maps gave no state /.test(stateless.note) && / couldn't place it$/.test(stateless.note) && !/AI Ark|person/.test(stateless.note),
     stateless.note);
+  const byCid = placeInputs({ ...place("bycid", "Cid Dental", { address: false }), place_id: undefined, cid: "4130409598588254484" }, EXTRA, HA);
+  const cidNowhere = await office({ offices: byCid.offices, place_id: byCid.place_id, cid: byCid.cid });
+  check("a place kept by its cid (no place id) is a Google Maps row too: worded for the place",
+    !byCid.place_id && byCid.cid === "4130409598588254484" && cidNowhere.display === "Can't tell" &&
+      cidNowhere.note === "Google Maps gave no address for this place, so the lead database couldn't place it",
+    JSON.stringify(cidNowhere));
   const aiark = await office({ offices: JSON.stringify([{ street: "1 Main Street", city: "Springfield", state: "Illinois", country: "United States", postal_code: "62701", hq: true }]) });
   const aiarkNone = await office({ offices: "" });
   check("an AI Ark row keeps its own wording",

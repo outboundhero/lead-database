@@ -154,7 +154,7 @@ async function receive(c: PoolClient, token: string, raw: string): Promise<Answe
     inputKeys: table.inputKeys,
     rows: delivery.rows,
     runStatus: "held",
-    rowKey: (inputs) => placeRowKey(inputs.place_id),
+    rowKey: (inputs) => placeRowKey(inputs.place_id, inputs.cid),
     inboundUrlId: url.id,
     source: { kind: "maps", externalId: delivery.chunkId, label: delivery.label, meta: delivery.meta },
   });

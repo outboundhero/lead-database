@@ -11,7 +11,9 @@ import { locationFilterSummary } from "../../../../../scripts/lib/enrich/maps-pl
 // `deliveries` are the table's 10 newest Google Maps chunks (sources of kind
 // maps), each with the inbound URL it came through (migration 129) and, when
 // the chunk sent a location filter, its summary (`filter`: the version and the
-// entries of each list, or the note why it was not kept; migration 139).
+// entries of each list, or the note why it was not kept; migration 139), and
+// how many of its skipped places were Google Maps ads (`skipped_ads`; null for
+// a delivery stored before that count was kept).
 // `uploads` (a People (pipeline) table only, migration 130) are the 10 newest
 // uploads whose no-email rows the table holds (sources of kind upload), each
 // with its rows still held; `people_switch` says whether the client is on
@@ -28,8 +30,14 @@ export type LocationFilterSummary = {
   text: boolean;
   note: string | null;
 };
-/** A Google Maps chunk the table received, the inbound URL it came through, and its location filter in short (null: none sent). */
-export type MapsDelivery = SourceSummary & { inbound_url_id: string | null; filter: LocationFilterSummary | null };
+/**
+ * A Google Maps chunk the table received, the inbound URL it came through, its location filter in short (null: none
+ * sent), and how many of its skipped places were Google Maps ads (null: stored before that count was kept).
+ */
+export type MapsDelivery = SourceSummary & { inbound_url_id: string | null; filter: LocationFilterSummary | null; skipped_ads: number | null };
+
+/** meta.skipped_ads as a count: a whole number from 0 up, else null. */
+const adsCount = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
 /** An upload whose no-email rows the table holds: the upload's batch id and its rows still held. */
 export type UploadDelivery = SourceSummary & { batch_id: string | null; held: number };
 /** What this route answers: the table's detail, its newest Maps deliveries, and on a People (pipeline) table its uploads. */
@@ -70,7 +78,8 @@ export async function GET(req: NextRequest) {
           ),
           c.query(
             `SELECT id, kind, label, received, created, duplicates, skipped, created_at, inbound_url_id,
-                    meta -> 'location_filter' AS location_filter, meta ->> 'location_filter_note' AS location_filter_note
+                    meta -> 'location_filter' AS location_filter, meta ->> 'location_filter_note' AS location_filter_note,
+                    meta -> 'skipped_ads' AS skipped_ads
                FROM enrich_sources WHERE table_id = $1 AND kind = 'maps' ORDER BY created_at DESC LIMIT 10`,
             [id]
           ),
@@ -106,9 +115,10 @@ export async function GET(req: NextRequest) {
           counts,
           statuses: Object.fromEntries(statuses.rows.map((r) => [r.run_status, r.n])),
           sources: sources.rows,
-          deliveries: deliveries.rows.map(({ location_filter, location_filter_note, ...d }) => ({
+          deliveries: deliveries.rows.map(({ location_filter, location_filter_note, skipped_ads, ...d }) => ({
             ...d,
             filter: locationFilterSummary(location_filter, location_filter_note),
+            skipped_ads: adsCount(skipped_ads),
           })),
           uploads: uploads?.rows ?? [],
           people_switch: peopleSwitch,

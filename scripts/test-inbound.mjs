@@ -25,9 +25,12 @@
 //   T2. the URL table is server-only
 //   T3. the receiving route's answers: tokens, sizes, not a chunk, the Test,
 //       a chunk stored held (keys, cells, offices, source, meta), a delivery
-//       seen before, chunk ids, blank search fields, places with no id, odd
-//       text, no "full" phrase, name or token in any answer, never 410
-//   T4. the client name check, Accept this name, and a table that can't be made
+//       seen before, chunk ids, blank search fields, the cid fallback (a place
+//       with no place id kept by its cid, an ad skipped and counted as one),
+//       places with no id at all, odd text, no "full" phrase, name or token in
+//       any answer, never 410
+//   T4. the client name check, Accept this name, a table without the cid
+//       input compiled again first, and a table that can't be made
 //   T7. the location filter (migration 139): read leniently (known keys only,
 //       text cleaned, lists capped, a size cap, never a throw), stored in the
 //       delivery's meta and on each place, never a refusal; a table without
@@ -43,7 +46,7 @@
 import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { checker, dropPaidKeys, installNet, localDatabaseUrl, routeLoader, seedFixtureVariant } from "./fixtures/test-support.mjs";
-import { LOCATION_FILTER_MAX_CHARS, parseLocationFilter, placeInputs } from "./lib/enrich/maps-place.mjs";
+import { cidText, isMapsAd, LOCATION_FILTER_MAX_CHARS, parseLocationFilter, placeInputs, placeRowKey } from "./lib/enrich/maps-place.mjs";
 import { settingsFrom, VENDOR_CAP_KEYS, VENDOR_CAP_LABELS } from "./lib/enrich/settings.mjs";
 
 const url = localDatabaseUrl();
@@ -73,12 +76,14 @@ const same = (a, b) => JSON.stringify(norm(a)) === JSON.stringify(norm(b));
 // ── Made-up places and chunks ───────────────────────────────────────────────
 
 const placeId = (n) => `ibtest-place-${RUN}-${n}`;
+/** A made-up cid (digits only, as Google's), different in every run. */
+const cidOf = (n) => `${parseInt(RUN, 16)}${String(n).padStart(4, "0")}`;
 /** A made-up DataForSEO maps_search item, with the fields the docs give it. */
 const place = (n, over = {}) => ({
   type: "maps_search",
   title: `Inbound Test Dental ${n}`,
   place_id: placeId(n),
-  cid: String(n),
+  cid: cidOf(n),
   url: `https://www.dental${n}.ibtest.example/`,
   domain: `dental${n}.ibtest.example`,
   phone: "+1 217-555-0100",
@@ -90,7 +95,17 @@ const place = (n, over = {}) => ({
   rating: { value: 4.5, votes_count: 10 },
   ...over,
 });
-const EXTRA = { keyword: "dentist", city: "Springfield", state: "IL", category: "dentist", scrape_queue_id: "ibtest-queue-1" };
+/** A made-up Google Maps ad (DataForSEO maps_paid_item), as the scraper app passed three on: a name and a rating only. */
+const ad = (n, over = {}) => ({
+  type: "maps_paid_item",
+  rank_group: n,
+  rank_absolute: n,
+  title: `Inbound Test Ad ${n}`,
+  rating: { rating_type: "Max5", value: 4.8, votes_count: 120, rating_max: 5 },
+  ...over,
+});
+const cidRow = (tableId, n) => one(`SELECT * FROM enrich_rows WHERE table_id = $1 AND row_key = $2`, [tableId, `maps:cid:${cidOf(n)}`]);
+const EXTRA ={ keyword: "dentist", city: "Springfield", state: "IL", category: "dentist", scrape_queue_id: "ibtest-queue-1" };
 let seq = 0;
 /** A chunk as the scraper app sends it: taskId rewritten to <task>-<chunk>, with originalTaskId, unless rewrite is false. */
 function chunk(items, { client = A, extra, task = `ibtest-task-${RUN}-${++seq}`, index = 1, total = 1, rewrite = true } = {}) {
@@ -366,6 +381,23 @@ async function partT3() {
   const keys = await inputKeys(tA);
   const urlA = await urlRow(A);
 
+  // The row key and the cid, on their own.
+  check("a place's row key: its place id, else its cid (digits only), else none",
+    placeRowKey("ChIJabc") === "maps:ChIJabc" && placeRowKey(" ChIJabc ", "123") === "maps:ChIJabc" && placeRowKey(undefined, "123") === "maps:cid:123" &&
+      placeRowKey("", " 0042 ") === "maps:cid:0042" && placeRowKey({ not: "text" }, "9") === "maps:cid:9" && placeRowKey("p".repeat(1001), "9") === "maps:cid:9" &&
+      placeRowKey(undefined, 123) === "maps:cid:123" && placeRowKey(undefined, 2 ** 60) === null && placeRowKey(undefined, "12ab") === null &&
+      placeRowKey(undefined, "-1") === null && placeRowKey(undefined, "1".repeat(31)) === null && placeRowKey(undefined, { cid: "1" }) === null &&
+      placeRowKey(undefined) === null && placeRowKey("p".repeat(1001)) === null);
+  check("the cid as text: 1 to 30 digits, or an exact whole number; anything else is empty",
+    cidText("4130409598588254484") === "4130409598588254484" && cidText(17) === "17" && cidText(1.5) === "" && cidText(-3) === "" && cidText(null) === "" &&
+      cidText("") === "" && cidText("1e5") === "");
+  check("an ad is DataForSEO's maps_paid_item; placeInputs gives an ad no cid, and an ordinary place its cid",
+    isMapsAd(ad(1)) && !isMapsAd(place(1)) && !isMapsAd(null) && !isMapsAd({ type: ["maps_paid_item"] }) &&
+      !("cid" in placeInputs(ad(1, { cid: "77" }), EXTRA, A)) && placeInputs(place(5), EXTRA, A).cid === cidOf(5) &&
+      placeRowKey(placeInputs(ad(1, { cid: "77" }), EXTRA, A).place_id, placeInputs(ad(1, { cid: "77" }), EXTRA, A).cid) === null);
+  check("the Companies table's inputs include the cid, hidden", keys.includes("cid") &&
+    (await one(`SELECT hidden FROM enrich_columns WHERE table_id = $1 AND key = 'cid'`, [tA]))?.hidden === true);
+
   const p = R.enrichDb.enrichPool();
   const realConnect = p.connect;
   let connects = 0;
@@ -418,34 +450,42 @@ async function partT3() {
     JSON.stringify([t2.body, t3.body]));
 
   // A chunk.
-  const first = chunk([place(1), place(2), place(3, { place_id: undefined }), place(2)]);
+  const first = chunk([place(1), place(2), place(3, { place_id: undefined }), place(2), ad(1)]);
   const a1 = await post(tok[A], first);
-  check("a chunk: 200 after the commit, with its counts (a place twice in it counts once, one with no place id is skipped)",
-    a1.status === 200 && a1.body.ok === true && a1.body.client_tag === A && a1.body.received === 4 && a1.body.created === 2 && a1.body.duplicates === 1 &&
+  check("a chunk: 200 after the commit, with its counts (a place twice in it counts once, one with no place id kept by its cid, an ad skipped)",
+    a1.status === 200 && a1.body.ok === true && a1.body.client_tag === A && a1.body.received === 5 && a1.body.created === 3 && a1.body.duplicates === 1 &&
       a1.body.skipped === 1 && a1.body.duplicate_delivery === false && a1.body.held === true,
     JSON.stringify(a1.body));
   const rows = await all(`SELECT id, row_key, run_status, source_id FROM enrich_rows WHERE table_id = $1 ORDER BY row_key`, [tA]);
-  check("... read at once from another connection: 2 rows, keyed maps:<place id>, both held",
-    rows.length === 2 && rows[0].row_key === `maps:${placeId(1)}` && rows[1].row_key === `maps:${placeId(2)}` && rows.every((r) => r.run_status === "held"),
+  check("... read at once from another connection: 3 rows, keyed maps:<place id>, and maps:cid:<cid> for the one with no place id, all held",
+    same(rows.map((r) => r.row_key).sort(), [`maps:${placeId(1)}`, `maps:${placeId(2)}`, `maps:cid:${cidOf(3)}`].sort()) && rows.every((r) => r.run_status === "held"),
     JSON.stringify(rows));
   const src = await sourceOf(tA, first.taskId);
   check("... one source of kind maps: the chunk id, the label, the counts, the URL it came through",
-    src && src.label === "dentist · Springfield · IL" && src.received === 4 && src.created === 2 && src.duplicates === 1 && src.skipped === 1 &&
+    src && src.label === "dentist · Springfield · IL" && src.received === 5 && src.created === 3 && src.duplicates === 1 && src.skipped === 1 &&
       src.inbound_url_id === urlA.id && rows.every((r) => r.source_id === src.id),
     JSON.stringify(src));
-  check("... and its meta: the task, the search, the client name as compared, how it fit, the chunk's place",
+  check("... and its meta: the task, the search, the client name as compared, how it fit, the chunk's place, the ads skipped",
     same(src?.meta, {
       task_id: first.originalTaskId, keyword: "dentist", city: "Springfield", state: "IL", category: "dentist", scrape_queue_id: "ibtest-queue-1",
-      client_name: "IBTEST_A", name_check: "tag", chunk_index: 1, total_chunks: 1,
+      client_name: "IBTEST_A", name_check: "tag", chunk_index: 1, total_chunks: 1, skipped_ads: 1,
     }),
     JSON.stringify(src?.meta));
-  const cells = await cellsOf(rows[0].id);
+  const byCid = await cidRow(tA, 3);
+  const cidCells = byCid ? await cellsOf(byCid.id) : {};
+  check("... the place with no place id: its cid as a hidden input, no place id cell, the rest as any place's",
+    !!byCid && cidCells.cid?.value === cidOf(3) && !cidCells.place_id && cidCells.company?.value === "Inbound Test Dental 3" &&
+      cidCells.source?.value === "Google Maps" && cidCells.actual_city?.value === "Springfield" && cidCells.offices?.value?.includes("3 Main Street"),
+    JSON.stringify(Object.fromEntries(Object.entries(cidCells).map(([k, c]) => [k, c.value]))));
+  const adCells = await one(`SELECT count(*)::int AS n FROM enrich_cells WHERE table_id = $1 AND column_key = 'company' AND value = to_jsonb($2::text)`, [tA, "Inbound Test Ad 1"]);
+  check("... the ad made no row", adCells.n === 0);
+  const cells = await cellsOf(rows.find((r) => r.row_key === `maps:${placeId(1)}`)?.id);
   const want = Object.fromEntries(Object.entries(placeInputs(place(1), first.extra, A)).filter(([k]) => keys.includes(k)));
   check("... a row's input cells are the place as mapped (placeInputs), and nothing else",
     Object.keys(cells).length === Object.keys(want).length && Object.entries(want).every(([k, v]) => cells[k]?.value === v && cells[k].status === "done"),
     JSON.stringify({ got: Object.fromEntries(Object.entries(cells).map(([k, c]) => [k, c.value])), want }));
-  check("... the place's own fields: name, place id, website, domain, phone, Maps category as industry, source, client",
-    cells.company?.value === "Inbound Test Dental 1" && cells.place_id?.value === placeId(1) && cells.website?.value === "https://www.dental1.ibtest.example/" &&
+  check("... the place's own fields: name, place id, cid, website, domain, phone, Maps category as industry, source, client",
+    cells.company?.value === "Inbound Test Dental 1" && cells.place_id?.value === placeId(1) && cells.cid?.value === cidOf(1) && cells.website?.value === "https://www.dental1.ibtest.example/" &&
       cells.domain?.value === "dental1.ibtest.example" && cells.phone?.value === "+1 217-555-0100" && cells.industry?.value === "Dentist" &&
       cells.source?.value === "Google Maps" && cells.client_tag?.value === A);
   check("... the offices: one office, the place itself, as the head office",
@@ -459,7 +499,7 @@ async function partT3() {
 
   const again = await post(tok[A], first);
   check("the same chunk again: 200, a delivery seen before, nothing new",
-    again.status === 200 && again.body.duplicate_delivery === true && again.body.created === 0 && (await rowsIn(tA)) === 2 &&
+    again.status === 200 && again.body.duplicate_delivery === true && again.body.created === 0 && (await rowsIn(tA)) === 3 &&
       (await one(`SELECT count(*)::int AS n FROM enrich_sources WHERE table_id = $1 AND kind = 'maps'`, [tA])).n === 1,
     JSON.stringify(again.body));
   const seen = await post(tok[A], chunk([place(1), place(4)]));
@@ -496,18 +536,56 @@ async function partT3() {
   check("blank search city, state and category: stored all the same, labelled Google Maps (the place's own address places it)",
     blank.status === 200 && blank.body.created === 1 && blankSrc?.label === "Google Maps" && !blankCells.call_city && blankCells.actual_city?.value === "Springfield");
 
-  const odd = await post(tok[A], chunk(
-    [place(10, { title: "Inbound\u0000 Test \ud800 Dental 10" }), place(11, { place_id: { not: "text" } }), place(12, { place_id: "p".repeat(1001) }), place(13, { address_info: undefined })],
+  const oddChunk = chunk(
+    [
+      place(10, { title: "Inbound\u0000 Test \ud800 Dental 10" }),
+      place(11, { place_id: { not: "text" }, cid: undefined }),
+      place(12, { place_id: "p".repeat(1001), cid: undefined }),
+      place(13, { address_info: undefined }),
+    ],
     { extra: { client: A, ...EXTRA, keyword: "dent\u0000ist" } }
-  ));
+  );
+  const odd = await post(tok[A], oddChunk);
   const oddRow = await placeRow(tA, 10);
   const oddCells = oddRow ? await cellsOf(oddRow.id) : {};
   const noOffice = await placeRow(tA, 13);
   const noOfficeCells = noOffice ? await cellsOf(noOffice.id) : {};
-  check("odd places: text with a NUL and a lone surrogate stored cleaned, a place id that is not text or too long skipped, no address: no office",
+  check("odd places: text with a NUL and a lone surrogate stored cleaned, a place id that is not text or too long (and no cid) skipped, no address: no office",
     odd.status === 200 && odd.body.created === 2 && odd.body.skipped === 2 && oddCells.company?.value === "Inbound Test � Dental 10" &&
       !!noOffice && !noOfficeCells.offices && !noOfficeCells.office_count,
     JSON.stringify({ body: odd.body, company: oddCells.company?.value }));
+  const oddSrc = await sourceOf(tA, oddChunk.taskId);
+  check("... and no ad among them: skipped_ads 0", oddSrc?.meta?.skipped_ads === 0, JSON.stringify(oddSrc?.meta));
+
+  // The cid fallback: a place whose place id is not text or too long is kept by its cid; a cid that is not digits is
+  // not one; an ad is never kept by a cid, even one that came with a cid, and is counted as an ad.
+  const viaCid = chunk([
+    place(15, { place_id: { not: "text" } }),
+    place(16, { place_id: "p".repeat(1001) }),
+    place(17, { place_id: undefined, cid: "12ab" }),
+    ad(2, { cid: cidOf(18) }),
+    place(15, { place_id: undefined }),
+  ]);
+  const vc = await post(tok[A], viaCid);
+  const row15 = await cidRow(tA, 15);
+  const row16 = await cidRow(tA, 16);
+  const vcSrc = await sourceOf(tA, viaCid.taskId);
+  check("the cid fallback: two places kept by their cid (the same cid twice in a chunk counts once), a bad cid and an ad skipped, the ad counted",
+    vc.status === 200 && vc.body.received === 5 && vc.body.created === 2 && vc.body.duplicates === 1 && vc.body.skipped === 2 &&
+      !!row15 && !!row16 && !(await cidRow(tA, 18)) && vcSrc?.skipped === 2 && vcSrc?.meta?.skipped_ads === 1,
+    JSON.stringify({ body: vc.body, meta: vcSrc?.meta }));
+  const vcAgain = await post(tok[A], chunk([place(16, { place_id: undefined }), place(15, { place_id: undefined })]));
+  check("... the same places again with no place id, in another chunk: already there (the cid keys them)",
+    vcAgain.status === 200 && vcAgain.body.created === 0 && vcAgain.body.duplicates === 2 && vcAgain.body.skipped === 0,
+    JSON.stringify(vcAgain.body));
+  const detailCid = await call(R.table.GET, { query: { id: tA } });
+  const shown = (detailCid.body?.deliveries ?? []).find((d) => d.id === vcSrc?.id);
+  await pool.query(`UPDATE enrich_sources SET meta = meta - 'skipped_ads' WHERE id = $1`, [vcSrc?.id]);
+  const detailOld = await call(R.table.GET, { query: { id: tA } });
+  const shownOld = (detailOld.body?.deliveries ?? []).find((d) => d.id === vcSrc?.id);
+  check("the table route gives each delivery's skipped ads, and null for one stored before they were counted",
+    detailCid.status === 200 && shown?.skipped === 2 && shown?.skipped_ads === 1 && detailOld.status === 200 && !!shownOld && shownOld.skipped_ads === null,
+    JSON.stringify({ shown, shownOld }));
 
   check("every refusal's body is under 200 characters (the scraper app keeps 200 on the card)",
     Object.values(INTAKE_ANSWERS).every((e) => JSON.stringify({ error: e }).length < 200 && !SCRAPER_FULL_PHRASES.test(e)));
@@ -566,6 +644,17 @@ async function partT4() {
   check("a Companies table without the place id input is brought up to date first, then the chunk stored",
     upgraded.status === 200 && upgraded.body.created === 1 && (await inputKeys(tC)).includes("place_id") && !!upRow && (await cellsOf(upRow.id)).place_id?.value === placeId(28),
     JSON.stringify(upgraded.body));
+
+  // A table made before the cid input (every table made before the cid fallback): compiled again first, so a place
+  // with no place id is kept by its cid.
+  await pool.query(`DELETE FROM enrich_columns WHERE table_id = $1 AND key = 'cid'`, [tC]);
+  const cidBefore = await inputKeys(tC);
+  const cidLate = await post(tok[C], chunk([place(29, { place_id: undefined })], { client: C }));
+  const cidLateRow = await cidRow(tC, 29);
+  check("a Companies table without the cid input is compiled again first, so a place with no place id is kept by its cid",
+    cidBefore.includes("place_id") && !cidBefore.includes("cid") && cidLate.status === 200 && cidLate.body.created === 1 &&
+      (await inputKeys(tC)).includes("cid") && !!cidLateRow && (await cellsOf(cidLateRow.id)).cid?.value === cidOf(29),
+    JSON.stringify(cidLate.body));
 
   // The client's Companies table can't be made: a retired companies_v1 table (D24).
   await pool.query(`DELETE FROM enrich_tables WHERE id = $1`, [tC]);
@@ -684,11 +773,17 @@ async function partT7() {
   const r4 = await post(tok[C], older);
   const row4 = await placeRow(tC, 320);
   const cells4 = row4 ? await cellsOf(row4.id) : {};
+  // The same table without the cid input either: a place with no place id is skipped there, as before the fallback.
+  await pool.query(`DELETE FROM enrich_columns WHERE table_id = $1 AND key = 'cid'`, [tC]);
+  const r5 = await post(tok[C], chunk([place(321, { place_id: undefined })], { client: C }));
   await pool.query(`DELETE FROM enrich_tables WHERE client_tag = $1 AND template = 'companies_v1'`, [C]);
   check("a table with the place id that can't be compiled again now takes places as before (200), without the newer input",
     r4.status === 200 && r4.body.created === 1 && !!row4 && !cells4.location_filter && cells4.place_id?.value === placeId(320) &&
       !(await inputKeys(tC)).includes("location_filter"),
     JSON.stringify({ body: r4.body, cells: Object.keys(cells4) }));
+  check("... and without the cid input, a place with no place id is skipped there as before (200, not refused)",
+    r5.status === 200 && r5.body.created === 0 && r5.body.skipped === 1 && !(await cidRow(tC, 321)) && !(await inputKeys(tC)).includes("cid"),
+    JSON.stringify(r5.body));
 
   // The Test.
   const sources = async () => (await one(`SELECT count(*)::int AS n FROM enrich_sources WHERE table_id = $1`, [tA])).n;

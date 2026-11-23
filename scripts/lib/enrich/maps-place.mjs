@@ -4,12 +4,20 @@
 // JavaScript, so the intake route and the tests share it.
 //
 // The places are DataForSEO Google Maps items (the "advanced" postback), which
-// the scraper app passes on unchanged. Read here: title, place_id, url, domain,
-// phone, category, and address_info's address (the street), city, region (the
-// state, usually its full name), zip and country_code (two letters). The street,
-// zip and country code names come from DataForSEO's public docs: no code in the
-// three repos reads them. The chunk's extra block gives what the scrape
-// searched: city, state and category.
+// the scraper app passes on unchanged. Read here: type, title, place_id, cid,
+// url, domain, phone, category, and address_info's address (the street), city,
+// region (the state, usually its full name), zip and country_code (two
+// letters). The street, zip and country code names come from DataForSEO's
+// public docs: no code in the three repos reads them. The chunk's extra block
+// gives what the scrape searched: city, state and category.
+//
+// A place's row key is its place id. A place Google sent without one keeps
+// its cid (Google's other id for it, digits only) and is keyed by that
+// instead (the cid fallback), so it is stored once all the same. A Google
+// Maps ad (type maps_paid_item) is never keyed by a cid: DataForSEO gives an
+// ad a name, a rating, at most a website, and no place id, cid or address, so
+// an ad is skipped, and the delivery counts how many of its skipped places
+// were ads (src/lib/enrich/gmaps.ts mapsDelivery, meta.skipped_ads).
 //
 // The place becomes one office, the head office, in the shape officesOf()
 // gives an AI Ark company (scripts/lib/aiark/company-filters.mjs), so the
@@ -29,8 +37,12 @@ import { normTag } from "./settings.mjs";
 export const MAPS_SOURCE = "Google Maps";
 /** A Maps row's key is this, then the place id: it never meets an AI Ark row's "aiark:" key. */
 export const MAPS_KEY_PREFIX = "maps:";
+/** A Maps row keyed by its cid (Google sent no place id) has this, then the cid. A place id never starts with "cid:". */
+export const MAPS_CID_KEY_PREFIX = `${MAPS_KEY_PREFIX}cid:`;
 /** A place id longer than this is refused: the row key sits in a unique index. */
 export const PLACE_ID_MAX = 1000;
+/** DataForSEO's type for a Google Maps ad: a name and a rating, no place id, cid or address. Never keyed by a cid. */
+export const MAPS_AD_TYPE = "maps_paid_item";
 
 /** Text, white space made single and trimmed; an object or a missing value is "". */
 const text = (v) =>
@@ -38,16 +50,38 @@ const text = (v) =>
 
 const objectOr = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
 
+/** Is the item a Google Maps ad (DataForSEO's maps_paid_item)? */
+export function isMapsAd(item) {
+  return text(objectOr(item).type) === MAPS_AD_TYPE;
+}
+
 /**
- * A place's row key: "maps:" and its place id, or null when it has none (the
- * place is then skipped and counted) or one over PLACE_ID_MAX characters.
+ * Google's cid as text: 1 to 30 digits (DataForSEO sends it as text, 17 to 20
+ * digits seen), or a whole number short enough to be exact. Anything else is "".
+ *
+ * @param {unknown} v
+ * @returns {string}
+ */
+export function cidText(v) {
+  const t = typeof v === "number" ? (Number.isSafeInteger(v) && v >= 0 ? String(v) : "") : text(v);
+  return /^\d{1,30}$/.test(t) ? t : "";
+}
+
+/**
+ * A place's row key: "maps:" and its place id; else, when the place id is
+ * missing, not text or over PLACE_ID_MAX characters, "maps:cid:" and its cid
+ * (cidText); else null (the place is then skipped and counted). placeInputs()
+ * gives no cid for an ad, so an ad's key is its place id or nothing.
  *
  * @param {unknown} placeId
+ * @param {unknown} [cid]
  * @returns {string | null}
  */
-export function placeRowKey(placeId) {
+export function placeRowKey(placeId, cid = undefined) {
   const id = text(placeId);
-  return id && id.length <= PLACE_ID_MAX ? `${MAPS_KEY_PREFIX}${id}` : null;
+  if (id && id.length <= PLACE_ID_MAX) return `${MAPS_KEY_PREFIX}${id}`;
+  const c = cidText(cid);
+  return c ? `${MAPS_CID_KEY_PREFIX}${c}` : null;
 }
 
 /**
@@ -274,6 +308,7 @@ export function locationFilterSummary(filter, note) {
  * The input cells of one place, every value text, empty ones left out:
  *   company        the place's title
  *   place_id       Google's place id (C#6)
+ *   cid            Google's cid (cidText; hidden), the row's key when there is no place id; never on an ad
  *   website        its website (url)
  *   domain         the bare domain of its domain, else of its website
  *   phone          its phone
@@ -307,6 +342,7 @@ export function placeInputs(item, extra, tag, filter = undefined) {
   const out = {
     company: text(it.title),
     place_id: text(it.place_id),
+    cid: isMapsAd(it) ? "" : cidText(it.cid),
     website: text(it.url),
     domain: bareDomain(text(it.domain)) ?? bareDomain(text(it.url)) ?? "",
     phone: text(it.phone),

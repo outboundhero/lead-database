@@ -94,12 +94,13 @@ export const AIARK_EMAIL_REOON_APPEND = " && {{passes_filters}} && !{{held_usabl
  * originals' own keys (C#6, C#60, C#62, C#61, C#63 and C#68), so a compiled
  * original that reads one sees the place's value on a Maps row and nothing on
  * an AI Ark row (maps-place.mjs placeInputs), and since migration 139 the
- * chunk's location filter (location_filter, ours: stored, read by nothing yet).
+ * chunk's location filter (location_filter, ours: stored, read by nothing yet),
+ * then Google's cid (cid, ours: the row's key when Google sent no place id).
  * The intake counts a table ready for Maps places only when it has every one of
  * them (gmaps.ts findMapsTable), so an older table is compiled again first.
  */
 export const COMPANY_MAPS_INPUT_KEYS = Object.freeze([
-  "place_id", "actual_city", "actual_state", "call_city", "call_state", "call_category", "location_filter",
+  "place_id", "actual_city", "actual_state", "call_city", "call_state", "call_category", "location_filter", "cid",
 ]);
 
 export const COMPANY_INPUT_KEYS_V2 = Object.freeze([
@@ -343,7 +344,11 @@ const PHASE1 = {
   },
   place_id: {
     name: "Place id", kind: "input", provider: MAPS,
-    description: "Google's id for the place, on a Google Maps row (C#6). The row's key is maps: and this id, so each place is stored once per client.",
+    description: "Google's id for the place, on a Google Maps row (C#6). The row's key is maps: and this id, so each place is stored once per client. A place Google sent without one is keyed by its cid instead.",
+  },
+  cid: {
+    name: "Maps cid", kind: "input", provider: MAPS, hidden: true,
+    description: "Google's other id for the place (its cid, digits only), on a Google Maps row. When Google sent no place id, the row's key is maps:cid: and this number, so the place is still stored once per client. A Google Maps ad has none and is skipped.",
   },
   actual_city: { name: "Actual city", kind: "input", provider: MAPS, hidden: true, description: "The place's own city on Google Maps (C#60)." },
   actual_state: {
@@ -359,8 +364,8 @@ const PHASE1 = {
   },
   office: {
     name: "Office in the client's area", kind: "action", action: "client_office", data_type: "json", provider: "Client rules",
-    inputs: { offices: "{{offices}}", hq_only: "{{hq_only}}", place_id: "{{place_id}}" },
-    description: "Checks every office against the client's places and excluded places, exactly as the send gate would place a lead there. The head office when it is inside, else the first office inside. Outside: no office is. Can't tell: AI Ark gave no state the lead database could place. On a LinkedIn pull's row only the head office counts: Outside (head office) when it is not inside. On a Google Maps row (its place id is set) the place itself is the one office.",
+    inputs: { offices: "{{offices}}", hq_only: "{{hq_only}}", place_id: "{{place_id}}", cid: "{{cid}}" },
+    description: "Checks every office against the client's places and excluded places, exactly as the send gate would place a lead there. The head office when it is inside, else the first office inside. Outside: no office is. Can't tell: AI Ark gave no state the lead database could place. On a LinkedIn pull's row only the head office counts: Outside (head office) when it is not inside. On a Google Maps row (its place id or cid is set) the place itself is the one office.",
   },
   use_city: { name: "City", kind: "formula", formula: "{{office}}?.office?.city", description: "The office's city (in C#7's place)." },
   use_state: { name: "State", kind: "formula", formula: "{{office}}?.office?.state", description: "The office's state, as a code (in C#8's place)." },

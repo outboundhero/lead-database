@@ -6,8 +6,9 @@
 //                              the company judged as client_area judges a person
 //                              (judgePlace), the head office first; on a LinkedIn
 //                              pull's row (hq_only) the head office alone; on a
-//                              Google Maps row (place_id set, migration 129) the
-//                              place itself, its one office, and the notes say so
+//                              Google Maps row (place_id set, migration 129, or
+//                              its cid when Google sent no place id) the place
+//                              itself, its one office, and the notes say so
 //   held_general_email  free   a general inbox for this company the database
 //                              already holds: role addresses at its domain, then
 //                              general-inbox leads at the same company and office
@@ -57,8 +58,8 @@ const placeNote = (note) => text(note).replace(/^AI Ark gave /, "Google Maps gav
 async function clientOffice({ inputs, table, row, db }) {
   const t = await targetingFor(db, table.client_tag, row?.next_run_at);
   if (!t) return { status: "error", note: `${table.client_tag} has no targeting rules`, retryable: false };
-  // A Google Maps row (maps-place.mjs: its place id is set) has one office, the place itself.
-  const mapsRow = Boolean(text(inputs.place_id));
+  // A Google Maps row (maps-place.mjs: its place id is set, or its cid when Google sent no place id) has one office, the place itself.
+  const mapsRow = Boolean(text(inputs.place_id) || text(inputs.cid));
   const offices = parseOffices(inputs.offices);
   if (!offices.length) {
     const why = mapsRow

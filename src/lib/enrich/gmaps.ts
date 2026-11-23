@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
-import { parseLocationFilter, placeInputs } from "../../../scripts/lib/enrich/maps-place.mjs";
+import { isMapsAd, parseLocationFilter, placeInputs, placeRowKey } from "../../../scripts/lib/enrich/maps-place.mjs";
 import { COMPANY_MAPS_INPUT_KEYS } from "../../../scripts/lib/enrich/company-template-v2.mjs";
 import { ensurePipelineTables, PIPELINE_TEMPLATES } from "../../../scripts/lib/enrich/templates.mjs";
 import { normName, type NameCheck } from "./inbound";
 import type { IncomingRow } from "./insert-rows";
 
-/** A place's row key, "maps:" and its place id (null skips the place). */
+/** A place's row key, "maps:" and its place id, else "maps:cid:" and its cid (null skips the place). */
 export { placeRowKey } from "../../../scripts/lib/enrich/maps-place.mjs";
 
 // One GMaps Scraper app chunk, as a client's inbound URL receives it
@@ -17,9 +17,13 @@ export { placeRowKey } from "../../../scripts/lib/enrich/maps-place.mjs";
 //     postbackData: { tasks: [ { result: [ { items: [ ...up to 25 places... ] } ] } ] } }
 // Every place of every task and result becomes one row of the client's
 // Companies (pipeline) table (placeInputs, scripts/lib/enrich/maps-place.mjs),
-// keyed "maps:" and its place id. A place with no place id is skipped and
-// counted. A blank search city, state or category is fine: the place's own
-// address places it.
+// keyed "maps:" and its place id. A place Google sent with no place id is
+// keyed "maps:cid:" and its cid instead (the cid fallback). A place with
+// neither is skipped and counted: in practice a Google Maps ad (type
+// maps_paid_item), which carries a name and a rating but no place id, cid or
+// address, and is never keyed by a cid. The delivery's meta says how many of
+// its skipped places were ads (skipped_ads). A blank search city, state or
+// category is fine: the place's own address places it.
 //
 // The location filter (optional, migration 139): what the scrape was limited
 // to, sent in the extra block, versioned:
@@ -136,7 +140,10 @@ export function chunkId(body: unknown): string | null {
  * meta with the name the chunk carried. A chunk that sends a location filter
  * (extra.location_filter) has it in the meta as kept (null when it was not)
  * with the note why, and each place has the kept one as its location_filter
- * input; a chunk that sends none has neither key in its meta.
+ * input; a chunk that sends none has neither key in its meta. The meta's
+ * skipped_ads counts the chunk's Google Maps ads with no place id (skipped:
+ * an ad is never keyed by a cid), 0 when there are none; a delivery stored
+ * before that count was kept has no such key.
  */
 export function mapsDelivery(body: unknown, tag: string, how: NameCheck["how"]) {
   const b = obj(body);
@@ -149,6 +156,8 @@ export function mapsDelivery(body: unknown, tag: string, how: NameCheck["how"]) 
   const rows: IncomingRow[] = items.map((item) => ({
     inputs: Object.fromEntries(Object.entries(placeInputs(item, b.extra ?? null, tag, lf.filter)).map(([k, v]) => [k, wellFormed(v)])),
   }));
+  // Ads the intake skips: an ad is never keyed by a cid, so one with no place id has no key.
+  const skippedAds = items.filter((item) => isMapsAd(item) && !placeRowKey(obj(item).place_id)).length;
   const keyword = text(extra.keyword);
   const city = text(extra.city);
   const state = text(extra.state);
@@ -165,6 +174,7 @@ export function mapsDelivery(body: unknown, tag: string, how: NameCheck["how"]) 
     chunk_index: whole(b.chunkIndex),
     total_chunks: whole(b.totalChunks),
     ...(sentFilter ? { location_filter: lf.filter, location_filter_note: lf.note } : {}),
+    skipped_ads: skippedAds,
   };
   return { rows, chunkId: chunkId(body), label, meta };
 }

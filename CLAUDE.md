@@ -3768,8 +3768,20 @@ scraper: a URL is pasted on the client's card there like a Clay URL.
   the head office), `source` "Google Maps", the client tag, and the inputs
   `actual_city`, `actual_state` (the place's own) and `call_city`, `call_state`,
   `call_category` (what the scrape searched). The row key is `maps:` and the place id,
-  so a place is stored once per client and never meets an `aiark:` row; a place with
-  no place id is skipped and counted. A blank search city, state or category is fine.
+  so a place is stored once per client and never meets an `aiark:` row. **The cid
+  fallback (2026-11-24):** a place Google sent with no place id (or one that is not
+  text, or over 1,000 characters) is keyed `maps:cid:` and its cid (Google's other id
+  for the place, 1 to 30 digits, kept as the hidden input `cid`), so it is stored once
+  all the same; the office check treats it as a Google Maps row. A place with neither
+  is skipped and counted. In practice that is a Google Maps ad (DataForSEO
+  `maps_paid_item`: a name and a rating, no place id, cid or address), and an ad is
+  never keyed by a cid (`placeInputs` gives it none). Each delivery's meta counts the
+  ads it skipped (`skipped_ads`, 0 when none; a delivery from before has no such
+  key), and Recent deliveries show it in the Skipped column ("12 (ads)", "12 (10
+  ads)"), the reason as its title. In one client's real run (40 chunks, 2026-11-19), 119
+  of 119 ordinary places had a place id and the 3 skipped items were ads; the scraper app re-sends items without a
+  place id on every scrape (it can't dedupe them), so a repeat scrape is mostly ads.
+  A blank search city, state or category is fine.
   Each chunk is one `enrich_sources` row of kind `maps`, with `inbound_url_id`; its
   repeat key is the scraper app's `<task>-<chunk>` taskId (or taskId and chunkIndex,
   or taskId), so a chunk delivered twice adds nothing. The 200 comes only after the
@@ -3820,7 +3832,7 @@ scraper: a URL is pasted on the client's card there like a Clay URL.
   input `location_filter` (compact JSON); a chunk that sends none has neither. It
   filters nothing yet: whether it replaces or narrows the client's places is a later
   decision. A Companies table counts as ready for Maps places only with every Maps
-  input (`COMPANY_MAPS_INPUT_KEYS`, seven since 139), so an older one is compiled
+  input (`COMPANY_MAPS_INPUT_KEYS`: seven since 139, eight with `cid` since the cid fallback), so an older one is compiled
   again before such places land (one that can't be compiled now but has the place
   id input takes them as before, without the newer inputs). A Test that sends a
   top-level `location_filter` is answered `location_filter: { accepted, version,

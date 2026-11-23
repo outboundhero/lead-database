@@ -240,7 +240,7 @@ async function deliver(t, items) {
   const inputKeys = (await all(`SELECT key FROM enrich_columns WHERE table_id = $1 AND kind = 'input'`, [tableId])).map((r) => r.key);
   return inTx(pool, (c) =>
     insertRows(c, {
-      tableId, inputKeys, runStatus: "held", rowKey: (i) => placeRowKey(i.place_id),
+      tableId, inputKeys, runStatus: "held", rowKey: (i) => placeRowKey(i.place_id, i.cid),
       rows: items.map((it) => ({ inputs: placeInputs(it, { city: "Springfield", state: "IL", category: "dentist" }, t) })),
       source: { kind: "maps", externalId: `uptest-${RUN}-chunk-${++placeSeq}`, label: "Upload enrich test", meta: {} },
     })
