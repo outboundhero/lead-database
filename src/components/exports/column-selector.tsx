@@ -19,6 +19,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { LEAD_FIELDS } from "@/lib/uploads/constants";
 import { useClientRoster } from "@/lib/clients/roster";
+import { pushSelection } from "@/lib/exports/push-selection";
+import { NO_QUESTION_CHOICE, QuestionVariableRow, type QuestionChoice } from "./question-variable-row";
 import { toast } from "sonner";
 
 export interface BisonCampaign {
@@ -112,6 +114,16 @@ const DEFAULT_COLUMNS = [
   "domain",
 ];
 
+/** What a push sends besides its campaigns and leads (export-button.tsx puts it in the push-batch body). */
+export interface PushExtras {
+  clientTag: string | null;
+  includeAlreadyPushed: boolean;
+  /** The question variable to send (migration 139), only with clientTag; null = the default {QUESTION} only. */
+  questionVariableId: string | null;
+  /** Its copy form ({ACME-OS QUESTION}), for the queued message. */
+  questionCopyTag: string | null;
+}
+
 interface ColumnSelectorProps {
   open: boolean;
   onClose: () => void;
@@ -122,7 +134,7 @@ interface ColumnSelectorProps {
     rangeTo: number | undefined,
     destination: ExportDestination,
     campaigns: BisonCampaign[],
-    pushExtras: { clientTag: string | null; includeAlreadyPushed: boolean },
+    pushExtras: PushExtras,
   ) => void;
   totalCount?: number;
   exportType?: "filtered" | "selected";
@@ -134,6 +146,8 @@ interface ColumnSelectorProps {
   clientTag?: string | null;
   statsFilters?: unknown;
   statsSelectedIds?: string[];
+  /** Which leads a push covers, as export-button.tsx sends them: the ticked rows, else the filters. */
+  pushBase?: { selectedIds: string[] | null; filters: unknown };
 }
 
 export function ColumnSelector({
@@ -146,6 +160,7 @@ export function ColumnSelector({
   clientTag = null,
   statsFilters,
   statsSelectedIds,
+  pushBase,
 }: ColumnSelectorProps) {
   const [selected, setSelected] = useState<Set<string>>(
     new Set(DEFAULT_COLUMNS)
@@ -223,6 +238,28 @@ export function ColumnSelector({
     coverage: { known: string[]; unknown: string[]; complete: boolean };
   } | null>(null);
   const [forecastLoading, setForecastLoading] = useState(false);
+  // The question variable this push sends (migration 139), as the Question
+  // variable row decided it for the detected client (question-variable-row.tsx).
+  const [questionChoice, setQuestionChoice] = useState<QuestionChoice>(NO_QUESTION_CHOICE);
+  const detectedClientType = useMemo(
+    () => (detectedTag ? (rosterClients ?? []).find((t) => t.tag === detectedTag)?.client_type ?? null : null),
+    [rosterClients, detectedTag],
+  );
+  // The leads this push covers, exactly as export-button.tsx will send them
+  // (minus campaigns, force and the question variable): what the question
+  // row counts and writes for.
+  const pushSelectionJson = useMemo(() => {
+    const from = rangeFromStr ? parseInt(rangeFromStr, 10) : undefined;
+    const to = rangeToStr ? parseInt(rangeToStr, 10) : undefined;
+    return JSON.stringify(pushSelection({
+      selectedIds: pushBase ? pushBase.selectedIds : statsSelectedIds ?? null,
+      filters: pushBase ? pushBase.filters : statsFilters,
+      clientTag: detectedTag,
+      includeAlreadyPushed,
+      rangeFrom: from,
+      rangeTo: to,
+    }));
+  }, [pushBase, statsSelectedIds, statsFilters, detectedTag, includeAlreadyPushed, rangeFromStr, rangeToStr]);
 
   // force = true asks the server to bypass its cache (?fresh=1) and re-read the
   // Bison installs live. That is what the "Sync" button does: a campaign created
@@ -390,6 +427,17 @@ export function ColumnSelector({
       .map((c) => ({ id: c.id, instance_url: c.instance_url })),
     [campaigns, selectedCampaignKeys]
   );
+  // The campaigns the push will reach (archived ones are left out at confirm),
+  // for the question row's copy check.
+  const questionCampaigns = useMemo(
+    () => campaigns.filter((c) => selectedCampaignKeys.has(campaignKey(c)) && !isArchivedCampaign(c))
+      .map((c) => ({ id: c.id, name: c.name, instance_url: c.instance_url })),
+    [campaigns, selectedCampaignKeys]
+  );
+  // The choice counts only for the client it was made for, and only on a push.
+  const questionFor = destination === "bison" && detectedTag !== null && questionChoice.tag === detectedTag;
+  const questionSend = questionFor && questionChoice.send && questionChoice.variableId !== null;
+  const questionBlocked = questionFor ? questionChoice.blocked : null;
   useEffect(() => {
     if (!open || destination !== "bison" || selectedCampaignList.length === 0 || (!statsFilters && !statsSelectedIds)) {
       setForecast(null);
@@ -847,6 +895,15 @@ export function ColumnSelector({
                   />
                   Also send the already-pushed leads (off = only leads never pushed for {detectedTag})
                 </label>
+                {/* Question variable (migration 139): every client, expanded for OS clients. */}
+                <QuestionVariableRow
+                  key={detectedTag}
+                  tag={detectedTag}
+                  clientType={detectedClientType}
+                  selectionJson={pushSelectionJson}
+                  campaigns={questionCampaigns}
+                  onChange={setQuestionChoice}
+                />
               </div>
             )}
             <p className="text-[10px] text-muted-foreground mt-1">
@@ -901,12 +958,23 @@ export function ColumnSelector({
             )}
           </div>
         )}
+        {questionBlocked ? (
+          <p className="text-xs text-destructive">{questionBlocked}.</p>
+        ) : questionSend && questionChoice.copyTag ? (
+          <p className="text-xs text-muted-foreground">
+            Sends {questionChoice.copyTag} with each lead. Leads without {questionChoice.copyTag} are skipped.
+          </p>
+        ) : null}
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
           <Button
             onClick={() => {
+              if (destination === "bison" && questionBlocked) {
+                toast.error(questionBlocked);
+                return;
+              }
               const from = rangeFromStr ? parseInt(rangeFromStr, 10) : undefined;
               const to = rangeToStr ? parseInt(rangeToStr, 10) : undefined;
               const limit = from && to ? to - from + 1 : to ? to : null;
@@ -927,10 +995,15 @@ export function ColumnSelector({
               if (archivedPicked > 0) {
                 toast.info(`${archivedPicked} archived campaign${archivedPicked === 1 ? "" : "s"} left out of this push (archived campaigns cannot send)`);
               }
-              onConfirm(Array.from(selected), limit && limit > 0 ? limit : null, from, to, destination, chosenCampaigns,
-                { clientTag: detectedTag, includeAlreadyPushed });
+              onConfirm(Array.from(selected), limit && limit > 0 ? limit : null, from, to, destination, chosenCampaigns, {
+                clientTag: detectedTag,
+                includeAlreadyPushed,
+                questionVariableId: questionSend ? questionChoice.variableId : null,
+                questionCopyTag: questionSend ? questionChoice.copyTag : null,
+              });
             }}
-            disabled={destination === "csv" ? selected.size === 0 : selectedCampaignKeys.size === 0}
+            disabled={destination === "csv" ? selected.size === 0 : selectedCampaignKeys.size === 0 || questionBlocked !== null}
+            title={questionSend && questionChoice.copyTag ? `Leads without ${questionChoice.copyTag} are skipped` : undefined}
           >
             {destination === "csv"
               ? `Export (${selected.size} columns)`

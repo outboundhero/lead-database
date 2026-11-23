@@ -10,7 +10,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ColumnSelector, type BisonCampaign, type ExportDestination } from "./column-selector";
+import { ColumnSelector, type BisonCampaign, type ExportDestination, type PushExtras } from "./column-selector";
+import { pushSelection } from "@/lib/exports/push-selection";
 import { toast } from "sonner";
 import type { FilterState } from "@/types/filters";
 import { useHasPermission } from "@/lib/context/role-context";
@@ -53,7 +54,7 @@ export function ExportButton({ filters, totalCount, selectedIds = [], filteredCo
     rangeTo: number | undefined,
     destination: ExportDestination = "csv",
     campaigns: BisonCampaign[] = [],
-    pushExtras: { clientTag: string | null; includeAlreadyPushed: boolean } = { clientTag: null, includeAlreadyPushed: true },
+    pushExtras: PushExtras = { clientTag: null, includeAlreadyPushed: true, questionVariableId: null, questionCopyTag: null },
   ) {
     setSelectorOpen(false);
     setExporting(true);
@@ -70,7 +71,9 @@ export function ExportButton({ filters, totalCount, selectedIds = [], filteredCo
       const toastId = toast.loading(`Queuing push to ${campaignLabel}…`);
       // A selected-rows push never sends the range fields (the route 400s on
       // selectedIds+range rather than guessing intent). On the filters path a
-      // lone "To" acts as a max-leads cap server-side.
+      // lone "To" acts as a max-leads cap server-side. Both are pushSelection's,
+      // shared with the popup's question-variable checks so they count and
+      // write for exactly these leads.
       try {
         const queue = async (force: boolean) =>
           fetch("/api/bison/push-batch", {
@@ -85,24 +88,23 @@ export function ExportButton({ filters, totalCount, selectedIds = [], filteredCo
                 // So the route can refuse an archived campaign (it cannot send).
                 status: c.status,
               })),
-              selectedIds: isSelected ? selectedIds : undefined,
-              filters: isSelected ? undefined : filters,
-              // Detected client tag rides along so per-tag dedupe/eligibility
-              // and the double-push guard apply on popup pushes too.
-              ...(pushExtras.clientTag
-                ? {
-                    clientTag: pushExtras.clientTag,
-                    pushOptions: { includeAlreadyPushed: pushExtras.includeAlreadyPushed },
-                  }
+              // The leads, and the detected client tag with its push options, so
+              // per-tag dedupe/eligibility and the double-push guard apply on
+              // popup pushes too. Both bounds -> a range; a lone "To" -> a
+              // max-leads cap; a lone bound is never sent as a range key.
+              ...pushSelection({
+                selectedIds: isSelected ? selectedIds : null,
+                filters,
+                clientTag: pushExtras.clientTag,
+                includeAlreadyPushed: pushExtras.includeAlreadyPushed,
+                rangeFrom,
+                rangeTo,
+              }),
+              // The question variable (migration 139) rides only with the client, as pushOptions does.
+              ...(pushExtras.clientTag && pushExtras.questionVariableId
+                ? { questionVariableId: pushExtras.questionVariableId }
                 : {}),
               force,
-              // Both bounds -> a range; a lone "To" -> a max-leads cap. Never
-              // send a lone bound as a range key — the route rejects that pair.
-              ...(!isSelected && rangeFrom && rangeTo
-                ? { rangeFrom, rangeTo }
-                : !isSelected && rangeTo
-                ? { maxLeads: rangeTo }
-                : {}),
             }),
           });
         let res = await queue(false);
@@ -124,8 +126,11 @@ export function ExportButton({ filters, totalCount, selectedIds = [], filteredCo
           : rangeTo
           ? `up to ${rangeTo.toLocaleString()} leads`
           : `${filteredCount != null ? filteredCount.toLocaleString() : "all"} filtered leads`;
+        const questionLabel = pushExtras.clientTag && pushExtras.questionVariableId && pushExtras.questionCopyTag
+          ? ` with ${pushExtras.questionCopyTag}`
+          : "";
         toast.success(
-          `Queued push of ${leadsLabel} to ${campaignLabel} — progress on the Exports page`,
+          `Queued push of ${leadsLabel} to ${campaignLabel}${questionLabel}: progress on the Exports page`,
           { id: toastId }
         );
       } catch (err) {
@@ -276,6 +281,7 @@ export function ExportButton({ filters, totalCount, selectedIds = [], filteredCo
         clientTag={filters.clientTag ?? null}
         statsFilters={exportType === "selected" ? undefined : filters}
         statsSelectedIds={exportType === "selected" && selectedIds.length > 0 ? selectedIds : undefined}
+        pushBase={{ selectedIds: exportType === "selected" && selectedIds.length > 0 ? selectedIds : null, filters }}
       />
     </>
   );
