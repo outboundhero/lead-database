@@ -3,19 +3,33 @@ import { requireRole } from "@/lib/enrich/auth";
 import { isUuid, withTx } from "@/lib/enrich/db";
 import { workerState } from "@/lib/enrich/queries";
 import type { ColumnCounts, SourceSummary, TableDetail } from "@/lib/enrich/types";
+import { locationFilterSummary } from "../../../../../scripts/lib/enrich/maps-place.mjs";
 
 // GET /api/enrich/table?id=<uuid> — one table's columns, the per-column counts
 // for the headers (trigger-kept enrich_counters, never a COUNT over cells),
 // row status totals, recent deliveries and the worker's heartbeat.
 // `deliveries` are the table's 10 newest Google Maps chunks (sources of kind
-// maps), each with the inbound URL it came through (migration 129).
+// maps), each with the inbound URL it came through (migration 129) and, when
+// the chunk sent a location filter, its summary (`filter`: the version and the
+// entries of each list, or the note why it was not kept; migration 139).
 // `uploads` (a People (pipeline) table only, migration 130) are the 10 newest
 // uploads whose no-email rows the table holds (sources of kind upload), each
 // with its rows still held; `people_switch` says whether the client is on
 // People runs (people_pipeline), which releases them. Null on any other table.
 
-/** A Google Maps chunk the table received, and the inbound URL it came through. */
-export type MapsDelivery = SourceSummary & { inbound_url_id: string | null };
+/** A location filter a Maps chunk sent, in short (maps-place.mjs locationFilterSummary). */
+export type LocationFilterSummary = {
+  version: number | null;
+  countries: number;
+  include: number;
+  exclude: number;
+  zips: number;
+  radius: boolean;
+  text: boolean;
+  note: string | null;
+};
+/** A Google Maps chunk the table received, the inbound URL it came through, and its location filter in short (null: none sent). */
+export type MapsDelivery = SourceSummary & { inbound_url_id: string | null; filter: LocationFilterSummary | null };
 /** An upload whose no-email rows the table holds: the upload's batch id and its rows still held. */
 export type UploadDelivery = SourceSummary & { batch_id: string | null; held: number };
 /** What this route answers: the table's detail, its newest Maps deliveries, and on a People (pipeline) table its uploads. */
@@ -55,7 +69,8 @@ export async function GET(req: NextRequest) {
             [id]
           ),
           c.query(
-            `SELECT id, kind, label, received, created, duplicates, skipped, created_at, inbound_url_id
+            `SELECT id, kind, label, received, created, duplicates, skipped, created_at, inbound_url_id,
+                    meta -> 'location_filter' AS location_filter, meta ->> 'location_filter_note' AS location_filter_note
                FROM enrich_sources WHERE table_id = $1 AND kind = 'maps' ORDER BY created_at DESC LIMIT 10`,
             [id]
           ),
@@ -91,7 +106,10 @@ export async function GET(req: NextRequest) {
           counts,
           statuses: Object.fromEntries(statuses.rows.map((r) => [r.run_status, r.n])),
           sources: sources.rows,
-          deliveries: deliveries.rows,
+          deliveries: deliveries.rows.map(({ location_filter, location_filter_note, ...d }) => ({
+            ...d,
+            filter: locationFilterSummary(location_filter, location_filter_note),
+          })),
           uploads: uploads?.rows ?? [],
           people_switch: peopleSwitch,
           keyCounts: Object.fromEntries(keys.rows.map((r) => [r.source_table, r.n])),

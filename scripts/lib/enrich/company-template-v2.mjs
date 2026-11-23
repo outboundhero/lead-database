@@ -90,13 +90,16 @@ export const AIARK_EMAIL_REOON_APPEND = " && {{passes_filters}} && !{{held_usabl
  *
  * A Google Maps place from the client's inbound URL (migration 129) fills the
  * shared ones (company, website, domain, phone, industry, offices,
- * office_count, source, client_tag) and the six Maps inputs below, under the
+ * office_count, source, client_tag) and the Maps inputs below: six under the
  * originals' own keys (C#6, C#60, C#62, C#61, C#63 and C#68), so a compiled
  * original that reads one sees the place's value on a Maps row and nothing on
- * an AI Ark row (maps-place.mjs placeInputs).
+ * an AI Ark row (maps-place.mjs placeInputs), and since migration 139 the
+ * chunk's location filter (location_filter, ours: stored, read by nothing yet).
+ * The intake counts a table ready for Maps places only when it has every one of
+ * them (gmaps.ts findMapsTable), so an older table is compiled again first.
  */
 export const COMPANY_MAPS_INPUT_KEYS = Object.freeze([
-  "place_id", "actual_city", "actual_state", "call_city", "call_state", "call_category",
+  "place_id", "actual_city", "actual_state", "call_city", "call_state", "call_category", "location_filter",
 ]);
 
 export const COMPANY_INPUT_KEYS_V2 = Object.freeze([
@@ -329,6 +332,10 @@ const PHASE1 = {
   call_city: { name: "Searched city", kind: "input", provider: MAPS, hidden: true, description: "The city the scrape searched, from the scraper app's chunk (C#61)." },
   call_state: { name: "Searched state", kind: "input", provider: MAPS, hidden: true, description: "The state the scrape searched, from the scraper app's chunk (C#63)." },
   call_category: { name: "Searched category", kind: "input", provider: MAPS, hidden: true, description: "The category the scrape searched, from the scraper app's chunk (C#68)." },
+  location_filter: {
+    name: "Location filter", kind: "input", provider: MAPS, hidden: true, data_type: "json",
+    description: "The location filter the scraper app sent with the chunk (extra.location_filter, version 1), cleaned, as compact JSON: what the scrape was limited to (countries, places, zips, a radius, text). Stored only: it filters nothing yet (migration 139).",
+  },
   office: {
     name: "Office in the client's area", kind: "action", action: "client_office", data_type: "json", provider: "Client rules",
     inputs: { offices: "{{offices}}", hq_only: "{{hq_only}}", place_id: "{{place_id}}" },

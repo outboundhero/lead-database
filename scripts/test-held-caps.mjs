@@ -23,7 +23,7 @@
 //   H. held rows: stored held, never claimed, the guard, the switch check
 //      against flagOn(), the release, a client switched off meanwhile, and
 //      switched off again
-//   M. Maps rows in the Companies (pipeline) template: the six inputs, the
+//   M. Maps rows in the Companies (pipeline) template: the seven inputs, the
 //      office check by the place's own city and state, the Companies tab's
 //      source, a place worked after its release
 //   V. the daily caps of Findymail, Prospeo, Anymail Finder and Enrichley: no
@@ -349,12 +349,13 @@ async function partH() {
 async function partM(h) {
   section("M1. The template's Maps inputs");
   const cols = await all(
-    `SELECT key, kind, provider, hidden FROM enrich_columns WHERE table_id = $1 AND key = ANY($2::text[]) ORDER BY position`,
+    `SELECT key, kind, provider, hidden, data_type FROM enrich_columns WHERE table_id = $1 AND key = ANY($2::text[]) ORDER BY position`,
     [tables[HA].companies, [...COMPANY_MAPS_INPUT_KEYS]]
   );
-  check("the six Maps inputs, each from Google Maps; Place id shown, the other five hidden",
-    cols.length === 6 && cols.every((c) => c.kind === "input" && c.provider === "Google Maps") &&
-      cols.find((c) => c.key === "place_id")?.hidden === false && cols.filter((c) => c.key !== "place_id").every((c) => c.hidden === true),
+  check("the seven Maps inputs, each from Google Maps; Place id shown, the other six hidden; the location filter is JSON (139)",
+    cols.length === 7 && cols.every((c) => c.kind === "input" && c.provider === "Google Maps") &&
+      cols.find((c) => c.key === "place_id")?.hidden === false && cols.filter((c) => c.key !== "place_id").every((c) => c.hidden === true) &&
+      cols.find((c) => c.key === "location_filter")?.data_type === "json",
     JSON.stringify(cols));
   const shared = await all(`SELECT key, provider FROM enrich_columns WHERE table_id = $1 AND key = ANY($2::text[])`, [tables[HA].companies, ["company", "website", "domain", "offices", "source", "client_tag"]]);
   check("... and the inputs both sources write name AI Ark or Google Maps", shared.length === 6 && shared.every((c) => c.provider === "AI Ark or Google Maps"), JSON.stringify(shared));

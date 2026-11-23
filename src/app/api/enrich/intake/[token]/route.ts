@@ -16,6 +16,7 @@ import {
 } from "@/lib/enrich/gmaps";
 import { checkName, INTAKE_ANSWERS, isPassingDbError, isToken, normName, REFUSED_NOTES } from "@/lib/enrich/inbound";
 import { insertRows } from "@/lib/enrich/insert-rows";
+import { locationFilterEcho } from "../../../../../../scripts/lib/enrich/maps-place.mjs";
 
 // POST /api/enrich/intake/<token>: Google Maps places from the GMaps Scraper
 // app, one chunk at a time, for the client whose inbound URL this is
@@ -31,6 +32,11 @@ import { insertRows } from "@/lib/enrich/insert-rows";
 // provider is called here, and the worker starts held rows only while the
 // client is on the Company pulls switch. A 2xx comes only after the commit,
 // so the scraper app may forget a chunk once it has one.
+//
+// A chunk may carry a location filter (extra.location_filter, migration 139;
+// the contract is in src/lib/enrich/gmaps.ts): it is stored, never a reason to
+// refuse. A Test that sends one at the top level is told whether it would be
+// kept: { location_filter: { accepted, version, note } }.
 //
 // The answers, and what the scraper app does with each (gmaps-UI src/lib/clay-pool.ts):
 //   200  stored now, or a delivery seen before, or a Test    deletes its copy; Test passes
@@ -122,6 +128,8 @@ async function receive(c: PoolClient, token: string, raw: string): Promise<Answe
       const fit = checkName(sent, tag, accepted);
       answer.name_check = { fits: fit.ok, how: fit.how };
     }
+    // A location filter sent with the Test: would it be kept? Nothing is stored.
+    if (Object.hasOwn(body as object, "location_filter")) answer.location_filter = locationFilterEcho((body as Record<string, unknown>).location_filter);
     return { status: 200, body: answer };
   }
 

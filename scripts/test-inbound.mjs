@@ -28,6 +28,11 @@
 //       seen before, chunk ids, blank search fields, places with no id, odd
 //       text, no "full" phrase, name or token in any answer, never 410
 //   T4. the client name check, Accept this name, and a table that can't be made
+//   T7. the location filter (migration 139): read leniently (known keys only,
+//       text cleaned, lists capped, a size cap, never a throw), stored in the
+//       delivery's meta and on each place, never a refusal; a table without
+//       the input compiled again first; the Test's echo; the table route's
+//       summary for the Clay tab
 //   T6. load and errors: ten at once, the slots, a lock held past the
 //       statement timeout, an unexpected error, a passing one
 //   R.  the Run route leaves held rows held and counts them; the table
@@ -38,7 +43,7 @@
 import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { checker, dropPaidKeys, installNet, localDatabaseUrl, routeLoader, seedFixtureVariant } from "./fixtures/test-support.mjs";
-import { placeInputs } from "./lib/enrich/maps-place.mjs";
+import { LOCATION_FILTER_MAX_CHARS, parseLocationFilter, placeInputs } from "./lib/enrich/maps-place.mjs";
 import { settingsFrom, VENDOR_CAP_KEYS, VENDOR_CAP_LABELS } from "./lib/enrich/settings.mjs";
 
 const url = localDatabaseUrl();
@@ -577,6 +582,138 @@ async function partT4() {
     remade.status === 200 && remade.body.created === 1 && !!tC2 && (await heldIn(tC2.id)) === 1, JSON.stringify(remade.body));
 }
 
+// ── T7. The location filter (migration 139) ─────────────────────────────────
+
+async function partT7() {
+  section("T7. The location filter: read leniently, stored in the meta and on each place, never a refusal");
+  const tA = (await tableOf(A)).id;
+
+  // The reader, on its own.
+  const none = parseLocationFilter(undefined);
+  check("nothing sent: no filter and no note", none.filter === null && none.note === null && parseLocationFilter(null).note === null);
+  const FILTER = {
+    version: 1, name: "  Springfield   metro ", countries: ["us", "US"],
+    include: [{ country: "us", state: "IL", city: "Springfield", extra: "x" }, { country: "US", state: "IL", city: "springfield" }],
+    exclude: [{ country: "US", state: "MO" }], zips: ["62701", 62702, "62701"],
+    radius: { miles: 25, center: { city: "Springfield", state: "IL", country: "us" } }, text: "Springfield\u0000 and \ud800 nearby", stray: 1,
+  };
+  const kept = parseLocationFilter(FILTER);
+  check("version 1: only the known keys kept, text cleaned (no NUL, single spaces, well formed), lists once each, an unknown key noted",
+    same(kept.filter, {
+      version: 1, name: "Springfield metro", countries: ["US"], include: [{ country: "US", state: "IL", city: "Springfield" }], exclude: [{ country: "US", state: "MO" }],
+      zips: ["62701", "62702"], radius: { miles: 25, center: { city: "Springfield", state: "IL", country: "US" } }, text: "Springfield and \ufffd nearby",
+    }) && kept.note === "left out: stray",
+    JSON.stringify(kept));
+  check("... a radius around a point", same(parseLocationFilter({ version: 1, radius: { miles: "10", center: { lat: 39.8, lng: -89.6 } } }).filter, { version: 1, radius: { miles: 10, center: { lat: 39.8, lng: -89.6 } } }));
+  const many = parseLocationFilter({ version: 1, zips: Array.from({ length: 600 }, (_, i) => String(i)) });
+  check("a list over 500 entries: its first 500 kept, noted", many.filter?.zips?.length === 500 && /first 500 of 600/.test(many.note ?? ""), JSON.stringify(many.note));
+  const notKept = [
+    [{ version: 2, countries: ["US"] }, /version "2"/],
+    [{ countries: ["US"] }, /version missing/],
+    ["US", /not an object/],
+    [[{ version: 1 }], /not an object/],
+    [{ version: 1, include: "Springfield, IL" }, /include is not a list/],
+    [{ version: 1, include: [{ state: "IL" }] }, /no two-letter country/],
+    [{ version: 1, countries: ["USA"] }, /two-letter country/],
+    [{ version: 1, radius: { miles: 0, center: { city: "Springfield" } } }, /radius\.miles/],
+    [{ version: 1, radius: { miles: 5, center: { lat: 99, lng: 0 } } }, /latitude or longitude/],
+    [{ version: 1, text: { not: "text" } }, /text is not text/],
+    [{ version: 1, text: "x".repeat(900), zips: Array.from({ length: 400 }, (_, i) => `z${i}-${"0".repeat(8)}`) }, /4,000 at most/],
+    [new Proxy({}, { get() { throw new Error("made-up failure"); } }), /could not be read/],
+  ];
+  const results = notKept.map(([raw]) => parseLocationFilter(raw));
+  check("not kept, each with a note: an unknown or missing version, not an object, a known key of the wrong shape, too long, unreadable (never a throw)",
+    results.every((r, i) => r.filter === null && notKept[i][1].test(r.note ?? "")), JSON.stringify(results.map((r) => r.note)));
+  check(`... a kept filter fits ${LOCATION_FILTER_MAX_CHARS} characters, a note 200`,
+    [kept, many].every((r) => JSON.stringify(r.filter).length <= LOCATION_FILTER_MAX_CHARS) && results.every((r) => (r.note ?? "").length <= 200));
+
+  // Through the intake.
+  const withFilter = chunk([place(300), place(301)], { extra: { client: A, ...EXTRA, location_filter: FILTER } });
+  const r1 = await post(tok[A], withFilter);
+  const src1 = await sourceOf(tA, withFilter.taskId);
+  check("a chunk with a filter: stored (200), the filter in the delivery's meta as kept, with its note",
+    r1.status === 200 && r1.body.created === 2 && same(src1?.meta?.location_filter, kept.filter) && src1?.meta?.location_filter_note === kept.note &&
+      src1.meta.keyword === "dentist" && src1.meta.name_check === "tag",
+    JSON.stringify({ body: r1.body, meta: src1?.meta }));
+  const row1 = await placeRow(tA, 300);
+  const cells1 = row1 ? await cellsOf(row1.id) : {};
+  check("... and on each place, the location_filter input as compact JSON, as placeInputs maps it",
+    cells1.location_filter?.value === JSON.stringify(kept.filter) && cells1.location_filter.value === placeInputs(place(300), withFilter.extra, A).location_filter &&
+      !!(await placeRow(tA, 301)),
+    JSON.stringify(cells1.location_filter));
+  const badShapes = [
+    { version: 2, include: [] },
+    { version: 1, include: "Springfield, IL" },
+    "a string",
+    { version: 1, text: "x".repeat(900), zips: Array.from({ length: 400 }, (_, i) => `z${i}-${"0".repeat(8)}`) },
+  ];
+  const bad = [];
+  for (const [i, f] of badShapes.entries()) {
+    const body = chunk([place(302 + i)], { extra: { client: A, ...EXTRA, location_filter: f } });
+    const r = await post(tok[A], body);
+    const src = await sourceOf(tA, body.taskId);
+    const row = await placeRow(tA, 302 + i);
+    const cells = row ? await cellsOf(row.id) : {};
+    bad.push({ status: r.status, created: r.body.created, filter: src?.meta?.location_filter, note: src?.meta?.location_filter_note, cell: cells.location_filter ?? null, place: cells.place_id?.value ?? null });
+  }
+  check("a filter that can't be kept never refuses the chunk: each stored (200), its meta saying why, no location_filter cell",
+    bad.every((b, i) => b.status === 200 && b.created === 1 && b.filter === null && typeof b.note === "string" && b.note.length > 0 && b.cell === null && b.place === placeId(302 + i)) &&
+      /version "2"/.test(bad[0].note) && /include is not a list/.test(bad[1].note) && /not an object/.test(bad[2].note) && /4,000 at most/.test(bad[3].note),
+    JSON.stringify(bad));
+  const plain = (await one(`SELECT meta FROM enrich_sources WHERE table_id = $1 AND kind = 'maps' AND NOT (meta ? 'location_filter') LIMIT 1`, [tA]))?.meta;
+  check("a chunk that sends no filter has neither key in its meta", !!plain && !("location_filter_note" in plain));
+
+  // A table made before the input: it is compiled again before the chunk is stored.
+  await pool.query(`DELETE FROM enrich_columns WHERE table_id = $1 AND key = 'location_filter'`, [tA]);
+  const keysBefore = await inputKeys(tA);
+  const late = chunk([place(310)], { extra: { client: A, ...EXTRA, location_filter: { version: 1, countries: ["US"] } } });
+  const r3 = await post(tok[A], late);
+  const row3 = await placeRow(tA, 310);
+  const cells3 = row3 ? await cellsOf(row3.id) : {};
+  check("a Companies table with the place id but not the location_filter input is compiled again first, so the place keeps its filter",
+    keysBefore.includes("place_id") && !keysBefore.includes("location_filter") && r3.status === 200 && r3.body.created === 1 &&
+      (await inputKeys(tA)).includes("location_filter") && cells3.location_filter?.value === JSON.stringify({ version: 1, countries: ["US"] }),
+    JSON.stringify({ body: r3.body, cell: cells3.location_filter }));
+
+  // A table that takes places but can't be compiled again now (here: a retired companies_v1 table beside it):
+  // it takes them as before, without the newer input, rather than holding them back.
+  const tC = (await tableOf(C)).id;
+  await pool.query(`DELETE FROM enrich_columns WHERE table_id = $1 AND key = 'location_filter'`, [tC]);
+  await pool.query(`INSERT INTO enrich_tables (client_tag, kind, name, template) VALUES ($1, 'companies', 'Companies (retired, test)', 'companies_v1')`, [C]);
+  const older = chunk([place(320)], { extra: { client: C, ...EXTRA, location_filter: { version: 1, countries: ["US"] } } });
+  const r4 = await post(tok[C], older);
+  const row4 = await placeRow(tC, 320);
+  const cells4 = row4 ? await cellsOf(row4.id) : {};
+  await pool.query(`DELETE FROM enrich_tables WHERE client_tag = $1 AND template = 'companies_v1'`, [C]);
+  check("a table with the place id that can't be compiled again now takes places as before (200), without the newer input",
+    r4.status === 200 && r4.body.created === 1 && !!row4 && !cells4.location_filter && cells4.place_id?.value === placeId(320) &&
+      !(await inputKeys(tC)).includes("location_filter"),
+    JSON.stringify({ body: r4.body, cells: Object.keys(cells4) }));
+
+  // The Test.
+  const sources = async () => (await one(`SELECT count(*)::int AS n FROM enrich_sources WHERE table_id = $1`, [tA])).n;
+  const n0 = await sources();
+  const e1 = await post(tok[A], testCall({ location_filter: { version: 1, countries: ["US"], stray: true } }));
+  const e2 = await post(tok[A], testCall({ location_filter: { version: 2 } }));
+  const e3 = await post(tok[A], testCall());
+  check("a Test with a filter is told it would be kept, with its version and note; one that would not, why; without one, nothing about it",
+    e1.status === 200 && e1.body.test === true && same(e1.body.location_filter, { accepted: true, version: 1, note: "left out: stray" }) &&
+      e2.status === 200 && e2.body.location_filter?.accepted === false && e2.body.location_filter.version === 2 && /only version 1/.test(e2.body.location_filter.note ?? "") &&
+      e3.status === 200 && !("location_filter" in e3.body),
+    JSON.stringify([e1.body, e2.body]));
+  check("... and a Test stores nothing", (await sources()) === n0);
+
+  // The Clay tab's Recent deliveries.
+  const detail = await call(R.table.GET, { query: { id: tA } });
+  const byId = new Map((detail.body?.deliveries ?? []).map((d) => [d.id, d]));
+  const lateSrc = await sourceOf(tA, late.taskId);
+  check("the table route sums each delivery's filter up: version and counts, or only the note; none for a chunk without one",
+    same(byId.get(src1.id)?.filter, { version: 1, countries: 1, include: 1, exclude: 1, zips: 2, radius: true, text: true, note: "left out: stray" }) &&
+      same(byId.get(lateSrc?.id)?.filter, { version: 1, countries: 1, include: 0, exclude: 0, zips: 0, radius: false, text: false, note: null }) &&
+      [...byId.values()].some((d) => d.filter && d.filter.version === null && /version "2"/.test(d.filter.note ?? "")),
+    JSON.stringify([...byId.values()].map((d) => d.filter)));
+}
+
 // ── T6. Load and errors ─────────────────────────────────────────────────────
 
 async function partT6() {
@@ -853,6 +990,7 @@ try {
   await partT1();
   await partT3();
   await partT4();
+  await partT7();
   await partT6();
   const r = await partR();
   await partS(r);

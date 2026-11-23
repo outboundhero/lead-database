@@ -20,9 +20,25 @@ import type { MapsDelivery } from "@/app/api/enrich/table/route";
 // name did not fit), the names accepted for it, and whether the client is
 // switched on, with its held places. A client with no URL gets Create. The
 // strip sits above a Companies (pipeline) table: the client's URL, its held
-// places and why, and the newest Maps deliveries.
+// places and why, and the newest Maps deliveries, each with the location
+// filter it sent, in short (migration 139).
 
 const fmt = (n: number | undefined) => (n ?? 0).toLocaleString("en-US");
+
+/** A delivery's location filter in short: its version and what each list holds, or why it was not kept. */
+function filterText(f: MapsDelivery["filter"] | undefined): string {
+  if (!f) return "None";
+  if (f.version === null) return f.note ?? "Not kept";
+  const parts = [
+    f.countries ? `${fmt(f.countries)} ${f.countries === 1 ? "country" : "countries"}` : null,
+    f.include ? `${fmt(f.include)} in` : null,
+    f.exclude ? `${fmt(f.exclude)} out` : null,
+    f.zips ? `${fmt(f.zips)} ${f.zips === 1 ? "zip" : "zips"}` : null,
+    f.radius ? "a radius" : null,
+    f.text ? "text" : null,
+  ].filter(Boolean);
+  return `v${f.version}: ${parts.length ? parts.join(", ") : "empty"}`;
+}
 const when = (iso: string | null | undefined) =>
   iso ? new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : null;
 
@@ -573,7 +589,8 @@ export function InboundStrip({
                 <th className="py-0.5 pr-3 font-medium">Received</th>
                 <th className="py-0.5 pr-3 font-medium">New</th>
                 <th className="py-0.5 pr-3 font-medium">Already there</th>
-                <th className="py-0.5 font-medium">Skipped</th>
+                <th className="py-0.5 pr-3 font-medium">Skipped</th>
+                <th className="py-0.5 font-medium">Filter</th>
               </tr>
             </thead>
             <tbody>
@@ -584,7 +601,13 @@ export function InboundStrip({
                   <td className="py-0.5 pr-3">{fmt(d.received)}</td>
                   <td className="py-0.5 pr-3">{fmt(d.created)}</td>
                   <td className="py-0.5 pr-3">{fmt(d.duplicates)}</td>
-                  <td className="py-0.5">{fmt(d.skipped)}</td>
+                  <td className="py-0.5 pr-3">{fmt(d.skipped)}</td>
+                  <td
+                    className={cn("max-w-[220px] truncate py-0.5", d.filter?.version === null && "text-[var(--warning)]", !d.filter && "text-muted-foreground")}
+                    title={d.filter?.note ?? undefined}
+                  >
+                    {filterText(d.filter)}
+                  </td>
                 </tr>
               ))}
             </tbody>
