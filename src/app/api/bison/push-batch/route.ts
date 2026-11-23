@@ -11,6 +11,8 @@ import { logAudit } from "@/lib/api/log-audit";
 import { gateEnabled, scoringStatusFor } from "../../../../../scripts/lib/enrich/fit-push.mjs";
 import { BISON_GROUPS, sideCampaignsByInstall } from "../../../../../scripts/lib/bison-groups.mjs";
 import { isSharePush } from "../../../../../scripts/lib/overlap-topup.mjs";
+import { loadQuestionSettings, questionSwitchOn } from "../../../../../scripts/lib/questions/settings.mjs";
+import { copyTag } from "../../../../../scripts/lib/questions/names.mjs";
 
 // Queue an async Bison push batch. Unlike the synchronous /api/bison/push
 // (kept for targeted client "pulls"), this only validates + inserts a
@@ -77,6 +79,10 @@ interface PushBatchPayload {
   // Double-push guard override: a recent batch for the same client tag makes
   // this endpoint 409 unless force is set.
   force?: boolean;
+  // Question variables (migration 139, ships off): the variable this push sends
+  // besides the usual ones, picked in the export popup. Only with clientTag, as
+  // pushOptions. The worker skips leads without a written value.
+  questionVariableId?: string | null;
 }
 
 export async function POST(request: NextRequest) {
@@ -262,6 +268,56 @@ export async function POST(request: NextRequest) {
     // than silently dropping it.
     const { b2b, b2c } = stampCampaigns(campaigns, tagRow);
     savedMapping = { group: (tagRow.group_no as number | null) ?? null, b2b, b2c };
+  }
+
+  // QUESTION VARIABLE (migration 139; ships off). The export popup sends the
+  // variable it picked only with the client, as it sends pushOptions. Refused
+  // unless the question_variables switch is on for this client and the variable
+  // exists and is not archived; stored on the batch (id and name) for the worker
+  // (scripts/lib/push-question-var.mjs). Absent: the batch is as it always was.
+  let questionVariable: { id: string; name: string } | null = null;
+  if (body.questionVariableId !== undefined && body.questionVariableId !== null) {
+    if (!clientTag) {
+      return NextResponse.json(
+        { error: "A question variable is only sent with a client: select the client (top bar) and push again." },
+        { status: 400 }
+      );
+    }
+    if (typeof body.questionVariableId !== "string" || !UUID_RE.test(body.questionVariableId)) {
+      return NextResponse.json({ error: "questionVariableId must be a question variable's id" }, { status: 400 });
+    }
+    try {
+      const settings = await loadQuestionSettings(getPool());
+      if (!questionSwitchOn(settings, clientTag)) {
+        return NextResponse.json(
+          { error: `Question variables are off for ${clientTag} (Companies tab, Settings): push with the default {QUESTION}, or turn them on first.` },
+          { status: 400 }
+        );
+      }
+      const { rows } = await getPool().query(
+        `select id, name, archived_at from question_variables where id = $1`,
+        [body.questionVariableId]
+      );
+      const row = rows[0] as { id: string; name: string; archived_at: string | Date | null } | undefined;
+      if (!row) {
+        return NextResponse.json({ error: "That question variable no longer exists: pick another one." }, { status: 400 });
+      }
+      if (row.archived_at) {
+        return NextResponse.json(
+          { error: `${copyTag(row.name)} is archived: pick another variable, or restore it on the Clay tab.` },
+          { status: 400 }
+        );
+      }
+      questionVariable = { id: row.id, name: row.name };
+    } catch (e) {
+      if ((e as { code?: string })?.code === "42P01") {
+        return NextResponse.json({ error: "Question variables are not set up in this database yet." }, { status: 400 });
+      }
+      return NextResponse.json(
+        { error: `Failed to read the question variable: ${e instanceof Error ? e.message : String(e)}` },
+        { status: 500 }
+      );
+    }
   }
 
   // FIT GATE (fit scoring, migration 127; shipped OFF). While the gate is on,
@@ -460,6 +516,9 @@ export async function POST(request: NextRequest) {
           }
         : null,
       status: startStatus,
+      ...(questionVariable
+        ? { question_variable_id: questionVariable.id, question_variable_name: questionVariable.name }
+        : {}),
     })
     .select("id")
     .single();
@@ -485,6 +544,8 @@ export async function POST(request: NextRequest) {
       maxLeads: body.maxLeads ?? null,
       clientTag,
       emailSide: emailSide ?? null,
+      // The variable's name only (never a value).
+      ...(questionVariable ? { questionVariable: questionVariable.name } : {}),
     } as Record<string, unknown>,
   }).then(() => {}, () => {});
 
@@ -523,5 +584,6 @@ export async function POST(request: NextRequest) {
     ...(startStatus === "scoring" ? { waitsForScoring: true } : {}),
     ...(clientGroupSet ? { clientGroupSet } : {}),
     ...(sharePushes.length ? { sharePushes } : {}),
+    ...(questionVariable ? { questionVariable } : {}),
   });
 }

@@ -43,6 +43,10 @@ import { eligibilitySql, enqueueLeadCompanies, fitCheckOn, FIT_SKIP } from "./li
 import { isSharePush } from "./lib/overlap-topup.mjs";
 import { planTarget, inSequenceElsewhere, attachBody, verifyForced, itemOutcome } from "./lib/push-attach.mjs";
 import { directLookupUnsafe, exactEmailMatch } from "./lib/bison-lookup.mjs";
+import {
+  appendExtraVars, extraVarsFor, fixedVariableName, holdsValue, installHasVariable, loadQuestionValues,
+  missingVariableName, notSetUpError, patchPayload,
+} from "./lib/push-question-var.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname });
 
 const env = process.env;
@@ -266,7 +270,9 @@ function markVarUnsupported(domain, name) {
   console.warn(`  instance ${domain} has no custom variable "${name}" — dropping it from further pushes`);
 }
 
-function leadPayload(l, tags, domain) {
+// extra: the batch's question variable ([{ name, value }], migration 139), sent
+// after the eleven names; [] for every other batch, whose payload is unchanged.
+function leadPayload(l, tags, domain, extra = []) {
   const vars = [];
   const addVar = (name, value) => {
     if (value == null || value === "") return;
@@ -295,7 +301,7 @@ function leadPayload(l, tags, domain) {
     ...(l.title ? { title: l.title } : {}),
     ...(l.company ? { company: l.company } : {}),
     ...(l.notes ? { notes: l.notes } : {}),
-    custom_variables: vars,
+    custom_variables: appendExtraVars(vars, extra),
     // Client tag(s) attached to the lead in Bison (create + PUT carry them so
     // it's idempotent). Merges the batch's client tag with any tags the lead
     // already carries in our DB. Sent as a `tags` string array.
@@ -381,23 +387,32 @@ async function searchLeadByEmail(auth, email) {
 // "taken / already exists" validation error. Handle it corofy's way: find the
 // existing lead by search (retrying for indexing delay), PUT to refresh its
 // fields, and reuse its id. Other 4xx are real validation errors.
-async function createLead(auth, lead, tags) {
+async function createLead(auth, lead, tags, extra = []) {
   // One pass per custom variable we might send (+1): an instance can be missing
   // SEVERAL of them (a B2C instance often defines none), and each attempt only
   // reveals the next missing name. Too few passes and the lead still fails.
   for (let pass = 0; pass < 7; pass++) {
     try {
-      const json = await bison(auth, "POST", "/api/leads", leadPayload(lead, tags, auth.domain));
+      const json = await bison(auth, "POST", "/api/leads", leadPayload(lead, tags, auth.domain, extra));
       const id = json?.data?.id ?? json?.id ?? json?.lead?.id; // defensive id read
       // lead: null = created just now, so it is in no campaign (see planTarget).
       if (id != null) return { id: String(id), lead: null };
       throw new Error(`create ${lead.email}: could not read Bison lead id from response`);
     } catch (e) {
-      // NB the message continues after the name ("... named subcategory. Please
-      // create it first"), so capture the identifier only — anchoring to $
-      // swallowed the trailing sentence and blocked a bogus variable name.
-      const missing = e.message.match(/custom variable named\s+"?([A-Za-z0-9_-]+)/i);
-      if (missing) { markVarUnsupported(auth.domain, missing[1]); continue; }
+      // NB the message continues after the name ("... named company phone.
+      // Please create it first"). The WHOLE name is taken (quoted, or up to the
+      // ". Please"): capturing up to the first space never learned a multi-word
+      // name, and the lead failed after 7 passes. Only the eleven fixed names are
+      // learned and dropped; a missing question variable (139) fails the lead
+      // with a reason, and so does any other name (scripts/lib/push-question-var.mjs).
+      const missing = missingVariableName(e.message);
+      if (missing != null) {
+        const fixed = fixedVariableName(missing);
+        if (fixed) { markVarUnsupported(auth.domain, fixed); continue; }
+        const own = extra.find((v) => v.name.toLowerCase() === missing.toLowerCase());
+        if (own) throw notSetUpError(own.name, auth.domain);
+        throw e;
+      }
       if (/taken|already exists|duplicate/i.test(e.message)) break; // duplicate -> find+PUT below
       throw e;
     }
@@ -422,6 +437,23 @@ async function readLeadById(auth, id) {
     return json?.data ?? json ?? null;
   } catch (e) {
     if (e.status === 404) return null;
+    throw e;
+  }
+}
+
+// The batch's question variable (migration 139) onto a lead the install already
+// holds: PATCH with only that variable, which leaves every other field and
+// variable of the lead as it is (PUT would clear them). Nothing for a batch
+// without one, or when the lead as Bison returned it already holds the value.
+// A refusal naming the variable fails the lead with the Clay-tab reason.
+const customVarsCache = new Map(); // install domain -> { at, names } (scripts/lib/push-question-var.mjs)
+async function setQuestionVar(auth, id, bisonLead, extra) {
+  const v = extra[0];
+  if (!v || holdsValue(bisonLead, v.name, v.value)) return;
+  try {
+    await bison(auth, "PATCH", `/api/leads/${encodeURIComponent(id)}`, patchPayload(v.name, v.value));
+  } catch (e) {
+    if (missingVariableName(e.message)?.toLowerCase() === v.name.toLowerCase()) throw notSetUpError(v.name, auth.domain);
     throw e;
   }
 }
@@ -850,11 +882,18 @@ async function pushCycle() {
     [[...new Set(items.map((i) => i.lead_id))]]
   );
   const leads = new Map(leadRows.map((l) => [l.id, l]));
-  const { rows: batchRows } = await pool.query(
-    `select id, campaigns, status, client_tag from push_batches where id = any($1::uuid[])`,
-    [[...new Set(items.map((i) => i.batch_id))]]
-  );
+  // With the question variable a batch names (migration 139); read without it
+  // until 139 is applied, when no batch can name one.
+  const batchSql = (withVar) =>
+    `select id, campaigns, status, client_tag${withVar ? ", question_variable_id, question_variable_name" : ""}
+       from push_batches where id = any($1::uuid[])`;
+  const batchIds = [...new Set(items.map((i) => i.batch_id))];
+  const { rows: batchRows } = await pool.query(batchSql(true), [batchIds])
+    .catch((e) => (e.code === "42703" ? pool.query(batchSql(false), [batchIds]) : Promise.reject(e)));
   const batchOf = new Map(batchRows.map((b) => [b.id, b]));
+  // The written question values of the leads whose batch names a variable: one
+  // statement per variable, none when no batch names one (scripts/lib/push-question-var.mjs).
+  const qValues = await loadQuestionValues(pool, items, batchOf);
 
   // B2B vs B2C is decided by the ADDRESS DOMAIN — freemail (gmail/yahoo/aol/…)
   // is B2C, a company domain is B2B. This is the same definition the Leads
@@ -1006,6 +1045,18 @@ async function pushCycle() {
       await setItem(item, token, { status: "skipped", error: fitReason, claimed_at: null });
       return;
     }
+    // Question variable (139), only when the batch names one: a lead with no
+    // written value is skipped ("no {X} written yet"), never sent without it.
+    // qx.vars is [] for every other batch.
+    const qx = extraVarsFor(lead, qValues, batch);
+    if (qx.retry) {
+      await failOrRetry(item, token, qx.retry);
+      return;
+    }
+    if (qx.skip) {
+      await setItem(item, token, { status: "skipped", error: qx.skip, claimed_at: null });
+      return;
+    }
     // Target campaigns are decided once and persisted — a retry reuses them.
     // ESP ROUTING (client req #9): when the batch's campaigns carry buckets,
     // a lead attaches ONLY to the campaign(s) matching its email provider:
@@ -1096,6 +1147,12 @@ async function pushCycle() {
           const domain = t.instance_url ? normalizeDomain(t.instance_url) : DEFAULT_DOMAIN;
           throw Object.assign(new Error(`no API key for instance ${domain}`), { configFatal: true });
         }
+        // A batch with a question variable: the install must define it, or
+        // Bison refuses the lead. One read per install, cached (fails the lead
+        // with the Clay-tab reason when it is missing).
+        if (qx.vars.length && !(await installHasVariable(bison, auth, qx.vars[0].name, customVarsCache))) {
+          throw notSetUpError(qx.vars[0].name, auth.domain);
+        }
         if (bisonIds[auth.domain] == null) {
           // SEARCH-FIRST: these databases were imported FROM Bison exports, so
           // nearly every lead already exists on its instance — one search hit
@@ -1104,10 +1161,14 @@ async function pushCycle() {
           if (existing && existing.id != null) {
             bisonIds[auth.domain] = String(existing.id);
             bisonLeads[auth.domain] = existing;
+            await setQuestionVar(auth, existing.id, existing, qx.vars);
           } else {
-            const made = await createLead(auth, lead, tagsForLead(batch.client_tag, lead.tags));
+            const made = await createLead(auth, lead, tagsForLead(batch.client_tag, lead.tags), qx.vars);
             bisonIds[auth.domain] = made.id;
             bisonLeads[auth.domain] = made.lead;
+            // Found after a "taken" create: its PUT carried only the eleven, so
+            // PATCH the variable (null: what the lead held before the PUT no longer counts).
+            if (made.lead) await setQuestionVar(auth, made.id, null, qx.vars);
           }
         } else if (!(auth.domain in bisonLeads)) {
           // A retry with the id already known: read the lead again, so the plan
@@ -1115,6 +1176,7 @@ async function pushCycle() {
           // finalized left it IN the campaign, and re-attaching that would come
           // back as Bison's blanket "in other sequences" 422.
           bisonLeads[auth.domain] = await readLeadById(auth, bisonIds[auth.domain]);
+          if (bisonLeads[auth.domain]) await setQuestionVar(auth, bisonIds[auth.domain], bisonLeads[auth.domain], qx.vars);
         }
       }
       // Persist BEFORE any attach — crash recovery must never duplicate creates.
