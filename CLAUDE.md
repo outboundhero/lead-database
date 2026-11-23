@@ -5052,11 +5052,19 @@ written, checked or sent for a client until it is on and lists that client
   push-worker run once per made-up install (`PUSH_WORKER_ONCE=1`) against a made-up
   Bison, and the push routes; it needs no other active push batch locally. Both need
   139 locally and the shared database lock.
-- **Rollout** (everything ships off): apply 139 first. Deploy the web app, upload the
-  enrich-worker (the routes start no job until its heartbeat lists `question_jobs`),
-  and redeploy push-worker and its four install workers while no batch is processing,
-  all before the switch is on for any client: an older push-worker ignores
-  `question_variable_id` and would push those leads without the variable.
+- **Rollout** (migration 139 as a whole: this section, "Per-client prompt edits" and
+  "Places edited by hand win"; everything ships off): apply 139 first. Deploy the web
+  app and upload the enrich-worker together: the worker compiles clients' tables too
+  (an older one drops prompt edits and the `prompt_source` marks when it recompiles a
+  client's tables), runs the `service_area` column (an older one fails that cell:
+  upload it before any client is on People runs or personalisation) and runs the
+  question step (the routes start no job until its heartbeat lists `question_jobs`);
+  save no prompt edit until both run this code. Redeploy client-sync and
+  targeting-worker, which run the sheet sync: an older sync ignores `locations_locked`
+  and would overwrite places edited by hand. Redeploy push-worker and its four install
+  workers while no batch is processing, all before the question variables switch is on
+  for any client: an older push-worker ignores `question_variable_id` and would push
+  those leads without the variable.
 
 ## Known issues / TODO
 
