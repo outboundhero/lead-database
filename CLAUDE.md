@@ -418,6 +418,12 @@ scripts/lib/enrich/upload-move.mjs         - The worker's copy of an upload's no
 scripts/lib/enrich/upload-found.mjs        - The worker's side of the found-email hand-off (130)
 scripts/lib/enrich/clay-tools.mjs          - Exact copies of Clay's normalize-company-name, extract-email-components and normalize-phone-number (G#14, G#16, G#35, P#18, P#29)
 scripts/lib/enrich/ai-examples.mjs         - An AI column's Clay table examples, laid out as each request's instructions (P#61, G#49, G#19)
+scripts/lib/enrich/prompt-text.mjs         - A personalisation prompt as the editor's text ({{Column}} placeholders) and back to the expression it runs (139)
+scripts/lib/enrich/prompt-overrides.mjs    - A client's prompt edits put in place when its tables compile: prompt_source, text_variant (139)
+scripts/lib/enrich/prompt-editor.mjs       - The prompt editor's server side: what a step may read, the view, save, reset, compile again (139)
+src/app/api/enrich/prompts/route.ts        - GET/PUT/DELETE a client's own text for P#60, P#61, G#48, G#49 (139)
+src/components/clay/client-setup-sheet.tsx - The Clay tab's Client setup sheet: Prompts, Location, Question variable (139)
+src/components/clay/prompts-tab.tsx        - Its Prompts tab: each step's text, placeholder chips, Save, Reset to Clay original (139)
 scripts/lib/enrich/email-verdict.mjs       - Who found or approved a promoted address: the lead's validation status and source
 scripts/lib/enrich/pull-no-email.mjs       - AI Ark pulls' people with no email: copied into the People table, found addresses handed back
 scripts/clay-fetch-tables.mjs              - Reads clients' Clay tables, read only, for the originals loads (its files hold keys: 0700/0600)
@@ -2881,7 +2887,10 @@ out of AI Ark searches wherever the standard keywords go, with no switch of its 
   carries `config.text_variant`: the client's variant for a kind it keeps as its own,
   `default` otherwise. The engine's switch reads it, so a step on the default's text
   runs only under `shared_text_ok`, as before. Columns compiled before this read the
-  table's variant.
+  table's variant. Since migration 139 a client's own prompt edit makes a step its own
+  too: the edited step, and the steps of its kind with no client text, carry the
+  client's variant name, so they run for a listed client even without its own Clay
+  originals (see "Per-client prompt edits (migration 139)" below).
 - **Credentials.** The Clay CLI's exports hold live API keys (the Authorization
   headers of the HTTP columns, Reoon's key). Every loader (exact layout, by name, the
   refresh, the overlays) stores them as "[redacted]" (`redactCredentials`, a header or
@@ -3201,6 +3210,101 @@ out of AI Ark searches wherever the standard keywords go, with no switch of its 
   of 8 or more characters, every table example value, every table and workbook id of
   the Clay scan, and every credential value of the fetched exports (compared in
   memory, counts only). The repo is public.
+
+### Per-client prompt edits (migration 139)
+
+A client's own text for its four personalisation AI steps: People P#60 (research) and
+P#61 (question AI), General G#48 (research) and G#49 (question AI). Typed in the Clay
+tab's Client setup sheet, stored in `enrich_prompt_overrides` (with
+`enrich_prompt_override_log`), and put in place when the client's pipeline tables
+compile. The Clay originals in `enrich_originals` are never changed: "Reset to Clay
+original" deletes the edit. Nothing changes for a client until an admin saves an edit.
+
+- **The text and the expression** (`scripts/lib/enrich/prompt-text.mjs`, pure). A Clay
+  prompt is a JavaScript expression the engine runs in node:vm, so the editor never
+  saves one a person typed. `promptToText` shows an original as plain text when it is
+  only a concatenation of string literals, column references (`{{f_id}}` or `{{key}}`,
+  with one field at most: `?.x`, `.x`, `?.["x"]`), `Clay.formatForAIPrompt(<reference>)`
+  and brackets; each reference becomes `{{Column Name}}` or `{{Column Name.field}}`.
+  Anything else (a condition, another call or operator, a comment, a deeper read, two
+  columns added before any text) can't be shown: the original is then read only, and a
+  new text can still be written. `textToPrompt` writes text back: every piece of text
+  JSON-quoted, every placeholder `Clay.formatForAIPrompt(<ref>)` (with `?.field`),
+  joined with `+`. Names match whatever their case and spaces; `{{` and `}}` mean a
+  placeholder and nothing else; an unknown placeholder or field is an error that names
+  it. Checked 2026-11-23 on the local default originals (the 11-14 export, counts only):
+  all four steps show as text, and the text written back renders the same prompt.
+- **What a step may read** (`promptCatalogue`, `prompt-editor.mjs`): the columns of its
+  table that run before it (the worker's run order), compiled in memory from the
+  client's originals, so it works for a client with no tables yet; never a later step,
+  a never-run column or a hidden column of ours. A column from a Clay original is
+  written as its field id (rewritten to our key when the tables compile, as the
+  original's own references are), one of the template's own by its key, so an own
+  column a template adds before these steps shows up by itself. Fields: an AI step's
+  answer fields (Clay's order), and for a JSON column the single fields its table reads
+  from it. Names are unique (a second one gets " (2)").
+- **The compile** (`prompt-overrides.mjs`, `templates.mjs` `applyPromptOverrides`):
+  `ensurePipelineTables` reads the client's edits after choosing its variant and puts
+  each one's expression in place of the original's prompt binding, in memory. The model
+  setting, answer fields, table examples and run condition stay the original's,
+  references are rewritten as usual, and the memory key follows the new prompt, so a
+  changed prompt never reuses an answer (re-running pays OpenAI again). An edit is kept
+  only when the templates compile with it. One that does not (the originals changed
+  under it), whose original is missing, or whose stored expression is not of the
+  editor's shape is left out on its own: that step compiles from its original, the
+  table's note gets "; prompt edits not applied, the Clay original runs instead: P#61
+  (...)" after the usual note (`variantOfNote` still reads the variant), and the client
+  is never sent back to the default for it. The return carries `prompts: { applied,
+  skipped }`. Before 139 is applied (checked with `to_regclass`) there are no edits.
+- **Marks on the compiled steps:** `config.prompt_source`, "edited" or "clay", on the
+  four steps (the grid's header menu says "Edited"); and `config.text_variant`: an
+  edited step carries the client's own variant name (`variantName(tag)`), and so do the
+  steps of its kind with no client text that the AI steps read or write (P#57, P#58,
+  P#62; G#45, G#46, G#50). So an edited step runs for a client on `personalisation.tags`
+  without `shared_text_ok`, even without its own Clay originals. An AI step of the same
+  kind that is not edited keeps its variant (the client's own Clay text, or "default",
+  which runs only with shared text on), and the editor warns: research edited alone runs
+  and is paid for while the default's question AI stays off; question AI edited alone
+  never runs (it reads the research). A tag with no variant name keeps the text variant
+  it had.
+- **The route** `GET/PUT/DELETE /api/enrich/prompts` (`requireRole` + `withTx`; manager
+  reads, admin saves and resets). GET `?tag=` answers the four steps: source (edited,
+  the client's own Clay text, or the default's), the text, the Clay original as text (or
+  why it can't be shown), the placeholders, the edit's version, when and by whom
+  (email), and `problem` when an edit does not compile now. PUT `{tag, kind, position,
+  text, version}` (people 60 or 61, inboxes 48 or 49; version null when not edited), in
+  one transaction of at most 20 s under the client's pipeline lock
+  (`lockPipelineTables`): converts the text (400 with every placeholder error), compiles
+  the templates with it and the client's other running edits (400 with the first line),
+  writes the edit (version + 1; 409 `changed` on a stale version; the same text written
+  the same way saves nothing) and its log row (text before and after), then compiles
+  the client's tables again when it has any, in a savepoint (a client whose tables
+  can't be compiled now keeps the edit for its next compile). DELETE `{tag, kind,
+  position, version}` resets the same way. Both answer the GET shape plus `saved`,
+  `recompiled` and `note`. The audit log gets lengths only (`enrich_prompt`), never the
+  text.
+- **The Clay tab:** "Client setup" beside "Inbound URLs" opens a wide sheet
+  (`client-setup-sheet.tsx`) on the open table's client; any client of the shared client
+  list can be picked; three tabs: Prompts (`prompts-tab.tsx`), Location and Question
+  variable. `/leads/clay?setup=TAG&tab=prompts|location|question` opens it on load (the
+  address is cleared when it closes). A personalisation AI step's header menu (People and
+  General pipeline tables) and its cell panel have "Edit prompt", which opens the sheet
+  on that step. The Prompts tab: a People/General switch and a card per step with its
+  source, the text, placeholder chips that insert at the cursor, the Clay original
+  (collapsed), Save, Reset to Clay original behind a confirm, and the note that rows
+  already worked keep their answers ("Re-run this column for every row" pays OpenAI
+  again). Text not saved asks before the page, the sheet, the client or the tab is left;
+  a 409 loads the tab again and keeps the text typed. After a save the page reads its
+  tables and the open table again.
+- **Tests:** `node --env-file=.env.local scripts/test-prompt-overrides.mjs` (local database
+  only, migration 139 applied; 80 checks, under 1 s): the conversion and its refusals,
+  round trips on the fixture originals that render the same prompt, what a step may
+  read, the compile in memory and the text variants, an edit compiled into the tables,
+  reset, a broken edit left out with its note, the route through the TypeScript loader
+  (roles, 400, 409, 404, the audit lines) and the Clay tab's wiring by source. Made-up
+  `XQ1A` to `XQ1C` clients and `xq1` variants, removed at the end; it refuses while a
+  client is on a pipeline switch list, while another client's row is held, or while a
+  real tag starts with XQ1.
 
 ### Fit scoring (migrations 126 and 127)
 
