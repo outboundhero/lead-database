@@ -24,6 +24,14 @@
 // example, are failed passes: stored values stay and the next run tries again.
 // Never touched here: exclude_locations, require_location, allow_inferred_location,
 // commercial_cleaning, notes.
+// Places edited by hand win (migration 139): a client whose places are locked
+// (client_targeting.locations_locked, set when the Rules dialog or the Clay
+// tab saves changed places) keeps its include_locations, exclude_locations and
+// countries. No location pass runs for it, the write leaves the three alone
+// (checked again as it writes), and its line says "places kept (edited by
+// hand)". Its terms, sheet_raw and sheet_synced_at are written as for any
+// client. "Follow the sheet again" unlocks it and forgets the stored places
+// text, so the next run reads its places from the sheet.
 //
 // Env: GOOGLE_SERVICE_ACCOUNT_B64, DATABASE_URL, OPENAI_API_KEY,
 //      ONBOARDING_SHEET_ID (defaults to the known onboarding sheet)
@@ -676,6 +684,25 @@ async function main(job = null) {
 
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
   try {
+    await syncSheetClients(pool, sheetClients, { job });
+  } finally {
+    await pool.end();
+  }
+}
+
+/**
+ * Everything after the sheet is read: which clients changed, the AI passes and
+ * the write, for the sheet's rows by tag ({ tag, target, exclusion, locations }).
+ * main() calls it with the onboarding sheet; the tests call it with made-up
+ * rows and a stubbed fetch. A client whose places are locked (edited by hand,
+ * migration 139) gets no location pass, and the write keeps its places.
+ *
+ * @param {import("pg").Pool} pool
+ * @param {Map<string, { tag: string, target: string, exclusion: string, locations: string }>} sheetClients
+ * @param {{ job?: { client_tags?: string[] } | null, dry?: boolean, force?: boolean, onlyClient?: string | null }} [opts]
+ */
+export async function syncSheetClients(pool, sheetClients, { job = null, dry = DRY, force = FORCE, onlyClient = ONLY_CLIENT } = {}) {
+  {
     const { rows: tagRows } = await pool.query(`SELECT tag, client_type FROM client_tags`);
     const knownTags = new Set(tagRows.map((r) => r.tag));
     // Cleaning clients must not be sold to their own industry. These terms are
@@ -698,19 +725,24 @@ async function main(job = null) {
     let clients = [...sheetClients.values()].filter((c) => knownTags.has(c.tag));
     console.log(`${sheetClients.size} sheet tags -> ${clients.length} matched in client_tags, ${unmatched.length} unmatched${unmatched.length ? `: ${unmatched.join(", ")}` : ""}`);
 
-    if (ONLY_CLIENT) {
-      clients = clients.filter((c) => c.tag === ONLY_CLIENT);
-      if (!clients.length) { console.error(`--client ${ONLY_CLIENT}: not found among matched sheet tags.`); process.exit(1); }
+    if (onlyClient) {
+      clients = clients.filter((c) => c.tag === onlyClient);
+      if (!clients.length) { console.error(`--client ${onlyClient}: not found among matched sheet tags.`); process.exit(1); }
     }
 
     // Change detection vs stored sheet_raw. Full rows are fetched so a failed
     // AI pass can fall back to the client's existing values instead of [].
+    // locations_locked (139) is read through to_jsonb, so a run before 139 reads every client as not locked.
     const { rows: existing } = await pool.query(
       `SELECT client_tag, countries, include_locations, include_industries, include_keywords,
-              exclude_industries, exclude_keywords, exclude_terms, sheet_raw FROM client_targeting`);
+              exclude_industries, exclude_keywords, exclude_terms, sheet_raw,
+              coalesce((to_jsonb(t) ->> 'locations_locked')::boolean, false) AS locations_locked
+         FROM client_targeting t`);
     const existingByTag = new Map(existing.map((r) => [r.client_tag, r]));
+    // Places edited by hand (139): never re-parsed, never written by this run.
+    const lockedTags = new Set(existing.filter((r) => r.locations_locked).map((r) => r.client_tag));
     const rawOf = (c) => ({ target: c.target, exclusion: c.exclusion, locations: c.locations });
-    let changed = clients.filter((c) => FORCE || JSON.stringify(existingByTag.get(c.tag)?.sheet_raw ?? null) !== JSON.stringify(rawOf(c)));
+    let changed = clients.filter((c) => force || JSON.stringify(existingByTag.get(c.tag)?.sheet_raw ?? null) !== JSON.stringify(rawOf(c)));
     // A job may name specific tags (what the operator confirmed in the preview);
     // an empty list means "whatever is currently changed".
     if (job?.client_tags?.length) {
@@ -724,13 +756,16 @@ async function main(job = null) {
       await jobSet({ total: JOB.total, phase: `Parsing ${changed.length} client(s)` });
     }
 
-    if (DRY) {
+    if (dry) {
       const kept = (cell) => (isNonAnswer(cell) ? "  [no answer: stored rules kept]" : "");
+      const placesKept = (c) => (lockedTags.has(c.tag) ? "  [places kept (edited by hand)]" : kept(c.locations));
       for (const c of changed.slice(0, 15)) {
-        console.log(`\n=== ${c.tag} ===\n  L: ${c.target.slice(0, 150)}\n  M: ${c.exclusion.slice(0, 150)}${kept(c.exclusion)}\n  O: ${c.locations.slice(0, 200)}${kept(c.locations)}`);
+        console.log(`\n=== ${c.tag} ===\n  L: ${c.target.slice(0, 150)}\n  M: ${c.exclusion.slice(0, 150)}${kept(c.exclusion)}\n  O: ${c.locations.slice(0, 200)}${placesKept(c)}`);
       }
       const noAnswer = changed.filter((c) => isNonAnswer(c.exclusion) || isNonAnswer(c.locations)).map((c) => c.tag);
       if (noAnswer.length) console.log(`\n${noAnswer.length} changed client(s) with a blank or non-answer cell, kept as stored: ${noAnswer.join(", ")}`);
+      const byHand = changed.filter((c) => lockedTags.has(c.tag)).map((c) => c.tag);
+      if (byHand.length) console.log(`\n${byHand.length} changed client(s): places kept (edited by hand): ${byHand.join(", ")}`);
       if (changed.length > 15) console.log(`\n… and ${changed.length - 15} more changed clients.`);
       console.log("\n--dry-run: no AI calls, no DB writes.");
       return;
@@ -750,7 +785,7 @@ async function main(job = null) {
     const allDropped = [];
     const locByTag = new Map();
     const locFailed = new Set();
-    await mapConcurrent(changed.filter((c) => !isNonAnswer(c.locations)), 4, async (c) => {
+    await mapConcurrent(changed.filter((c) => !isNonAnswer(c.locations) && !lockedTags.has(c.tag)), 4, async (c) => {
       try {
         const raw = await parseLocations(c.locations);
         if (echoesExample(raw.map((e) => e.city).filter(Boolean), EXAMPLE_PLACES, c.locations, { unlessText: TEXAS_WORDS })) {
@@ -850,15 +885,26 @@ async function main(job = null) {
       }
     }
 
+    // Places edited by hand are checked again as the row is written (locations_locked, 139), so a lock taken while
+    // this run worked still wins. Before 139 the column does not exist and the write is as it always was.
+    const lockAware = (await pool.query(
+      `SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'client_targeting' AND column_name = 'locations_locked'`)).rowCount > 0;
+    const placesSet = (column, value) =>
+      lockAware ? `CASE WHEN client_targeting.locations_locked THEN client_targeting.${column} ELSE ${value} END` : value;
+
     const client = await pool.connect();
     let written = 0;
     const partial = [];
+    const keptByHand = [];
     try {
       await client.query("begin");
       for (const c of changed) {
         const ex = existingByTag.get(c.tag);
+        // Places edited by hand (139) are kept as stored, as a non-answer keeps them.
+        const handLocked = lockedTags.has(c.tag);
         // A blank or non-answer cell keeps what is stored for it (2026-11-20).
-        const keepLoc = isNonAnswer(c.locations);
+        const keepLoc = handLocked || isNonAnswer(c.locations);
         const keepExcl = isNonAnswer(c.exclusion);
         const locFail = !keepLoc && (locFailed.has(c.tag) || !locByTag.has(c.tag));
         const bFail = !keepExcl && catRes.failed.has(c.tag);
@@ -882,7 +928,7 @@ async function main(job = null) {
         const sheetRaw = allOk ? rawOf(c) : (ex?.sheet_raw ?? null);
         if (!allOk) partial.push(c.tag);
 
-        await client.query(
+        const { rows: [w] } = await client.query(
           // commercial_cleaning is set ON INSERT ONLY, from the client's type in
           // the Client Tracker (col F): cleaning clients exclude the
           // commercial-cleaning title list by default (client rule 2026-08-25).
@@ -895,8 +941,8 @@ async function main(job = null) {
                    $8::jsonb, now(), 'sheet', now(),
                    coalesce((SELECT ct.client_type = 'Cleaning' FROM client_tags ct WHERE ct.tag = $1), false))
            ON CONFLICT (client_tag) DO UPDATE SET
-             countries = $2::text[],
-             include_locations = $3::jsonb,
+             countries = ${placesSet("countries", "$2::text[]")},
+             include_locations = ${placesSet("include_locations", "$3::jsonb")},
              include_industries = $4::text[],
              include_keywords = $5::text[],
              exclude_industries = $6::text[],
@@ -906,7 +952,8 @@ async function main(job = null) {
              sheet_raw = $8::jsonb,
              sheet_synced_at = now(),
              source = 'sheet',
-             updated_at = now()`,
+             updated_at = now()
+           RETURNING ${lockAware ? "locations_locked" : "false"} AS locked`,
           // $4 / $5 are always '{}' now — include_industries / include_keywords
           // are never populated from the sheet.
           // $9 exclude_terms: the merged list migrations 078/079 made THE list
@@ -921,7 +968,10 @@ async function main(job = null) {
            ].map((x) => String(x).trim().toLowerCase()).filter(Boolean))].sort()]
         );
         written++;
-        const placesNote = keepLoc ? "locations kept (no answer in the sheet)" : locFail ? "locations kept" : `${locs.length} locations`;
+        const byHand = handLocked || w?.locked === true;
+        if (byHand) keptByHand.push(c.tag);
+        const placesNote = byHand ? "places kept (edited by hand)"
+          : keepLoc ? "locations kept (no answer in the sheet)" : locFail ? "locations kept" : `${locs.length} locations`;
         const exclNote = keepExcl ? "exclusions kept (no answer in the sheet)" : `${exclInd.length} excl-cats, ${exclKw.length} excl-keywords`;
         const line = `${c.tag}: ${placesNote}, ${exclNote}${allOk ? "" : "  [PARTIAL: will retry next run]"}`;
         console.log(`  ${line}`);
@@ -939,6 +989,9 @@ async function main(job = null) {
     if (partial.length) {
       console.warn(`\n${partial.length} clients had failed passes (existing values kept, will re-parse next run): ${partial.join(", ")}`);
     }
+    if (keptByHand.length) {
+      console.log(`\n${keptByHand.length} client(s): places kept (edited by hand): ${keptByHand.join(", ")}`);
+    }
 
     if (allDropped.length) {
       console.log(`\ndropped ${allDropped.length} location entries:`);
@@ -946,8 +999,6 @@ async function main(job = null) {
       if (allDropped.length > 40) console.log(`  … and ${allDropped.length - 40} more`);
     }
     console.log(`\nsynced ${written} clients | ${usage.calls} AI calls ≈ $${usage.cost.toFixed(2)} (${MODEL} + ${TEXT_MODEL})`);
-  } finally {
-    await pool.end();
   }
 }
 
@@ -1001,8 +1052,12 @@ async function serve() {
   console.log("targeting-worker stopped");
 }
 
-const entry = SERVE ? serve() : main();
-entry.catch((e) => {
-  console.error(e instanceof Error ? e.stack ?? e.message : e);
-  process.exit(1);
-});
+// Run only as a script (npm run sync-targeting, targeting-worker): the tests import syncSheetClients().
+const IS_MAIN = process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop());
+if (IS_MAIN) {
+  const entry = SERVE ? serve() : main();
+  entry.catch((e) => {
+    console.error(e instanceof Error ? e.stack ?? e.message : e);
+    process.exit(1);
+  });
+}
