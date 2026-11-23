@@ -29,9 +29,12 @@ export async function GET(request: NextRequest) {
   const admin = createAdminClient();
   const BASE = "id, campaigns, total, processed, sent, failed, skipped, status, error, created_at, completed_at, client_tag, email_side";
   // fit_total and fit_scored (migration 127): "N of M companies scored" for a
-  // push waiting for fit scoring. Read without them before 127 is applied.
+  // push waiting for fit scoring. question_variable_name (migration 139): the
+  // question variable the push sends, shown beside its client. Each is read
+  // without, in turn, before its migration is applied.
   const read = (fields: string) => admin.from("push_batches").select(fields).order("created_at", { ascending: false }).limit(limit);
-  let { data, error } = await read(`${BASE}, fit_total, fit_scored`);
+  let { data, error } = await read(`${BASE}, fit_total, fit_scored, question_variable_name`);
+  if (error?.code === "42703") ({ data, error } = await read(`${BASE}, fit_total, fit_scored`));
   if (error?.code === "42703") ({ data, error } = await read(BASE));
   if (error) {
     return NextResponse.json(

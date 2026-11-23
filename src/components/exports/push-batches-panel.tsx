@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { X, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { useHasPermission } from "@/lib/context/role-context";
+import { copyTag } from "../../../scripts/lib/questions/names.mjs";
 
 interface PushBatchCampaign {
   id: number | string;
@@ -33,6 +34,9 @@ interface PushBatch {
   // in 'scoring' until its companies are scored.
   fit_total?: number | null;
   fit_scored?: number | null;
+  // Question variables (migration 139): the variable this push also sends, by
+  // its stored (lower-case) name; shown as campaign copy writes it, {X}.
+  question_variable_name?: string | null;
 }
 
 interface CampaignTotals {
@@ -273,6 +277,15 @@ export function PushBatchesPanel() {
                   <Badge variant="secondary" className="shrink-0">
                     {batch.client_tag}
                     {batch.email_side ? ` · ${batch.email_side}` : ""}
+                  </Badge>
+                )}
+                {batch.question_variable_name && (
+                  <Badge
+                    variant="tinted"
+                    className="shrink-0 text-xs normal-case tracking-normal"
+                    title="This push also sends this question variable. Leads without a written value were skipped."
+                  >
+                    {copyTag(batch.question_variable_name)}
                   </Badge>
                 )}
                 <p className="min-w-0 flex-1 truncate text-[13px] font-medium" title={campaignNames}>
