@@ -29,9 +29,12 @@
 //      text variant for a client on the default's text
 //   D. the route through the TypeScript loader: roles, shapes, 400, 409, 404,
 //      save, reset, the audit lines
+//   E. the Clay tab's wiring (source checks): the sheet, its tabs, the grid's
+//      and the cell panel's "Edit prompt", the address that opens the sheet
 
 import pg from "pg";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { checker, dropPaidKeys, inTx, installNet, localDatabaseUrl, routeLoader, seedFixtureVariant } from "./fixtures/test-support.mjs";
 import { FIXTURE_MARKER, fixtureSeedExports } from "./fixtures/clay-originals/fixtures.mjs";
 import { originalRows, originalsMap, seedOriginals } from "./lib/enrich/seed-originals.mjs";
@@ -421,6 +424,36 @@ async function partD() {
     /no pipeline tables yet/.test(noTables.body.note ?? "") && (await one(`SELECT count(*)::int AS n FROM enrich_tables WHERE client_tag = $1`, [C])).n === 0);
 }
 
+// ── E. The Clay tab's wiring ────────────────────────────────────────────────
+
+function partE() {
+  section("E. The Clay tab's wiring (source checks)");
+  const source = (p) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
+  const loc = source("src/components/clay/location-tab.tsx");
+  const qv = source("src/components/clay/question-variable-tab.tsx");
+  check("the Location and Question variable tabs keep their exports and props",
+    loc.includes("export function LocationTab({ tag }: { tag: string })") && qv.includes("export function QuestionVariableTab({ tag }: { tag: string })"));
+  const sheet = source("src/components/clay/client-setup-sheet.tsx");
+  check("the sheet: its props, wide, every client of the shared list, the three tabs, a question before text not saved is lost",
+    /export function ClientSetupSheet\(\{\s*open,\s*onOpenChange,\s*initialTag,\s*initialTab = "prompts",\s*focus = null,\s*onSaved,\s*\}/.test(sheet) && sheet.includes("sm:max-w-3xl") &&
+      sheet.includes("useClientRoster()") && !sheet.includes("/api/bison/client-tags") && /"Prompts"[\s\S]*"Location"[\s\S]*"Question variable"/.test(sheet) && sheet.includes("window.confirm(LEAVE)"));
+  const tab = source("src/components/clay/prompts-tab.tsx");
+  check("the Prompts tab: its props, loaded fresh, version sent back, a 409 loads it again, Reset behind a confirm, unsaved text guarded",
+    /export function PromptsTab\(\{\s*tag,\s*focus = null,\s*onSaved,\s*onDirtyChange,\s*\}/.test(tab) && tab.includes("/api/enrich/prompts?tag=") && tab.includes("version: c.version") &&
+      tab.includes("if (j.changed)") && tab.includes("window.confirm(`Reset ") && tab.includes('addEventListener("beforeunload", ask)') && tab.includes("<textarea"));
+  const grid = source("src/components/clay/clay-grid.tsx");
+  const panel = source("src/components/clay/cell-panel.tsx");
+  check("the grid's header menu and the cell panel: Edit prompt on a personalisation AI step, Edited shown",
+    grid.includes("onEditPrompt?: (col: EnrichColumn) => void;") && grid.includes('"Edit prompt (edited)"') && grid.includes('col.config?.prompt_source === "edited"') &&
+      grid.includes('.includes("personalisation")') && panel.includes("onEditPrompt?: (col: EnrichColumn) => void;") && panel.includes("<PencilLine /> Edit prompt") &&
+      panel.includes('template === "people_v1" || template === "inboxes_v1"'));
+  const page = source("src/app/(app)/leads/clay/page.tsx");
+  check("the page: Client setup beside Inbound URLs, ?setup=TAG&tab= opens it, a save reads the tables and the table view again, Edit prompt to the grid and the panel",
+    page.includes("<SlidersHorizontal /> Client setup") && page.includes('params.get("setup")') && page.includes("isSetupTab(tab)") &&
+      page.includes("[table.id, onWorker, tick, setupTick]") && page.includes("[query, tick, setupTick]") && page.includes("onEditPrompt={promptTable ? editPrompt : undefined}") &&
+      /onEditPrompt=\{\s*promptTable\s*\?\s*\(col\) => \{\s*setOpenCell\(null\);/.test(page));
+}
+
 // ── Run ─────────────────────────────────────────────────────────────────────
 
 async function cleanup() {
@@ -461,6 +494,7 @@ try {
   );
   await partC();
   await partD();
+  partE();
   check("nothing tried to reach any address", net.calls.refused === 0 && Object.values(net.calls).every((n) => n === 0), JSON.stringify(net.calls));
 } catch (e) {
   count.failed++;

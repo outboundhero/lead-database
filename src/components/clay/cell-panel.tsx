@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Loader2, Play, RotateCcw } from "lucide-react";
+import { Loader2, PencilLine, Play, RotateCcw } from "lucide-react";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { withNames, type CellDetail, type CellStatus } from "@/lib/enrich/types";
+import { withNames, type CellDetail, type CellStatus, type EnrichColumn } from "@/lib/enrich/types";
 import { ColumnIcon, FOUND_COLUMN, KIND_LABEL, notRunHere, writtenElsewhere } from "./clay-cell";
 
 // The panel a cell click opens: what the cell holds and why — Clay's formula
@@ -65,6 +65,13 @@ function Code({ text, limit = 700 }: { text: string; limit?: number }) {
 
 const pretty = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
 
+/** A personalisation AI step of a People or General (pipeline) table: a client's own text can replace its prompt. */
+const isPromptStep = (col: EnrichColumn, template: string | null | undefined) =>
+  (template === "people_v1" || template === "inboxes_v1") &&
+  col.action === "ai_web" &&
+  Array.isArray(col.config?.flag) &&
+  (col.config.flag as unknown[]).includes("personalisation");
+
 export function CellPanel({
   target,
   onClose,
@@ -72,6 +79,7 @@ export function CellPanel({
   canRun,
   copy,
   run: isRun,
+  onEditPrompt,
 }: {
   target: { row: number; col: string } | null;
   onClose: () => void;
@@ -81,6 +89,8 @@ export function CellPanel({
   copy?: boolean;
   /** The table is an AI Ark run's: its find_email column is written by the pulls' copy. */
   run?: boolean;
+  /** Opens the prompt editor on this step ("Edit prompt"), for a personalisation AI step. */
+  onEditPrompt?: (col: EnrichColumn) => void;
 }) {
   const [detail, setDetail] = useState<CellDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -236,6 +246,16 @@ export function CellPanel({
                   ))}
                 </div>
               </Section>
+            )}
+            {onEditPrompt && isPromptStep(col!, shown.row.template) && (
+              <div className="flex flex-wrap items-center gap-2 rounded-xl bg-primary/5 px-3 py-2">
+                <span className="text-[12.5px]">
+                  {col!.config?.prompt_source === "edited" ? "This step runs the client's own prompt (edited)." : "This step runs the Clay prompt."}
+                </span>
+                <Button size="xs" variant="tinted" className="ml-auto" onClick={() => onEditPrompt(col!)}>
+                  <PencilLine /> Edit prompt
+                </Button>
+              </div>
             )}
             {col!.kind === "action" && Object.keys(col!.inputs ?? {}).length > 0 && (
               <Section title="Inputs">
