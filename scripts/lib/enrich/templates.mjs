@@ -22,9 +22,18 @@
 // earlier) still compiles as before. The default's extension columns (positions
 // after 68, 88 and 76, original-keys.mjs) map by their keys, and a template
 // column compiled from one is left out when the originals lack it.
+//
+// Prompt edits (migration 139, prompt-overrides.mjs): a client's own text for
+// the research and question steps (P#60, P#61, G#48, G#49), typed in the Clay
+// tab, replaces the original's prompt in memory when the tables compile. An
+// edit that does not compile (the originals changed under it, say) is left
+// out on its own: that step compiles from its original, the table's note says
+// so, and every other edit and step is unchanged.
 
 import { loadOriginals, OriginalsMissing, shapeOf } from "./compile-original.mjs";
 import { keysOf } from "./original-keys.mjs";
+import { firstLine, isPromptPosition, loadPromptOverrides, markPromptSources, overrideLabel, skippedNote, withPromptOverrides } from "./prompt-overrides.mjs";
+import { parsePrompt } from "./prompt-text.mjs";
 import { COMPANY_REFS, COMPANY_TABLE_NAME_V2, COMPANY_TEMPLATE_V2, companyColumnsV2 } from "./company-template-v2.mjs";
 import { INBOX_TABLE_NAME, INBOX_TEMPLATE, inboxColumns } from "./inbox-template.mjs";
 import { PEOPLE_TABLE_NAME, PEOPLE_TEMPLATE, peopleColumns } from "./people-template.mjs";
@@ -128,12 +137,20 @@ export async function ensureTable(db, tag, kind, { variant = "default", note = n
      ON CONFLICT (client_tag, kind, template) WHERE template IS NOT NULL
      DO UPDATE SET source_note = EXCLUDED.source_note
      RETURNING id, (xmax = 0) AS created`,
-    [
-      normTag(tag), t.kind, t.name,
-      note ?? `Pipeline template ${t.template}, compiled from the Clay originals (variant ${variant})`, t.template,
-    ]
+    [normTag(tag), t.kind, t.name, note ?? tableNote(kind, variant), t.template]
   );
   return { id: table.id, created: table.created };
+}
+
+/**
+ * The note of a client's table compiled from a variant (variantOfNote reads it back).
+ *
+ * @param {TemplateKind} kind
+ * @param {string} variant
+ * @returns {string}
+ */
+export function tableNote(kind, variant) {
+  return `Pipeline template ${PIPELINE_TEMPLATES[kind].template}, compiled from the Clay originals (variant ${variant})`;
 }
 
 /**
@@ -170,6 +187,7 @@ export function compileTemplates(originals, { settings = null } = {}) {
     inboxes: inboxColumns(originals),
     people: peopleColumns(originals, settings?.people_tracks ?? null, { companyKeys: { ...keysOf("companies"), ...COMPANY_REFS } }),
   };
+  markPromptSources(out, originals); // config.prompt_source on the editable steps: "edited" or "clay"
   for (const [kind, cols] of Object.entries(out)) {
     const keys = new Set();
     for (const c of cols) {
@@ -179,6 +197,57 @@ export function compileTemplates(originals, { settings = null } = {}) {
     order(cols.map((c) => ({ ...c })));
   }
   return out;
+}
+
+/**
+ * A client's prompt edits (prompt-overrides.mjs) applied to its originals:
+ * each edit is kept only when the templates compile with it (and with the
+ * edits kept before it), so one that no longer compiles is left out on its
+ * own, with the first line of why, and never sends the client back to the
+ * default. An edit for a position that is not editable, whose original is
+ * missing, or whose stored prompt is not one the editor writes is left out
+ * too. Pure: the edits are given.
+ *
+ * @param {import("./compile-original.mjs").Originals} originals
+ * @param {import("./prompt-overrides.mjs").PromptOverride[]} overrides
+ * @param {{ tag: string, settings?: import("./settings.mjs").PipelineSettings | null }} opts
+ * @returns {{ originals: import("./compile-original.mjs").Originals, applied: import("./prompt-overrides.mjs").PromptOverride[],
+ *   skipped: import("./prompt-overrides.mjs").SkippedOverride[] }}
+ */
+export function applyPromptOverrides(originals, overrides, { tag, settings = null }) {
+  const variant = variantName(tag);
+  /** @type {import("./prompt-overrides.mjs").PromptOverride[]} */
+  const candidates = [];
+  /** @type {import("./prompt-overrides.mjs").SkippedOverride[]} */
+  const skipped = [];
+  for (const o of overrides ?? []) {
+    const at = { template_kind: o.template_kind, position: Number(o.position) };
+    if (!isPromptPosition(o.template_kind, o.position)) skipped.push({ ...at, reason: "not one of the editable prompts" });
+    else if (!originals.has(`${o.template_kind}:${o.position}`)) skipped.push({ ...at, reason: "its Clay original is not loaded" });
+    else if (!parsePrompt(o.formula).ok) skipped.push({ ...at, reason: "the stored prompt is not one the editor writes" });
+    else candidates.push({ ...o, position: Number(o.position) });
+  }
+  /** Null when the templates compile with these edits, else why not. */
+  const fails = (list) => {
+    try {
+      compileTemplates(withPromptOverrides(originals, list, { variant }), { settings });
+      return null;
+    } catch (e) {
+      if (e instanceof OriginalsMissing) throw e;
+      return firstLine(e);
+    }
+  };
+  /** @type {import("./prompt-overrides.mjs").PromptOverride[]} */
+  let applied = [];
+  if (candidates.length && fails(candidates) === null) applied = candidates;
+  else {
+    for (const o of candidates) {
+      const why = fails([...applied, o]);
+      if (why === null) applied.push(o);
+      else skipped.push({ template_kind: o.template_kind, position: o.position, reason: `it does not compile: ${why}` });
+    }
+  }
+  return { originals: applied.length ? withPromptOverrides(originals, applied, { variant }) : originals, applied, skipped };
 }
 
 const UPSERT_COLUMNS = `
@@ -268,14 +337,20 @@ export async function lockPipelineTables(db, tag) {
  * "default" from that note, so the worker never treats them as the client's
  * own (personalisation stays off).
  *
+ * The client's prompt edits (migration 139) are applied after that choice
+ * (applyPromptOverrides): an edit that does not compile is left out on its
+ * own, and the note of its table says so after the usual note.
+ *
  * @param {Db} db  a client inside the caller's transaction
  * @param {string} tag
  * @param {{ settings?: import("./settings.mjs").PipelineSettings | null, base?: string }} [opts]
  *   base: the variant an overlay is composed with ("default"; the tests pass their own, production never does)
  * @returns {Promise<{ companies: string, inboxes: string, people: string, variant: string, own_variant: string | null,
- *   fallback: string | null, created: { companies: boolean, inboxes: boolean, people: boolean } }>}
+ *   fallback: string | null, prompts: { applied: string[], skipped: import("./prompt-overrides.mjs").SkippedOverride[] },
+ *   created: { companies: boolean, inboxes: boolean, people: boolean } }>}
  *   table ids, the variant they were compiled from, the client's own variant when it is loaded (else null),
- *   why its own variant was set aside (null when it was not), and which tables were made now
+ *   why its own variant was set aside (null when it was not), the prompt edits applied ("P#60") and left out,
+ *   and which tables were made now
  */
 export async function ensurePipelineTables(db, tag, { settings = null, base = "default" } = {}) {
   const t = normTag(tag);
@@ -296,8 +371,14 @@ export async function ensurePipelineTables(db, tag, { settings = null, base = "d
       originals = await loadOriginals(db, "default");
     }
   }
+  const edits = applyPromptOverrides(originals, await loadPromptOverrides(db, t), { tag: t, settings });
+  originals = edits.originals;
   /** @param {TemplateKind} kind */
-  const note = (kind) => (fallback == null ? null : fallbackNote(kind, own, fallback));
+  const note = (kind) => {
+    const skipped = edits.skipped.filter((s) => s.template_kind === kind);
+    if (fallback == null && !skipped.length) return null;
+    return `${fallback == null ? tableNote(kind, variant) : fallbackNote(kind, own, fallback)}${skippedNote(skipped)}`;
+  };
   const c = await ensureTable(db, t, "companies", { variant, note: note("companies") });
   const i = await ensureTable(db, t, "inboxes", { variant, note: note("inboxes") });
   const p = await ensureTable(db, t, "people", { variant, note: note("people") });
@@ -308,6 +389,7 @@ export async function ensurePipelineTables(db, tag, { settings = null, base = "d
     variant,
     own_variant: own === "default" ? null : own,
     fallback,
+    prompts: { applied: edits.applied.map(overrideLabel), skipped: edits.skipped },
     created: { companies: c.created, inboxes: i.created, people: p.created },
   };
 }
