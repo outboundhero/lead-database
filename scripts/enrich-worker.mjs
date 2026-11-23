@@ -90,6 +90,17 @@
 // on, and prunes. It does nothing at all while overlap_sharing is off or has
 // no "since"; it ships off and covers no client.
 //
+// Question variables (migration 139, scripts/lib/questions/): once per loop,
+// not awaited, with a busy flag and on a pool of its own (3 connections), the
+// question step claims the oldest open question job and gathers its leads or
+// writes one slice of them (research per company and a question per lead, on
+// OpenAI, under question_variables.usd_per_day; jobs.mjs questionStep). A job
+// is paused with its reason while question variables are off for its client,
+// the day's budget is used up or OPENAI_API_KEY is missing, and resumes by
+// itself. With no job open the step waits 10 s between looks. The heartbeat
+// lists question_jobs; the web app starts no job without it. Ships off: no
+// job can start while the switch covers no client.
+//
 // Env: DATABASE_URL (required). OPENAI_API_KEY: optional; without it, the
 // columns that need it show "Needs key" and the row waits.
 // FINDYMAIL_API_KEY, PROSPEO_API_KEY, ANYMAIL_FINDER_API_KEY, ENRICHLEY_API_KEY:
@@ -140,6 +151,7 @@ import { UPLOAD_CAPABILITY } from "./lib/enrich/upload-people.mjs";
 import { SHARING_CAPABILITY, sharePushConfig } from "./lib/overlap-topup.mjs";
 import { newShareMemory, SHARE_EVERY_MS, shareRefusals, shareRound } from "./lib/share/step.mjs";
 import { SHARE_UNREADY } from "./lib/share/db.mjs";
+import { QUESTION_JOBS_CAPABILITY, questionStep } from "./lib/questions/jobs.mjs";
 dotenv.config({ path: new URL("../.env.local", import.meta.url).pathname, quiet: true });
 
 const env = process.env;
@@ -569,6 +581,8 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
     // Overlap sharing (134): whether applied shares are pushed with no button (SHARE_PUSH_KEY and the web address set),
     // and the push timer's last failed ask per receiving client, cleared by its next push that goes through.
     sharing: { push_auto: Boolean(sharePush), refusals: shareRefusals(shareMemory) },
+    // Question jobs (139): the step's counters, the job it last looked at and why that job waits, if it does.
+    questions: { ...questionState },
     host: os.hostname(),
     pid: process.pid,
     stopped: stopping,
@@ -803,6 +817,58 @@ async function shareStep() {
   }
 }
 
+// ── Question variables (migration 139) ──────────────────────────────────────
+// One step a loop, not awaited, with a busy flag (scripts/lib/questions/jobs.mjs).
+// Its statements run on a pool of their own, so a long gather page or a slice's
+// writes never take a connection a row or a slice is waiting for. With nothing
+// to do it waits QUESTION_IDLE_MS before looking again.
+
+CAPABILITIES.push(QUESTION_JOBS_CAPABILITY);
+const QUESTION_IDLE_MS = 10_000;
+const questionPool = new pg.Pool({
+  connectionString: env.DATABASE_URL,
+  max: 3,
+  keepAlive: true,
+  connectionTimeoutMillis: 30_000,
+  idleTimeoutMillis: 30_000,
+  query_timeout: 70_000,
+});
+questionPool.on("error", (e) => log(`question pool idle-client error: ${e.message}`)); // never crash the loop
+const questionState = { steps: 0, slices: 0, written: 0, idle: true, job: null, last_error: null };
+let questionBusy = false;
+let questionInFlight = Promise.resolve();
+let questionUnreadyLogged = false;
+// What a database without migration 139 answers: no question tables (42P01) or columns (42703).
+const QUESTIONS_UNREADY = new Set(["42P01", "42703"]);
+
+async function questionTick() {
+  if (questionBusy) return;
+  questionBusy = true;
+  try {
+    const r = await questionStep(questionPool, { env, log, shouldStop: () => shuttingDown });
+    questionUnreadyLogged = false;
+    questionState.steps++;
+    questionState.idle = !r.worked;
+    questionState.job = r.jobId ? { id: r.jobId, status: r.status ?? null, note: r.note ?? null } : null;
+    if (r.written) {
+      questionState.slices++;
+      questionState.written += r.written;
+    }
+    questionState.last_error = null;
+  } catch (e) {
+    questionState.idle = true;
+    if (QUESTIONS_UNREADY.has(e?.code)) {
+      if (!questionUnreadyLogged) log("question jobs are idle: migration 139 is not applied");
+      questionUnreadyLogged = true;
+      return;
+    }
+    questionState.last_error = String(e?.message ?? e).slice(0, 300);
+    log(`question jobs: ${e.message}`);
+  } finally {
+    questionBusy = false;
+  }
+}
+
 // ── Template rows waiting on a key or a cap: queued again once it cleared ───
 
 let sweepBusy = false;
@@ -871,8 +937,14 @@ async function main() {
   let lastPromote = 0;
   let lastFound = 0;
   let lastShare = 0;
+  let lastQuestion = 0;
   while (!shuttingDown) {
     try {
+      if (!questionBusy && Date.now() - lastQuestion > (questionState.idle ? QUESTION_IDLE_MS : 0)) {
+        lastQuestion = Date.now();
+        // One step a loop; a step still busy keeps its own promise, so a stopping worker waits for it.
+        questionInFlight = questionTick();
+      }
       if (Date.now() - lastAdd > AUTO_ADD_EVERY_MS) {
         lastAdd = Date.now();
         addFinishedPulls();
@@ -913,7 +985,8 @@ async function main() {
         inFlight++;
         safeProcess(r).finally(() => { inFlight--; });
       }
-      if (ONCE && !claimed.length && inFlight === 0 && aiark.idle && fitState.idle && !(await runDue(pool)) && !(await companyRunDue(pool)) && !(await peopleRunDue(pool))) break;
+      if (ONCE && !claimed.length && inFlight === 0 && aiark.idle && fitState.idle && !questionBusy && questionState.idle &&
+        !(await runDue(pool)) && !(await companyRunDue(pool)) && !(await peopleRunDue(pool))) break;
       await sleep(claimed.length ? 50 : inFlight ? 250 : POLL_MS);
     } catch (e) {
       log(`loop error: ${e.message}`);
@@ -934,6 +1007,9 @@ async function main() {
   // So is the share round in flight (told to stop, it ends after the step it is on), then its own pool closes.
   await shareInFlight;
   await sharePool.end().catch(() => {});
+  // And the question step in flight: told to stop, it ends after the lead (or gather page) it is on.
+  await questionInFlight;
+  await questionPool.end().catch(() => {});
   await heartbeat({ stopping: true }).catch(() => {});
   log(`stopped: ${stats.processed} rows processed, ${stats.calls} provider calls, ${stats.failed} failures`);
   await pool.end();
