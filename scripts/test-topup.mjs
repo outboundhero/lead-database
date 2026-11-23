@@ -180,8 +180,11 @@ async function partM() {
   check("the column refuses 0 (1 to 100,000)", code === "23514", String(code));
   check("the sheet sync never writes it", !/min_leads_per_place/.test(source("scripts/sync-client-targeting-from-sheet.mjs")));
   const route = source("src/app/api/clients/targeting/route.ts");
+  // Since 139 the route writes in SQL (withTx): the stored minimum is kept unless one was sent ($12).
   check("the Rules route writes it only when sent, through cleanMinimum, and keeps it otherwise",
-    /"min_leads_per_place" in body \? cleanMinimum\(body\.min_leads_per_place\)/.test(route) && /\.\.\.\(minimum \? \{ min_leads_per_place: minimum\.value \} : \{\}\)/.test(route));
+    /"min_leads_per_place" in body \? cleanMinimum\(body\.min_leads_per_place\)/.test(route) &&
+      /min_leads_per_place = CASE WHEN \$12 THEN EXCLUDED\.min_leads_per_place ELSE t\.min_leads_per_place END/.test(route) &&
+      /minimum \? minimum\.value : null, Boolean\(minimum\),/.test(route));
   check("the Rules dialog sends it", /min_leads_per_place: minValue/.test(source("src/components/clients/client-targeting-dialog.tsx")));
   const page = source("src/app/(app)/leads/page.tsx");
   check("the Leads page no longer sends a fixed threshold", !/location-coverage\?[^`]*threshold=/.test(page));
