@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { copyTag, isOsClient } from "../../../scripts/lib/questions/names.mjs";
+import type { BisonView, CopyCheckView, JobView, ReadinessView, VariablesView } from "@/lib/questions/types";
 
 /** What the popup sends for the question variable, as this row last decided it. */
 export interface QuestionChoice {
@@ -49,60 +50,12 @@ const JOB_STATE: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
-// The answers of W3's routes (build contract, section 4).
-interface QuestionVariableSummary {
-  id: string;
-  name: string;
-  copyTag: string;
-  createdForTag: string | null;
-  services: string;
-  maxWords: number;
-  promptVersion: number;
-  archived: boolean;
-  usedBy: string[];
-}
-interface VariablesAnswer {
-  tag: string;
-  isOs: boolean;
-  switchOn: boolean;
-  workerReady: boolean;
-  current: { variableId: string | null };
-  variables: QuestionVariableSummary[];
-}
-interface Readiness {
-  selected: number;
-  withValue: number;
-  stale: number;
-  missing: number;
-  errors: number;
-  companiesMissing: number;
-  estimate: { researchCalls: number; questionCalls: number };
-}
-interface QuestionJob {
-  id: string;
-  variableId: string;
-  variableName: string;
-  status: string;
-  total: number;
-  done: number;
-  failed: number;
-  skipped: number;
-  companies: number;
-  researched: number;
-  spendUsd: number;
-  note: string | null;
-  error: string | null;
-  createdAt: string;
-  completedAt: string | null;
-}
-interface BisonCheck {
-  name: string;
-  copyTag: string;
-  installs: Array<{ install: string; side: "b2b" | "b2c"; exists: boolean | null; error: string | null }>;
-}
-interface CopyCheck {
-  campaigns: Array<{ instance_url: string; id: number; usesVariable: boolean; usesQuestion: boolean; error: string | null }>;
-}
+// The answers of the /api/questions routes, as the routes declare them (type only).
+type VariablesAnswer = VariablesView;
+type Readiness = ReadinessView;
+type QuestionJob = JobView;
+type BisonCheck = BisonView;
+type CopyCheck = CopyCheckView;
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
