@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowDown, ArrowUp, ChevronDown, Filter, Play, RotateCcw } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, Filter, PencilLine, Play, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -39,6 +39,10 @@ export const FILTER_LABELS: Record<string, string> = {
 
 const ROW_HEAD = 64; // checkbox + row number column
 
+/** A personalisation AI step (People P#60, P#61; General G#48, G#49): a client's own text can replace its prompt. */
+const isPromptColumn = (col: EnrichColumn) =>
+  col.action === "ai_web" && Array.isArray(col.config?.flag) && (col.config.flag as unknown[]).includes("personalisation");
+
 export function columnWidth(col: EnrichColumn): number {
   if (col.key === "company") return 230;
   if (col.data_type === "boolean") return 170;
@@ -67,6 +71,8 @@ interface ClayGridProps {
   onRunColumn: (col: EnrichColumn, only?: string) => void;
   canRun: boolean;
   loading: boolean;
+  /** "Edit prompt" on a personalisation AI step: given only for a People or General (pipeline) table. */
+  onEditPrompt?: (col: EnrichColumn) => void;
   /** The table is a hand-seeded copy of the client's Clay table: its later columns read "not run here". */
   copy?: boolean;
   /** The table is an AI Ark run's: its find_email column is written by the pulls' copy, so it shows as built. */
@@ -149,8 +155,9 @@ export function ClayGrid(props: ClayGridProps) {
   );
 }
 
-function HeaderCell({ col, sticky, counts, rowCount, sort, onSort, filters, onFilter, onRunColumn, canRun, copy, run }: ClayGridProps & { col: EnrichColumn; sticky: boolean }) {
+function HeaderCell({ col, sticky, counts, rowCount, sort, onSort, filters, onFilter, onRunColumn, canRun, onEditPrompt, copy, run }: ClayGridProps & { col: EnrichColumn; sticky: boolean }) {
   const sorted = sort?.col === col.key ? sort.dir : null;
+  const promptEdited = col.config?.prompt_source === "edited";
   const filtered = filters.some((f) => f.col === col.key);
   const states =
     col.phase > 1
@@ -203,6 +210,7 @@ function HeaderCell({ col, sticky, counts, rowCount, sort, onSort, filters, onFi
               {notRunHere(col, { run }) ? (copy ? " · Clay copy, not run here" : " · Not built yet") : ""}
             </span>
             {col.description && <span className="block text-[11px] font-normal leading-snug text-muted-foreground">{col.description}</span>}
+            {promptEdited && <span className="block text-[12px] font-medium text-primary">Edited: this client&apos;s own prompt</span>}
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => onSort({ col: col.key, dir: "asc" })}>
@@ -234,6 +242,14 @@ function HeaderCell({ col, sticky, counts, rowCount, sort, onSort, filters, onFi
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => onRunColumn(col, "error")}>
                 <RotateCcw className="size-3.5" /> Retry this column&apos;s errors
+              </DropdownMenuItem>
+            </>
+          )}
+          {onEditPrompt && isPromptColumn(col) && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => onEditPrompt(col)}>
+                <PencilLine className="size-3.5" /> {promptEdited ? "Edit prompt (edited)" : "Edit prompt"}
               </DropdownMenuItem>
             </>
           )}

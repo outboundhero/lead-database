@@ -13,6 +13,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  SlidersHorizontal,
   Store,
   Table2,
   Trash2,
@@ -42,6 +43,8 @@ import { CellPanel } from "@/components/clay/cell-panel";
 import { notRunHere } from "@/components/clay/clay-cell";
 import { ImportDialog } from "@/components/clay/import-dialog";
 import { InboundStrip, InboundUrlsSheet } from "@/components/clay/inbound-urls";
+import { ClientSetupSheet, isSetupTab, type SetupTab } from "@/components/clay/client-setup-sheet";
+import { promptFocusOf, type PromptFocus } from "@/components/clay/prompts-tab";
 import { UploadRowsStrip } from "@/components/clay/upload-rows";
 import { ROW_STATUSES, type EnrichColumn, type EnrichTableSummary, type RowsPage, type RowStatus, type WorkerState } from "@/lib/enrich/types";
 import type { TableDetailView } from "@/app/api/enrich/table/route";
@@ -189,6 +192,15 @@ function ClayTab() {
   const [inboundOpen, setInboundOpen] = useState(false);
   // Bumped by every change in the Inbound URLs sheet, so a table's strip reads its URL again.
   const [inboundTick, setInboundTick] = useState(0);
+  // The Client setup sheet: opened by its button, a column's "Edit prompt", or the address
+  // (?setup=TAG&tab=prompts|location|question, which the export popup links to).
+  const [setup, setSetup] = useState<{ open: boolean; tag: string | null; tab: SetupTab; focus: PromptFocus | null }>(() => {
+    const tag = params.get("setup")?.trim().toUpperCase() || null;
+    const tab = params.get("tab");
+    return { open: Boolean(tag), tag, tab: isSetupTab(tab) ? tab : "prompts", focus: null };
+  });
+  // Bumped after the sheet saved something, so the open table reads its columns again.
+  const [setupTick, setSetupTick] = useState(0);
 
   // A failed refresh keeps the tables already on screen; only a first load that
   // fails says so, rather than reading as "No Clay tables yet".
@@ -211,11 +223,26 @@ function ClayTab() {
     if (canView) loadTables();
   }, [canView, loadTables]);
 
+  // With no table in the address, the first client's Companies table opens (the linked client's, from ?setup=).
+  const linkTag = setup.tag;
   useEffect(() => {
     if (!tables?.length || (tableId && tables.some((t) => t.id === tableId))) return;
-    const first = tables.find((t) => t.kind === "companies") ?? tables[0];
+    const linked = linkTag ? tables.find((t) => t.client_tag === linkTag && t.kind === "companies") : undefined;
+    const first = linked ?? tables.find((t) => t.kind === "companies") ?? tables[0];
     router.replace(`/leads/clay?t=${first.id}`);
-  }, [tables, tableId, router]);
+  }, [tables, tableId, router, linkTag]);
+
+  /** Closes the Client setup sheet, and takes ?setup= and ?tab= out of the address so a reload doesn't open it again. */
+  const closeSetup = () => {
+    setSetup((s) => ({ ...s, open: false, focus: null }));
+    if (params.get("setup") !== null || params.get("tab") !== null) {
+      const sp = new URLSearchParams(params.toString());
+      sp.delete("setup");
+      sp.delete("tab");
+      const qs = sp.toString();
+      router.replace(`/leads/clay${qs ? `?${qs}` : ""}`);
+    }
+  };
 
   const table = tables?.find((t) => t.id === tableId) ?? null;
 
@@ -290,6 +317,9 @@ function ClayTab() {
         <div className="ml-auto flex items-center gap-2">
           <Button size="sm" variant="outline" onClick={() => setInboundOpen(true)}>
             <Webhook /> Inbound URLs
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setSetup({ open: true, tag: table?.client_tag ?? null, tab: "prompts", focus: null })}>
+            <SlidersHorizontal /> Client setup
           </Button>
           <WorkerPill worker={worker} />
           {worker?.online &&
@@ -424,6 +454,8 @@ function ClayTab() {
             onRowsChanged={loadTables}
             inboundTick={inboundTick}
             onOpenInbound={() => setInboundOpen(true)}
+            setupTick={setupTick}
+            onEditPrompt={(focus) => setSetup({ open: true, tag: table.client_tag, tab: "prompts", focus })}
           />
         </>
       )}
@@ -433,6 +465,17 @@ function ClayTab() {
         onChanged={() => {
           setInboundTick((n) => n + 1);
           loadTables();
+        }}
+      />
+      <ClientSetupSheet
+        open={setup.open}
+        onOpenChange={(o) => (o ? setSetup((s) => ({ ...s, open: true })) : closeSetup())}
+        initialTag={setup.tag}
+        initialTab={setup.tab}
+        focus={setup.focus}
+        onSaved={() => {
+          loadTables();
+          setSetupTick((n) => n + 1);
         }}
       />
     </div>
@@ -546,6 +589,8 @@ function TableView({
   onRowsChanged,
   inboundTick,
   onOpenInbound,
+  setupTick,
+  onEditPrompt,
 }: {
   table: EnrichTableSummary;
   /** Filters from the page's address (?q=, ?status=, ?f=), applied when the table opens. */
@@ -555,6 +600,10 @@ function TableView({
   /** Changes when the Inbound URLs sheet changed something. */
   inboundTick: number;
   onOpenInbound: () => void;
+  /** Changes when the Client setup sheet saved something (a prompt edit recompiles the columns). */
+  setupTick: number;
+  /** Opens the Client setup sheet on a personalisation step's prompt. */
+  onEditPrompt: (focus: PromptFocus) => void;
 }) {
   const canDelete = useHasPermission("admin");
   // An AI Ark run's table: its rows come from AI Ark, never from a CSV.
@@ -564,6 +613,12 @@ function TableView({
   // A hand-seeded copy of the client's own Clay table (122): kept for reading and
   // comparing with Clay; its later columns never run in it.
   const isCopy = !isRun && !table.template;
+  // A People or General (pipeline) table: its personalisation AI steps take "Edit prompt".
+  const promptTable = table.template === "people_v1" || table.template === "inboxes_v1";
+  const editPrompt = (col: EnrichColumn) => {
+    const focus = promptFocusOf(table.template, col.key);
+    if (focus) onEditPrompt(focus);
+  };
   const [detail, setDetail] = useState<TableDetailView | null>(null);
   const [page, setPage] = useState<RowsPage | null>(null);
   const [shownQuery, setShownQuery] = useState<string | null>(null);
@@ -613,7 +668,7 @@ function TableView({
         if (detailReq.current === ctl) detailReq.current = null;
       });
     return () => ctl.abort();
-  }, [table.id, onWorker, tick]);
+  }, [table.id, onWorker, tick, setupTick]);
 
   // One page of rows, filtered, searched and sorted by the server.
   const query = useMemo(() => {
@@ -644,7 +699,7 @@ function TableView({
         if (rowsReq.current === ctl) rowsReq.current = null;
       });
     return () => ctl.abort();
-  }, [query, tick]);
+  }, [query, tick, setupTick]);
 
   // Live updates: every 2.5 s while rows are queued or running, else every 10 s.
   // A tick while the page is hidden is skipped, not the timer, so updates resume
@@ -902,6 +957,7 @@ function TableView({
               }
               canRun
               loading={loadingRows}
+              onEditPrompt={promptTable ? editPrompt : undefined}
             />
             {page.rows.length === 0 && rowCount > 0 && (
               <div className="p-10 text-center text-[13px] text-muted-foreground">No rows match these filters.</div>
@@ -978,6 +1034,14 @@ function TableView({
           run({ scope: "rows", rows: [rowId], column, force: true }, () =>
             column ? `${nameOf(column)} queued for this row` : "Row queued — every step runs again"
           )
+        }
+        onEditPrompt={
+          promptTable
+            ? (col) => {
+                setOpenCell(null);
+                editPrompt(col);
+              }
+            : undefined
         }
       />
       {detail && (
