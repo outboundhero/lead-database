@@ -12,6 +12,7 @@ import {
   settingsFrom,
 } from "../../../scripts/lib/enrich/settings.mjs";
 import { backfillFrom, cleanDatabaseBackfill } from "../../../scripts/lib/backfill/settings.mjs";
+import { questionSettingsFrom } from "../../../scripts/lib/questions/settings.mjs";
 import { competitorsFor, geo, modes, peopleOrDefaults } from "@/lib/aiark/server";
 import type { RowStatus, WorkerState } from "@/lib/enrich/types";
 import { contactsFor } from "./people";
@@ -41,6 +42,8 @@ import {
   type PipelineSettings,
   type PipelineView,
   type PromotionInput,
+  type QuestionVariablesInput,
+  type QuestionVariablesSettings,
   type SettingsInput,
   type SettingsState,
   type VendorCalls,
@@ -152,11 +155,12 @@ export function companyPlanView(...args: Parameters<typeof companyPlan>): Compan
  * migration 128; promotion: 126, its switch and client list only;
  * overlap_sharing, weekly_topup, never_contact_inboxes: migrations 134 to 136;
  * database_backfill: 138, read by scripts/lib/backfill/settings.mjs, since the
- * worker's settingsFrom does not know it).
+ * worker's settingsFrom does not know it; question_variables: 139, read by
+ * scripts/lib/questions/settings.mjs, for the same reason).
  */
 const SETTING_KEYS = [
   "company_pipeline", "people_pipeline", "personalisation", "spend_caps", "models", "linkedin_sources", "promotion",
-  "overlap_sharing", "weekly_topup", "never_contact_inboxes", "database_backfill",
+  "overlap_sharing", "weekly_topup", "never_contact_inboxes", "database_backfill", "question_variables",
 ];
 /** aiark_company_runs.size_requested takes at most 10,000. */
 export const PULL_SIZE_LIMIT = 10_000;
@@ -220,7 +224,15 @@ export function normalizeSettings(rows: { key: string; value: unknown }[]): Pipe
     },
     // A missing row (before 138) reads as switched off.
     database_backfill: backfillOf(rows),
+    // So does question_variables before 139.
+    question_variables: questionVariablesOf(rows),
   };
+}
+
+/** question_variables as questionSettingsFrom reads it, its client list copied. */
+function questionVariablesOf(rows: { key: string; value: unknown }[]): QuestionVariablesSettings {
+  const q = questionSettingsFrom(rows.find((r) => r.key === "question_variables")?.value);
+  return { ...q, tags: [...q.tags] };
 }
 
 /** database_backfill as backfillFrom reads it, its client list copied. */
@@ -245,6 +257,8 @@ export function pipelineView(s: PipelineSettings, tag: string | null = null): Pi
 const wholeIn = (v: unknown, lo: number, hi: number) => (typeof v === "number" && Number.isInteger(v) && v >= lo && v <= hi ? v : null);
 const amountIn = (v: unknown, lo: number, hi: number) => (typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi ? v : null);
 const TAG_TEXT = /^[A-Z0-9][A-Z0-9_&-]{0,63}$/;
+/** A question variables model id, as scripts/lib/questions/settings.mjs takes it. */
+const QUESTION_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
 
 /** A switch's client list as typed: tags upper case, once each. Errors name what was refused. */
 function cleanTags(v: unknown, label: string, errors: string[]): string[] {
@@ -312,6 +326,7 @@ type SettingsRows = {
   weekly_topup?: Record<string, unknown>;
   never_contact_inboxes?: Record<string, unknown>;
   database_backfill?: Record<string, unknown>;
+  question_variables?: Record<string, unknown>;
 };
 /** LinkedIn people runs: the most people bought at one company (D-P4-6), as settingsFrom reads it. */
 const PEOPLE_PER_COMPANY_MAX = 100;
@@ -458,6 +473,34 @@ export function cleanSettingsInput(
     if (v.value) backfill = v.value as DatabaseBackfillSettings;
     else errors.push(...v.errors);
   }
+  // Question variables (139): optional, merged over the stored row (concurrency is kept as stored).
+  // The ranges and the model shape are questionSettingsFrom's, so a stored value always saves again.
+  let question: QuestionVariablesInput | null = null;
+  if (body.question_variables !== undefined) {
+    const raw = body.question_variables;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      errors.push("Question variables: must be the switch, its client list, the dollars a day, max words, most searches and the two models.");
+    } else {
+      const qv = raw as Record<string, unknown>;
+      const modelOf = (v: unknown, label: string): string | null => {
+        if (v === null || v === undefined || (typeof v === "string" && !v.trim())) return null;
+        if (typeof v !== "string" || !QUESTION_MODEL_ID.test(v.trim())) {
+          errors.push(`${label}: a model id is letters, digits, dots, dashes, colons and underscores (at most 80), or empty for the pipeline's.`);
+          return null;
+        }
+        return v.trim();
+      };
+      question = {
+        enabled: bool(qv.enabled, "Question variables"),
+        tags: cleanTags(qv.tags, "Question variables", errors),
+        usd_per_day: amount(qv.usd_per_day, 0, 500, "Question variables: OpenAI dollars a day"),
+        max_words: whole(qv.max_words, 4, 40, "Question variables: max words"),
+        max_searches: whole(qv.max_searches, 0, 5, "Question variables: most searches"),
+        research_model: modelOf(qv.research_model, "Question variables: research model"),
+        question_model: modelOf(qv.question_model, "Question variables: question model"),
+      };
+    }
+  }
   if (errors.length) return { value: null, errors, changes: [] };
 
   const changes: string[] = [];
@@ -572,6 +615,20 @@ export function cleanSettingsInput(
     diff("the backfill takes untagged leads", b0.untagged, backfill.untagged, said);
     backfillChanged = changes.length > beforeBackfill;
   }
+  const beforeQuestion = changes.length;
+  let questionChanged = false;
+  if (question) {
+    const q0 = current.question_variables;
+    const modelText = (v: string | null) => v ?? "the pipeline's";
+    diff("question variables", q0.enabled, question.enabled, said);
+    diff("question variables' clients", q0.tags, question.tags, listText);
+    diff("question writer's OpenAI dollars a day", q0.usd_per_day, question.usd_per_day);
+    diff("question variables' max words", q0.max_words, question.max_words);
+    diff("question research's most searches", q0.max_searches, question.max_searches);
+    diff("question research model", q0.research_model, question.research_model, modelText);
+    diff("question model", q0.question_model, question.question_model, modelText);
+    questionChanged = changes.length > beforeQuestion;
+  }
 
   const storedModels = obj(stored.models);
   const models: Record<string, unknown> = { ...storedModels };
@@ -611,6 +668,7 @@ export function cleanSettingsInput(
       // The filter keys (pattern, source, sha256, read_at) stay as the seed wrote them.
       ...(inboxes && inboxesChanged ? { never_contact_inboxes: { ...obj(stored.never_contact_inboxes), ...inboxes } } : {}),
       ...(backfill && backfillChanged ? { database_backfill: { ...obj(stored.database_backfill), ...backfill } } : {}),
+      ...(question && questionChanged ? { question_variables: { ...obj(stored.question_variables), ...question } } : {}),
     },
     errors,
     changes,
@@ -667,6 +725,20 @@ export function settingsInputOf(v: PipelineSettings): SettingsInput {
       chunk_rows: v.never_contact_inboxes.chunk_rows,
     },
     database_backfill: { ...v.database_backfill, tags: [...v.database_backfill.tags] },
+    question_variables: questionInputOf(v.question_variables),
+  };
+}
+
+/** What the sheet edits of question_variables: everything but concurrency. */
+export function questionInputOf(q: QuestionVariablesSettings): QuestionVariablesInput {
+  return {
+    enabled: q.enabled,
+    tags: [...q.tags],
+    max_words: q.max_words,
+    research_model: q.research_model,
+    question_model: q.question_model,
+    max_searches: q.max_searches,
+    usd_per_day: q.usd_per_day,
   };
 }
 

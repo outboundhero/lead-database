@@ -19,6 +19,7 @@ import {
   type OverlapSharingSettings,
   type PipelineSettings,
   type PromotionInput,
+  type QuestionVariablesInput,
   type SettingsInput,
   type SettingsState,
   type VendorCapKey,
@@ -46,6 +47,11 @@ import type { SharingClient } from "@/lib/sharing/types";
 // clients, preview or apply, the shares a firing may write, its minutes, the
 // days before a place is read again, and untagged leads; its Backfill tab is
 // on the Sharing page.
+// And question variables (migration 139, shipped off): the switch and its
+// clients, the question writer's OpenAI dollars a day, a new variable's max
+// words, the research's most searches, and the research and question models
+// (empty: the pipeline's). Each client's variables are edited on the Clay
+// tab (Client setup, Question variable); jobs start from the export popup.
 
 const NOT_SENT = "__not_sent"; // a Select item can't have an empty value
 
@@ -89,6 +95,19 @@ function toInput(v: PipelineSettings): SettingsInput {
       chunk_rows: v.never_contact_inboxes.chunk_rows,
     },
     ...(v.database_backfill ? { database_backfill: { ...v.database_backfill, tags: [...v.database_backfill.tags] } } : {}),
+    ...(v.question_variables
+      ? {
+          question_variables: {
+            enabled: v.question_variables.enabled,
+            tags: [...v.question_variables.tags],
+            max_words: v.question_variables.max_words,
+            research_model: v.question_variables.research_model,
+            question_model: v.question_variables.question_model,
+            max_searches: v.question_variables.max_searches,
+            usd_per_day: v.question_variables.usd_per_day,
+          },
+        }
+      : {}),
   };
 }
 
@@ -322,6 +341,8 @@ export function SettingsSheet({
     setForm((f) => (f?.never_contact_inboxes ? { ...f, never_contact_inboxes: { ...f.never_contact_inboxes, [k]: v } } : f));
   const setBackfill = <K extends keyof DatabaseBackfillSettings>(k: K, v: DatabaseBackfillSettings[K]) =>
     setForm((f) => (f?.database_backfill ? { ...f, database_backfill: { ...f.database_backfill, [k]: v } } : f));
+  const setQuestion = <K extends keyof QuestionVariablesInput>(k: K, v: QuestionVariablesInput[K]) =>
+    setForm((f) => (f?.question_variables ? { ...f, question_variables: { ...f.question_variables, [k]: v } } : f));
 
   const save = async () => {
     if (!form || !state) return;
@@ -368,6 +389,7 @@ export function SettingsSheet({
   const nc = form?.never_contact_inboxes;
   const ncFilter = state?.value.never_contact_inboxes?.filter;
   const db = form?.database_backfill;
+  const qv = form?.question_variables;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -710,6 +732,57 @@ export function SettingsSheet({
                     checked={db.untagged}
                     onChange={(v) => setBackfill("untagged", v)}
                   />
+                </Section>
+              )}
+
+              {qv && (
+                <Section>
+                  <Switch
+                    label="Question variables"
+                    hint={
+                      qv.enabled
+                        ? "On, for the clients listed below: the export popup can write a client's own question variable (made on the Clay tab, Client setup) for the leads it pushes, a research call per company and a question per lead."
+                        : "Off: no question job starts, and jobs already open wait, paused. Variables can still be made and edited."
+                    }
+                    checked={qv.enabled}
+                    onChange={(v) => setQuestion("enabled", v)}
+                  />
+                  <Clients label="Question variables" tags={qv.tags} onChange={(t) => setQuestion("tags", t)} />
+                  <div className="flex flex-wrap gap-3">
+                    <NumberField
+                      label="OpenAI dollars a day"
+                      hint="The question writer's own budget (UTC day), apart from the pipeline's, 0 to 500. Past it, jobs wait, paused, for the next day."
+                      value={qv.usd_per_day}
+                      min={0}
+                      max={500}
+                      step={0.5}
+                      onChange={(n) => setQuestion("usd_per_day", n)}
+                    />
+                    <NumberField label="Max words" hint="A new variable's starting max words, 4 to 40. Each variable keeps its own." value={qv.max_words} min={4} max={40} onChange={(n) => setQuestion("max_words", n)} />
+                    <NumberField label="Most searches" hint="Web searches one company's research may make, 0 to 5. 0 sends no search." value={qv.max_searches} min={0} max={5} onChange={(n) => setQuestion("max_searches", n)} />
+                  </div>
+                  <div className="flex flex-wrap gap-3">
+                    <Field label="Research model" hint="Empty: the pipeline's People research model (below).">
+                      <Input
+                        value={qv.research_model ?? ""}
+                        onChange={(e) => setQuestion("research_model", e.target.value.trim() || null)}
+                        placeholder="The pipeline's"
+                        className="h-9 rounded-full font-mono text-[13px]"
+                        spellCheck={false}
+                        aria-label="Question variables research model"
+                      />
+                    </Field>
+                    <Field label="Question model" hint="Empty: the pipeline's People question model (below).">
+                      <Input
+                        value={qv.question_model ?? ""}
+                        onChange={(e) => setQuestion("question_model", e.target.value.trim() || null)}
+                        placeholder="The pipeline's"
+                        className="h-9 rounded-full font-mono text-[13px]"
+                        spellCheck={false}
+                        aria-label="Question variables question model"
+                      />
+                    </Field>
+                  </div>
                 </Section>
               )}
 
