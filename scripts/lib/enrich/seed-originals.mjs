@@ -1193,14 +1193,76 @@ export async function restoreBackup(db, backup) {
 
 /**
  * @typedef {{ check: "no_steps" | "type" | "unmapped_column" | "credentials" | "compile" | "examples", from: string | null, text: string }} OverlayCheck
- * @typedef {{ status: "own" | "base" | "same" | "not_read", checks: OverlayCheck[], filled: string[], aliased: string[], renamed: string[] }} KindResult
+ * @typedef {{ status: "own" | "base" | "same" | "not_read", checks: OverlayCheck[], filled: string[], aliased: string[], renamed: string[], unread: string[] }} KindResult
  *   own: the client's personalisation rows are stored; base: the client runs the default's (the checks say why);
- *   same: its columns are the default's, nothing stored; not_read: no export of the table
+ *   same: its columns are the default's, nothing stored; not_read: no export of the table;
+ *   unread: the positions whose prompt stopped reading a company link column (UNREAD_LINK_COLUMNS)
  */
 
 const PERSONAL_KINDS = Object.freeze(["people", "inboxes"]);
 /** A column's type in words: its Clay action, or its type. */
 const typeWords = (type, action) => (type === "action" ? action ?? "(no action)" : type ?? "(no type)");
+
+/**
+ * The client columns a personalisation prompt no longer reads (the owner's
+ * rule, 2026-11-24: the research step needs the website, city, state, company
+ * name and categories, not the company's LinkedIn or Facebook link). The
+ * template client's tables have no such columns, so a prompt reading them used
+ * to put the whole kind on the default's steps (unmapped_column). Names as
+ * Clay shows them, matched whatever their case and spacing.
+ */
+export const UNREAD_LINK_COLUMNS = Object.freeze(["company linkedin link", "company facebook link", "company linkedin url", "company facebook url"]);
+const columnName = (s) => String(s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+/** A reference as a prompt reads it: {{f_id}}, or the same inside Clay.formatForAIPrompt(...). */
+const PROMPT_REF = String.raw`(?:Clay\.formatForAIPrompt\(\s*\{\{\s*(f_[A-Za-z0-9_]+)\s*\}\}\s*\)|\{\{\s*(f_[A-Za-z0-9_]+)\s*\}\})`;
+/** ` and the LinkedIn page at " + <ref> + "`: the clause the clients' research prompts read a link with. */
+const LINK_CLAUSE = new RegExp(String.raw` ?and the (?:LinkedIn|Facebook) page at "\s*\+\s*` + PROMPT_REF + String.raw`\s*\+\s*"`, "g");
+const ANY_REF = new RegExp(PROMPT_REF, "g");
+
+/**
+ * A prompt expression that no longer reads the given columns: each clause
+ * ` and the LinkedIn page at " + {{f_x}} + "` (or Facebook) leaves the
+ * expression, so "…at " + {{web}} + " of the company " + … is what remains,
+ * and any other read of them becomes "" (an empty value, as an empty cell
+ * reads in a prompt).
+ *
+ * @param {string} expr
+ * @param {Set<string>} ids  the columns' field ids
+ * @returns {{ text: string, dropped: number, blanked: number }}
+ */
+export function withoutLinkReads(expr, ids) {
+  let dropped = 0;
+  let blanked = 0;
+  const own = (a, b) => ids.has(a ?? b);
+  const text = String(expr ?? "")
+    .replace(LINK_CLAUSE, (whole, a, b) => (own(a, b) ? (dropped++, "") : whole))
+    .replace(ANY_REF, (whole, a, b) => (own(a, b) ? (blanked++, '""') : whole));
+  return { text, dropped, blanked };
+}
+
+/**
+ * A column with its prompt (the "prompt" input) no longer reading the given
+ * columns. Only the prompt changes: a run condition, an example or any other
+ * setting that reads them still counts as unmapped.
+ *
+ * @param {any} column
+ * @param {Set<string>} ids
+ * @returns {{ column: any, dropped: number, blanked: number }}
+ */
+function promptWithoutLinks(column, ids) {
+  const bindings = column?.settings?.inputsBinding;
+  if (!ids.size || !Array.isArray(bindings)) return { column, dropped: 0, blanked: 0 };
+  let dropped = 0;
+  let blanked = 0;
+  const next = bindings.map((b) => {
+    if (b?.name !== "prompt" || typeof b.formulaText !== "string") return b;
+    const out = withoutLinkReads(b.formulaText, ids);
+    dropped += out.dropped;
+    blanked += out.blanked;
+    return out.dropped || out.blanked ? { ...b, formulaText: out.text } : b;
+  });
+  return dropped || blanked ? { column: { ...column, settings: { ...column.settings, inputsBinding: next } }, dropped, blanked } : { column, dropped, blanked };
+}
 
 /**
  * A client's personalisation columns (OVERLAY_POSITIONS: P#57 to P#62,
@@ -1214,8 +1276,10 @@ const typeWords = (type, action) => (type === "action" ? action ?? "(no action)"
  *   4. each overlay position: the client's column, or the base's row (filled);
  *   5. another type or Clay action than the base's there: check type;
  *   6. the definition re-pointed (repointIds: references, the table examples'
- *      keys, its own id) and its credentials redacted; a reference left to a
- *      column the base does not have: check unmapped_column;
+ *      keys, its own id) and its credentials redacted; its prompt no longer
+ *      reads the company link columns (UNREAD_LINK_COLUMNS: the clause that
+ *      names one leaves, any other read is ""); a reference left to a column
+ *      the base does not have: check unmapped_column;
  *   7. the rows keep the base's field ids and keys, the client's names;
  *   8. every row alike the base's (type and settings): same, nothing stored;
  *   9. the templates compile from the base with the kind's rows (both kinds
@@ -1247,6 +1311,10 @@ export function personalisationOverlay(exportsByKind, baseRows, { variant, seede
     }
     return id;
   };
+  /** The client's company link columns the base has no column for (their ids, in any of its tables). */
+  const linkIds = new Set(
+    ORIGINAL_KINDS.flatMap((k) => (read[k]?.data ?? []).filter((x) => UNREAD_LINK_COLUMNS.includes(columnName(x?.name)) && typeof x?.id === "string" && !baseIds.has(x.id)).map((x) => x.id))
+  );
   const ownBy = [seededBy, "(personalisation)"].filter(Boolean).join(" ");
   const filledBy = [seededBy, "(personalisation, filled from default)"].filter(Boolean).join(" ");
   /** @type {Record<string, KindResult>} */
@@ -1259,7 +1327,7 @@ export function personalisationOverlay(exportsByKind, baseRows, { variant, seede
   for (const k of PERSONAL_KINDS) {
     const m = maps[k];
     if (!m) {
-      kinds[k] = { status: "not_read", checks: [], filled: [], aliased: [], renamed: [] };
+      kinds[k] = { status: "not_read", checks: [], filled: [], aliased: [], renamed: [], unread: [] };
       report.kinds[k] = { ...kinds[k], redacted: 0, columns: [] };
       continue;
     }
@@ -1276,7 +1344,7 @@ export function personalisationOverlay(exportsByKind, baseRows, { variant, seede
     /** @type {KindResult} */
     const res = {
       status: "own", checks: [], filled: [], aliased: m.aliased.filter(inOverlay).map((x) => fromOf(k, x.position)),
-      renamed: m.renamed.filter(inOverlay).map((x) => fromOf(k, x.position)),
+      renamed: m.renamed.filter(inOverlay).map((x) => fromOf(k, x.position)), unread: [],
     };
     const onBase = (check, from, t) => {
       res.status = "base";
@@ -1313,6 +1381,9 @@ export function personalisationOverlay(exportsByKind, baseRows, { variant, seede
       const safe = redactCredentials(repointIds(c, toBase));
       redacted += safe.redacted;
       if (safe.refused.length) onBase("credentials", from, `${from}: a credential could not be redacted`);
+      const linkless = promptWithoutLinks(safe.column, linkIds);
+      if (linkless.dropped || linkless.blanked) res.unread.push(from);
+      safe.column = linkless.column;
       const left = [...new Set(strings(safe.column?.settings ?? {}).flatMap((s) => [...s.matchAll(CLAY_REF)].map((x) => x[1])))].filter((id) => !baseIds.has(id));
       for (const id of left) onBase("unmapped_column", from, `${from} reads ${columnOf(id)}, which the default's tables do not have`);
       // 7.
@@ -1405,7 +1476,7 @@ export async function seedPersonalisation(db, { exports, variant, seededBy = nul
   const people = Array.isArray(exports?.people?.data) ? exports.people : null;
   const inboxes = Array.isArray(exports?.inboxes?.data) ? exports.inboxes : null;
   if (!people && !inboxes) {
-    const none = () => ({ status: /** @type {const} */ ("not_read"), checks: [], filled: [], aliased: [], renamed: [] });
+    const none = () => ({ status: /** @type {const} */ ("not_read"), checks: [], filled: [], aliased: [], renamed: [], unread: [] });
     return { status: "not_read", variant, kinds: { people: none(), inboxes: none() }, stored: 0, replaced: 0, report: null, reasons: [] };
   }
   const baseRows = [...(await loadOriginals(db, base, { base })).values()]; // complete, else OriginalsMissing

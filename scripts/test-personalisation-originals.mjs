@@ -347,12 +347,13 @@ async function partC() {
 // ── D. Overlays ─────────────────────────────────────────────────────────────
 
 /** seedPersonalisation in a transaction that is always rolled back. */
-async function overlayDry(exports, variant, opts = {}) {
+async function overlayDry(exports, variant, { keepRows = false, ...opts } = {}) {
   const c = await pool.connect();
   try {
     await c.query("BEGIN");
     const out = await seedPersonalisation(c, { exports, variant, seededBy: "tests", base: BASE, ...opts });
     out.rowsInside = (await c.query(`SELECT template_kind, position FROM enrich_originals WHERE variant = $1`, [variant])).rows;
+    if (keepRows) out.storedRows = (await c.query(`SELECT template_kind, position, definition FROM enrich_originals WHERE variant = $1`, [variant])).rows;
     return out;
   } finally {
     await c.query("ROLLBACK").catch(() => {});
@@ -430,6 +431,51 @@ async function partD() {
     statusOf(o3) === "base/own" && o3.kinds.people.checks.some((x) => x.check === "unmapped_column" && x.text === "P#60 reads Pstest Company Link (People), which the default's tables do not have") &&
       o3.stored === 6 && o3.rowsInside.every((r) => r.template_kind === "inboxes"),
     JSON.stringify(o3.kinds.people));
+  // The company LinkedIn and Facebook link columns are not read (the owner's rule, 2026-11-24): the clause that names
+  // one leaves the prompt, any other read becomes "", and the client keeps its own steps.
+  const linkCols = (e) => {
+    e.people.data.push(
+      { type: "basic", id: "f_psLI", name: "Company LinkedIn Link", settings: { type: "basic", dataTypeSettings: { type: "url" } } },
+      { type: "basic", id: "f_psFB", name: " company  facebook link ", settings: { type: "basic", dataTypeSettings: { type: "url" } } }
+    );
+    e.inboxes.data.push({ type: "basic", id: "f_psLU", name: "Company LinkedIn URL", settings: { type: "basic", dataTypeSettings: { type: "url" } } });
+  };
+  const ownBothText = (e) => (ownText(e, "people", 60), ownText(e, "inboxes", 48));
+  const linkEdit = (e) => {
+    linkCols(e);
+    const p = binding(col(e, "people", 60), "prompt");
+    p.formulaText = p.formulaText.replace(`"; Summarise`, `" and the Facebook page at " + {{f_psFB}} + " and the LinkedIn page at " + Clay.formatForAIPrompt({{f_psLI}}) + "; Summarise`);
+    const g = binding(col(e, "inboxes", 48), "prompt");
+    g.formulaText = g.formulaText.replace(`"; Summarise`, `"; li=" + {{f_psLU}} + "; Summarise`);
+    ownBothText(e);
+  };
+  const o3b = await overlayDry(clientExports({ edit: linkEdit }), "pstest_o3b", { keepRows: true });
+  const plain = await overlayDry(clientExports({ edit: ownBothText }), "pstest_o3c", { keepRows: true });
+  const promptOf = (out, kind, position) => {
+    const d = out.storedRows?.find((r) => r.template_kind === kind && r.position === position)?.definition;
+    return d ? binding(d, "prompt")?.formulaText ?? null : null;
+  };
+  check("the company LinkedIn and Facebook link columns: both tables keep the client's own steps, the prompts no longer read them",
+    statusOf(o3b) === "own/own" && same(o3b.kinds.people.unread, ["P#60"]) && same(o3b.kinds.inboxes.unread, ["G#48"]) && o3b.stored === 12 &&
+      !o3b.kinds.people.checks.length && !o3b.kinds.inboxes.checks.length && same(plain.kinds.people.unread, []),
+    JSON.stringify({ people: o3b.kinds.people, inboxes: o3b.kinds.inboxes }));
+  const p60 = promptOf(o3b, "people", 60);
+  check("... P#60: both clauses gone (the formatted read too), so its prompt is the client's own text word for word",
+    typeof p60 === "string" && p60 === promptOf(plain, "people", 60) && !/page at|f_psLI|f_psFB/.test(p60), String(p60).slice(0, 300));
+  const g48 = promptOf(o3b, "inboxes", 48);
+  check("... G#48: a read in no such clause is an empty value",
+    typeof g48 === "string" && g48 === String(promptOf(plain, "inboxes", 48)).replace(`"; Summarise`, `"; li=" + "" + "; Summarise`) && !g48.includes("f_psLU"), String(g48).slice(0, 300));
+  const o3d = await overlayDry(clientExports({
+    edit: (e) => {
+      linkCols(e);
+      col(e, "people", 60).settings.conditionalRunFormulaText = "!!{{f_psLI}}";
+      ownBothText(e);
+    },
+  }), "pstest_o3d");
+  check("... but a link column read anywhere else (here P#60's run condition) still keeps People on the default's (unmapped_column)",
+    statusOf(o3d) === "base/own" && o3d.kinds.people.checks.some((x) => x.check === "unmapped_column" && x.text === "P#60 reads Company LinkedIn Link (People), which the default's tables do not have") &&
+      same(o3d.kinds.people.unread, []),
+    JSON.stringify(o3d.kinds.people));
   const o4 = await overlayDry(clientExports({ edit: (e) => (without(e, "people", 61), ownText(e, "inboxes", 48)) }), "pstest_o4");
   check("no P#61: People on the default's (no_steps)", statusOf(o4) === "base/own" && o4.kinds.people.checks.some((x) => x.check === "no_steps" && x.from === "P#61"), JSON.stringify(o4.kinds.people));
   const o5 = await overlayDry(clientExports({ edit: (e) => (col(e, "people", 58).settings.actionKey = "pstest-made-up-action", ownText(e, "people", 60)) }), "pstest_o5");
