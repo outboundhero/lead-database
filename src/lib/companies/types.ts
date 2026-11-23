@@ -175,7 +175,31 @@ export interface PipelineSettings {
   never_contact_inboxes: NeverContactInboxesView;
   /** The database backfill (migration 138), as scripts/lib/backfill/settings.mjs backfillFrom reads it. Ships off. */
   database_backfill: DatabaseBackfillSettings;
+  /** Question variables (migration 139), as scripts/lib/questions/settings.mjs questionSettingsFrom reads them. Ships off. */
+  question_variables: QuestionVariablesSettings;
 }
+
+/**
+ * Question variables (enrich_settings.question_variables, migration 139): the
+ * switch and its client list, the question writer's own OpenAI dollars a day
+ * (UTC), a new variable's max words, the most web searches of one company's
+ * research, and the research and question models (null: the pipeline's
+ * research and question models, people_claygent and people_question_ai).
+ * concurrency (leads written at once) is not on the sheet and kept as stored.
+ */
+export interface QuestionVariablesSettings {
+  enabled: boolean;
+  tags: string[];
+  max_words: number;
+  research_model: string | null;
+  question_model: string | null;
+  max_searches: number;
+  usd_per_day: number;
+  concurrency: number;
+}
+
+/** The part of question_variables the settings sheet edits. */
+export type QuestionVariablesInput = Omit<QuestionVariablesSettings, "concurrency">;
 
 /**
  * The part of promotion (enrich_settings.promotion, migration 126) the
@@ -324,6 +348,8 @@ export interface SettingsInput {
   never_contact_inboxes?: NeverContactInboxesInput;
   /** Optional: left out, what is stored is kept. */
   database_backfill?: DatabaseBackfillSettings;
+  /** Optional: left out, what is stored is kept; concurrency is always kept as stored. */
+  question_variables?: QuestionVariablesInput;
 }
 
 // ── Runs, worker and counts ─────────────────────────────────────────────────
