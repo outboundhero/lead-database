@@ -1,23 +1,25 @@
 #!/usr/bin/env node
 // The enrichment worker's claim order (scripts/lib/enrich/claim.mjs): rows of
 // AI Ark tab pulls (tables of kind 'ai_ark') are claimed before any other row,
-// then the email checks (General inboxes rows, kind 'inboxes'), then the rest,
-// each oldest first. LOCAL DATABASE ONLY: made-up tables of the
-// made-up client CLAIMTEST_A and their rows, all removed at the end, also when
-// a check fails (and at the start, after a run that was killed).
+// oldest first, then the email checks (General inboxes rows, kind 'inboxes'),
+// then the rest, those two in fair turns between their tables. LOCAL DATABASE
+// ONLY: made-up tables of the made-up client CLAIMTEST_A and their rows, all
+// removed at the end, also when a check fails (and at the start, after a run
+// that was killed).
 //
 //   node --env-file=.env.local scripts/test-claim-order.mjs
 //
 // Stop the enrichment worker first, and don't start it for this: a claim takes
 // due rows of every table in the database, so the script refuses to run while
 // a worker's heartbeat is fresh, or while a row of any other table is queued
-// and due (or due within 10 minutes). No network, no key.
+// and due (or due within 10 minutes). No network, no key. F needs migration
+// 142 applied to the local database.
 //
 //   A. the order: pull rows first even when every other row is older, then the
-//      email checks even when the other rows are older, then the rest oldest
-//      first across tables (a tie by id); a pull row queued later still goes
-//      first; a part's statement runs only when the parts before it did not
-//      fill the claim
+//      email checks even when the other rows are older, then the rest; a claim
+//      of one row takes the oldest (a tie by id); a pull row queued later still
+//      goes first; a part's statement runs only when the parts before it did
+//      not fill the claim
 //   B. claimed rows are running with their claim's token and an attempt
 //      counted; rows of a paused table (a pull's and another), of a retired
 //      template's table (companies_v1), held, finished and waiting rows, and
@@ -25,12 +27,23 @@
 //   C. two claims at once take different rows, and neither waits for the other
 //   D. claiming the rest fails: the pull rows already claimed are handed back
 //      and the failure logged; with no pull row claimed, the failure is thrown
-//   E. the plans (EXPLAIN, never ANALYZE): whether each statement reads the
-//      queue index enrich_rows_queue_idx as planned now, and that it can
+//   E. fair turns: a big older backlog in one table and a few newer rows in
+//      others, among the email checks and among the rest. A claim of n takes
+//      from every such table, each table's oldest rows first, and exactly what
+//      the passes take (worked out here pass by pass: at most ceil(slots left /
+//      tables) a table, slots still free round again); the tiers' order holds;
+//      two claims at once take different rows without waiting; rows that are
+//      never claimed still aren't
+//   F. the plans (EXPLAIN only, never EXPLAIN ANALYZE): the pull rows'
+//      statement can read the queue in enrich_rows_queue_idx's order; with the
+//      statistics of a big backlog, the turns read each table's queue, and lock
+//      their rows, on enrich_rows_table_queue_idx (migration 142); without that
+//      index (dropped inside a transaction that is rolled back) a claim takes
+//      the same rows
 
 import pg from "pg";
 import { randomUUID } from "node:crypto";
-import { CLAIM_SQL, claimRows, EMAIL_CHECK_KIND, PULL_KIND } from "./lib/enrich/claim.mjs";
+import { CLAIM_ORDER, CLAIM_SQL, claimRows, EMAIL_CHECK_KIND, PULL_KIND } from "./lib/enrich/claim.mjs";
 import { RETIRED_TEMPLATES } from "./lib/enrich/templates.mjs";
 
 const url = process.env.DATABASE_URL;
@@ -57,11 +70,14 @@ const sameSet = (a, b) => same([...a].sort(), [...b].sort());
 const TAG = "CLAIMTEST_A";
 const RETIRED = [...RETIRED_TEMPLATES];
 const QUEUE_INDEX = "enrich_rows_queue_idx";
+const TABLE_QUEUE_INDEX = "enrich_rows_table_queue_idx";
+/** What every claimed row comes back with: the worker reads these. */
+const RETURNED = ["attempts", "claim_token", "created_at", "id", "next_run_at", "run_force", "table_id"];
 /** Table key → id, for every made-up table. */
 const tables = {};
 /** Row label → id (text), for every made-up row. */
 const rows = {};
-/** Row label → what it was made as. */
+/** Row label → what it was made as: its status, table key, due minutes and (E's claimable rows) part. */
 const made = {};
 let base = "";
 
@@ -82,7 +98,7 @@ async function row(label, t, minutes, status = "queued") {
     [tables[t], `claimtest:${label}`, status, base, minutes]
   );
   rows[label] = String(id);
-  made[label] = { status };
+  made[label] = { status, t, minutes };
 }
 
 const label = (id) => Object.keys(rows).find((k) => rows[k] === String(id)) ?? `unknown row ${id}`;
@@ -106,7 +122,7 @@ function recorded(db = pool) {
   };
 }
 
-/** Every claim section A makes: its token and the rows it took. */
+/** Every claim sections A and E make: its token and the rows it took. */
 const claims = [];
 async function claim(n) {
   const token = randomUUID();
@@ -120,7 +136,7 @@ async function claim(n) {
 // ── A and B. The order, and what is never claimed ───────────────────────────
 
 async function partAB() {
-  section("A. Pull rows first, then the email checks, then the rest oldest first");
+  section("A. Pull rows first, then the email checks, then the rest; a claim of one row takes the oldest");
   await table("pull", { kind: PULL_KIND });
   await table("pull 2", { kind: PULL_KIND });
   await table("pull paused", { kind: PULL_KIND, paused: true });
@@ -166,14 +182,13 @@ async function partAB() {
     same(c.ids, ids("p3", "i1")) && same(c.ran, ["pulls", "inboxes"]), `${labels(c.ids)}; ran ${c.ran.join(", ")}`);
   check("both under the claim's one token", c.got.length === 2 && c.got.every((r) => r.claim_token === c.token));
   check("each claimed row comes back as the worker reads it: id, table, forced columns, attempts, created and due times, token",
-    c.got.every((r) => same(Object.keys(r).sort(), ["attempts", "claim_token", "created_at", "id", "next_run_at", "run_force", "table_id"])),
-    JSON.stringify(Object.keys(c.got[0] ?? {})));
+    c.got.every((r) => same(Object.keys(r).sort(), RETURNED)), JSON.stringify(Object.keys(c.got[0] ?? {})));
   await row("p4", "pull", -1);
   c = await claim(1);
   check("a pull row queued after every other row still goes first", same(c.ids, ids("p4")), labels(c.ids));
   const order = [];
   for (let i = 0; i < 7; i++) order.push(...(await claim(1)).ids);
-  check("then one at a time: the email checks oldest first across tables though every other row waited longer, then the rest oldest first, a tie by id",
+  check("then one at a time: the email checks oldest first across tables though every other row waited longer, then the rest oldest first, a tie by id (a turn of one row: the oldest of the tables' oldest)",
     same(order, ids("i2", "i3", "o1", "o2", "o3", "o3b", "o4")), labels(order));
   await row("i4", "inboxes 2", -1);
   await row("o5", "people", -300);
@@ -291,7 +306,203 @@ async function partD() {
   check("the next claim takes the other row as usual", same(again.map((r) => String(r.id)), ids("f1")), labels(again.map((r) => String(r.id))));
 }
 
-// ── E. The plans ────────────────────────────────────────────────────────────
+// ── E. Fair turns ───────────────────────────────────────────────────────────
+
+/** E's rows that a claim may take now, by label (each made by dueRow), until a claim takes them. */
+const pending = new Set();
+/** A due queued row of E, claimable in `part` (pulls, inboxes or rest, by its table's kind). */
+async function dueRow(lbl, t, minutes, part) {
+  await row(lbl, t, minutes);
+  made[lbl].part = part;
+  pending.add(lbl);
+}
+/** The claim's age order: due time, then id. */
+const older = (a, b) => made[a].minutes - made[b].minutes || Number(rows[a]) - Number(rows[b]);
+
+/**
+ * What a claim of n takes of the pending rows, worked out as the fair turns
+ * are worded, pass by pass: the pull rows oldest first; then the email checks,
+ * then the rest, each so: every table with due rows left offers up to
+ * max(1, ceil(slots left / those tables)) of its oldest; when that is more rows
+ * than slots, earlier turns go first, then older rows; slots still free go
+ * round again.
+ */
+function passes(n) {
+  const of = (part) => [...pending].filter((l) => made[l].part === part).sort(older);
+  const out = of("pulls").slice(0, n);
+  for (const part of ["inboxes", "rest"]) {
+    const queues = new Map();
+    for (const l of of(part)) queues.set(made[l].t, [...(queues.get(made[l].t) ?? []), l]);
+    const taken = new Map([...queues.keys()].map((t) => [t, 0]));
+    for (;;) {
+      const left = n - out.length;
+      const open = [...queues.keys()].filter((t) => taken.get(t) < queues.get(t).length);
+      if (left <= 0 || !open.length) break;
+      const quota = Math.max(1, Math.ceil(left / open.length));
+      const offered = open.flatMap((t) => queues.get(t).slice(taken.get(t), taken.get(t) + quota).map((l, i) => ({ l, t, turn: taken.get(t) + i })));
+      offered.sort((a, b) => a.turn - b.turn || older(a.l, b.l));
+      for (const o of offered.slice(0, left)) {
+        out.push(o.l);
+        taken.set(o.t, taken.get(o.t) + 1);
+      }
+    }
+  }
+  return out;
+}
+
+/** Whether a claim's rows come in the parts' order (pull rows, the email checks, the rest), as claimRows hands them back. */
+const partsInOrder = (ls) => ls.every((l, i) => i === 0 || CLAIM_ORDER.indexOf(made[ls[i - 1]]?.part) <= CLAIM_ORDER.indexOf(made[l]?.part));
+
+/** Whether every table gave the claim its oldest pending rows: inside a table, oldest first. */
+function oldestOfEachTable(ls, before) {
+  const byTable = new Map();
+  for (const l of ls) byTable.set(made[l]?.t, [...(byTable.get(made[l]?.t) ?? []), l]);
+  return [...byTable].every(([t, got]) => sameSet(got, [...before].filter((l) => made[l].t === t).sort(older).slice(0, got.length)));
+}
+
+/** Records what a claim took (labels), so the pending rows and the passes follow it. */
+function took(ls) {
+  for (const l of ls) pending.delete(l);
+}
+
+/** A claim of n in E, checked against the passes: its labels, what the passes take, the statements that ran. */
+async function fairClaim(n) {
+  const want = passes(n);
+  const before = new Set(pending);
+  const c = await claim(n);
+  const got = c.ids.map(label);
+  took(got);
+  const ok = sameSet(got, want) && partsInOrder(got) && oldestOfEachTable(got, before);
+  return { ...c, labels: got, want, ok, why: `took ${got.join(", ") || "nothing"}; the passes take ${want.join(", ") || "nothing"}; ran ${c.ran.join(", ")}` };
+}
+const range = (prefix, from, to) => Array.from({ length: to - from + 1 }, (_, i) => `${prefix}${from + i}`);
+
+async function partE() {
+  section("E. Fair turns: every table with due rows gets its share of the slots, each its oldest rows first");
+  await table("fair pull", { kind: PULL_KIND });
+  await table("fair inboxes big", { kind: EMAIL_CHECK_KIND });
+  await table("fair inboxes small", { kind: EMAIL_CHECK_KIND });
+  await table("fair companies big", { kind: "companies" });
+  await table("fair companies mid", { kind: "companies" });
+  await table("fair people small", { kind: "people" });
+  // Nothing of A-D is due now. Never claimed, though older than every row below: rows of these tables, and of A's
+  // paused and retired tables.
+  await row("fair held inbox row", "fair inboxes big", -1000, "held");
+  await row("fair waiting inbox row", "fair inboxes big", -999, "waiting");
+  await row("fair held company row", "fair companies big", -998, "held");
+  await row("fair error company row", "fair companies big", -997, "error");
+  await row("fair done company row", "fair companies big", -996, "done");
+  await row("fair paused pull row", "pull paused", -995);
+  await row("fair paused inbox row", "inboxes paused", -994);
+  await row("fair paused people row", "people paused", -993);
+  await row("fair retired row", "retired", -992);
+  await row("fair future inbox row", "fair inboxes big", 60);
+  await row("fair future company row", "fair companies big", 60);
+  // The backlogs, each older than the tier before it: 30 company rows (the oldest), 8 email checks, then
+  // a few newer rows in other tables, and two pull rows (the newest of all).
+  for (let i = 1; i <= 30; i++) await dueRow(`cb${i}`, "fair companies big", -901 + i, "rest");
+  for (let i = 1; i <= 8; i++) await dueRow(`ib${i}`, "fair inboxes big", -601 + i, "inboxes");
+  for (let i = 1; i <= 4; i++) await dueRow(`cm${i}`, "fair companies mid", -301 + i, "rest");
+  for (let i = 1; i <= 3; i++) await dueRow(`is${i}`, "fair inboxes small", -31 + i, "inboxes");
+  for (let i = 1; i <= 3; i++) await dueRow(`ps${i}`, "fair people small", -26 + i, "rest");
+  await dueRow("fp1", "fair pull", -5, "pulls");
+  await dueRow("fp2", "fair pull", -4, "pulls");
+  const start = claims.length;
+
+  let c = await fairClaim(4);
+  check("a claim of 4: the two pull rows first, though they are the newest rows, then one email check from each General inboxes table, " +
+    "the small table's too, though the big one's whole backlog is older; filled, so the rest's statement never ran",
+    sameSet(c.labels, ["fp1", "fp2", "ib1", "is1"]) && same(c.ran, ["pulls", "inboxes"]) && c.ok, c.why);
+  c = await fairClaim(6);
+  check("a claim of 6 between the two General inboxes tables: three each, but the small one has two left, so its slot goes round again " +
+    "to the big one (oldest first across tables, all six were the big backlog's)",
+    sameSet(c.labels, ["ib2", "ib3", "ib4", "ib5", "is2", "is3"]) && same(c.ran, ["pulls", "inboxes"]) && c.ok, c.why);
+  c = await fairClaim(6);
+  check("a claim of 6: the big table's last three email checks go before every other row, though the company backlog is older " +
+    "(the tiers' order holds), then one row from each of the three other tables",
+    sameSet(c.labels, ["ib6", "ib7", "ib8", "cb1", "cm1", "ps1"]) && same(c.ran, ["pulls", "inboxes", "rest"]) && c.ok, c.why);
+  check("rows of the turns come back as the worker reads them, as the pull rows' do",
+    c.got.length === 6 && c.got.every((r) => same(Object.keys(r).sort(), RETURNED) && r.claim_token === c.token), JSON.stringify(Object.keys(c.got[0] ?? {})));
+  c = await fairClaim(4);
+  check("a claim of 4 over three tables: at most ceil(4/3) = 2 a table, every table's next row first, then the oldest second one",
+    sameSet(c.labels, ["cb2", "cb3", "cm2", "ps2"]) && c.ok, c.why);
+  c = await fairClaim(7);
+  check("a claim of 7: three a table; the two smaller tables' last rows, and the slot they leave goes round again to the big one",
+    sameSet(c.labels, ["cb4", "cb5", "cb6", "cb7", "cm3", "cm4", "ps3"]) && c.ok, c.why);
+
+  // Two claims at once: the first is not committed yet, so its rows are locked and look queued to the second.
+  await dueRow("is4", "fair inboxes small", -9, "inboxes");
+  await dueRow("is5", "fair inboxes small", -8, "inboxes");
+  await dueRow("ps4", "fair people small", -7, "rest");
+  await dueRow("ps5", "fair people small", -6, "rest");
+  await dueRow("ps6", "fair people small", -5, "rest");
+  const wantX = passes(4);
+  const tokenX = randomUUID();
+  const tokenY = randomUUID();
+  const x = await pool.connect();
+  let gotX = [];
+  let gotY = [];
+  let errY = null;
+  let ms = 0;
+  try {
+    await x.query("BEGIN");
+    gotX = (await claimRows(x, 4, { token: tokenX, retired: RETIRED })).map((r) => label(r.id));
+    const t0 = Date.now();
+    try {
+      gotY = (await claimRows(pool, 4, { token: tokenY, retired: RETIRED })).map((r) => label(r.id));
+    } catch (e) {
+      errY = e;
+    }
+    ms = Date.now() - t0;
+    await x.query("COMMIT");
+  } catch (e) {
+    await x.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    x.release();
+  }
+  took([...gotX, ...gotY]);
+  check("the first of two claims at once, of 4: the two new email checks, then a row from each other table with due rows, as the passes take",
+    sameSet(gotX, ["is4", "is5", "cb8", "ps4"]) && sameSet(gotX, wantX), `took ${gotX.join(", ")}; the passes take ${wantX.join(", ")}`);
+  check("a second claim of 4 meanwhile: passes by every row the first holds (both email checks held, so their slots go to the rest) " +
+    "and takes each table's next rows, without waiting",
+    !errY && sameSet(gotY, ["cb9", "cb10", "ps5", "ps6"]) && ms < 5000, errY ? String(errY.message) : `${gotY.join(", ")} in ${ms} ms`);
+  const sXY = await stateOf([...gotX, ...gotY]);
+  const tokenOf = Object.fromEntries(sXY.map((r) => [label(r.id), r.claim_token]));
+  check("each of those rows is running under the token of the claim that took it",
+    sXY.length === 8 && sXY.every((r) => r.run_status === "running") && gotX.every((k) => tokenOf[k] === tokenX) && gotY.every((k) => tokenOf[k] === tokenY),
+    JSON.stringify(sXY.map((r) => [label(r.id), r.run_status])));
+
+  c = await fairClaim(100);
+  check("a claim of 100: every row left, the rest of the company backlog, and nothing else", sameSet(c.labels, range("cb", 11, 30)) && c.ok, c.why);
+  c = await fairClaim(5);
+  check("then nothing more: no row of E is claimable, and all three statements looked", c.labels.length === 0 && same(c.ran, [...CLAIM_ORDER]), c.why);
+
+  const taken = [
+    ...claims.slice(start).flatMap((y) => y.got.map((r) => ({ id: String(r.id), token: y.token }))),
+    ...gotX.map((l) => ({ id: rows[l], token: tokenX })),
+    ...gotY.map((l) => ({ id: rows[l], token: tokenY })),
+  ];
+  const state = new Map((await stateOf(taken.map((t) => label(t.id)))).map((s) => [s.id, s]));
+  const wrong = taken.filter((t) => {
+    const s = state.get(t.id);
+    return !s || s.run_status !== "running" || s.claim_token !== t.token || s.attempts !== 1 || !s.claimed_at;
+  });
+  check(`each of E's ${Object.values(made).filter((m) => m.part).length} due rows was claimed once (${taken.length} taken), and is running with its own claim's token, its attempt counted once`,
+    taken.length === 55 && new Set(taken.map((t) => t.id)).size === 55 && wrong.length === 0 && pending.size === 0,
+    `${taken.length} taken; wrong: ${labels(wrong.map((t) => t.id))}; still pending: ${[...pending].join(", ")}`);
+  const never = ["fair held inbox row", "fair waiting inbox row", "fair held company row", "fair error company row", "fair done company row",
+    "fair paused pull row", "fair paused inbox row", "fair paused people row", "fair retired row", "fair future inbox row", "fair future company row",
+    "paused pull row", "paused inbox row", "paused people row", "retired template row", "held row", "done row", "waiting row",
+    "future pull row", "future inbox row", "future people row"];
+  const left = await stateOf(never);
+  const moved = left.filter((s) => s.run_status !== made[label(s.id)].status || s.claim_token !== null || s.attempts !== 0 || s.claimed_at !== null);
+  check("still never claimed: rows of paused tables (a pull's, a General inboxes table's, another), of the retired template's table, held, waiting, " +
+    "failed, finished and not yet due rows, E's older than every row the turns took",
+    left.length === never.length && moved.length === 0, labels(moved.map((s) => s.id)));
+}
+
+// ── F. The plans ────────────────────────────────────────────────────────────
 
 async function explain(sql, forced) {
   const c = await pool.connect();
@@ -307,16 +518,94 @@ async function explain(sql, forced) {
   }
 }
 
-async function partE() {
-  section(`E. The plans (EXPLAIN only; nothing is claimed)`);
-  for (const [name, sql] of Object.entries(CLAIM_SQL)) {
-    const now = await explain(sql, false);
-    const uses = now.some((l) => l.includes(QUEUE_INDEX));
-    console.log(`  ${name}: as planned on this database now, reads ${QUEUE_INDEX}: ${uses ? "yes" : "no"}`);
+/** Rows in the big table of withBacklog; each of its six small tables holds 5. */
+const BACKLOG = 10_000;
+
+/**
+ * Runs fn(client) inside a transaction that is rolled back, over a made-up
+ * backlog of tables of `kind`: one of BACKLOG rows due for hours and six of 5
+ * rows due for minutes, with the tables' statistics taken (ANALYZE inside the
+ * transaction), as production's are by autovacuum. dropIndex: the turns'
+ * index is dropped first, inside the same transaction.
+ */
+async function withBacklog(kind, fn, { dropIndex = false } = {}) {
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    if (dropIndex) {
+      // An ACCESS EXCLUSIVE lock until the rollback: given up at once rather than queued behind another session.
+      await c.query("SET LOCAL lock_timeout = '2s'");
+      await c.query(`DROP INDEX ${TABLE_QUEUE_INDEX}`);
+    }
+    const make = async (name) =>
+      (await c.query(`INSERT INTO enrich_tables (client_tag, kind, name, source_note) VALUES ($1, $2, $3, 'test-claim-order: made up') RETURNING id`,
+        [TAG, kind, `Claim test plan ${name}`])).rows[0].id;
+    const add = (t, n, prefix, from) =>
+      c.query(`INSERT INTO enrich_rows (table_id, row_key, run_status, next_run_at)
+               SELECT $1, $2 || g, 'queued', now() - make_interval(mins => $3) + make_interval(secs => g) FROM generate_series(1, $4::int) g`,
+        [t, `claimtest:plan ${prefix} `, from, n]);
+    await add(await make("big"), BACKLOG, "big", 600);
+    for (let i = 1; i <= 6; i++) await add(await make(`small ${i}`), 5, `small ${i}`, 10);
+    await c.query("ANALYZE enrich_rows");
+    await c.query("ANALYZE enrich_tables");
+    return await fn(c);
+  } finally {
+    await c.query("ROLLBACK").catch(() => {});
+    c.release();
+  }
+}
+
+/** The plan of `sql` on c, and a claim of 12 on c: the row keys it took (sorted) and how long it took. */
+async function planAndClaim(c, sql) {
+  const plan = (await c.query(`EXPLAIN ${sql}`, [randomUUID(), 12, RETIRED])).rows.map((r) => r["QUERY PLAN"]);
+  const t0 = Date.now();
+  const got = await claimRows(c, 12, { token: randomUUID(), retired: RETIRED });
+  const ms = Date.now() - t0;
+  const keys = (await c.query(`SELECT row_key FROM enrich_rows WHERE id = ANY($1::bigint[]) ORDER BY row_key`, [got.map((r) => r.id)])).rows.map((r) => r.row_key);
+  return { plan, keys, ms };
+}
+
+/** The plan's reads of the queue (enrich_rows as q, q_1 …: each table's oldest rows, the locked pick) and the read under its LockRows. */
+function queueReads(plan) {
+  const reads = plan.filter((l) => /Scan\b.* on enrich_rows q(_\d+)?\b/.test(l));
+  const lock = plan.findIndex((l) => l.includes("LockRows"));
+  return { reads, locked: lock < 0 ? null : plan.slice(lock + 1).find((l) => /Scan\b.* on enrich_rows\b/.test(l)) ?? null };
+}
+
+async function partF() {
+  section(`F. The plans (EXPLAIN only, never EXPLAIN ANALYZE; the claims here are rolled back)`);
+  {
+    const now = await explain(CLAIM_SQL.pulls, false);
+    console.log(`  pulls: as planned on this database now, reads ${QUEUE_INDEX}: ${now.some((l) => l.includes(QUEUE_INDEX)) ? "yes" : "no"}`);
     for (const l of now) console.log(`      ${l}`);
-    const forced = await explain(sql, true);
-    check(`${name}: can read the queue in ${QUEUE_INDEX}'s order (sequential scans and sorts off for that EXPLAIN)`,
+    const forced = await explain(CLAIM_SQL.pulls, true);
+    check(`pulls: can read the queue in ${QUEUE_INDEX}'s order (sequential scans and sorts off for that EXPLAIN)`,
       forced.some((l) => l.includes(QUEUE_INDEX)), forced.join(" | "));
+  }
+  const idx = await one(
+    `SELECT i.indisvalid AND i.indisready AS ok, pg_get_indexdef(i.indexrelid) AS def FROM pg_index i WHERE i.indexrelid = to_regclass($1)`,
+    [`public.${TABLE_QUEUE_INDEX}`]
+  );
+  check(`migration 142 is applied here: ${TABLE_QUEUE_INDEX} is valid, on the queued rows by table_id, next_run_at, id`,
+    Boolean(idx?.ok) && /\(table_id, next_run_at, id\) WHERE \(run_status = 'queued'::text\)/.test(idx?.def ?? ""),
+    idx ? idx.def : "missing: psql -f supabase/migrations/142_enrich_rows_table_queue_idx.sql on the local database");
+  if (!idx?.ok) return;
+  for (const [name, kind] of [["inboxes", EMAIL_CHECK_KIND], ["rest", "companies"]]) {
+    const withIt = await withBacklog(kind, (c) => planAndClaim(c, CLAIM_SQL[name]));
+    const { reads, locked } = queueReads(withIt.plan);
+    console.log(`  ${name}: as planned over a backlog of ${BACKLOG.toLocaleString("en-US")} rows in one table and 5 in each of six others:`);
+    for (const l of withIt.plan) console.log(`      ${l}`);
+    check(`${name}: each table's oldest due rows are read on ${TABLE_QUEUE_INDEX}, and so are the rows its turn locks`,
+      reads.length >= 2 && reads.every((l) => l.includes(TABLE_QUEUE_INDEX)) && Boolean(locked?.includes(TABLE_QUEUE_INDEX)), `${reads.join(" | ")}; locked: ${locked}`);
+    const without = await withBacklog(kind, (c) => planAndClaim(c, CLAIM_SQL[name]), { dropIndex: true });
+    console.log(`  ${name}: without ${TABLE_QUEUE_INDEX}:`);
+    for (const l of without.plan) console.log(`      ${l}`);
+    console.log(`  ${name}: a claim of 12 took ${withIt.ms} ms with the index, ${without.ms} ms without`);
+    const big = withIt.keys.filter((k) => k.startsWith("claimtest:plan big ")).length;
+    check(`${name}: a claim of 12 over those seven tables: 2 of the backlog, the rest the six others', each table's oldest; without the index the very same rows`,
+      withIt.keys.length === 12 && big === 2 && new Set(withIt.keys.map((k) => k.replace(/ \d+$/, ""))).size === 7 && same(withIt.keys, without.keys) &&
+        !without.plan.some((l) => l.includes(TABLE_QUEUE_INDEX)),
+      `with: ${withIt.keys.join(", ")}; without: ${without.keys.join(", ")}`);
   }
 }
 
@@ -328,6 +617,7 @@ async function cleanup() {
 
 const t0 = Date.now();
 let clean = false;
+let analyzed = false;
 try {
   await cleanup();
   const workers = await all(
@@ -349,6 +639,8 @@ try {
   await partC();
   await partD();
   await partE();
+  analyzed = true;
+  await partF();
 } catch (e) {
   failed++;
   console.error("\nUNEXPECTED:", e);
@@ -362,6 +654,9 @@ try {
     );
     clean = left.tables === 0 && left.rows === 0;
     console.log(`\ncleaned up: ${clean ? "yes" : `NO ${JSON.stringify(left)}`}`);
+    // F's statistics were rolled back, but ANALYZE keeps a table's page and row counts whatever happens to its
+    // transaction: taken again here, they describe the tables as they are.
+    if (analyzed) await pool.query("ANALYZE enrich_rows; ANALYZE enrich_tables");
   } catch (e) {
     console.error("cleanup failed:", e.message);
   }

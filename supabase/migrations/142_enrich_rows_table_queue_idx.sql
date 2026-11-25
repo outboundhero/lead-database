@@ -1,0 +1,43 @@
+-- 142: each enrich table's queue in claim order, for the worker's fair turns (2026-11-26).
+--
+-- WHY. The enrichment worker's claim (scripts/lib/enrich/claim.mjs) now shares
+-- its free slots fairly between the tables with due rows, among the email
+-- checks (General inboxes tables) and among every other table after them:
+-- each table's oldest due rows, turn by turn, so one client's big backlog
+-- never holds up another client's rows. Claimed oldest first across every
+-- table, one client's company rows waited about 2 hours behind another
+-- client's scrape on 2026-11-25.
+--
+-- A turn reads one table's queued rows in due order. enrich_rows_queue_idx
+-- (next_run_at, id, migration 122) has them in that order only across every
+-- table, and enrich_rows_status_idx (table_id, run_status) has a table's
+-- queued rows in no order, so each turn would walk the whole queue, or read
+-- and sort all its table's queued rows. This index holds the queued rows by
+-- table in the claim's order, so a turn reads the few rows it takes and
+-- stops. Like enrich_rows_queue_idx it is self-draining: a claimed row is
+-- 'running' and leaves it, so it stays as small as the queue. The AI Ark pull
+-- rows are still claimed oldest first across every table, on
+-- enrich_rows_queue_idx.
+--
+-- The claim never names an index: without this one it takes the same rows,
+-- only slower. Apply it before the worker change is deployed.
+--
+-- ⚠ CREATE INDEX CONCURRENTLY CANNOT RUN INSIDE A TRANSACTION BLOCK, and a run
+-- of more than one statement is one. In the Supabase SQL editor, paste ONLY
+-- the CREATE INDEX statement at the end of this file (no BEGIN/COMMIT, nothing
+-- else in the editor) and run it; with psql, `psql -f` this file. It builds
+-- without blocking the worker's claims and writes.
+--
+-- Verify (each its own query):
+--   SELECT indexname, indexdef FROM pg_indexes
+--    WHERE tablename = 'enrich_rows' AND indexname = 'enrich_rows_table_queue_idx';
+--   SELECT indisvalid, indisready FROM pg_index
+--    WHERE indexrelid = 'enrich_rows_table_queue_idx'::regclass;  -- both true
+-- A build that was stopped (a timeout, a closed tab) leaves the index INVALID
+-- (indisvalid false), and IF NOT EXISTS then skips it: drop it, then create it
+-- again.
+--
+-- Drop (also on its own): DROP INDEX CONCURRENTLY IF EXISTS enrich_rows_table_queue_idx;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS enrich_rows_table_queue_idx
+  ON enrich_rows (table_id, next_run_at, id) WHERE run_status = 'queued';
