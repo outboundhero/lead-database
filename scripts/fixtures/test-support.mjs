@@ -248,10 +248,10 @@ const workerSource = readFileSync(new URL("../enrich-worker.mjs", import.meta.ur
 export const WORKER_SQL = Object.freeze({
   writeCells: /async function writeCells\([\s\S]*?pool\.query\(\s*`([\s\S]*?)`/.exec(workerSource)[1],
   finish: /async function finish\(r, [\s\S]*?pool\.query\(\s*`([\s\S]*?)`/.exec(workerSource)[1],
-  // The claim is two statements (scripts/lib/enrich/claim.mjs: AI Ark pull rows, then every other
-  // table's). The suites ask it for every row it could take now (n = 100,000), which is what the two
+  // The claim is three statements (scripts/lib/enrich/claim.mjs: AI Ark pull rows, the email checks, then
+  // every other table's). The suites ask it for every row it could take now (n = 100,000), which is what the three
   // take together, so here they run as one statement with the worker's parameters ($1 token, $2 n, $3 retired).
-  claim: `WITH pulls AS (${CLAIM_SQL.pulls}), rest AS (${CLAIM_SQL.rest}) SELECT * FROM pulls UNION ALL SELECT * FROM rest`,
+  claim: `WITH pulls AS (${CLAIM_SQL.pulls}), inboxes AS (${CLAIM_SQL.inboxes}), rest AS (${CLAIM_SQL.rest}) SELECT * FROM pulls UNION ALL SELECT * FROM inboxes UNION ALL SELECT * FROM rest`,
 });
 
 /** A table as the worker reads it: the variant from its note, its columns in dependency order. */

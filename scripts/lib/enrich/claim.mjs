@@ -1,26 +1,34 @@
 // The enrichment worker's claim (scripts/enrich-worker.mjs): which queued
 // enrich_rows its free slots take next.
 //
-// Rows of AI Ark tab pulls (enrich_tables kind 'ai_ark') are claimed before
-// any other row, however long the others have waited. A pull's rows are quick
-// database checks (the lead lookup, the area, the exclusions), while a People
-// row waits on the email finders, slow calls to outside services. Claimed
-// oldest first across every table, a 10,000-person pull's rows once waited
-// 2.5 hours behind thousands of People rows, and its leads reached the
-// database hours late.
+// In this order, each part oldest first:
+//   1. rows of AI Ark tab pulls (enrich_tables kind 'ai_ark'): quick database
+//      checks (the lead lookup, the area, the exclusions) whose leads wait for
+//      them. Claimed oldest first across every table, a 10,000-person pull's
+//      rows once waited 2.5 hours behind thousands of People rows;
+//   2. the email checks: rows of the clients' General inboxes (pipeline)
+//      tables (kind 'inboxes'). A general email becomes a lead only once its
+//      check is done, and its row is made after its company's, so claimed
+//      oldest first across every table the checks waited for the whole
+//      company backlog: on 2026-11-25, 1,539 of one client's general emails
+//      waited while its companies were worked, and only a few leads came out.
+//      First, the leads come out while the companies are still being worked;
+//   3. every other row (Companies, People, ...), as before.
 //
-// So a claim is two statements under one claim token: up to n due rows of
-// pull tables, then, when fewer came back, the rest from every other table.
-// Each is the claim as it was (oldest first, FOR UPDATE SKIP LOCKED, the row
-// marked running with the token and its attempt counted), so each can read
-// the queue in the order of the partial index enrich_rows_queue_idx
-// (next_run_at, id WHERE run_status = 'queued', migration 122);
-// scripts/test-claim-order.mjs prints both plans. As before, rows of a paused
-// table or of a retired template's table (companies_v1, D24), held rows and
-// rows not due yet are never claimed.
+// So a claim is up to three statements under one claim token, each taking
+// what the ones before left of the free slots. Each is the claim as it was
+// (oldest first, FOR UPDATE SKIP LOCKED, the row marked running with the token
+// and its attempt counted), so each can read the queue in the order of the
+// partial index enrich_rows_queue_idx (next_run_at, id WHERE run_status =
+// 'queued', migration 122); scripts/test-claim-order.mjs prints the plans. As
+// before, rows of a paused table or of a retired template's table
+// (companies_v1, D24), held rows and rows not due yet are never claimed.
 
 /** enrich_tables.kind of an AI Ark tab pull's table (scripts/lib/aiark/runs.mjs createRun). */
 export const PULL_KIND = "ai_ark";
+
+/** enrich_tables.kind of a client's General inboxes (pipeline) table: its rows are the email checks. */
+export const EMAIL_CHECK_KIND = "inboxes";
 
 /**
  * @typedef {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> }} Db
@@ -45,37 +53,47 @@ const claimStatement = (tableTest) => `UPDATE enrich_rows r
            FOR UPDATE OF q SKIP LOCKED)
       RETURNING r.id, r.table_id, r.run_force, r.attempts, r.created_at, r.claim_token, r.next_run_at`;
 
-/** The claim's two statements, in the order they run: pull rows, then every other table's. */
+/** The claim's statements, in the order they run: pull rows, then the email checks, then every other table's. */
 export const CLAIM_SQL = Object.freeze({
   pulls: claimStatement(`t.kind = '${PULL_KIND}'`),
-  rest: claimStatement(`t.kind <> '${PULL_KIND}'`),
+  inboxes: claimStatement(`t.kind = '${EMAIL_CHECK_KIND}'`),
+  rest: claimStatement(`t.kind NOT IN ('${PULL_KIND}', '${EMAIL_CHECK_KIND}')`),
 });
+
+/** The order claimRows sends them in, and how its log names each. */
+export const CLAIM_ORDER = Object.freeze(["pulls", "inboxes", "rest"]);
+const PART_NAMES = { pulls: "AI Ark pull rows", inboxes: "email checks", rest: "rows of other tables" };
 
 /**
  * Claims up to n queued rows under one claim token: AI Ark pull rows first,
- * then the rest, each oldest first. When claiming the rest fails after pull
- * rows were claimed, the failure is logged and the pull rows are still handed
- * back, so they are worked now instead of waiting in 'running' for the stale
- * sweep; the rest are claimed on a later round.
+ * then the email checks (General inboxes rows), then the rest, each oldest
+ * first; a part is asked only for the slots the parts before it left. When a
+ * later part's statement fails after rows were claimed, the failure is logged
+ * and the rows already claimed are still handed back, so they are worked now
+ * instead of waiting in 'running' for the stale sweep; the others are claimed
+ * on a later round. With nothing claimed yet, the failure is thrown.
  *
  * @param {Db} db  the worker's pool
  * @param {number} n  free slots
  * @param {{ token: string, retired: string[], log?: (m: string) => void }} opts
  *   token: the claim token every claimed row gets; retired: templates whose tables are never claimed
  * @returns {Promise<any[]>} each claimed row's id, table_id, run_force, attempts, created_at, claim_token
- *   and next_run_at, pull rows first (inside each part in no set order: the worker starts them all at once)
+ *   and next_run_at, in the parts' order (inside each part in no set order: the worker starts them all at once)
  */
 export async function claimRows(db, n, { token, retired, log = console.error }) {
   if (!token || !Array.isArray(retired)) throw new TypeError("claimRows needs a claim token and the retired templates");
   if (!(n >= 1)) return [];
-  const { rows: pulls } = await db.query(CLAIM_SQL.pulls, [token, n, retired]);
-  if (pulls.length >= n) return pulls;
-  try {
-    const { rows: rest } = await db.query(CLAIM_SQL.rest, [token, n - pulls.length, retired]);
-    return [...pulls, ...rest];
-  } catch (e) {
-    if (!pulls.length) throw e;
-    log(`claiming rows of other tables: ${e instanceof Error ? e.message : String(e)} (the ${pulls.length} AI Ark pull row(s) claimed are worked now)`);
-    return pulls;
+  const got = [];
+  for (const part of CLAIM_ORDER) {
+    if (got.length >= n) break;
+    try {
+      const { rows } = await db.query(CLAIM_SQL[part], [token, n - got.length, retired]);
+      got.push(...rows);
+    } catch (e) {
+      if (!got.length) throw e;
+      log(`claiming ${PART_NAMES[part]}: ${e instanceof Error ? e.message : String(e)} (the ${got.length} row(s) already claimed are worked now)`);
+      return got;
+    }
   }
+  return got;
 }

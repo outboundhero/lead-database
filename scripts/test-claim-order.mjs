@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // The enrichment worker's claim order (scripts/lib/enrich/claim.mjs): rows of
 // AI Ark tab pulls (tables of kind 'ai_ark') are claimed before any other row,
-// then the rest, oldest first. LOCAL DATABASE ONLY: made-up tables of the
+// then the email checks (General inboxes rows, kind 'inboxes'), then the rest,
+// each oldest first. LOCAL DATABASE ONLY: made-up tables of the
 // made-up client CLAIMTEST_A and their rows, all removed at the end, also when
 // a check fails (and at the start, after a run that was killed).
 //
@@ -13,9 +14,10 @@
 // and due (or due within 10 minutes). No network, no key.
 //
 //   A. the order: pull rows first even when every other row is older, then the
-//      rest oldest first across tables (a tie by id); a pull row queued later
-//      still goes first; the rest's statement runs only when the pull rows did
-//      not fill the claim
+//      email checks even when the other rows are older, then the rest oldest
+//      first across tables (a tie by id); a pull row queued later still goes
+//      first; a part's statement runs only when the parts before it did not
+//      fill the claim
 //   B. claimed rows are running with their claim's token and an attempt
 //      counted; rows of a paused table (a pull's and another), of a retired
 //      template's table (companies_v1), held, finished and waiting rows, and
@@ -28,7 +30,7 @@
 
 import pg from "pg";
 import { randomUUID } from "node:crypto";
-import { CLAIM_SQL, claimRows, PULL_KIND } from "./lib/enrich/claim.mjs";
+import { CLAIM_SQL, claimRows, EMAIL_CHECK_KIND, PULL_KIND } from "./lib/enrich/claim.mjs";
 import { RETIRED_TEMPLATES } from "./lib/enrich/templates.mjs";
 
 const url = process.env.DATABASE_URL;
@@ -89,14 +91,15 @@ const ids = (...names) => names.map((n) => rows[n]);
 const stateOf = async (names) =>
   all(`SELECT id::text AS id, run_status, claim_token, claimed_at, attempts FROM enrich_rows WHERE id = ANY($1::bigint[]) ORDER BY id`, [ids(...names)]);
 
-/** The pool, noting which of the claim's two statements ran. */
+/** The pool, noting which of the claim's statements ran. */
 function recorded(db = pool) {
   const ran = [];
+  const nameOf = (sql) => Object.keys(CLAIM_SQL).find((k) => CLAIM_SQL[k] === sql) ?? "other";
   return {
     ran,
     db: {
       query: (sql, params) => {
-        ran.push(sql === CLAIM_SQL.pulls ? "pulls" : sql === CLAIM_SQL.rest ? "rest" : "other");
+        ran.push(nameOf(sql));
         return db.query(sql, params);
       },
     },
@@ -117,22 +120,28 @@ async function claim(n) {
 // ── A and B. The order, and what is never claimed ───────────────────────────
 
 async function partAB() {
-  section("A. Pull rows first, then the rest oldest first");
+  section("A. Pull rows first, then the email checks, then the rest oldest first");
   await table("pull", { kind: PULL_KIND });
   await table("pull 2", { kind: PULL_KIND });
   await table("pull paused", { kind: PULL_KIND, paused: true });
+  // No template: one client holds one table per template (enrich_tables_template_uniq), and the order goes by kind alone.
+  await table("inboxes", { kind: EMAIL_CHECK_KIND });
+  await table("inboxes 2", { kind: EMAIL_CHECK_KIND });
+  await table("inboxes paused", { kind: EMAIL_CHECK_KIND, paused: true });
   await table("people", { kind: "people" });
   await table("companies", { kind: "companies" });
   await table("people paused", { kind: "people", paused: true });
   await table("retired", { kind: "companies", template: RETIRED[0] });
   // Never claimed, though most are older than any row below.
   await row("paused pull row", "pull paused", -300);
+  await row("paused inbox row", "inboxes paused", -295);
   await row("paused people row", "people paused", -290);
   await row("retired template row", "retired", -280);
   await row("held row", "people", -270, "held");
   await row("done row", "companies", -260, "done");
   await row("waiting row", "people", -250, "waiting");
   await row("future pull row", "pull", 60);
+  await row("future inbox row", "inboxes", 60);
   await row("future people row", "people", 60);
   // Other rows, all older than every pull row; o3 and o3b are due at the same moment.
   await row("o1", "people", -240);
@@ -140,6 +149,10 @@ async function partAB() {
   await row("o3", "people", -220);
   await row("o3b", "companies", -220);
   await row("o4", "people", -210);
+  // Email checks, in two General inboxes tables: one older than every other row, two newer.
+  await row("i1", "inboxes", -245);
+  await row("i2", "inboxes 2", -100);
+  await row("i3", "inboxes", -10);
   // Pull rows, in two pull tables.
   await row("p1", "pull", -60);
   await row("p2", "pull 2", -50);
@@ -149,8 +162,8 @@ async function partAB() {
   check("a claim of 2: the two oldest pull rows, though four other rows waited longer; they filled it, so the rest's statement never ran",
     sameSet(c.ids, ids("p1", "p2")) && same(c.ran, ["pulls"]), `${labels(c.ids)}; ran ${c.ran.join(", ")}`);
   c = await claim(2);
-  check("the next claim of 2: the last pull row, then the oldest other row, in that order",
-    same(c.ids, ids("p3", "o1")) && same(c.ran, ["pulls", "rest"]), `${labels(c.ids)}; ran ${c.ran.join(", ")}`);
+  check("the next claim of 2: the last pull row, then the oldest email check; they filled it, so the rest's statement never ran",
+    same(c.ids, ids("p3", "i1")) && same(c.ran, ["pulls", "inboxes"]), `${labels(c.ids)}; ran ${c.ran.join(", ")}`);
   check("both under the claim's one token", c.got.length === 2 && c.got.every((r) => r.claim_token === c.token));
   check("each claimed row comes back as the worker reads it: id, table, forced columns, attempts, created and due times, token",
     c.got.every((r) => same(Object.keys(r).sort(), ["attempts", "claim_token", "created_at", "id", "next_run_at", "run_force", "table_id"])),
@@ -159,11 +172,17 @@ async function partAB() {
   c = await claim(1);
   check("a pull row queued after every other row still goes first", same(c.ids, ids("p4")), labels(c.ids));
   const order = [];
-  for (let i = 0; i < 4; i++) order.push(...(await claim(1)).ids);
-  check("then the rest one at a time: oldest first across tables, a tie by id", same(order, ids("o2", "o3", "o3b", "o4")), labels(order));
+  for (let i = 0; i < 7; i++) order.push(...(await claim(1)).ids);
+  check("then one at a time: the email checks oldest first across tables though every other row waited longer, then the rest oldest first, a tie by id",
+    same(order, ids("i2", "i3", "o1", "o2", "o3", "o3b", "o4")), labels(order));
+  await row("i4", "inboxes 2", -1);
+  await row("o5", "people", -300);
+  c = await claim(2);
+  check("an email check queued after an older other row still goes before it", same(c.ids, ids("i4", "o5")) && same(c.ran, ["pulls", "inboxes", "rest"]),
+    `${labels(c.ids)}; ran ${c.ran.join(", ")}`);
   c = await claim(5);
-  check("then nothing more: no other row is claimable, and both statements looked",
-    c.ids.length === 0 && same(c.ran, ["pulls", "rest"]), `${labels(c.ids)}; ran ${c.ran.join(", ")}`);
+  check("then nothing more: no other row is claimable, and all three statements looked",
+    c.ids.length === 0 && same(c.ran, ["pulls", "inboxes", "rest"]), `${labels(c.ids)}; ran ${c.ran.join(", ")}`);
   {
     const { db, ran } = recorded();
     const none = await claimRows(db, 0, { token: randomUUID(), retired: RETIRED });
@@ -186,11 +205,11 @@ async function partAB() {
     return !s || s.run_status !== "running" || s.claim_token !== t.token || s.attempts !== 1 || !s.claimed_at;
   });
   check(`every claimed row (${taken.length}) is running with its own claim's token, claimed now, its attempt counted`,
-    taken.length === 9 && wrong.length === 0, `${taken.length} taken; wrong: ${labels(wrong.map((t) => t.id))}`);
-  const never = ["paused pull row", "paused people row", "retired template row", "held row", "done row", "waiting row", "future pull row", "future people row"];
+    taken.length === 14 && wrong.length === 0, `${taken.length} taken; wrong: ${labels(wrong.map((t) => t.id))}`);
+  const never = ["paused pull row", "paused inbox row", "paused people row", "retired template row", "held row", "done row", "waiting row", "future pull row", "future inbox row", "future people row"];
   const left = await stateOf(never);
   const moved = left.filter((s) => s.run_status !== made[label(s.id)].status || s.claim_token !== null || s.attempts !== 0 || s.claimed_at !== null);
-  check("never claimed: a paused pull table's row, a paused table's row, a retired template's row, held, done and waiting rows, rows not due yet",
+  check("never claimed: a paused pull table's row, a paused General inboxes table's row, a paused table's row, a retired template's row, held, done and waiting rows, rows not due yet",
     left.length === never.length && moved.length === 0, labels(moved.map((s) => s.id)));
 }
 
@@ -256,7 +275,7 @@ async function partD() {
   const [e1] = await stateOf(["e1"]);
   check("the pull row already claimed is handed back to be worked now, and the failure is logged once",
     same(got.map((r) => String(r.id)), ids("e1")) && e1.run_status === "running" && e1.claim_token === token &&
-      logs.length === 1 && /made-up failure/.test(logs[0]) && /1 AI Ark pull row/.test(logs[0]),
+      logs.length === 1 && /made-up failure/.test(logs[0]) && /claiming rows of other tables/.test(logs[0]) && /1 row\(s\) already claimed/.test(logs[0]),
     `${labels(got.map((r) => String(r.id)))}; ${JSON.stringify(logs)}`);
   let thrown = null;
   try {

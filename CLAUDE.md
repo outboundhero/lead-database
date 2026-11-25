@@ -2526,9 +2526,11 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   finished run. `AIARK_PART_MAX` shrinks parts for tests only. An export job's pages
   are written with one statement per page (`writePage`, same guarantees as a
   person's write; a value Postgres refuses sends that page through `writePerson`).
-  The worker claims rows of `ai_ark` tables before any other row
-  (`scripts/lib/enrich/claim.mjs`): on 11-24 a 10,000-person pull's checks waited
-  2.5 hours behind People rows' email searches. The count also answers `bought` (the
+  The worker claims rows of `ai_ark` tables before any other row, then the email
+  checks (rows of `inboxes` tables, the General inboxes), then the rest, each oldest
+  first (`scripts/lib/enrich/claim.mjs`): on 11-24 a 10,000-person pull's checks waited
+  2.5 hours behind People rows' email searches, and on 11-25 a scrape's 1,539 email
+  checks waited behind its company backlog, so its leads came out only at the end. The count also answers `bought` (the
   `aiark_people` rows of the client's own runs of that mode) and `aboutNew` (total
   less bought), null for a count of some places or when the database is slow; the
   tab offers "All new" from it. Measured before the change (two 10,000-person pulls,

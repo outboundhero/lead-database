@@ -12,11 +12,12 @@
 // others, and a free slot is refilled as soon as a row finishes.
 //
 // Rows of AI Ark tab pulls (tables of kind 'ai_ark') are claimed before any
-// other row, then the rest, oldest first (scripts/lib/enrich/claim.mjs). A
-// pull's rows are quick database checks (the lead lookup, the area, the
-// exclusions) and its leads wait for them, while a People row waits on the
-// email finders: claimed oldest first across every table, a 10,000-person
-// pull's rows once waited 2.5 hours behind thousands of People rows.
+// other row, then the email checks (General inboxes rows), then the rest,
+// each oldest first (scripts/lib/enrich/claim.mjs). A pull's rows are quick
+// database checks and its leads wait for them; a general email becomes a lead
+// only once its check is done, and its row is made after its company's, so
+// claimed oldest first across every table the checks (and the leads) waited
+// for the whole company backlog.
 //
 // Crash model: a row is 'running' with a claim token while it is worked. A
 // crash leaves it 'running'; after STALE_MIN the sweep re-queues it and it is
@@ -257,7 +258,7 @@ async function tableDef(id) {
 
 // ── Queue ───────────────────────────────────────────────────────────────────
 
-/** Up to n queued rows, AI Ark pull rows first, under one claim token (claim.mjs); never a retired template's row. */
+/** Up to n queued rows, AI Ark pull rows first, then the email checks, under one claim token (claim.mjs); never a retired template's row. */
 async function claim(n) {
   return claimRows(pool, n, { token: randomUUID(), retired: [...RETIRED_TEMPLATES], log });
 }
