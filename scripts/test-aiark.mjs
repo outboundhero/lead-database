@@ -36,10 +36,15 @@
 //      that they stay out of the database's rules
 //   F. a person only the Companies tab's people runs bought (D43): left off the
 //      tab's lists, met in a single run's Preview, copied free and added as today
+//
+// B also covers an export job's pages written one statement each (B16), an
+// export pull of every match run as a chain of parts (B17, with parts of a few
+// made-up people through AIARK_PART_MAX) and the sizes a pull may ask for (B18).
 
 import pg from "pg";
 import ts from "typescript";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { AiArkError, clip, createAiArk, personInputs } from "./lib/aiark/client.mjs";
@@ -49,7 +54,8 @@ import { CLEANING_EXCLUDE_KEYWORDS } from "./lib/aiark/cleaning-filters.mjs";
 import { RUN_COLUMNS } from "./lib/aiark/columns.mjs";
 import { addState, autoAddConfig, beginAdd, emailFound, EXTRA_FIELDS, finishAdd, headcount, IMPORT_COLUMNS, importRow, names, pullsToAdd, requestAdd } from "./lib/aiark/add.mjs";
 import { cityKey, findState } from "./lib/aiark/geo.mjs";
-import { advanceOneRun, aiArkFor, createRun, runDue, webhookFor } from "./lib/aiark/runs.mjs";
+import { advanceOneRun, aiArkFor, createRun, PART_MAX, partMax, runDue, webhookFor } from "./lib/aiark/runs.mjs";
+import { ACTIVE_RUN_SQL, SERIES_MAX, startRun } from "./lib/aiark/start-run.mjs";
 import { CLIENT_ACTIONS, likelyAddresses, resetClientChecks, wholeTermSource } from "./lib/enrich/client-checks.mjs";
 import { runRow as engineRow } from "./lib/enrich/engine.mjs";
 import { order } from "./lib/enrich/formula.mjs";
@@ -416,8 +422,9 @@ const search = (places = ["Dayton, Ohio"]) => ({
   },
 });
 const SEVERAL_PLACES = ["Dayton, Ohio", "Akron, Ohio", "Toledo, Ohio", "Canton, Ohio", "Parma, Ohio"];
+const TEN_PLACES = [...SEVERAL_PLACES, "Lorain, Ohio", "Hamilton, Ohio", "Youngstown, Ohio", "Springfield, Ohio", "Kettering, Ohio"];
 
-async function newRun({ strategy = "single", size, people = TEST_PEOPLE, mode = "demo", requests = null }) {
+async function newRun({ strategy = "single", size, people = TEST_PEOPLE, mode = "demo", requests = null, progress = {}, part = null }) {
   // Every run here starts with the day's list budget unused; spendLists uses it up.
   await pool.query(`UPDATE aiark_runs SET progress = progress - 'lists_log' WHERE id = ANY($1::uuid[])`, [created.runs]);
   const geo = await loadGeo(pool);
@@ -426,7 +433,9 @@ async function newRun({ strategy = "single", size, people = TEST_PEOPLE, mode = 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const run = await createRun(client, { tag: TAG, mode, strategy, size, filters: { people, report: built.report }, requests: requests ?? built.requests });
+    const run = await createRun(client, {
+      tag: TAG, mode, strategy, size, filters: { people, report: built.report }, requests: requests ?? built.requests, progress, part,
+    });
     await client.query("COMMIT");
     created.runs.push(run.id);
     created.tables.push(run.table_id);
@@ -441,11 +450,11 @@ async function newRun({ strategy = "single", size, people = TEST_PEOPLE, mode = 
 
 const demoClient = (transport, token = DEMO_TOKEN) => async () => ({ client: createAiArk({ token, transport, wait: fastWait, rps: 5 }) });
 
-async function drive(runId, clientFor, { limit = 600 } = {}) {
+async function drive(runId, clientFor, { limit = 600, env = { AIARK_DEMO: "1" }, log = () => {} } = {}) {
   for (let i = 0; i < limit; i++) {
     const st = await one(`SELECT status FROM aiark_runs WHERE id = $1`, [runId]);
     if (TERMINAL.has(st.status)) return st.status;
-    const worked = await advanceOneRun({ pool, env: { AIARK_DEMO: "1" }, clientFor, log: () => {} });
+    const worked = await advanceOneRun({ pool, env, clientFor, log });
     if (!worked) await pool.query(`UPDATE aiark_runs SET next_run_at = now() WHERE id = $1 AND status IN ('queued', 'running')`, [runId]);
   }
   throw new Error(`run ${runId} did not finish`);
@@ -486,12 +495,15 @@ const dropHeldPeople = () => pool.query(`DELETE FROM aiark_people WHERE person_i
 // What the routes really send, read from their files.
 const cancelSql = /`(UPDATE aiark_runs[\s\S]*?)`/.exec(source("src/app/api/aiark/runs/cancel/route.ts"))[1];
 const cancelRoute = (id) => one(cancelSql, [id]);
-const activeSql = /`(SELECT id, status FROM aiark_runs[\s\S]*?)`/.exec(source("scripts/lib/aiark/start-run.mjs"))[1];
+// The one-run-per-client check: startRun's, which a part's finish asks too before it queues the next part.
+const activeSql = ACTIVE_RUN_SQL;
 
 // Scripted answers over the stand-in.
 const ans = (status, json) => ({ status, headers: new Headers(), text: JSON.stringify(json) });
 const overlay = (tx, fn) => async (req) => (await fn(req)) ?? tx(req);
 const isPost = (req) => req.method === "POST" && req.url.endsWith("/v1/people/export");
+/** What tells the write of an export job's page (one statement for the page) from a person's. */
+const PAGE_WRITE = "jsonb_array_elements($5::jsonb) WITH ORDINALITY";
 const PENDING = ans(200, { statistics: { total: 0, found: 0 }, state: "PENDING" });
 const flaky = (match, times) => ({
   query: async (sql, params) => {
@@ -733,6 +745,9 @@ async function partB() {
   await brake();
   await lostAnswers();
   await recovered();
+  await pageWrites();
+  await parts();
+  await startSizes();
 
   const left = await one(`SELECT count(*)::int AS n FROM aiark_runs WHERE id = ANY($1::uuid[]) AND finished_at IS NULL`, [created.runs]);
   check("every run here has ended", left.n === 0, `${left.n} still open`);
@@ -1746,11 +1761,18 @@ async function writes() {
       refused = j.content[0].id;
       return { ...res, text: JSON.stringify(j) };
     }));
-    // Postgres refuses that title (SQLSTATE class 22) every time it is sent.
+    // Postgres refuses that title (SQLSTATE class 22) every time it is sent: in the page's statement, then in the person's own.
+    let pageRefused = 0;
+    let personWrites = 0;
     const refusing = {
       query: async (sql, params) => {
-        if (sql.includes("INSERT INTO aiark_people") && String(params[6]).includes("Gérante")) {
-          throw Object.assign(new Error("invalid input syntax for type json"), { code: "22P02" });
+        if (sql.includes("INSERT INTO aiark_people")) {
+          const page = sql.includes(PAGE_WRITE);
+          if (!page) personWrites++;
+          if ((params ?? []).some((x) => String(x).includes("Gérante"))) {
+            if (page) pageRefused++;
+            throw Object.assign(new Error("invalid input syntax for type json"), { code: "22P02" });
+          }
         }
         return pool.query(sql, params);
       },
@@ -1768,6 +1790,8 @@ async function writes() {
       [refused, run.id, run.table_id]
     );
     check("a value Postgres refuses every time (SQLSTATE class 22): the person goes in without it, and the paid job is not held", r.status === "done" && r.pulled === 30 && r.attempts === 0 && got.registered === 1 && got.titles === 0, `${r.status} ${r.pulled} ${r.attempts} ${JSON.stringify(got)}`);
+    const titled = await one(`SELECT count(*)::int AS n FROM enrich_cells WHERE table_id = $1 AND column_key = 'title'`, [run.table_id]);
+    check("  … its page, refused once as a whole, goes in one person at a time: everyone else keeps every cell", pageRefused === 1 && personWrites === 31 && titled.n === 29, `${pageRefused} page refusals, ${personWrites} person writes, ${titled.n} titles`);
   }
   {
     const tx = createDemoTransport({});
@@ -1997,6 +2021,410 @@ async function recovered() {
   await step(cf); // the next slice finishes the run
   const b = await runRow(run.id);
   check("an error, then a slice that finishes the run: it ends done, with no error left on it", /500/.test(a.last_error ?? "") && b.status === "done" && b.pulled === 20 && b.last_error === null, `${a.last_error} → ${b.status} ${b.last_error}`);
+}
+
+/** B16. An export job's page goes in with one statement, on the terms a person's write keeps. */
+async function pageWrites() {
+  section("B16. An export job's pages, one statement each");
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    let pages = 0;
+    let persons = 0;
+    const counting = {
+      query: (sql, params) => {
+        if (sql.includes(PAGE_WRITE)) pages++;
+        else if (sql.includes("INSERT INTO aiark_people")) persons++;
+        return pool.query(sql, params);
+      },
+      connect: () => pool.connect(),
+    };
+    const run = await newRun({ strategy: "export", size: 150, requests: [search(SEVERAL_PLACES)] });
+    for (let i = 0; i < 20 && !TERMINAL.has((await runRow(run.id)).status); i++) {
+      await due(run.id);
+      await step(demoClient(tx), { pool: counting });
+    }
+    const r = await runRow(run.id);
+    const s = await tableStats(run.table_id, run.id);
+    const linked = await one(
+      `SELECT count(*)::int AS n FROM aiark_people a JOIN enrich_rows w ON w.id = a.row_id AND w.row_key = 'aiark:' || a.person_id
+        WHERE a.run_id = $1 AND w.table_id = $2`,
+      [run.id, run.table_id]
+    );
+    check("150 people on two pages: two statements, none per person", r.status === "done" && r.pulled === 150 && pages === 2 && persons === 0, `${r.status} ${r.pulled}, ${pages} page writes, ${persons} person writes`);
+    check("  … everyone in the table and the registry, each registry row on that person's row", s.rows === 150 && s.keys === 150 && s.registered === 150 && linked.n === 150, `${JSON.stringify(s)} ${linked.n} linked`);
+    check("  … with_email counts the rows with a usable email, nobody counts as bought before, and the job's price is the only charge",
+      r.with_email === s.valid && r.skipped_held === 0 && Number(r.credits_used) === tx.state.charged, `${r.with_email} vs ${s.valid}, ${r.skipped_held}, ${r.credits_used} vs ${tx.state.charged}`);
+    const listed = (await createAiArk({ token: DEMO_TOKEN, transport: tx, wait: fastWait }).exportResults(r.progress.track_ids?.[0], { page: 0, size: 100 })).content.map((x) => x.id);
+    const { rows: order } = await pool.query(
+      `SELECT c.value #>> '{}' AS id FROM enrich_rows w JOIN enrich_cells c ON c.row_id = w.id AND c.column_key = 'aiark_id'
+        WHERE w.table_id = $1 ORDER BY w.id LIMIT 100`,
+      [run.table_id]
+    );
+    check("  … the rows in the order AI Ark lists the people", listed.length === 100 && JSON.stringify(order.map((x) => x.id)) === JSON.stringify(listed), `${order.length} rows, ${listed.length} listed`);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    let twice = null;
+    const cf = demoClient(overlay(tx, async (req) => {
+      if (twice || !req.url.includes("/inquiries")) return;
+      const res = await tx(req);
+      const j = JSON.parse(res.text);
+      if (!j.content?.length) return res;
+      twice = j.content[0].id;
+      j.content = [j.content[0], ...j.content];
+      return { ...res, text: JSON.stringify(j) };
+    }));
+    const run = await newRun({ strategy: "export", size: 150, requests: [search(SEVERAL_PLACES)] });
+    await step(cf);
+    await due(run.id);
+    await step(cf); // page 0, with its first person listed twice
+    const a = await runRow(run.id);
+    const s = await tableStats(run.table_id, run.id);
+    check("a person listed twice on one page: the page goes in at once, that person once", Boolean(twice) && a.pulled === 100 && a.attempts === 0 && a.last_error === null && s.rows === 100 && s.registered === 100, `${a.pulled} ${a.attempts} ${a.last_error} ${JSON.stringify(s)}`);
+    const st = await drive(run.id, cf);
+    check("  … and the run finishes with everyone", st === "done" && (await runRow(run.id)).pulled === 150, st);
+  }
+  {
+    // Five of the job's people were bought before by another run; the job brings them back (the lists aside).
+    const tx = createDemoTransport({ jobMs: 0, faults: { ignoreLists: true } });
+    const req = search(SEVERAL_PLACES);
+    const firstFive = (await createAiArk({ token: DEMO_TOKEN, transport: createDemoTransport(), wait: fastWait }).preview(req, { page: 0, size: 100 })).content.slice(0, 5).map((x) => x.id);
+    const earlier = await newRun({ size: 1, requests: [search()] });
+    await settle(earlier.id);
+    await pool.query(
+      `INSERT INTO aiark_people (person_id, demo, run_id, pulled_at) SELECT id, true, $2, '2026-01-02T00:00:00Z' FROM unnest($1::text[]) AS t(id)`,
+      [firstFive, earlier.id]
+    );
+    const run = await newRun({ strategy: "export", size: 30, requests: [req] });
+    const st = await drive(run.id, demoClient(tx));
+    const r = await runRow(run.id);
+    const again = await one(
+      `SELECT count(*)::int AS n, count(*) FILTER (WHERE value #>> '{}' = $2)::int AS worded
+         FROM enrich_cells WHERE table_id = $1 AND column_key = 'pulled_before'`,
+      [run.table_id, `Bought 2026-01-02 (run ${earlier.id.slice(0, 6)})`]
+    );
+    const kept = await one(`SELECT count(*)::int AS n FROM aiark_people WHERE person_id = ANY($1::text[]) AND run_id = $2`, [firstFive, earlier.id]);
+    check("people bought before, brought back by a job: rows of their own, counted in skipped_held, still the earlier run's in the registry",
+      st === "done" && r.pulled === 30 && r.skipped_held === 5 && again.n === 5 && again.worded === 5 && kept.n === 5, `${st} ${r.pulled} ${r.skipped_held} ${JSON.stringify(again)} ${kept.n}`);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    const held = "2026-01-01T00:00:00.000Z";
+    let id = null;
+    let taken = false;
+    const cf = demoClient(overlay(tx, async (req) => {
+      if (id && !taken && req.url.includes("/inquiries")) {
+        taken = true;
+        await pool.query(`UPDATE aiark_runs SET claim_token = gen_random_uuid(), claimed_at = $2 WHERE id = $1`, [id, held]);
+      }
+    }));
+    const run = await newRun({ strategy: "export", size: 150, requests: [search(SEVERAL_PLACES)] });
+    await step(cf);
+    id = run.id;
+    await due(run.id);
+    await step(cf); // the claim goes to another worker while page 0 is on its way
+    const a = await runRow(run.id);
+    const s = await tableStats(run.table_id, run.id);
+    const rowless = await one(`SELECT count(*)::int AS n FROM aiark_people WHERE run_id = $1 AND row_id IS NULL`, [run.id]);
+    check("a claim lost before a page is written: the paid page is written all the same, everyone registered on their row",
+      taken && a.pulled === 100 && s.rows === 100 && s.registered === 100 && rowless.n === 0, `${taken} ${a.pulled} ${JSON.stringify(s)} ${rowless.n}`);
+    check("  … then the slice stops: the cursor stays on the page, and the new holder's lease is left alone",
+      (a.progress.job?.page ?? 0) === 0 && new Date(a.claimed_at).toISOString() === held, `${a.progress.job?.page} ${a.claimed_at}`);
+    await pool.query(`UPDATE aiark_runs SET claim_token = NULL, claimed_at = NULL, next_run_at = now() WHERE id = $1`, [run.id]);
+    const st = await drive(run.id, cf);
+    const s2 = await tableStats(run.table_id, run.id);
+    check("  … and the next holder reads that page again, adding nobody twice", st === "done" && (await runRow(run.id)).pulled === 150 && s2.rows === 150 && s2.registered === 150, `${st} ${JSON.stringify(s2)}`);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    const run = await newRun({ strategy: "export", size: 150, requests: [search(SEVERAL_PLACES)] });
+    await step(demoClient(tx));
+    await due(run.id);
+    await step(demoClient(tx), { pool: answerLost((sql) => sql.includes(PAGE_WRITE)) });
+    const a = await runRow(run.id);
+    const s = await tableStats(run.table_id, run.id);
+    check("a page's write saved but its answer lost: tried again, nobody added or counted twice", a.pulled === 100 && a.attempts === 0 && s.rows === 100 && s.registered === 100 && a.with_email === s.valid, `${a.pulled} ${a.attempts} ${JSON.stringify(s)} ${a.with_email}`);
+    const st = await drive(run.id, demoClient(tx));
+    check("  … and the run finishes with everyone once", st === "done" && (await runRow(run.id)).pulled === 150 && (await tableStats(run.table_id, run.id)).rows === 150, st);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    const run = await newRun({ strategy: "export", size: 150, requests: [search(SEVERAL_PLACES)] });
+    await step(demoClient(tx));
+    await due(run.id);
+    await step(demoClient(tx), { pool: flaky((sql) => sql.includes(PAGE_WRITE), 3) });
+    const a = await runRow(run.id);
+    check("a page's write that fails three times goes in on the fourth: nobody lost, the job not held", a.pulled === 100 && a.attempts === 0 && a.progress.job?.page === 1, `${a.pulled} ${a.attempts} ${JSON.stringify(a.progress.job)}`);
+    await due(run.id);
+    await drive(run.id, demoClient(tx));
+  }
+}
+
+// ── B17: an export pull of every match, in parts ────────────────────────────
+
+const PARTS_ENV = { AIARK_DEMO: "1", AIARK_PART_MAX: "40" };
+
+/** A series' parts in order, each kept for the cleanup (the worker made all but the first). */
+async function seriesParts(id) {
+  const { rows } = await pool.query(
+    `SELECT * FROM aiark_runs WHERE progress #>> '{series,id}' = $1 ORDER BY (progress #>> '{series,part}')::int`,
+    [id]
+  );
+  for (const r of rows) {
+    if (created.runs.includes(r.id)) continue;
+    created.runs.push(r.id);
+    created.tables.push(r.table_id);
+  }
+  return rows;
+}
+
+/** Part 1 of an export pull of `total` in parts of `partSize`, as startRun makes it (B18 checks startRun's own). */
+const newSeries = (total, partSize, requests) =>
+  newRun({ strategy: "export", size: Math.min(total, partSize), requests, part: 1, progress: { series: { id: randomUUID(), part: 1, total, before: 0 } } });
+
+/** Works a series until none of its parts is open. */
+async function driveSeries(seriesId, clientFor, { env = PARTS_ENV, log = () => {}, limit = 600 } = {}) {
+  for (let i = 0; i < limit; i++) {
+    const open = (await seriesParts(seriesId)).find((r) => !r.finished_at);
+    if (!open) return seriesParts(seriesId);
+    if (!(await step(clientFor, { env, log }))) await due(open.id);
+  }
+  throw new Error(`series ${seriesId} did not finish`);
+}
+
+async function parts() {
+  section("B17. An export pull of every match, in parts");
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    let lists = 0;
+    const sizes = [];
+    const cf = demoClient(overlay(tx, (req) => {
+      if (req.url.endsWith("/v1/lists")) lists++;
+      if (isPost(req)) sizes.push(JSON.parse(req.body).size);
+    }));
+    const first = await newSeries(100, 40, [search(SEVERAL_PLACES)]);
+    const id = first.progress.series.id;
+    await pool.query(`UPDATE aiark_runs SET match_count = 4321 WHERE id = $1`, [first.id]);
+    const logs = [];
+    const st = await drive(first.id, cf, { env: PARTS_ENV, log: (m) => logs.push(m) });
+    const a = await runRow(first.id);
+    const [, second, third] = await seriesParts(id);
+    check("part 1 ends done with its 40, and its finish queues part 2: 40 more, the same searches, filters and count",
+      st === "done" && a.pulled === 40 && a.stop_reason === null && second?.status === "queued" && second.size_requested === 40 && !third &&
+        second.client_tag === TAG && second.mode === "demo" && second.strategy === "export" && Number(second.match_count) === 4321 &&
+        JSON.stringify(second.requests) === JSON.stringify(first.requests) && JSON.stringify(second.filters) === JSON.stringify(first.filters),
+      `${st} ${a.pulled} ${a.stop_reason} ${second?.status} ${second?.size_requested} ${third?.id}`);
+    const p2 = second?.progress ?? {};
+    check("  … part 2 starts where part 1 stopped: its place in the series, the location group, and part 1's lists",
+      p2.series?.id === id && p2.series.part === 2 && p2.series.total === 100 && p2.series.before === 40 && p2.chunk === (a.progress.chunk ?? 0) &&
+        JSON.stringify(p2.lists) === JSON.stringify(a.progress.lists) && p2.lists_at === a.progress.lists_at && p2.lists_through === a.progress.lists_through &&
+        p2.excluded === a.progress.excluded && !p2.lists_log && !p2.track_ids && !p2.job,
+      JSON.stringify(p2));
+    const name = (await one(`SELECT name FROM enrich_tables WHERE id = $1`, [second?.table_id]))?.name ?? "";
+    check("  … in a table of its own named as part 2, and the worker's log says it was queued", / · part 2 · /.test(name) && second.table_id !== first.table_id && logs.some((m) => m.includes("part 2 queued")), `${name} | ${logs.join(" | ")}`);
+    const listsBefore = lists;
+    const all = await driveSeries(id, cf);
+    const [, b, c] = all;
+    const people = new Set();
+    let rows = 0;
+    for (const r of all) {
+      const ids = await personIds(r.table_id);
+      rows += ids.size;
+      for (const x of ids) people.add(x);
+    }
+    const registered = await one(`SELECT count(*)::int AS n FROM aiark_people WHERE run_id = ANY($1::uuid[])`, [all.map((r) => r.id)]);
+    check("parts of 40, 40 and 20, each done with no stop reason, and the one that reaches the total ends the chain",
+      all.length === 3 && all.map((r) => r.size_requested).join() === "40,40,20" && all.map((r) => r.pulled).join() === "40,40,20" &&
+        all.every((r) => r.status === "done" && r.stop_reason === null && r.finished_at) && all.map((r) => r.progress.series.before).join() === "0,40,80" &&
+        all.every((r) => r.progress.series.id === id && r.progress.series.total === 100) && sizes.join() === "40,40,20",
+      `${all.map((r) => `${r.status}:${r.size_requested}:${r.pulled}:${r.stop_reason}`).join(" ")} posts ${sizes.join()}`);
+    check("  … nobody bought twice across the parts, each part's people registered to it", people.size === 100 && rows === 100 && registered.n === 100, `${people.size} people, ${rows} rows, ${registered.n} registered`);
+    check("  … each next part adds one exclusion list, for the people the part before bought, to the ones it was handed",
+      lists - listsBefore === 2 && b.progress.lists.length === a.progress.lists.length + 1 && JSON.stringify(b.progress.lists.slice(0, -1)) === JSON.stringify(a.progress.lists) &&
+        b.progress.excluded === a.progress.excluded + 40 && c.progress.lists.length === b.progress.lists.length + 1 && c.progress.excluded === b.progress.excluded + 40,
+      `${lists - listsBefore} made, ${a.progress.lists.length} → ${b.progress.lists?.length} → ${c?.progress.lists?.length}`);
+    check("  … each part paid only for its own job", all.reduce((t, r) => t + Number(r.credits_used), 0) === tx.state.charged, `${all.map((r) => r.credits_used).join("+")} vs ${tx.state.charged}`);
+  }
+  {
+    // The first location group holds at most 159 people, so part 1's job of 200 uses it up and part 1 fills up from the second.
+    const tx = createDemoTransport({ jobMs: 0 });
+    const bodies = [];
+    const cf = demoClient(overlay(tx, (req) => { if (isPost(req)) bodies.push(JSON.parse(req.body)); }));
+    const small = search(["Dayton, Ohio"]);
+    const wide = search(TEN_PLACES);
+    const first = await newSeries(300, 200, [small, wide]);
+    const all = await driveSeries(first.progress.series.id, cf, { env: { AIARK_DEMO: "1", AIARK_PART_MAX: "200" } });
+    const titleOf = (q) => q.contact.experience.latest.title.any.include.content[0];
+    check("a part that used up a location group hands on the one it reached: the next part searches only the second group",
+      all.length === 2 && all[0].pulled === 200 && all[0].progress.chunk === 1 && all[1].size_requested === 100 && all[1].pulled === 100 &&
+        all[1].status === "done" && all[1].progress.chunk === 1 && bodies.length === 3 && titleOf(bodies[2]) === titleOf(wide) &&
+        bodies.filter((q) => titleOf(q) === titleOf(small)).length === 1,
+      `${all.map((r) => `${r.status}:${r.pulled}:chunk ${r.progress.chunk}`).join(" ")} posts ${bodies.map(titleOf).join(", ")}`);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    const cf = demoClient(tx);
+    const first = await newSeries(100, 40, [search(SEVERAL_PLACES)]);
+    await step(cf, { env: PARTS_ENV }); // AI Ark takes part 1's job
+    const said = await cancelRoute(first.id);
+    const all = await driveSeries(first.progress.series.id, cf);
+    check("a part cancelled with its job out: the paid job is read to its end, and no next part is queued",
+      said?.holds_job === true && all.length === 1 && all[0].status === "cancelled" && all[0].pulled === 40 && all[0].finished_at !== null,
+      `${JSON.stringify(said)} ${all.map((r) => `${r.status}:${r.pulled}`).join(" ")}`);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    const req = search();
+    const n = (await createAiArk({ token: DEMO_TOKEN, transport: createDemoTransport(), wait: fastWait }).preview(req, { page: 0, size: 100 })).totalElements;
+    const first = await newSeries(1000, 40, [req]);
+    const all = await driveSeries(first.progress.series.id, demoClient(tx));
+    const last = all.at(-1);
+    check(`a search with fewer people than the series wants (${n}): parts of 40 until one comes back short, which ends the chain with "No more matches"`,
+      all.length === Math.floor(n / 40) + 1 && all.slice(0, -1).every((r) => r.status === "done" && r.pulled === 40 && r.stop_reason === null) &&
+        last.status === "done" && last.stop_reason === "No more matches" && last.pulled === n % 40 && all.reduce((t, r) => t + r.pulled, 0) === n,
+      all.map((r) => `${r.status}:${r.pulled}:${r.stop_reason}`).join(" "));
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    const first = await newSeries(100, 40, [search(SEVERAL_PLACES)]);
+    const other = await newRun({ size: 10, requests: [search()] });
+    await pool.query(`UPDATE aiark_runs SET next_run_at = now() + interval '1 hour' WHERE id = $1`, [other.id]); // queued, not yet due
+    const all = await driveSeries(first.progress.series.id, demoClient(tx));
+    check("another pull of the client going when a part finishes: no next part, and the part's stop reason says why",
+      all.length === 1 && all[0].status === "done" && all[0].pulled === 40 && all[0].stop_reason === "The next part wasn't queued: this client already had another pull going.",
+      all.map((r) => `${r.status}:${r.pulled}:${r.stop_reason}`).join(" "));
+    await settle(other.id);
+  }
+  {
+    // The next part's table can't be made: everything in its savepoint goes, the finish stays.
+    const tx = createDemoTransport({ jobMs: 0 });
+    let broke = 0;
+    const breaking = {
+      query: (sql, params) => pool.query(sql, params),
+      connect: async () => {
+        const c = await pool.connect();
+        return {
+          query: async (sql, params) => {
+            if (!broke && sql.includes("INSERT INTO enrich_tables")) {
+              broke++;
+              throw new Error("the next part's table could not be made");
+            }
+            return c.query(sql, params);
+          },
+          release: (e) => c.release(e),
+        };
+      },
+    };
+    const first = await newSeries(100, 40, [search(SEVERAL_PLACES)]);
+    const logs = [];
+    for (let i = 0; i < 20 && !TERMINAL.has((await runRow(first.id)).status); i++) {
+      await due(first.id);
+      await step(demoClient(tx), { pool: breaking, env: PARTS_ENV, log: (m) => logs.push(m) });
+    }
+    const a = await runRow(first.id);
+    const all = await seriesParts(first.progress.series.id);
+    const src = await one(`SELECT received FROM enrich_sources WHERE id = $1`, [a.source_id]);
+    const orphans = await one(`SELECT count(*)::int AS n FROM enrich_tables WHERE client_tag = $1 AND name LIKE '% · part 2 ·%' AND created_at > $2`, [TAG, a.created_at]);
+    check("the next part can't be made: the finish is kept (done, let go, its source counted), nothing of the next part is left, and the stop reason says why",
+      broke === 1 && all.length === 1 && a.status === "done" && a.finished_at !== null && a.claim_token === null && src?.received === 40 && orphans.n === 0 &&
+        a.stop_reason === "The next part could not be queued: the next part's table could not be made" && logs.some((m) => m.includes("could not be queued")),
+      `${broke} ${all.length} ${a.status} ${a.claim_token} ${src?.received} ${orphans.n} ${a.stop_reason} | ${logs.join(" | ")}`);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    const cf = demoClient(tx);
+    const first = await newSeries(100, 40, [search(SEVERAL_PLACES)]);
+    await step(cf, { env: PARTS_ENV }); // lists made, job out
+    await setProgress(first.id, { lists_at: new Date(Date.now() - 25 * 3600_000).toISOString() });
+    await drive(first.id, cf, { env: PARTS_ENV });
+    const [, second] = await seriesParts(first.progress.series.id);
+    const p = second?.progress ?? {};
+    check("lists AI Ark has already dropped (past 24 hours) are not handed on: the next part makes its own",
+      Boolean(second) && !("lists" in p) && !("lists_at" in p) && !("lists_through" in p) && !("excluded" in p) && p.series?.part === 2 && "chunk" in p, JSON.stringify(p));
+    if (second) await settle(second.id);
+  }
+  {
+    const tx = createDemoTransport({ jobMs: 0 });
+    const first = await newSeries(100, 40, [search()]);
+    // Full, with every location group used up (a crash after its last page could leave it so).
+    await pool.query(`UPDATE aiark_runs SET pulled = 40, progress = progress || '{"chunk": 1}' WHERE id = $1`, [first.id]);
+    await step(demoClient(tx), { env: PARTS_ENV });
+    const all = await seriesParts(first.progress.series.id);
+    check("a full part with no location group left: no empty next part, and its stop reason says there are no more matches",
+      all.length === 1 && all[0].status === "done" && all[0].stop_reason === "No more matches", all.map((r) => `${r.status}:${r.stop_reason}`).join(" "));
+  }
+  {
+    const tx = createDemoTransport({});
+    const single = await newRun({ size: 5, requests: [search()], progress: { series: { id: randomUUID(), part: 1, total: 100, before: 0 } } });
+    const st = await drive(single.id, demoClient(tx), { env: PARTS_ENV });
+    const braked = await newSeries(100, 40, [search()]);
+    await pool.query(`UPDATE aiark_runs SET credits_used = 1000 WHERE id = $1`, [braked.id]);
+    const st2 = await drive(braked.id, demoClient(tx), { env: PARTS_ENV });
+    check("a one-at-a-time run never has a next part, nor does a part the spending brake stopped",
+      st === "done" && (await seriesParts(single.progress.series.id)).length === 1 && st2 === "stopped" && (await seriesParts(braked.progress.series.id)).length === 1,
+      `${st} ${st2}`);
+  }
+}
+
+/** B18. How many people one pull may ask for, and how a big export pull starts. */
+async function startSizes() {
+  section("B18. Sizes a pull may ask for");
+  check("a part is 10,000 people, or a whole AIARK_PART_MAX up to that",
+    PART_MAX === 10_000 && partMax({}) === PART_MAX && partMax({ AIARK_PART_MAX: "40" }) === 40 &&
+      ["0", "-3", "2.5", "10001", "abc", ""].every((v) => partMax({ AIARK_PART_MAX: v }) === PART_MAX));
+  const going = await one(ACTIVE_RUN_SQL, [TAG]);
+  if (going) {
+    check("no run of the test client going before startRun is asked", false, JSON.stringify(going));
+    return;
+  }
+  const geo = await loadGeo(pool);
+  /** startRun in a transaction that is rolled back, so nothing it makes is kept; with `part`, AIARK_PART_MAX meanwhile. */
+  const tryStart = async (strategy, size, { part = null, topupPullId = null } = {}) => {
+    const was = process.env.AIARK_PART_MAX;
+    if (part) process.env.AIARK_PART_MAX = String(part);
+    else delete process.env.AIARK_PART_MAX;
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      const out = await startRun(c, { tag: TAG, mode: "demo", strategy, size, geo, topupPullId });
+      const table = out.run ? (await c.query(`SELECT name FROM enrich_tables WHERE id = $1`, [out.run.table_id])).rows[0]?.name : null;
+      return { ...out, table };
+    } finally {
+      await c.query("ROLLBACK").catch(() => {});
+      c.release();
+      if (was === undefined) delete process.env.AIARK_PART_MAX;
+      else process.env.AIARK_PART_MAX = was;
+    }
+  };
+  const refused = (out) => out.status === 400 && out.code === "size" && !out.run;
+  const shown = (out) => JSON.stringify(out.run ? { size: out.run.size_requested, progress: out.run.progress, table: out.table } : out);
+  const odd = [];
+  for (const size of [0, -5, 2.5, Number.NaN, "100"]) {
+    const out = await tryStart("export", size);
+    if (!refused(out)) odd.push(`${size}: ${shown(out)}`);
+  }
+  check("a size that is not a whole number of at least 1 is refused", odd.length === 0, odd.join("; "));
+  const single = await tryStart("single", 10_001);
+  check("a one-at-a-time pull of more than 10,000 is refused, saying an export job can take more",
+    refused(single) && single.error === "A one-at-a-time pull takes at most 10,000 people; an export job can take more.", shown(single));
+  check("  … a top-up pull too, before anything else is looked at", refused(await tryStart("single", 10_001, { topupPullId: randomUUID() })));
+  const full = await tryStart("single", 10_000);
+  check("  … and 10,000 one at a time is one ordinary run", full.run?.size_requested === 10_000 && !full.run.progress?.series && !/ part /.test(full.table ?? ""), shown(full));
+  const tooMany = await tryStart("export", SERIES_MAX + 1);
+  check("an export pull of more than 200,000 is refused", refused(tooMany) && /200,000/.test(tooMany.error), shown(tooMany));
+  const most = await tryStart("export", SERIES_MAX);
+  const s = most.run?.progress?.series;
+  check("an export pull of 200,000 starts as part 1 of its series: 10,000 people, the series' id and total, nobody before, the table named as part 1",
+    most.run?.size_requested === 10_000 && most.run.strategy === "export" && /^[0-9a-f-]{36}$/.test(s?.id ?? "") && s.part === 1 && s.total === SERIES_MAX &&
+      s.before === 0 && / · part 1 · /.test(most.table ?? ""),
+    shown(most));
+  const small = await tryStart("export", 100, { part: 40 });
+  check("  … with parts of 40, an export pull of 100 starts as part 1 of 40", small.run?.size_requested === 40 && small.run.progress?.series?.total === 100 && small.run.progress.series.part === 1, shown(small));
+  const exact = await tryStart("export", 40, { part: 40 });
+  const whole = await tryStart("export", 10_000);
+  check("  … and one part's worth or less is an ordinary run, with no series",
+    exact.run?.size_requested === 40 && !exact.run.progress?.series && whole.run?.size_requested === 10_000 && !whole.run.progress?.series && !/ part /.test(whole.table ?? ""),
+    `${shown(exact)} ${shown(whole)}`);
 }
 
 // ── C. Outcomes against the database's own rules ────────────────────────────
