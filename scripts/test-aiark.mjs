@@ -54,6 +54,7 @@ import { CLEANING_EXCLUDE_KEYWORDS } from "./lib/aiark/cleaning-filters.mjs";
 import { RUN_COLUMNS } from "./lib/aiark/columns.mjs";
 import { addState, autoAddConfig, beginAdd, emailFound, EXTRA_FIELDS, finishAdd, headcount, IMPORT_COLUMNS, importRow, names, pullsToAdd, requestAdd } from "./lib/aiark/add.mjs";
 import { cityKey, findState } from "./lib/aiark/geo.mjs";
+import { ck } from "./lib/lead-places.mjs";
 import { advanceOneRun, aiArkFor, createRun, PART_MAX, partMax, runDue, webhookFor } from "./lib/aiark/runs.mjs";
 import { ACTIVE_RUN_SQL, SERIES_MAX, startRun } from "./lib/aiark/start-run.mjs";
 import { CLIENT_ACTIONS, likelyAddresses, resetClientChecks, wholeTermSource } from "./lib/enrich/client-checks.mjs";
@@ -2801,7 +2802,7 @@ async function areaAgainstGate(geo) {
   check(`all ${spellings.length} of the import's state spellings are known`, unknown.length === 0, unknown.slice(0, 5).join("; "));
   check('"WA" is the US state, in the resolver\'s order', findState(geo, "WA")?.country === "US");
   check('"Western Australia" is not', findState(geo, "Western Australia")?.country === "AU");
-  const ck = new Function("s", `return ${/^const ck = \(s\) => (.+);$/m.exec(source("scripts/backfill-lead-locations.mjs"))[1]};`);
+  // The resolver's key, from the location job's shared passes (scripts/lib/lead-places.mjs).
   const cities = [...new Set(people.map((p) => p.city).filter(Boolean))];
   check(`cityKey is the resolver's key for all ${cities.length} of these places`, cities.every((c) => cityKey(c) === ck(c)));
 }

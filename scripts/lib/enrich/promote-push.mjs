@@ -10,16 +10,22 @@
 //      queued once. A contact whose lead was there first (in_database,
 //      in_bison, never_contact) is never queued, and neither is one settled
 //      while the switch was off: nothing older is pushed unasked.
-//   2. Ready once placed. The import leaves a lead's place to the location
-//      backfill (a cron every 30 minutes), and the push worker checks the
-//      client's targeting again at push time, where require_location needs a
-//      country. A lead pushed before its place is known is skipped there as
-//      "ineligible per client targeting at push time". So a client's queued
-//      leads wait for a location run that started after their round finished
-//      (cron_runs, as the share step waits), or PUSH_WAIT_MINUTES. A round's
-//      leads go together: nothing is taken while a round of the client is
-//      still importing, and the two batches of a round (made in one
-//      transaction, so with one created_at) wait for the later of the two.
+//   2. Ready once placed. The push worker checks the client's targeting again
+//      at push time, where require_location needs a country: a lead pushed
+//      before its place is known is skipped there as "ineligible per client
+//      targeting at push time". The import leaves a lead's place to the
+//      location job, so promotion places a batch's new leads itself with that
+//      job's own code right after the settle, before the batch's final status
+//      (placeAdded, promote.mjs; ../lead-places.mjs). A round is ready once
+//      nothing is left for the job to write for any of its leads (each placed,
+//      or one the job leaves as it is: no place text, or a state text naming
+//      no state, so one unplaceable lead never holds a round), or as before: a
+//      location run that started after the round finished (cron_runs, as the
+//      share step waits), or PUSH_WAIT_MINUTES. A placement that failed leaves
+//      the round to those two. A round's leads go together: nothing is taken
+//      while a round of the client is still importing, and the two batches of
+//      a round (made in one transaction, so with one created_at) wait for the
+//      later of the two.
 //   3. Pushed by the web app. The enrich-worker asks POST
 //      /api/companies/promote/auto/push (Bearer AIARK_AUTO_ADD_KEY, the
 //      promotion round's own address and key) for a client with ready leads,
@@ -34,6 +40,7 @@
 
 import { flagOn } from "./settings.mjs";
 import { CRON_LOCATION_BACKFILL, PUSH_BATCH_MAX_IDS } from "../overlap-topup.mjs";
+import { leftToPlaceSql } from "../lead-places.mjs";
 import { ADD_COLUMN, notePush, PROMOTE_STALE_HOURS } from "./promote.mjs";
 
 /** push_batches.push_options.source of a promotion push. Not a share source: the worker treats it as any batch. */
@@ -42,7 +49,7 @@ export const PROMOTE_PUSH_SOURCE = "promote";
 export const PUSH_STATES = Object.freeze(["queued", "pushed", "held", "dropped"]);
 /** The columns 140 adds; the code reads none of them until all four exist. */
 export const PUSH_COLUMNS = Object.freeze(["auto_push_state", "auto_push_note", "auto_push_batch_id", "auto_push_at"]);
-/** A round's leads wait this long for the location backfill, then go anyway (the share step's default wait). */
+/** A round whose leads are not all placed waits this long for the location backfill, then goes anyway (the share step's default wait). */
 export const PUSH_WAIT_MINUTES = 180;
 /** The worker asks for a client's push at most this often. */
 export const PUSH_ASK_EVERY_MS = 2 * 60_000;
@@ -77,23 +84,26 @@ export async function pushColumnsReady(db) {
 
 // A client's queued contacts, each with its round: the upload batch's
 // created_at (the two batches of a round are made in one transaction), whether
-// every batch of that round is finished, and when the last one finished. A
-// contact whose batch row is gone counts as a round of its own that finished
-// when it was queued. $1 the tag.
+// every batch of that round is finished, when the last one finished, and
+// whether every lead of the round is placed (nothing left for the location
+// job to write: leftToPlaceSql). A contact whose batch row is gone counts as
+// a round of its own that finished when it was queued; one whose lead is gone
+// counts as placed (the push drops it). $1 the tag.
 const QUEUED_CTE = `
   q AS (
     SELECT c.row_id, c.table_id, c.lead_id,
            coalesce(b.created_at, c.auto_push_at) AS round_at,
            CASE WHEN b.id IS NULL THEN true ELSE b.status IN ('complete', 'error') AND b.completed_at IS NOT NULL END AS finished,
-           coalesce(b.completed_at, CASE WHEN b.id IS NULL THEN c.auto_push_at END) AS done_at
+           coalesce(b.completed_at, CASE WHEN b.id IS NULL THEN c.auto_push_at END) AS done_at,
+           NOT EXISTS (SELECT 1 FROM leads l WHERE l.id = c.lead_id AND ${leftToPlaceSql("l")}) AS placed
       FROM enrich_contacts c
       LEFT JOIN upload_batches b ON b.id = c.batch_id
      WHERE c.client_tag = $1 AND c.auto_push_state = 'queued'
   ),
   r AS (
-    SELECT round_at, bool_and(finished) AS finished, max(done_at) AS done_at FROM q GROUP BY round_at
+    SELECT round_at, bool_and(finished) AS finished, max(done_at) AS done_at, bool_and(placed) AS placed FROM q GROUP BY round_at
   ),
-  placed AS (
+  location_run AS (
     SELECT max(finished_run_started_at) AS run_at FROM cron_runs WHERE name = $2
   ),
   live AS (
@@ -104,8 +114,11 @@ const QUEUED_CTE = `
     ) AS running
   )`;
 
-/** Whether a round's leads may go: finished, and placed by a location run or waited out. $3 the wait in minutes. */
-const ROUND_READY = `(r.finished AND (r.done_at < (SELECT run_at FROM placed) OR r.done_at < now() - make_interval(mins => $3)))`;
+/**
+ * Whether a round's leads may go: finished, and placed (by the promotion itself, or by anything since), or a
+ * location run started after it finished, or waited out. $3 the wait in minutes.
+ */
+const ROUND_READY = `(r.finished AND (r.placed OR r.done_at < (SELECT run_at FROM location_run) OR r.done_at < now() - make_interval(mins => $3)))`;
 
 /** The queued contacts that may be pushed now, oldest round first. $5 the limit. */
 const READY_SQL = `

@@ -6,6 +6,7 @@ import { importRows, type ImportCounters } from "@/lib/uploads/import-rows";
 import {
   beginPromote,
   finishPromote,
+  placeAdded,
   PROMOTE_COLUMNS,
   PROMOTE_EXTRA_FIELDS,
   PROMOTE_STALE_HOURS,
@@ -38,6 +39,13 @@ import type { PromoteKind } from "./fit-types";
 // after its contacts are settled: until then it is live, so another round
 // never retakes them and settles them as already in the database, and the
 // push never takes a round that is still being settled.
+//
+// Between the settle and the final status, the leads the batch made are
+// placed at once with the location job's own code (placeAdded,
+// scripts/lib/lead-places.mjs), exactly as the location cron would place
+// them, so a round's push need not wait for the cron's next run. A failure
+// there is logged and nothing else: the cron places them, and the push waits
+// for it as before.
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const KINDS: PromoteKind[] = ["general", "person"];
@@ -181,9 +189,9 @@ export async function startPromote({
 }
 
 /**
- * One batch: the import, then each contact settled (3 tries), then the
- * batch's counters and final status. The status comes last: see the note at
- * the top.
+ * One batch: the import, then each contact settled (3 tries), then its new
+ * leads placed, then the batch's counters and final status. The status comes
+ * last: see the note at the top.
  */
 async function importAndSettle(tag: string, b: Started, label: string, queuePush: boolean) {
   let final: { counters: ImportCounters; status: "complete" | "error" } | { failed: string };
@@ -216,12 +224,29 @@ async function importAndSettle(tag: string, b: Started, label: string, queuePush
       await sleep(2_000 * attempt);
     }
   }
+  // Before the final status, so a finished round has had its leads placed (or the try at it).
+  await placeNewLeads(b.batchId, b.contacts);
   if ("failed" in final) {
     await enrichPool()
       .query(`UPDATE upload_batches SET status = 'error', error_log = $2::jsonb, completed_at = now() WHERE id = $1`, [b.batchId, JSON.stringify([final.failed])])
       .catch(() => {});
   } else {
     await writeProgress(b.batchId, final.counters, final.status);
+  }
+}
+
+/**
+ * The leads the batch made, placed at once by the location job's own code, in one transaction (a batch is at
+ * most promotion.batch_max contacts). Never throws: a failure is logged, the location cron places them on its
+ * next run, and the automatic push waits for it as before.
+ */
+async function placeNewLeads(batchId: string, contacts: Started["contacts"]) {
+  try {
+    await withTx((c) => placeAdded(c, { batchId, contacts }), { timeoutMs: 30_000 });
+  } catch (err) {
+    console.error(
+      `[companies/promote] placing the new leads of ${batchId} failed (the location backfill places them): ${err instanceof Error ? err.message : err}`
+    );
   }
 }
 

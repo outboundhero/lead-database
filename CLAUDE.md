@@ -5233,14 +5233,24 @@ the client's campaigns, the way an Exports push of those rows would.
   batch stays live, so another round never retakes its contacts and settles them as
   already in the database (which would lose their push), and the push never takes a
   round that is still being settled.
-- **Ready once placed.** The import leaves a lead's place to the location cron, and the
-  push worker checks the client's targeting again at push time, where
-  `require_location` needs a country: a lead pushed before its place is known is
-  skipped there. So a client's queued leads wait for a location run that started after
-  their round finished (`cron_runs.location_backfill`, as the share step waits), or 180
-  minutes after it (`PUSH_WAIT_MINUTES`). A round's two batches (made in one
-  transaction, one `created_at`) go together, and nothing is taken while a round of the
-  client is still importing (`scripts/lib/enrich/promote-push.mjs`).
+- **Ready once placed.** The push worker checks the client's targeting again at push
+  time, where `require_location` needs a country: a lead pushed before its place is
+  known is skipped there. The import leaves a lead's place to the location job, so
+  since 2026-11-26 promotion places a batch's new leads itself, right after the settle
+  and before the batch's final status (`placeAdded`), with the location job's own
+  passes, now in `scripts/lib/lead-places.mjs` and called by
+  `scripts/backfill-lead-locations.mjs` too: what it writes for a lead is what the cron
+  would have written. Only the batch's 'added' leads, in one transaction (30 s at
+  most); a failure is logged ("placing the new leads of … failed") and changes nothing
+  else. A round is ready as soon as nothing is left for the location job to write for
+  any of its leads (`leftToPlaceSql`: each placed, or one the job leaves as it is, with
+  no place text or a state text naming no state, so an unplaceable lead never holds a
+  round), or as before: a location run that started after the round finished
+  (`cron_runs.location_backfill`, as the share step waits), or 180 minutes after it
+  (`PUSH_WAIT_MINUTES`), which is what a failed placement leaves it to. A round's two
+  batches (made in one transaction, one `created_at`) go together, and nothing is taken
+  while a round of the client is still importing (`scripts/lib/enrich/promote-push.mjs`).
+  The push's targeting check at push time is unchanged.
 - **Asked by the worker.** On the promotion minute, beside the promotion asks but with
   a busy flag of its own, the enrich-worker asks `POST /api/companies/promote/auto/push
   {tag}` (Bearer `AIARK_AUTO_ADD_KEY`, the `AIARK_AUTO_ADD_URL` origin: no new setting;
@@ -5281,13 +5291,20 @@ the client's campaigns, the way an Exports push of those rows would.
   before. Back-out steps are at the end of the file.
 - **Rollout:** apply 140 by hand, then deploy the web app and the enrich-worker (until
   the new worker runs, the fit panel says "The worker running does not push yet"), then
-  switch "Push into campaigns" on. The push-worker needs no change.
+  switch "Push into campaigns" on. The push-worker needs no change. The placement at
+  once needs no migration: the web app places, and the worker's ask and the web app's
+  push read the new readiness; with either one older, rounds wait for the location
+  cron as before.
 - **Tests:** `node --env-file=.env.local scripts/test-auto-push.mjs` (local database
   only, 140 applied, under the shared lock; made-up `APTEST_` clients on two made-up
   installs, `*.aptest.example`, whose campaign search a stand-in answers; no network;
   about 2 s): the switch and the sheet, switched off, the queue, the wait for places
-  and the wait limit, one forced batch for exactly the new leads, never twice (a second
-  ask, a second round, two asks at once, a retried settle), held and dropped with their
+  and the wait limit when the placement fails (a made-up failure), the placement at
+  once (before the batch's final status, ready and pushed with no location run,
+  unplaceable leads never holding a round, one left for the job holding it, and the
+  location backfill, run once on twin leads, writing exactly what the promotion
+  wrote), one forced batch for exactly the new leads, never twice (a second ask, a
+  second round, two asks at once, a retried settle), held and dropped with their
   reasons, the route's key, the worker's ask and wiring, the fit panel.
 
 ## Known issues / TODO
