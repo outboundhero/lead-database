@@ -51,6 +51,23 @@
 // single run copies such a person free with the registry's email and record,
 // an export run pays for them as for anyone it returns, and either way the
 // registry row then belongs to the tab run (run_id), as if it had bought them.
+//
+// Every match, in parts: one run holds at most 10,000 people (one export job,
+// PART_MAX), so an export pull of more (start-run.mjs) is a chain of parts,
+// each an ordinary run tied to the others by progress.series = { id, part,
+// total, before }. Each part is finished, added and handed to the email
+// finders as any run is. When a part has bought its whole size and the series
+// wants more, the finish that ends it queues the next part in the same
+// transaction: the same searches from the location group it reached, and its
+// exclusion lists while they live, so the next part only adds a list for the
+// people just bought. A cancel, a stop, an error, "No more matches" or another
+// pull of the client ends the chain; when the last part bought its whole size,
+// its stop_reason says why there is no next one.
+//
+// An export job's page is written with one statement for up to 100 people
+// (writePage), with what a person's write guarantees; a value Postgres refuses
+// sends that page through writePerson one person at a time. A single run
+// still writes each person as it is bought.
 
 import { randomUUID } from "node:crypto";
 import {
@@ -103,6 +120,38 @@ export const brakeFor = (size, searches) => Math.ceil(size * 1.25) + 5 * searche
 const spendCeiling = (run) => brakeFor(run.size_requested, run.requests.length);
 const brakeReason = (run, used) =>
   `Stopped by the run's spending brake: ${fmt(used)} credits used against a limit of ${fmt(spendCeiling(run))} for ${fmt(run.size_requested)} people. Going on could pass it, so nothing more was bought.`;
+
+/**
+ * The most one part of an export pull takes: one export job's worth, which is
+ * also the most one run holds (aiark_runs.size_requested, migration 123).
+ */
+export const PART_MAX = EXPORT_MAX;
+
+/**
+ * A part's size: PART_MAX, or AIARK_PART_MAX when it is a whole number from 1
+ * to PART_MAX. The override is for tests, so a chain of parts runs on a few
+ * made-up people; nothing sets it in production.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {number}
+ */
+export function partMax(env = process.env) {
+  const n = Number(env?.AIARK_PART_MAX);
+  return Number.isInteger(n) && n >= 1 && n <= PART_MAX ? n : PART_MAX;
+}
+
+/**
+ * Does the client have a run going? A cancelled run still reading the export
+ * it paid for counts. $1 = the tag. startRun (start-run.mjs) asks before it
+ * starts a pull and finish() before it queues a pull's next part, both under
+ * the client's run lock; it lives here because start-run.mjs imports this
+ * file, not the other way round.
+ */
+export const ACTIVE_RUN_SQL = `SELECT id, status FROM aiark_runs
+            WHERE client_tag = $1
+              AND (status IN ('queued', 'running')
+                   OR (status = 'cancelled' AND finished_at IS NULL AND jsonb_typeof(progress->'job') = 'object'))
+            LIMIT 1`;
 
 // ── Clients ─────────────────────────────────────────────────────────────────
 
@@ -185,14 +234,18 @@ function stamp(d = new Date()) {
 /**
  * Creates the run's table (kind 'ai_ark', the shared column set), its source
  * and the aiark_runs row. `db` is a client inside the caller's transaction.
+ * `progress` is the run's starting cursor (a part of an export pull carries
+ * its series there); `part` puts " · part N" in the table's name.
  *
  * @param {{ query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> }} db
  * @param {{ tag: string, mode: "live" | "demo", strategy: "single" | "export", size: number, filters: object,
- *           requests: object[], matchCount?: number | null, createdBy?: string | null }} opts
+ *           requests: object[], matchCount?: number | string | null, createdBy?: string | null, progress?: object,
+ *           part?: number | null }} opts
  */
-export async function createRun(db, { tag, mode, strategy, size, filters, requests, matchCount = null, createdBy = null }) {
+export async function createRun(db, { tag, mode, strategy, size, filters, requests, matchCount = null, createdBy = null, progress = {}, part = null }) {
   const id = randomUUID();
-  const name = `AI Ark ${stamp()} · ${size.toLocaleString("en-US")} people${mode === "demo" ? " · demo" : ""} · ${id.slice(0, 6)}`;
+  const partOf = Number.isInteger(part) && part >= 1 ? ` · part ${part}` : "";
+  const name = `AI Ark ${stamp()} · ${size.toLocaleString("en-US")} people${partOf}${mode === "demo" ? " · demo" : ""} · ${id.slice(0, 6)}`;
   const { rows: [table] } = await db.query(
     `INSERT INTO enrich_tables (client_tag, kind, name, source_note) VALUES ($1, 'ai_ark', $2, $3) RETURNING id`,
     [tag, name, `AI Ark run ${id} (${strategy}${mode === "demo" ? ", made-up people" : ""})`]
@@ -212,9 +265,9 @@ export async function createRun(db, { tag, mode, strategy, size, filters, reques
     [table.id, `AI Ark run (${strategy})`, JSON.stringify({ run_id: id, mode, strategy, size }), createdBy]
   );
   const { rows: [run] } = await db.query(
-    `INSERT INTO aiark_runs (id, client_tag, mode, strategy, size_requested, table_id, source_id, filters, requests, match_count, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-    [id, tag, mode, strategy, size, table.id, source.id, JSON.stringify(filters), JSON.stringify(requests), matchCount, createdBy]
+    `INSERT INTO aiark_runs (id, client_tag, mode, strategy, size_requested, table_id, source_id, filters, requests, match_count, created_by, progress)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+    [id, tag, mode, strategy, size, table.id, source.id, JSON.stringify(filters), JSON.stringify(requests), matchCount, createdBy, JSON.stringify(progress ?? {})]
   );
   return run;
 }
@@ -285,10 +338,25 @@ async function release(ctx, { inMs = 0, attempts = 0, lastError = null } = {}) {
   );
 }
 
+// The write every run ends with, fenced on the claim.
+const FINISH_SQL = `UPDATE aiark_runs
+        SET status = CASE WHEN status = 'running' OR (status = 'cancelled' AND $3 = 'error') THEN $3 ELSE status END,
+            stop_reason = coalesce($4, stop_reason),
+            last_error = CASE WHEN $3 IN ('done', 'stopped') THEN $5 ELSE coalesce($5, last_error) END,
+            progress = $6, credits_after = coalesce($7, credits_after),
+            finished_at = coalesce(finished_at, now()), claim_token = NULL, claimed_at = NULL
+      WHERE id = $1 AND claim_token = $2
+      RETURNING status, pulled, source_id, stop_reason`;
+
 /**
  * Ends the run. A cancelled run stays cancelled, unless the paid job it was
  * still reading ends in an error: people paid for were not read, so it shows
  * as failed. A run that ends done or stopped drops an error it got past.
+ *
+ * A part of an export pull that ends done with no stop reason has bought its
+ * whole size, so its finish may queue the next part (finishAndQueue). A pool
+ * with no connect() (a test's stand-in) can't open a transaction: the finish
+ * is then written alone, as before parts.
  */
 async function finish(ctx, { status, stopReason = null, lastError = null }) {
   let creditsAfter = null;
@@ -298,22 +366,105 @@ async function finish(ctx, { status, stopReason = null, lastError = null }) {
   } catch {
     /* the balance is a nicety; never fail a finish over it */
   }
-  const { rows } = await ctx.pool.query(
-    `UPDATE aiark_runs
-        SET status = CASE WHEN status = 'running' OR (status = 'cancelled' AND $3 = 'error') THEN $3 ELSE status END,
-            stop_reason = coalesce($4, stop_reason),
-            last_error = CASE WHEN $3 IN ('done', 'stopped') THEN $5 ELSE coalesce($5, last_error) END,
-            progress = $6, credits_after = coalesce($7, credits_after),
-            finished_at = coalesce(finished_at, now()), claim_token = NULL, claimed_at = NULL
-      WHERE id = $1 AND claim_token = $2
-      RETURNING status, pulled, source_id`,
-    [ctx.run.id, ctx.run.claim_token, status, stopReason, lastError, ctx.progress, creditsAfter]
-  );
-  if (rows[0]?.source_id) {
-    await ctx.pool.query(`UPDATE enrich_sources SET received = $2, created = $2 WHERE id = $1`, [rows[0].source_id, rows[0].pulled]);
+  const params = [ctx.run.id, ctx.run.claim_token, status, stopReason, lastError, ctx.progress, creditsAfter];
+  const series = status === "done" && !stopReason ? seriesOf(ctx.run, ctx.progress) : null;
+  const { row, next, why } = series && typeof ctx.pool.connect === "function"
+    ? await finishAndQueue(ctx, params, series)
+    : { row: (await ctx.pool.query(FINISH_SQL, params)).rows[0], next: null, why: null };
+  if (row?.source_id) {
+    await ctx.pool.query(`UPDATE enrich_sources SET received = $2, created = $2 WHERE id = $1`, [row.source_id, row.pulled]);
   }
-  ctx.log?.(`AI Ark run ${ctx.run.id.slice(0, 8)}: ${rows[0]?.status ?? "?"}${stopReason ? ` — ${stopReason}` : ""}${lastError ? ` (${lastError})` : ""}`);
-  return rows[0]?.status;
+  const reason = stopReason ?? why;
+  const s = next?.progress?.series;
+  const queued = s ? ` — part ${s.part} queued as run ${next.id.slice(0, 8)} (${fmt(next.size_requested)} people; ${fmt(s.before)} of ${fmt(s.total)} bought so far)` : "";
+  ctx.log?.(`AI Ark run ${ctx.run.id.slice(0, 8)}: ${row?.status ?? "?"}${reason ? ` — ${reason}` : ""}${lastError ? ` (${lastError})` : ""}${queued}`);
+  return row?.status;
+}
+
+/** The series an export run is a part of (progress.series), or null for any other run. */
+function seriesOf(run, progress) {
+  const s = progress?.series;
+  if (run.strategy !== "export" || !s || typeof s !== "object") return null;
+  const whole = (n) => Number.isInteger(n) && n >= 0;
+  return typeof s.id === "string" && whole(s.part) && s.part >= 1 && whole(s.total) && whole(s.before) ? s : null;
+}
+
+/**
+ * The next part's starting cursor: its place in the series, the location group
+ * the finished part reached, and the finished part's exclusion lists while AI
+ * Ark still has them. With those, the next part's buildLists only adds a list
+ * for the people registered since (the ones just bought) instead of making
+ * every list again.
+ */
+function nextPartProgress(p, series, done) {
+  return {
+    series: { id: series.id, part: series.part + 1, total: series.total, before: done },
+    chunk: p.chunk ?? 0,
+    ...(listsAlive(p) ? { lists: p.lists ?? [], lists_at: p.lists_at, lists_through: p.lists_through ?? null, excluded: p.excluded ?? 0 } : {}),
+  };
+}
+
+/**
+ * The finish of a part of an export pull, and the next part, in one
+ * transaction: the next part exists exactly when the finish does, so a crash
+ * between the two can neither end the chain nor queue a part twice. The next
+ * part is queued only when the finish leaves the run done with no stop reason
+ * and the series short of its total, under the client's run lock (the one
+ * startRun takes), and only while the client has no other pull going. A next
+ * part that can't be made never costs the finish: its savepoint is rolled
+ * back, and the finished part's stop_reason says why.
+ */
+async function finishAndQueue(ctx, params, series) {
+  const { run } = ctx;
+  const c = await ctx.pool.connect();
+  try {
+    await c.query("BEGIN");
+    const { rows: [row] } = await c.query(FINISH_SQL, params);
+    const done = series.before + Number(row?.pulled ?? 0);
+    let next = null;
+    let why = null;
+    if (row?.status === "done" && row.stop_reason == null && done < series.total) {
+      if ((ctx.progress.chunk ?? 0) >= run.requests.length) {
+        // Every location group is used up, so a next part could only find nobody.
+        why = "No more matches";
+      } else {
+        await c.query("SAVEPOINT aiark_next_part");
+        try {
+          await c.query(`SELECT pg_advisory_xact_lock(hashtext('aiark-run:' || $1))`, [run.client_tag]);
+          const { rows: active } = await c.query(ACTIVE_RUN_SQL, [run.client_tag]);
+          if (active.length) {
+            why = "The next part wasn't queued: this client already had another pull going.";
+          } else {
+            next = await createRun(c, {
+              tag: run.client_tag,
+              mode: run.mode,
+              strategy: run.strategy,
+              size: Math.min(series.total - done, partMax(ctx.env)),
+              filters: run.filters,
+              requests: run.requests,
+              matchCount: run.match_count,
+              createdBy: run.created_by,
+              part: series.part + 1,
+              progress: nextPartProgress(ctx.progress, series, done),
+            });
+          }
+          await c.query("RELEASE SAVEPOINT aiark_next_part");
+        } catch (e) {
+          await c.query("ROLLBACK TO SAVEPOINT aiark_next_part");
+          next = null;
+          why = `The next part could not be queued: ${String(e?.message ?? e).slice(0, 300)}`;
+        }
+      }
+      if (why) await c.query(`UPDATE aiark_runs SET stop_reason = $2 WHERE id = $1`, [run.id, why]);
+    }
+    await c.query("COMMIT");
+    return { row: row && why ? { ...row, stop_reason: why } : row, next, why };
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    c.release();
+  }
 }
 
 const waitedTooLong = (job) => Date.now() - Date.parse(job.submitted_at ?? job.submitting_at) > EXPORT_WAIT_MAX_MS;
@@ -384,6 +535,26 @@ async function writeRun(ctx, sql, params) {
 }
 
 /**
+ * A person as the run's table holds them: the cells (with plain, only those
+ * that are plain text, and the id), the row's search text, and whether the
+ * email is usable (AI Ark marked it VALID). Person and page writes share it,
+ * so both write the same cells.
+ */
+function personRow({ inputs, pulledBefore = null, plain = false }) {
+  const cells = {};
+  for (const k of RUN_INPUT_KEYS) {
+    const v = k === "pulled_before" ? pulledBefore : inputs[k];
+    if (v && (!plain || k === "aiark_id" || PLAIN.test(String(v)))) cells[k] = clip(String(v).replace(/\u0000/g, ""), 5_000);
+  }
+  return {
+    id: cells.aiark_id ?? null,
+    cells,
+    search: clip(PERSON_SEARCH_KEYS.map((k) => cells[k]).filter(Boolean).join(" ").toLowerCase(), 2_000),
+    usable: cells.email_status === "VALID" && Boolean(cells.email),
+  };
+}
+
+/**
  * One person into the run's table, the registry and the run's counters — one
  * statement, so a crash never leaves a paid person half-recorded. Everything
  * is written even if the claim was lost, since the person is paid for by then,
@@ -392,15 +563,8 @@ async function writeRun(ctx, sql, params) {
  * already there means the try before committed and only its answer was lost.
  */
 async function writePersonOnce(ctx, { inputs, credits, pulledBefore = null, plain = false }, retry = false) {
-  const cells = {};
-  for (const k of RUN_INPUT_KEYS) {
-    const v = k === "pulled_before" ? pulledBefore : inputs[k];
-    if (v && (!plain || k === "aiark_id" || PLAIN.test(String(v)))) cells[k] = clip(String(v).replace(/\u0000/g, ""), 5_000);
-  }
-  const personId = cells.aiark_id;
+  const { id: personId, cells, search, usable } = personRow({ inputs, pulledBefore, plain });
   if (!personId) return { inserted: 0 };
-  const search = clip(PERSON_SEARCH_KEYS.map((k) => cells[k]).filter(Boolean).join(" ").toLowerCase(), 2_000);
-  const usable = cells.email_status === "VALID" && Boolean(cells.email);
   const { rows: [r] } = await ctx.pool.query(
     `WITH ok AS (
        SELECT id, status FROM aiark_runs WHERE id = $1 AND claim_token = $2 FOR UPDATE
@@ -461,6 +625,104 @@ async function writePerson(ctx, person) {
     } catch (e) {
       if (e instanceof LostClaim || e instanceof Cancelled) throw e;
       if (/^22/.test(String(e?.code ?? "")) && !person.plain) return writePerson(ctx, { ...person, plain: true });
+      if (tries >= WRITE_RETRIES) throw e;
+      await sleep(WRITE_RETRY_MS * (tries + 1));
+    }
+  }
+}
+
+/**
+ * One page of an export job (up to 100 people) into the run's table, the
+ * registry and the run's counters, in one statement where writePersonOnce
+ * takes one each, and on the same terms: fenced on the run row, everything
+ * written even if the claim was lost (the job is paid for) and the slice
+ * stopped right after, ON CONFLICT keeping a repeat harmless, the counters
+ * moved only for rows that go in now. No credits: the job was paid for as a
+ * whole. `rows` are personRow()s, one per person.
+ */
+async function writePageOnce(ctx, rows) {
+  const page = rows.map((r) => ({
+    id: r.id, search: r.search, cells: r.cells, email: r.cells.email ?? "", email_status: r.cells.email_status ?? "",
+    usable: r.usable, again: Boolean(r.cells.pulled_before),
+  }));
+  const { rows: [w] } = await ctx.pool.query(
+    `WITH ok AS (
+       SELECT id, status FROM aiark_runs WHERE id = $1 AND claim_token = $2 FOR UPDATE
+     ), x AS (
+       SELECT e.n, e.v->>'id' AS person_id, 'aiark:' || (e.v->>'id') AS row_key, e.v->>'search' AS search, e.v->'cells' AS cells,
+              e.v->>'email' AS email, e.v->>'email_status' AS email_status,
+              (e.v->>'usable')::boolean AS usable, (e.v->>'again')::boolean AS again
+         FROM jsonb_array_elements($5::jsonb) WITH ORDINALITY AS e(v, n)
+     ), r AS (
+       INSERT INTO enrich_rows (table_id, source_id, row_key, search_text)
+       SELECT $3::uuid, $4::uuid, x.row_key, x.search FROM x ORDER BY x.n
+       ON CONFLICT (table_id, row_key) DO NOTHING
+       RETURNING id, row_key
+     ), c AS (
+       INSERT INTO enrich_cells (row_id, column_key, table_id, status, value, display)
+       SELECT r.id, kv.key, $3::uuid, 'done', to_jsonb(kv.value), left(kv.value, 300)
+         FROM r JOIN x ON x.row_key = r.row_key CROSS JOIN LATERAL jsonb_each_text(x.cells) AS kv
+       RETURNING 1
+     ), p AS (
+       -- As writePersonOnce: a person only a people run of the Companies tab bought becomes this run's (D43).
+       INSERT INTO aiark_people AS a (person_id, demo, run_id, row_id, email, email_status)
+       SELECT x.person_id, $6::boolean, $1::uuid, r.id, nullif(x.email, ''), nullif(x.email_status, '')
+         FROM x LEFT JOIN r ON r.row_key = x.row_key
+        ORDER BY x.n
+       ON CONFLICT (person_id) DO UPDATE SET run_id = EXCLUDED.run_id, row_id = coalesce(EXCLUDED.row_id, a.row_id)
+        WHERE a.run_id IS NULL AND a.people_run_id IS NOT NULL
+       RETURNING 1
+     ), n AS (
+       SELECT count(*)::int AS inserted, count(*) FILTER (WHERE x.usable)::int AS usable, count(*) FILTER (WHERE x.again)::int AS again
+         FROM r JOIN x ON x.row_key = r.row_key
+     ), u AS (
+       UPDATE aiark_runs
+          SET pulled = pulled + (SELECT inserted FROM n),
+              with_email = with_email + (SELECT usable FROM n),
+              skipped_held = skipped_held + (SELECT again FROM n),
+              claimed_at = CASE WHEN claim_token = $2 THEN now() ELSE claimed_at END
+        WHERE id = $1
+       RETURNING pulled, credits_used
+     )
+     SELECT (SELECT count(*) FROM ok)::int AS held, (SELECT status FROM ok) AS status,
+            (SELECT inserted FROM n) AS inserted, (SELECT count(*) FROM p)::int AS registered,
+            (SELECT pulled FROM u) AS pulled, (SELECT credits_used::float8 FROM u) AS used`,
+    [ctx.run.id, ctx.run.claim_token, ctx.run.table_id, ctx.run.source_id, JSON.stringify(page), ctx.run.mode === "demo"]
+  );
+  if (!w.held) throw new LostClaim();
+  ctx.pulled = w.pulled;
+  ctx.spent = w.used;
+  return w;
+}
+
+/**
+ * Writes an export job's page. ON CONFLICT DO UPDATE can't touch one row twice
+ * in a statement, so a person a page lists twice is written once (the first
+ * time, as a write per person would keep). A failed write is tried again, as
+ * a person's is. A value Postgres refuses (SQLSTATE class 22) would refuse the
+ * whole page every time, so that page then goes through writePerson one
+ * person at a time, where only the person holding it loses the cells
+ * Postgres can't take.
+ */
+async function writePage(ctx, people) {
+  const seen = new Set();
+  const rows = [];
+  for (const person of people) {
+    const row = personRow(person);
+    if (!row.id || seen.has(row.id)) continue;
+    seen.add(row.id);
+    rows.push({ ...row, person });
+  }
+  if (!rows.length) return null;
+  for (let tries = 0; ; tries++) {
+    try {
+      return await writePageOnce(ctx, rows);
+    } catch (e) {
+      if (e instanceof LostClaim) throw e;
+      if (/^22/.test(String(e?.code ?? ""))) {
+        for (const r of rows) await writePerson(ctx, r.person);
+        return null;
+      }
       if (tries >= WRITE_RETRIES) throw e;
       await sleep(WRITE_RETRY_MS * (tries + 1));
     }
@@ -971,13 +1233,17 @@ async function sliceExport(ctx) {
       )
     : { rows: [] };
   const before = new Map(rows.map((x) => [x.person_id, x]));
+  const people = [];
   for (const item of res.content) {
     if (!item?.id) continue;
-    if (ctx.shouldStop()) return { wait: 0 }; // the page is read again on resume, and rows already written stay as they are
     const prev = before.get(item.id);
     const pulledBefore = prev ? `Bought ${new Date(prev.pulled_at).toISOString().slice(0, 10)}${prev.run_id ? ` (run ${String(prev.run_id).slice(0, 6)})` : ""}` : null;
     // Paid for with the job (above), not per person.
-    await writePerson(ctx, { inputs: personInputs(item), credits: 0, pulledBefore });
+    people.push({ inputs: personInputs(item), credits: 0, pulledBefore });
+  }
+  if (people.length) {
+    if (ctx.shouldStop()) return { wait: 0 }; // the page is read again on resume
+    await writePage(ctx, people);
   }
 
   const lastPage = res.last || !res.content.length;

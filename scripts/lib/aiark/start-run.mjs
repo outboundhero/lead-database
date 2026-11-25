@@ -2,6 +2,12 @@
 // in one function the route and the topup-worker both call, so a pull the
 // weekly top-up starts on its own meets exactly the rules a manager's does.
 //
+//   - a size of 1 to 10,000 people for a one-at-a-time pull, and up to
+//     200,000 (SERIES_MAX) for an export pull: one run holds one export job's
+//     worth (partMax(), 10,000), so an export pull of more starts as part 1 of
+//     a series, and the enrichment worker queues each next part when the one
+//     before has bought its whole size (runs.mjs). The spending brake and
+//     every other rule apply to each part as to any run;
 //   - one run per client at a time (a cancelled run still reading the export
 //     it paid for counts);
 //   - a live pull only while the enrichment worker is online (a pull queued
@@ -33,11 +39,12 @@
 // Plain JavaScript: the Next.js routes and the worker share it. Every query
 // runs on the caller's client, inside the caller's transaction.
 
+import { randomUUID } from "node:crypto";
 import { buildRequests, cleanPeopleFilters } from "./filters.mjs";
 import { readCompetitors } from "./competitors.mjs";
 import { filtersFor, standardFor } from "./standard-filters.mjs";
 import { placeKeyOf } from "./company-filters.mjs";
-import { brakeFor, createRun } from "./runs.mjs";
+import { ACTIVE_RUN_SQL, brakeFor, createRun, PART_MAX, partMax } from "./runs.mjs";
 import { settingsFrom } from "../enrich/settings.mjs";
 import { TOPUP_FILTER_KEY } from "../overlap-topup.mjs";
 import { budgetAllows, pullsStartedToday, topupBudget, TOPUP_BUDGET_LOCK } from "../topup/budget.mjs";
@@ -45,12 +52,11 @@ import { budgetAllows, pullsStartedToday, topupBudget, TOPUP_BUDGET_LOCK } from 
 /** The enrichment worker writes a heartbeat about every 10 s; 45 s of silence means it is down (src/lib/enrich/queries.ts). */
 export const WORKER_ONLINE_WITHIN_S = 45;
 
-/** Does the client have a run going? A cancelled run still reading the export it paid for counts. $1 = the tag. */
-export const ACTIVE_RUN_SQL = `SELECT id, status FROM aiark_runs
-            WHERE client_tag = $1
-              AND (status IN ('queued', 'running')
-                   OR (status = 'cancelled' AND finished_at IS NULL AND jsonb_typeof(progress->'job') = 'object'))
-            LIMIT 1`;
+/** The most people one export pull asks for, in parts of partMax() (runs.mjs). */
+export const SERIES_MAX = 200_000;
+
+// Does the client have a run going? Defined in runs.mjs, whose finish asks it too before queueing a pull's next part.
+export { ACTIVE_RUN_SQL };
 
 const fmt = (n) => Math.round(Number(n)).toLocaleString("en-US");
 
@@ -257,12 +263,14 @@ export function topupPullRefusal(settings, tag, clientType) {
 
 /**
  * Starts a pull, or says why not. `db` is a client inside the caller's
- * transaction; nothing is written unless a run is created.
+ * transaction; nothing is written unless a run is created. An export pull of
+ * more than partMax() people creates part 1 of its series (the run returned).
  *
  * @param {Db} db
  * @param {{ tag: string, mode: "live" | "demo", strategy: "single" | "export", size: number, matchCount?: number | null,
  *           versions?: { people: string | null, rules: string | null } | null, places?: unknown, topupPullId?: string | null,
  *           createdBy?: string | null, geo: any, workerOnline?: (db: any) => Promise<boolean> }} opts
+ *   size: people asked for, at most 10,000 one at a time and SERIES_MAX by export job;
  *   versions: null skips the version check (the worker reads the current rows); geo: loadGeo()'s value, or a function giving it.
  * @returns {Promise<{ run: any, pull: any | null } | { status: number, error: string, code: string, changed?: boolean }>}
  */
@@ -271,6 +279,12 @@ export async function startRun(db, opts) {
     tag, mode, strategy, size, matchCount = null, versions = null, places = null, topupPullId = null, createdBy = null,
     geo, workerOnline = enrichWorkerOnline,
   } = opts;
+  // One run holds at most PART_MAX people. A one-at-a-time pull is one run; an export pull of more is a series of parts.
+  if (!Number.isInteger(size) || size < 1) return { status: 400, error: "A pull's size must be a whole number of at least 1.", code: "size" };
+  if (strategy !== "export" && size > PART_MAX) {
+    return { status: 400, error: `A one-at-a-time pull takes at most ${fmt(PART_MAX)} people; an export job can take more.`, code: "size" };
+  }
+  if (size > SERIES_MAX) return { status: 400, error: `An export pull takes at most ${fmt(SERIES_MAX)} people.`, code: "size" };
   // Two clicks at once (or the worker and a click) must not start two runs for the client.
   await db.query(`SELECT pg_advisory_xact_lock(hashtext('aiark-run:' || $1))`, [tag]);
   const { rows: active } = await db.query(ACTIVE_RUN_SQL, [tag]);
@@ -366,11 +380,15 @@ export async function startRun(db, opts) {
   }
 
   const peopleUpdatedAt = saved?.updated_at ?? null;
+  // More than one part's worth: this run is part 1, and the series is how the worker knows to queue the rest.
+  const part = partMax();
+  const series = strategy === "export" && size > part;
   const run = await createRun(db, {
     tag,
     mode,
     strategy,
-    size,
+    size: series ? part : size,
+    ...(series ? { part: 1, progress: { series: { id: randomUUID(), part: 1, total: size, before: 0 } } } : {}),
     filters: {
       people: people.value,
       people_updated_at: peopleUpdatedAt,
