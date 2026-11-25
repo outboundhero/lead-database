@@ -5,6 +5,15 @@ export type RunStrategy = "single" | "export";
 export type RunStatus = "queued" | "running" | "done" | "stopped" | "error" | "cancelled";
 export const ACTIVE_STATUSES: RunStatus[] = ["queued", "running"];
 
+/**
+ * The most people one pull may ask for. An export job above PART_SIZE runs as
+ * parts of up to PART_SIZE, one after another, each its own run (start-run.mjs);
+ * one at a time stays a single run.
+ */
+export const PULL_MAX: Record<RunStrategy, number> = { single: 10_000, export: 200_000 };
+/** People per part of a large export pull: AI Ark's own limit for one export job (EXPORT_MAX in client.mjs). */
+export const PART_SIZE = 10_000;
+
 export interface EmployeeBand {
   start?: number;
   end?: number;
@@ -103,6 +112,16 @@ export interface AiArkRun {
   /** One at a time: people whose Preview company held an excluded keyword, skipped before their email was bought. */
   keyword_skipped: number | null;
   job_state: string | null;
+  /**
+   * A part of an export pull larger than PART_SIZE: which part (the first is
+   * 1), the size the whole pull asked for, and how many people the parts before
+   * this one pulled. Null for a pull that is a single run.
+   */
+  series?: { id: string; part: number; total: number; before: number } | null;
+  /** AI Ark has taken (and charged for) the export this run holds now: cancelling can't undo it. */
+  export_taken: boolean;
+  /** How many people that export asked for. */
+  job_size: number | null;
   created_by_name: string | null;
   /** People per outcome so far; only on a client's newest runs. */
   outcomes?: Record<string, number>;
@@ -163,4 +182,13 @@ export interface CountResult {
   sample: { name: string; title: string | null; company: string | null; place: string | null }[];
   /** The rules' version the count searched with (null: the client had no rules). */
   rulesVersion: string | null;
+  /**
+   * People this client's AI Ark tab runs of this mode have bought: every pull
+   * leaves them out (up to AI Ark's list limits), though the total includes
+   * them. Null when it wasn't read: a count of only some of the client's
+   * places, or the database didn't answer in time.
+   */
+  bought: number | null;
+  /** total less bought, never below 0: roughly how many a pull could still buy. Null with bought. */
+  aboutNew: number | null;
 }

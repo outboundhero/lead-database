@@ -4,7 +4,7 @@ import { isUuid, withTx } from "@/lib/enrich/db";
 import { workerState } from "@/lib/enrich/queries";
 import { logAudit } from "@/lib/api/log-audit";
 import { cleanTag, geo, modes, RUN_FIELDS, runsFor, startRun, TAG_RE } from "@/lib/aiark/server";
-import type { RunMode, RunStrategy } from "@/lib/aiark/types";
+import { PART_SIZE, PULL_MAX, type RunMode, type RunStrategy } from "@/lib/aiark/types";
 
 // GET  /api/aiark/runs?tag=ABC — a client's AI Ark runs, newest first, and the
 //      worker's heartbeat (the tab polls this while a run is going).
@@ -18,6 +18,12 @@ import type { RunMode, RunStrategy } from "@/lib/aiark/types";
 //      client. The enrichment worker does the pulling. Manager and up: a live
 //      run spends AI Ark credits.
 //
+//      size: up to 10,000 one at a time (strategy single) and up to 200,000
+//      for an export job. start-run.mjs runs an export of more than 10,000 as
+//      parts of up to 10,000, one after another, each its own run (the worker
+//      queues the next part when one has bought its full size); the run this
+//      answers is the first part.
+//
 //      places (optional): some of the client's own include locations; the
 //      search covers only those. topupPullId (optional): a prepared weekly
 //      top-up pull of this client (the Sharing page's Low places tab); the run
@@ -27,7 +33,7 @@ import type { RunMode, RunStrategy } from "@/lib/aiark/types";
 
 export const dynamic = "force-dynamic";
 
-const MAX_SIZE = 10_000;
+const fmt = (n: number) => n.toLocaleString("en-US");
 
 export async function GET(req: NextRequest) {
   const auth = await requireRole("manager");
@@ -68,8 +74,11 @@ export async function POST(req: NextRequest) {
   const size = Number(body.size);
   if (!mode) return NextResponse.json({ error: "mode must be live or demo" }, { status: 400 });
   if (!strategy) return NextResponse.json({ error: "strategy must be single or export" }, { status: 400 });
-  if (!Number.isInteger(size) || size < 1 || size > MAX_SIZE) {
-    return NextResponse.json({ error: `size must be a whole number from 1 to ${MAX_SIZE.toLocaleString("en-US")}` }, { status: 400 });
+  if (!Number.isInteger(size) || size < 1 || size > PULL_MAX[strategy]) {
+    const error = strategy === "export"
+      ? `size must be a whole number from 1 to ${fmt(PULL_MAX.export)} for an export job`
+      : `size must be a whole number from 1 to ${fmt(PULL_MAX.single)} one at a time (an export job takes up to ${fmt(PULL_MAX.export)})`;
+    return NextResponse.json({ error }, { status: 400 });
   }
   const m = modes();
   if (!m[mode].ready) return NextResponse.json({ error: m[mode].why, needsKey: mode === "live" }, { status: 409 });
@@ -117,7 +126,9 @@ export async function POST(req: NextRequest) {
     await logAudit({
       action: "aiark_run",
       performedBy: auth.user.id,
-      details: `${tag}: ${mode} ${strategy} pull of ${size} people queued (run ${out.run.id})${
+      details: `${tag}: ${mode} ${strategy} pull of ${size} people queued (run ${out.run.id}${
+        strategy === "export" && size > PART_SIZE ? `, the first of up to ${Math.ceil(size / PART_SIZE)} parts` : ""
+      })${
         out.topup ? `, a weekly top-up pull (${topupPullId})` : places ? `, limited to ${places.length} of its places` : ""
       }`,
     });

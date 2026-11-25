@@ -34,6 +34,14 @@ import type { CountResult, PeopleFilters, RunMode } from "@/lib/aiark/types";
 // The answer carries the version it searched with, so a count made before a
 // rules change is not taken for one made after. Manager and up.
 //
+// It also says how many people this client's own AI Ark tab runs of the mode
+// have bought (`bought`, see boughtFor below), which every pull leaves out (up
+// to AI Ark's list limits), and `aboutNew`, the total less those: roughly what
+// a pull could still buy.
+// Both are null for a count of only some places, and when the database
+// doesn't answer in time: they are for the tab's eyes, never a reason to fail
+// a count that has spent credits.
+//
 // places (optional): some of the client's own include locations; the count
 // covers only those. topupPullId (optional): a prepared weekly top-up pull of
 // this client. The count then covers the pull's places, is refused unless the
@@ -45,6 +53,53 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
 const SAMPLE = 10;
+
+/**
+ * People this client's AI Ark tab runs of this mode bought: aiark_people rows
+ * (the registry every pull's exclusion lists are made from) whose run is one
+ * of the client's, demo rows for demo runs only.
+ *
+ * aiark_people has no index on run_id (migration 123 gives it (demo,
+ * pulled_at) and the person id), and it holds every person any run has
+ * bought, so reading it by run_id alone means reading all of it. A run writes
+ * its people while it works, so each run's are read with an index scan of
+ * aiark_people_recent_idx (demo, pulled_at) between the run's start and 15
+ * minutes after it finished, run_id a filter on that range: someone whose
+ * Export Single was in flight when the run was cancelled lands just after
+ * finished_at. Expected plan: a nested loop over the client's runs
+ * (aiark_runs_client_idx), and for each one that index scan, so the work
+ * follows the people bought while the client's runs were going, not the
+ * whole registry (measured on made-up data: 200,000 people of 20 runs among
+ * 603,000 in 23 ms, against 87 ms for a scan of all of them).
+ *
+ * Not counted: someone a tab run took over from a Companies tab people run
+ * that had bought them before the tab run began (D43, runs.mjs), as the
+ * registry row keeps the people run's time. Each row has one run, so windows
+ * that overlap (the 15 minutes, a part starting as the one before it ends)
+ * never count anyone twice.
+ */
+async function boughtFor(tag: string, mode: RunMode): Promise<number> {
+  return withTx(
+    async (c) => {
+      const { rows } = await c.query<{ bought: number }>(
+        `SELECT coalesce(sum(x.n), 0)::int AS bought
+           FROM aiark_runs r
+          CROSS JOIN LATERAL (
+                SELECT count(*) AS n
+                  FROM aiark_people p
+                 WHERE p.demo = $3
+                   AND p.pulled_at >= r.created_at
+                   AND p.pulled_at <= coalesce(r.finished_at + interval '15 minutes', 'infinity')
+                   AND p.run_id = r.id
+               ) x
+          WHERE r.client_tag = $1 AND r.mode = $2`,
+        [tag, mode, mode === "demo"]
+      );
+      return rows[0]?.bought ?? 0;
+    },
+    { readOnly: true, timeoutMs: 3_000 }
+  );
+}
 
 export async function POST(req: NextRequest) {
   const auth = await requireRole("manager");
@@ -168,6 +223,17 @@ export async function POST(req: NextRequest) {
       details: `${tag}: ${total} matches in ${perSearch.length} searches, ${credits} credits${topupPullId ? ` (weekly top-up pull ${topupPullId})` : ""}`,
     });
   }
-  const out: CountResult = { mode, total, perSearch, credits, sample, rulesVersion };
+  // A count of some places only (a top-up pull's, or places sent) can't be set
+  // against everyone the client's runs bought in all of them.
+  let bought: number | null = null;
+  if (!topupPullId && !Array.isArray(body.places)) {
+    try {
+      bought = await boughtFor(tag, mode);
+    } catch (err) {
+      console.error("aiark/count bought:", err);
+    }
+  }
+  const aboutNew = bought === null ? null : Math.max(0, total - bought);
+  const out: CountResult = { mode, total, perSearch, credits, sample, rulesVersion, bought, aboutNew };
   return NextResponse.json(out);
 }
