@@ -28,12 +28,14 @@
 // waits so far.
 //
 // Rows of AI Ark tab pulls (tables of kind 'ai_ark') are claimed before any
-// other row, then the email checks (General inboxes rows), then the rest,
-// each oldest first (scripts/lib/enrich/claim.mjs). A pull's rows are quick
-// database checks and its leads wait for them; a general email becomes a lead
-// only once its check is done, and its row is made after its company's, so
-// claimed oldest first across every table the checks (and the leads) waited
-// for the whole company backlog.
+// other row, oldest first; then the email checks (General inboxes rows), then
+// the rest, each shared in fair turns across the tables with due rows (each
+// table's oldest rows first; scripts/lib/enrich/claim.mjs). A pull's rows are
+// quick database checks and its leads wait for them; a general email becomes a
+// lead only once its check is done, and its row is made after its company's,
+// so claimed oldest first across every table the checks (and the leads) waited
+// for the whole company backlog; and one client's big backlog no longer holds
+// up another client's rows.
 //
 // Crash model: a row is 'running' with a claim token while it is worked. A
 // crash leaves it 'running'; after STALE_MIN the sweep re-queues it and it is
