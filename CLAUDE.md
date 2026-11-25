@@ -2047,6 +2047,38 @@ fetches BEFORE our pagehide runs (Next registers its own listener first), so a
 reload would skip the cancel. Measured: cancel → 57014 in one round trip;
 parallel workers gone within ~10 ms.
 
+## Job Title exclude checks each remaining lead (141, 2026-11-25)
+
+**Symptom:** a saved search (74 conditions, almost all excludes; its one
+narrowing filter a 9-term Category include) always showed "Count timed out",
+so Select all, Export Filtered and Push stayed disabled. Measured on the full
+table: everything but the job titles 33.8 s warm (the category include's
+bitmap scan over 7 trigram indexes ran 96.9 s cold); the job-title exclude
+alone 34.6 s; together past the 120 s limit.
+
+**Cause:** the exclude was `l.id NOT IN (SELECT lead_id FROM lead_job_titles
+WHERE title ILIKE ANY(...))`, a hashed subplan that tests every one of the
+1.8M `lead_job_titles` rows against every pattern (49 words: 479,338 lead ids)
+before any lead is counted, however few leads the rest of the search leaves.
+
+**Now (both modes, `contains` and `exact`):** `NOT EXISTS (SELECT 1 FROM
+lead_job_titles ljt WHERE ljt.lead_id = l.id AND ljt.title ILIKE ANY(...))`.
+With a selective include it plans as a nested-loop anti join on
+`idx_ljt_lead_id`, reading only the remaining leads' titles; over the whole
+table it plans as a hash anti join, the same work as before. Same rows:
+`lead_job_titles.lead_id` is NOT NULL (0 NULLs) and `leads.id` is the primary
+key, so the two cannot differ. Checked: that search gives 23,568 both ways
+(today's predicate applied to the candidates, 83 s), and all 8 distinct
+job-title exclude lists saved in `filter_presets` and `push_batches` (7
+contains, 1 exact with 227 titles) count the same both ways on a 0.5% sample;
+the 49-word list there 32.2 s → 5.0 s, none slower. After 141: the count RPC
+23,568 exact in 35.1 s, and the Leads page showed it ~40 s after the preset
+was applied (it was a timeout). The INCLUDE templates are unchanged. Applied
+through the Supabase SQL editor, rebuilt from the live body; the function's
+grants and SECURITY DEFINER are kept. Still slow cold: a big category include
+reads 7 trigram indexes (company_overview, specific_industry are the costly
+ones), ~97 s on a cold cache, under the limit but close.
+
 ## Costing feed for ReplyRouter (121, 2026-10-27)
 
 ReplyRouter's Costing section pulls `GET /api/costing?from=&to=` (spec "Costing
