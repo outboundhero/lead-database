@@ -2966,7 +2966,7 @@ async function ruleChanges() {
   await pool.query(`INSERT INTO commercial_cleaning_excluded_titles (term) VALUES ($1)`, [TEST_TITLE]);
   const again = (await one(`SELECT now() AS t`)).t;
   check("a re-run sees a cleaning title saved before the click", (await outcome({ next_run_at: again }, titled)) === "Excluded by the client's rules");
-  check("the worker hands each row its next_run_at", /RETURNING[^`]*\bnext_run_at\b/.test(source("scripts/enrich-worker.mjs")));
+  check("the worker's claim hands each row its next_run_at", /RETURNING[^`]*\bnext_run_at\b/.test(source("scripts/lib/enrich/claim.mjs")));
 }
 
 async function emailBisonCopy() {

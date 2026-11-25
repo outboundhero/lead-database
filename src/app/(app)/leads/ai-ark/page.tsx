@@ -957,6 +957,9 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
   // A part of a large export pull: "about", as a part that buys fewer than it asked for is the last.
   const series = run.series ?? null;
   const partsAbout = series ? Math.max(series.part, Math.ceil(series.total / PART_SIZE)) : 0;
+  // A cancelled live pull's people marked Ready to add and not added yet: they wait for the button.
+  // Outcomes are read for a client's newest runs only, so an older run without them gets the hint too.
+  const readyLeft = run.outcomes ? Math.max(0, (run.outcomes["Ready to add"] ?? 0) - (run.added ?? 0)) : null;
   return (
     <div className="py-3 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center gap-2">
@@ -1000,7 +1003,7 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
         {run.match_count != null ? ` · ${fmt(run.match_count)} matched at the count` : ""}
         {waiting ? " · AI Ark is preparing the export" : ""}
       </p>
-      {run.status === "cancelled" && (run.finishing || (run.mode === "live" && run.pulled > 0)) && (
+      {run.status === "cancelled" && (run.finishing || (run.mode === "live" && run.pulled > 0 && readyLeft !== 0)) && (
         <p className="mt-1 text-[12px] text-muted-foreground">
           {run.finishing && "Cancelled: nothing new is bought. The export AI Ark was already paid for is still being read in, so nobody paid for is lost. "}
           {/* The worker adds a finished pull's people by itself, never a cancelled one's (pullsToAdd in add.mjs); a demo pull is never added. */}

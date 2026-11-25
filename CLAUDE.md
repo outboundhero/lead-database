@@ -2480,6 +2480,27 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   before". While an export job is unread, no other run of its mode buys. A person
   whose Export Single answer never arrived stays unregistered, though AI Ark may
   have charged for them.
+- **Every match in parts, faster reading, pull rows first (2026-11-25, no migration).**
+  An export pull may ask for up to 200,000 people (`SERIES_MAX`, start-run.mjs); one
+  at a time stays at 10,000. One run still holds at most 10,000 (`PART_MAX`, one
+  export job; the `size_requested` CHECK is unchanged), so a bigger export pull is a
+  chain of parts, each an ordinary run tied by `progress.series` = `{ id, part, total,
+  before }`. The finish of a part that bought its whole size queues the next part in
+  the same transaction (`finishAndQueue` in runs.mjs, under the client's run lock):
+  the same searches from the location group reached, and the part's exclusion lists
+  while they live, so the next part only adds a list for the people just bought. A
+  cancel, stop, error, "No more matches" or another pull of the client ends the
+  chain. Each part is checked, added and handed to the email finders like any
+  finished run. `AIARK_PART_MAX` shrinks parts for tests only. An export job's pages
+  are written with one statement per page (`writePage`, same guarantees as a
+  person's write; a value Postgres refuses sends that page through `writePerson`).
+  The worker claims rows of `ai_ark` tables before any other row
+  (`scripts/lib/enrich/claim.mjs`): on 11-24 a 10,000-person pull's checks waited
+  2.5 hours behind People rows' email searches. The count also answers `bought` (the
+  `aiark_people` rows of the client's own runs of that mode) and `aboutNew` (total
+  less bought), null for a count of some places or when the database is slow; the
+  tab offers "All new" from it. Measured before the change (two 10,000-person pulls,
+  11-24): about 18 minutes for AI Ark to prepare an export and 38 minutes to read it in.
 - **Standard filters for cleaning clients** (`scripts/lib/aiark/cleaning-filters.mjs`;
   AI Ark searches only, never the send gate, `client_targeting`, the Outcome checks
   or Clay tables): the owner's final lists, overlaps included (2026-11-03). A client
