@@ -11,6 +11,13 @@
 // Rows run concurrently and independently: a slow AI call never holds up the
 // others, and a free slot is refilled as soon as a row finishes.
 //
+// Rows of AI Ark tab pulls (tables of kind 'ai_ark') are claimed before any
+// other row, then the rest, oldest first (scripts/lib/enrich/claim.mjs). A
+// pull's rows are quick database checks (the lead lookup, the area, the
+// exclusions) and its leads wait for them, while a People row waits on the
+// email finders: claimed oldest first across every table, a 10,000-person
+// pull's rows once waited 2.5 hours behind thousands of People rows.
+//
 // Crash model: a row is 'running' with a claim token while it is worked. A
 // crash leaves it 'running'; after STALE_MIN the sweep re-queues it and it is
 // evaluated again. Paid answers are reused when their inputs are unchanged
@@ -130,6 +137,7 @@ import pg from "pg";
 import { randomUUID } from "node:crypto";
 import dotenv from "dotenv";
 import { order } from "./lib/enrich/formula.mjs";
+import { claimRows } from "./lib/enrich/claim.mjs";
 import { runRow } from "./lib/enrich/engine.mjs";
 import { readSettings } from "./lib/enrich/settings.mjs";
 import { projectCompanyV2 } from "./lib/enrich/project-company.mjs";
@@ -249,22 +257,9 @@ async function tableDef(id) {
 
 // ── Queue ───────────────────────────────────────────────────────────────────
 
+/** Up to n queued rows, AI Ark pull rows first, under one claim token (claim.mjs); never a retired template's row. */
 async function claim(n) {
-  const { rows } = await pool.query(
-    `UPDATE enrich_rows r
-        SET run_status = 'running', claim_token = $1, claimed_at = now(), attempts = r.attempts + 1, updated_at = now()
-      WHERE r.id IN (
-        SELECT q.id FROM enrich_rows q
-          JOIN enrich_tables t ON t.id = q.table_id AND NOT t.is_paused
-         WHERE q.run_status = 'queued' AND q.next_run_at <= now()
-           AND (t.template IS NULL OR NOT (t.template = ANY($3::text[])))
-         ORDER BY q.next_run_at, q.id
-         LIMIT $2
-           FOR UPDATE OF q SKIP LOCKED)
-      RETURNING r.id, r.table_id, r.run_force, r.attempts, r.created_at, r.claim_token, r.next_run_at`,
-    [randomUUID(), n, [...RETIRED_TEMPLATES]]
-  );
-  return rows;
+  return claimRows(pool, n, { token: randomUUID(), retired: [...RETIRED_TEMPLATES], log });
 }
 
 async function reclaimStale() {
