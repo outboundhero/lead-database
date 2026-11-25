@@ -757,8 +757,8 @@ function partE() {
     /CAPABILITIES\.push\(PULL_NO_EMAIL_CAPABILITY\);/.test(ws) && PULL_NO_EMAIL_CAPABILITY === "pull_no_email" &&
       /const CAPABILITIES = \["company_runs", "pipeline_v2", "people_runs", "linkedin_sources", "held_release", UPLOAD_CAPABILITY\];/.test(ws));
   check("both steps never throw, and say once that migration 130 is missing (42P01, 42703, 42883)",
-    /async function copyPulls\(\) \{\s*try \{[\s\S]*?await copyPullNoEmail\(pool, \{ settings, log \}\);[\s\S]*?\} catch \(e\) \{\s*if \(UPLOADS_UNREADY\.has\(e\?\.code\)\) \{\s*if \(!pullsUnreadyLogged\)/.test(ws) &&
-      /async function handBackPulls\(\) \{\s*try \{\s*const \{ found, closed \} = await handBackFound\(pool, \{ log \}\);[\s\S]*?\} catch \(e\) \{\s*if \(UPLOADS_UNREADY\.has\(e\?\.code\)\) \{\s*if \(!handBackUnreadyLogged\)/.test(ws));
+    /async function copyPulls\(\) \{\s*try \{[\s\S]*?await copyPullNoEmail\(housekeepingPool, \{ settings, log \}\);[\s\S]*?\} catch \(e\) \{\s*if \(UPLOADS_UNREADY\.has\(e\?\.code\)\) \{\s*if \(!pullsUnreadyLogged\)/.test(ws) &&
+      /async function handBackPulls\(\) \{\s*try \{\s*const \{ found, closed \} = await handBackFound\(housekeepingPool, \{ log \}\);[\s\S]*?\} catch \(e\) \{\s*if \(UPLOADS_UNREADY\.has\(e\?\.code\)\) \{\s*if \(!handBackUnreadyLogged\)/.test(ws));
   const panel = source("src/components/clay/cell-panel.tsx");
   check("the cell panel: a held row from a pull gets its own note; the upload note and heldNote(shown.row.template) are kept",
     panel.includes("Held: a person an AI Ark pull bought with no email. The worker starts it while its client is on People runs, at most 2,000 rows of this table at a time; nothing runs or is spent on it until then.") &&

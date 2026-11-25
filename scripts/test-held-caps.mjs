@@ -603,7 +603,7 @@ function partW() {
   check("held_release is in its capabilities (the Clay tab warns without it)", /const CAPABILITIES = \[[^\]]*"held_release"/.test(ws));
   check("its 60-second block releases held rows right after reclaimStale, and a failure there is logged, never thrown",
     /if \(Date\.now\(\) - lastSweep > 60_000\) \{\s*await reclaimStale\(\);\s*await releaseHeld\(\);/.test(ws) &&
-      /async function releaseHeld\(\) \{\s*try \{\s*const \{ released, tables, refused \} = await releaseHeldRows\(pool\);[\s\S]*?\} catch \(e\) \{/.test(ws));
+      /async function releaseHeld\(\) \{\s*try \{\s*const \{ released, tables, refused \} = await releaseHeldRows\(housekeepingPool\);[\s\S]*?\} catch \(e\) \{/.test(ws));
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────

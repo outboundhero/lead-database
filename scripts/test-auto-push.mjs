@@ -813,7 +813,7 @@ async function partW() {
       /async function pushPromoted\(\) \{\s*if \(!promotePush \|\| pushBusy\) return;\s*pushBusy = true;/.test(ws) &&
       ws.includes("for (const tag of await pushDue(pool, settings))") && ws.includes("requestPromotePush(promotePush, tag)") &&
       PUSH_ASK_EVERY_MS === 2 * 60_000 && ws.includes("CAPABILITIES.push(PROMOTION_PUSH_CAPABILITY);") && PROMOTION_PUSH_CAPABILITY === "promotion_push");
-  check("... and its promotion ask is as it was", /PROMOTE_EVERY_MS = 10 \* 60_000/.test(ws) && /promoteDue\(pool, settings\)/.test(ws) &&
+  check("... and its promotion ask: at most one round per client every 2 minutes", /PROMOTE_EVERY_MS = 2 \* 60_000/.test(ws) && /promoteDue\(pool, settings\)/.test(ws) &&
     /requestPromote\(promoteAuto, tag\)/.test(ws));
   const { groupToSave, sideAcrossInstalls, checkPushCampaigns, selectedIdsError } = await srcModule("lib/bison/push-batch-core.ts");
   const g1 = BISON_GROUPS[1];

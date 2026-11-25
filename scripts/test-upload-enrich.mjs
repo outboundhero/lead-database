@@ -854,8 +854,8 @@ async function partS() {
     /if \(Date\.now\(\) - lastSweep > 60_000\) \{\s*await reclaimStale\(\);\s*await releaseHeld\(\);\s*await moveUploads\(\);\s*await copyPulls\(\);\s*await releaseHeldPeople\(\);\s*await handBackPulls\(\);\s*lastSweep = Date\.now\(\);/.test(ws));
   check("the move and the People release never throw, and say once that migration 130 is missing (42P01, 42703, 42883)",
     /const UPLOADS_UNREADY = new Set\(\["42P01", "42703", "42883"\]\);/.test(ws) &&
-      /async function moveUploads\(\) \{\s*try \{[\s\S]*?await moveUploadRows\(pool, \{ settings, log \}\);[\s\S]*?\} catch \(e\) \{\s*if \(UPLOADS_UNREADY\.has\(e\?\.code\)\) \{\s*if \(!uploadsUnreadyLogged\)/.test(ws) &&
-      /async function releaseHeldPeople\(\) \{\s*try \{\s*const \{ released, tables, refused, full \} = await releaseHeldPeopleRows\(pool\);[\s\S]*?\} catch \(e\) \{\s*if \(UPLOADS_UNREADY\.has\(e\?\.code\)\) \{\s*if \(!peopleUnreadyLogged\)/.test(ws));
+      /async function moveUploads\(\) \{\s*try \{[\s\S]*?await moveUploadRows\(housekeepingPool, \{ settings, log \}\);[\s\S]*?\} catch \(e\) \{\s*if \(UPLOADS_UNREADY\.has\(e\?\.code\)\) \{\s*if \(!uploadsUnreadyLogged\)/.test(ws) &&
+      /async function releaseHeldPeople\(\) \{\s*try \{\s*const \{ released, tables, refused, full \} = await releaseHeldPeopleRows\(housekeepingPool\);[\s\S]*?\} catch \(e\) \{\s*if \(UPLOADS_UNREADY\.has\(e\?\.code\)\) \{\s*if \(!peopleUnreadyLogged\)/.test(ws));
   check("found emails: a timer every minute, not awaited, off without the auto-add address and key, with a busy flag and the per-upload record",
     /const foundAuto = foundAutoConfig\(env\);/.test(ws) && /async function addFoundEmails\(\) \{\s*if \(!foundAuto \|\| foundBusy\) return;\s*foundBusy = true;/.test(ws) &&
       /await askForFound\(pool, \{ config: foundAuto, askedAt: foundAskedAt, log \}\);/.test(ws) && /\} finally \{\s*foundBusy = false;/.test(ws) &&

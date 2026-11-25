@@ -7,6 +7,10 @@
 // A request that timed out may still have been billed, so a cell is sent at
 // most twice with no answer (counted from enrich_cell_runs), then it ends in an
 // error until a person re-runs it.
+//
+// A rate limit is the one answer a paid call waits out in place (paidHttpJson,
+// below): a 429 is not billed, so the same request goes again after the wait
+// the answer asks for, instead of the row going back to the queue.
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const RESPONSE_CAP = 32_000;
@@ -16,6 +20,20 @@ export function capped(value) {
   if (value == null) return null;
   const s = JSON.stringify(value);
   return s.length <= RESPONSE_CAP ? value : { truncated: true, head: s.slice(0, RESPONSE_CAP) };
+}
+
+/**
+ * A provider answer as a run record keeps it, with `extra` (the rate-limit
+ * headers, the waits) beside its own fields; the answer as it is when there
+ * is nothing extra.
+ *
+ * @param {any} json
+ * @param {Record<string, unknown>} extra
+ */
+export function answerWith(json, extra) {
+  if (!Object.keys(extra).length) return json;
+  if (json == null) return { ...extra };
+  return typeof json === "object" && !Array.isArray(json) ? { ...json, ...extra } : { body: json, ...extra };
 }
 
 /**
@@ -51,6 +69,155 @@ export async function httpJson(url, { method = "GET", headers = {}, body, timeou
 }
 
 export const retryableStatus = (s) => s === 0 || s === 429 || s >= 500;
+
+// ── Rate limits, waited out in place ────────────────────────────────────────
+// A paid call's 429 that is a plain rate limit (the caller tells it apart from
+// a billing, quota or credits refusal, which stops as before and is never sent
+// again) is waited out and the same request sent again. The wait is what the
+// answer asks for: retry-after-ms, then Retry-After (seconds or a date), then
+// the answer's own words ("Please try again in 1.5s": OpenAI's message gives
+// the wait this very request needs), then the x-ratelimit-reset-* header of
+// the limit used up (its remaining is 0; else the longest of them), else 2 s,
+// 4 s, 8 s. A little jitter is added, so slots that hit the limit together do
+// not all come back at once. Bounds: each wait at most 60 s, at most 3 retries,
+// at most 2 minutes of waiting for one call. Past them the 429 is answered as
+// before and the row is tried again later with its backoff.
+//
+// A 429 is not billed, so a retry never pays twice. A send with no answer
+// (status 0) is never sent again here: the lost-send guard below counts it, as
+// before. Any other status is answered at once.
+
+/** The bounds of the waits for one paid call. */
+export const RATE_LIMIT_RETRY = Object.freeze({ retries: 3, waitMaxMs: 60_000, totalMaxMs: 120_000, waitMinMs: 250, jitterMs: 500 });
+
+const rateDeps = { sleep, random: Math.random, now: Date.now };
+
+/**
+ * For tests: stand-ins for the wait, the jitter and the clock. Returns the
+ * ones in force before, to put back.
+ *
+ * @param {Partial<typeof rateDeps>} deps
+ */
+export function setRateLimitDeps(deps = {}) {
+  const before = { ...rateDeps };
+  Object.assign(rateDeps, deps);
+  return before;
+}
+
+const DURATION_PART = /^(\d+(?:\.\d+)?)(ms|h|m|s)/;
+const UNIT_MS = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000 };
+
+/**
+ * A duration in ms: plain seconds ("30", "1.5") or as OpenAI writes it ("20ms",
+ * "1.5s", "6m0s", "1h2m3s"). Null for anything else.
+ *
+ * @param {unknown} v
+ * @returns {number | null}
+ */
+export function durationMs(v) {
+  let rest = String(v ?? "").trim().toLowerCase();
+  if (!rest) return null;
+  if (/^\d+(\.\d+)?$/.test(rest)) return Math.round(Number(rest) * 1_000);
+  let total = 0;
+  while (rest) {
+    const m = DURATION_PART.exec(rest);
+    if (!m) return null;
+    total += Number(m[1]) * UNIT_MS[/** @type {keyof typeof UNIT_MS} */ (m[2])];
+    rest = rest.slice(m[0].length);
+  }
+  return Math.round(total);
+}
+
+/** A reset header in ms from now: a duration, or a Unix time (seconds or ms) some APIs send instead. */
+function resetMs(v, now) {
+  const n = Number(v);
+  if (v !== "" && Number.isFinite(n) && n > 1e12) return Math.max(0, n - now);
+  if (v !== "" && Number.isFinite(n) && n > 1e9) return Math.max(0, n * 1_000 - now);
+  return durationMs(v);
+}
+
+/**
+ * The wait a rate-limited answer asks for, in ms, or null when it says nothing
+ * usable (then the caller backs off on its own).
+ *
+ * @param {{ headers?: { get: (name: string) => string | null } | null, json?: any, error?: string | null }} r
+ * @param {number} [now]
+ * @returns {number | null}
+ */
+export function askedWaitMs(r, now = rateDeps.now()) {
+  const headers = r?.headers && typeof r.headers.get === "function" ? r.headers : null;
+  const get = (k) => String(headers?.get(k) ?? "").trim();
+  const ms = get("retry-after-ms");
+  if (ms && Number.isFinite(Number(ms)) && Number(ms) >= 0) return Math.round(Number(ms));
+  const after = get("retry-after");
+  if (after) {
+    if (/^\d+(\.\d+)?$/.test(after)) return Math.round(Number(after) * 1_000);
+    const at = Date.parse(after);
+    if (Number.isFinite(at)) return Math.max(0, at - now);
+  }
+  const words = [r?.json?.error?.message, r?.json?.message, r?.error].filter((s) => typeof s === "string").join(" ");
+  const go = /try again in ((?:\d+(?:\.\d+)?(?:ms|h|m|s))+)/i.exec(words);
+  if (go && durationMs(go[1]) != null) return durationMs(go[1]);
+  const secs = /(?:retry|try again) (?:after|in) (\d+(?:\.\d+)?) ?(?:seconds?|secs?|s)\b/i.exec(words);
+  if (secs) return Math.round(Number(secs[1]) * 1_000);
+  const resets = [];
+  for (const kind of ["-requests", "-tokens", ""]) {
+    const d = resetMs(get(`x-ratelimit-reset${kind}`), now);
+    if (d != null) resets.push({ d, usedUp: get(`x-ratelimit-remaining${kind}`) === "0" });
+  }
+  if (!resets.length) return null;
+  const usedUp = resets.filter((x) => x.usedUp);
+  return Math.max(...(usedUp.length ? usedUp : resets).map((x) => x.d));
+}
+
+// Since the process started: the sends made again after a rate limit, the time
+// waited, and the calls still rate limited after their waits (the row then
+// went back to the queue as before). The worker's heartbeat carries them, so
+// a raised ENRICH_CONCURRENCY can be judged by how often the limits are met.
+const waitTotals = { retries: 0, waited_ms: 0, gave_up: 0 };
+
+/** The rate-limit waits of this process so far: { retries, waited_ms, gave_up }. */
+export function rateLimitWaits() {
+  return { ...waitTotals };
+}
+
+/**
+ * JSON over HTTP for a paid call: one send, and the same request again after
+ * each rate limit waited out (see above). `isRateLimit(answer)` is asked about
+ * each 429 and must say no to a billing, quota or credits refusal, which is
+ * then answered at once, as before. The answer is httpJson's, the last one
+ * received, with rate_limited: { retries, waited_ms } when it waited, else
+ * null.
+ *
+ * @param {string} url
+ * @param {{ method?: string, headers?: Record<string, string>, body?: string, timeoutMs?: number }} opts  as httpJson's; always one try
+ * @param {{ isRateLimit: (answer: { status: number, json: any, error: string | null, headers?: Headers | null }) => boolean }} rule
+ * @returns {Promise<{ ok: boolean, status: number, json: any, error: string | null, headers?: Headers | null,
+ *   rate_limited: { retries: number, waited_ms: number } | null }>}
+ */
+export async function paidHttpJson(url, opts, { isRateLimit }) {
+  const waits = { retries: 0, waited_ms: 0 };
+  for (;;) {
+    const r = await httpJson(url, { ...opts, tries: 1 });
+    const limited = r.status === 429 && isRateLimit(r);
+    let wait = null;
+    if (limited && waits.retries < RATE_LIMIT_RETRY.retries) {
+      const asked = askedWaitMs(r) ?? 2_000 * 2 ** waits.retries;
+      const jitter = Math.floor(rateDeps.random() * RATE_LIMIT_RETRY.jitterMs);
+      wait = Math.min(RATE_LIMIT_RETRY.waitMaxMs, Math.max(RATE_LIMIT_RETRY.waitMinMs, asked) + jitter);
+      if (waits.waited_ms + wait > RATE_LIMIT_RETRY.totalMaxMs) wait = null;
+    }
+    if (wait == null) {
+      if (limited) waitTotals.gave_up++;
+      return { ...r, rate_limited: waits.retries ? { ...waits } : null };
+    }
+    await rateDeps.sleep(wait);
+    waits.retries++;
+    waits.waited_ms += wait;
+    waitTotals.retries++;
+    waitTotals.waited_ms += wait;
+  }
+}
 
 /** How many sends a paid cell may make with no answer before it stops. */
 export const MAX_LOST_SENDS = 2;

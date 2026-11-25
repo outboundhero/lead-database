@@ -17,7 +17,7 @@
 import { CLIENT_ACTIONS } from "./client-checks.mjs";
 import { COMPANY_ACTIONS } from "./company-actions.mjs";
 import { bareDomain } from "./domain.mjs";
-import { capped, httpJson, lostSendGuard, retryableStatus } from "./http.mjs";
+import { answerWith, capped, lostSendGuard, paidHttpJson, retryableStatus } from "./http.mjs";
 import { FIT_ACTIONS } from "./fit-keys.mjs";
 import { pageStart, pagesForPrompt, readSite, readsPages, siteInPrompt } from "./page-read.mjs";
 import { PIPELINE_ACTIONS } from "./pipeline-actions.mjs";
@@ -174,8 +174,14 @@ async function lookupKey({ inputs, config, table, db }) {
 //                  none sends exactly what a column without examples sends.
 // One send per attempt: the row's own retry handles a lost answer, and a cell
 // sent twice with no answer is not sent again (http.mjs). OpenAI's billing
-// refusals are never retried. Each call checks the day's OpenAI cap for its
-// loop first and adds what it cost after (spend.mjs).
+// refusals are never retried. A rate limit (a 429 that is not a billing or
+// quota refusal, openAiRateLimited) is waited out and sent again in place,
+// within the bounds of http.mjs paidHttpJson, so the row keeps its slot
+// instead of going back to the queue; a 429 is not billed. Each call checks
+// the day's OpenAI cap for its loop first and adds what it cost after
+// (spend.mjs). The run record keeps the rate-limit headers OpenAI sent
+// (response.rate_limit) and the waits (response.rate_limited), and the
+// worker's heartbeat the latest headers per model (openAiRateLimits).
 //
 // The two email searches (page-read.mjs readsPages) open the company's own
 // pages first, as Clay's Claygent visits them: the place's page (input
@@ -208,6 +214,73 @@ export function billingCode(json) {
     if (code && (BILLING_CODES.has(code) || /_spend_limit_exceeded$/.test(code))) return code;
   }
   return null;
+}
+
+/**
+ * Is this 429 a plain rate limit, waited out and sent again in place? Never a
+ * billing or quota refusal: billingCode's codes, or, when OpenAI gives no rate
+ * limit code, words of one (quota, billing, credit). Those stop, as before.
+ *
+ * @param {{ status: number, json: any }} r
+ */
+export function openAiRateLimited(r) {
+  if (r?.status !== 429 || billingCode(r.json)) return false;
+  const err = r.json?.error ?? {};
+  if (text(err.code) === "rate_limit_exceeded" || ["requests", "tokens"].includes(text(err.type))) return true;
+  return !/quota|billing|credit/i.test(`${text(err.code)} ${text(err.type)} ${text(err.message)}`);
+}
+
+/** OpenAI's rate-limit headers, as a run record and the heartbeat keep them. */
+const RATE_LIMIT_HEADERS = Object.freeze([
+  ["limit_requests", "x-ratelimit-limit-requests"],
+  ["remaining_requests", "x-ratelimit-remaining-requests"],
+  ["limit_tokens", "x-ratelimit-limit-tokens"],
+  ["remaining_tokens", "x-ratelimit-remaining-tokens"],
+  ["reset_requests", "x-ratelimit-reset-requests"],
+  ["reset_tokens", "x-ratelimit-reset-tokens"],
+]);
+
+/**
+ * The rate-limit headers of one OpenAI answer: the limits and what is left as
+ * numbers, the resets as OpenAI writes them ("1s", "6m0s"). Null when it sent
+ * none (no answer at all, or a stand-in).
+ *
+ * @param {{ get: (name: string) => string | null } | null | undefined} headers
+ * @returns {Record<string, number | string> | null}
+ */
+export function openAiRateLimit(headers) {
+  if (!headers || typeof headers.get !== "function") return null;
+  /** @type {Record<string, number | string>} */
+  const out = {};
+  for (const [field, name] of RATE_LIMIT_HEADERS) {
+    const v = headers.get(name);
+    if (v == null || v === "") continue;
+    out[field] = field.startsWith("reset_") || !Number.isFinite(Number(v)) ? String(v) : Number(v);
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+// The latest headers per model (OpenAI's limits are per model), for the
+// heartbeat: the owner reads the account's token and request limits there,
+// without OpenAI's dashboard. A few models at most; the oldest goes first.
+const latestRateLimits = new Map();
+const RATE_LIMIT_MODELS_KEPT = 10;
+
+function keepRateLimit(model, limits) {
+  if (!limits) return;
+  latestRateLimits.delete(model);
+  latestRateLimits.set(model, { ...limits, at: new Date().toISOString() });
+  while (latestRateLimits.size > RATE_LIMIT_MODELS_KEPT) latestRateLimits.delete(latestRateLimits.keys().next().value);
+}
+
+/** What OpenAI last said of its rate limits, per model, with when: { [model]: { limit_tokens, remaining_tokens, ..., at } }. */
+export function openAiRateLimits() {
+  return Object.fromEntries(latestRateLimits);
+}
+
+/** For tests: forget the rate limits read. */
+export function resetOpenAiRateLimits() {
+  latestRateLimits.clear();
 }
 
 /**
@@ -287,7 +360,7 @@ async function aiWeb({ inputs, config, env, settings, db, row, column }) {
   const pagesText = read ? pagesForPrompt(read, { tools: Boolean(tool) }) : "";
   const input = pagesText ? `${prompt}\n\n${pagesText}` : prompt;
   const { fields, schema } = answerSchema(config);
-  const r = await httpJson("https://api.openai.com/v1/responses", {
+  const r = await paidHttpJson("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify({
@@ -300,8 +373,10 @@ async function aiWeb({ inputs, config, env, settings, db, row, column }) {
       text: { format: { type: "json_schema", name: "answer", schema, strict: true } },
     }),
     timeoutMs: 120_000,
-    tries: 1,
-  });
+  }, { isRateLimit: openAiRateLimited });
+  const rateLimit = openAiRateLimit(r.headers);
+  keepRateLimit(model, rateLimit);
+  const limits = { ...(rateLimit ? { rate_limit: rateLimit } : {}), ...(r.rate_limited ? { rate_limited: r.rate_limited } : {}) };
   const request = {
     model,
     ...(config.model_setting ? { model_setting: config.model_setting, tool: noTool ? "none" : toolType } : {}),
@@ -334,7 +409,7 @@ async function aiWeb({ inputs, config, env, settings, db, row, column }) {
           ? `OpenAI refused for billing (${billing}), so it is not sent again`
           : `OpenAI: ${r.error}`,
       retryable: !billing && !keyProblem && retryableStatus(r.status),
-      run: { request, response: capped(r.json), http_status: r.status || null, error: r.error },
+      run: { request, response: capped(answerWith(r.json, limits)), http_status: r.status || null, error: r.error },
     };
   }
   const out = r.json ?? {};
@@ -363,7 +438,7 @@ async function aiWeb({ inputs, config, env, settings, db, row, column }) {
   }
   const run = {
     request,
-    response: capped({ answer, sources, usage: out.usage ?? null, web_searches: webSearches, ...(cost ? { cost_usd: cost.usd } : {}) }),
+    response: capped({ answer, sources, usage: out.usage ?? null, web_searches: webSearches, ...(cost ? { cost_usd: cost.usd } : {}), ...limits }),
     http_status: r.status,
   };
   if (!answer || typeof answer !== "object") return { status: "error", note: "The agent's answer was not valid JSON", retryable: true, run, model };
