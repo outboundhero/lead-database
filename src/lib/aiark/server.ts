@@ -148,6 +148,9 @@ export async function creditsLeft(mode: "live" | "demo"): Promise<{ credits: num
   }
 }
 
+// series: set on each part of an export pull larger than 10,000 (start-run.mjs).
+// export_taken: the export the run holds now has AI Ark's track id, so AI Ark
+// has taken it and charged for it (the cancel route reads the same).
 export const RUN_FIELDS = `r.id, r.client_tag, r.mode, r.strategy, r.status, r.size_requested, r.table_id, r.match_count::float8 AS match_count,
   r.pulled, r.with_email, r.skipped_held, r.credits_used::float8 AS credits_used, r.credits_before::float8 AS credits_before,
   r.credits_after::float8 AS credits_after, r.attempts, r.next_run_at, r.last_error, r.stop_reason, r.created_at, r.started_at,
@@ -155,7 +158,9 @@ export const RUN_FIELDS = `r.id, r.client_tag, r.mode, r.strategy, r.status, r.s
   (r.status = 'cancelled' AND r.finished_at IS NULL AND jsonb_typeof(r.progress->'job') = 'object') AS finishing,
   r.progress->>'lists_note' AS lists_note, (r.progress->>'excluded')::int AS excluded,
   (r.progress->>'keyword_skipped')::int AS keyword_skipped,
-  r.progress #>> '{job,state}' AS job_state, up.full_name AS created_by_name`;
+  r.progress #>> '{job,state}' AS job_state,
+  r.progress->'series' AS series, (r.progress #>> '{job,track_id}') IS NOT NULL AS export_taken,
+  (r.progress #>> '{job,size}')::int AS job_size, up.full_name AS created_by_name`;
 
 const OUTCOME_RUNS = 5; // outcomes are counted for the newest runs only: the tab polls this
 

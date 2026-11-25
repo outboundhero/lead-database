@@ -14,6 +14,7 @@ import { AccessDenied } from "@/components/layout/access-denied";
 import { useHasPermission } from "@/lib/context/role-context";
 import { ClientSelector } from "@/components/filters/client-selector";
 import { LinkedinSettingsCard } from "@/components/aiark/linkedin-settings-card";
+import { PART_SIZE, PULL_MAX } from "@/lib/aiark/types";
 import type {
   AiArkPlan, AiArkRun, AiArkSetup, CompetitorsListView, CountResult, EmployeeBand, PeopleFilters, RunMode, RunStatus, RunStrategy,
 } from "@/lib/aiark/types";
@@ -91,6 +92,20 @@ function estimate(strategy: RunStrategy, size: number, searches: number) {
 
 /** Where a run stops itself: spendCeiling in scripts/lib/aiark/runs.mjs. */
 const spendCeiling = (size: number, searches: number) => Math.ceil(size * 1.25) + 5 * Math.max(1, searches) + 10;
+
+/** How many parts an export pull of this size runs as (start-run.mjs): 0 when it is one run. */
+const partsOf = (strategy: RunStrategy, size: number) => (strategy === "export" && size > PART_SIZE ? Math.ceil(size / PART_SIZE) : 0);
+
+/**
+ * What the estimate and the Start confirm say about an export pull that runs
+ * as parts. Each part is its own run, so the spending brake is a part's: the
+ * figure is for a full part. A demo part is never added or sent anywhere.
+ */
+function partsNote(parts: number, mode: RunMode, partBrake: number) {
+  const how = `It runs as ${fmt(parts)} parts of up to ${fmt(PART_SIZE)}, one after another, each leaving out everyone bought before.`;
+  if (mode === "demo") return how;
+  return `${how} Each part's people are checked, added and sent to the email finders as soon as that part is read in. The spending brake is per part: each part stops itself before passing ${cr(partBrake)} credits.`;
+}
 
 type HeldCount = CountResult & { key: string };
 
@@ -357,11 +372,16 @@ function AiArkTab() {
 
   const start = async () => {
     if (!tag || !countNow) return;
-    const est = estimate(strategy, size, plan?.searches ?? 1);
+    const searches = plan?.searches ?? 1;
+    const est = estimate(strategy, size, searches);
+    const parts = partsOf(strategy, size);
     const what = mode === "demo"
       ? "a DEMO pull (made-up people, nothing bought)"
-      : `a LIVE pull — about ${cr(est.expected)} AI Ark credits; the run stops itself before passing ${cr(spendCeiling(size, plan?.searches ?? 1))}`;
-    if (!window.confirm(`Start ${what} of ${fmt(size)} people for ${tag}?`)) return;
+      : parts
+        ? `a LIVE pull — about ${cr(est.expected)} AI Ark credits in all`
+        : `a LIVE pull — about ${cr(est.expected)} AI Ark credits; the run stops itself before passing ${cr(spendCeiling(size, searches))}`;
+    const how = parts ? ` ${partsNote(parts, mode, spendCeiling(PART_SIZE, searches))}` : "";
+    if (!window.confirm(`Start ${what} of ${fmt(size)} people for ${tag}?${how}`)) return;
     setStarting(true);
     try {
       const res = await fetch("/api/aiark/runs", {
@@ -383,6 +403,9 @@ function AiArkTab() {
       }
       if (tag !== tagRef.current) return;
       setRuns((rs) => [j.run, ...rs]);
+      // The pull changes how many are bought, so the count's "already bought"
+      // and "All new" would be out of date: they come back with the next count.
+      setCount((c) => (c ? { ...c, bought: null, aboutNew: null } : c));
       toast.success(setup?.worker?.online ? "Pull queued — the worker picks it up in a few seconds" : "Pull queued — start the enrichment worker to run it");
     } catch (e) {
       toast.error((e as Error).message);
@@ -392,10 +415,15 @@ function AiArkTab() {
   };
 
   const cancel = async (run: AiArkRun) => {
-    const extra = run.strategy === "export"
-      ? " If AI Ark has already taken this run's export, that job is still charged, and its people are still read in so nobody paid for is lost."
-      : "";
-    if (!window.confirm(`Cancel this pull? Nothing new is bought, and everyone pulled so far stays in its table.${extra}`)) return;
+    // AI Ark can't take back an export it has taken: say so when this run holds one.
+    const ask = run.export_taken
+      ? `Cancel this pull? AI Ark has already taken this run's export${run.job_size ? ` of ${fmt(run.job_size)} people` : ""} and charged for it, so cancelling can't save those credits, and those people will still be read in. Cancelling stops anything new from being bought${run.series ? ", and the parts still to come" : ""}. Everyone pulled so far stays in its table.`
+      : `Cancel this pull? Nothing new is bought, and everyone pulled so far stays in its table.${
+          run.strategy === "export"
+            ? " If AI Ark has already taken this run's export, that job is still charged, and its people are still read in so nobody paid for is lost."
+            : ""
+        }${run.series ? " The parts still to come won't start." : ""}`;
+    if (!window.confirm(ask)) return;
     try {
       const res = await fetch("/api/aiark/runs/cancel", {
         method: "POST",
@@ -418,6 +446,11 @@ function AiArkTab() {
   const modes = setup?.modes;
   const est = estimate(strategy, size, plan?.searches ?? 1);
   const ceiling = spendCeiling(size, plan?.searches ?? 1);
+  const parts = partsOf(strategy, size);
+  const partCeiling = spendCeiling(PART_SIZE, plan?.searches ?? 1); // a full part's brake
+  const maxSize = PULL_MAX[strategy];
+  // "All new": the count less what this client's runs bought, as far as this way of pulling goes.
+  const allNew = countNow?.aboutNew ? Math.min(countNow.aboutNew, maxSize) : 0;
   const blockers = [...(plan?.blockers ?? []), ...planErrors];
   const exportReady = mode === "demo" || !!modes?.exportLive.ready;
   const activeHere = runs.find((r) => isActive(r) && r.client_tag === tag);
@@ -430,7 +463,10 @@ function AiArkTab() {
     dirty ? "Save the people filters first — a pull always uses the saved filters" :
     strategy === "export" && !exportReady ? modes?.exportLive.why ?? "Export needs a webhook address" :
     activeHere ? (activeHere.finishing ? "This client's cancelled pull is still reading what it paid for" : "This client already has a pull going") :
-    !Number.isInteger(size) || size < 1 || size > 10_000 ? "Pull between 1 and 10,000 people" :
+    !Number.isInteger(size) || size < 1 || size > maxSize
+      ? strategy === "export"
+        ? `Pull between 1 and ${fmt(PULL_MAX.export)} people with an export job`
+        : `Pull between 1 and ${fmt(PULL_MAX.single)} people one at a time (an export job takes up to ${fmt(PULL_MAX.export)})` :
     !countNow ? "Count the matches first — a pull starts after a count of these filters" :
     null;
 
@@ -757,7 +793,7 @@ function AiArkTab() {
                   <Input
                     type="number"
                     min={1}
-                    max={10000}
+                    max={maxSize}
                     value={Number.isFinite(size) ? size : ""}
                     onChange={(e) => setSize(Math.floor(Number(e.target.value)))}
                     className="h-9 w-28 rounded-full text-[13px] tabular-nums"
@@ -772,6 +808,18 @@ function AiArkTab() {
                       {fmt(n)}
                     </button>
                   ))}
+                  {allNew > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSize(allNew)}
+                      title="The count less everyone this client's pulls have bought"
+                      className={cn("rounded-full px-3 py-1.5 text-[12px] font-medium", size === allNew ? "bg-primary text-primary-foreground" : "bg-muted hover:bg-accent")}
+                    >
+                      {allNew < (countNow?.aboutNew ?? 0)
+                        ? `All new: ${fmt(allNew)}, the most ${strategy === "single" ? "one at a time" : "an export job takes"} (about ${fmt(countNow?.aboutNew)})`
+                        : `All new (about ${fmt(allNew)})`}
+                    </button>
+                  )}
                 </div>
                 <p className="-mt-2 text-[12px] leading-relaxed text-muted-foreground">
                   How many people this pull buys, with or without an email. New leads will be fewer: some have no email, and some are already in the database or outside the client&apos;s rules.
@@ -779,12 +827,15 @@ function AiArkTab() {
                 <div className="rounded-xl bg-muted/60 px-3 py-2 text-[12.5px] leading-relaxed">
                   {mode === "demo" ? (
                     <>About <b>{cr(est.expected)}</b> demo credits (made up — nothing is bought).</>
+                  ) : parts ? (
+                    <>About <b>{cr(est.expected)}</b> AI Ark credits in all ({cr(est.high)} if everyone has an email).</>
                   ) : (
                     <>
                       About <b>{cr(est.expected)}</b> AI Ark credits ({cr(est.high)} if everyone has an email). The run stops itself before passing{" "}
                       {cr(ceiling)}.
                     </>
                   )}{" "}
+                  {parts > 0 && <>{partsNote(parts, mode, partCeiling)}{" "}</>}
                   <span className="text-muted-foreground">
                     Assumes 6 in 10 people have an email. People bought before are left out up to AI Ark&apos;s list limits; past those, an export job
                     can buy some of them again.
@@ -805,7 +856,7 @@ function AiArkTab() {
                   </Button>
                 </div>
                 {pullWhyNot && tag && <p className="-mt-2 text-[12px] text-muted-foreground">{pullWhyNot}.</p>}
-                {countNow && <CountView count={countNow} />}
+                {countNow && <CountView count={countNow} tag={tag} />}
               </div>
             </Card>
 
@@ -851,7 +902,7 @@ function ModePill({ setup }: { setup: AiArkSetup }) {
   );
 }
 
-function CountView({ count }: { count: CountResult }) {
+function CountView({ count, tag }: { count: CountResult; tag: string }) {
   return (
     <div className="rounded-xl border border-border/70 p-3">
       <p className="text-[13.5px]">
@@ -861,7 +912,16 @@ function CountView({ count }: { count: CountResult }) {
           · {count.credits} credit{count.credits === 1 ? "" : "s"} used{count.perSearch.length > 1 ? ` · ${count.perSearch.map(fmt).join(" + ")}` : ""}
         </span>
       </p>
-      <p className="mt-0.5 text-[11.5px] text-muted-foreground">Includes people bought before; a pull leaves them out, up to AI Ark&apos;s list limits.</p>
+      {count.bought ? (
+        <p className="mt-0.5 text-[12.5px] tabular-nums">
+          {fmt(count.bought)} already bought for {tag}, left out of every pull · about {fmt(count.aboutNew)} new
+        </p>
+      ) : null}
+      <p className="mt-0.5 text-[11.5px] text-muted-foreground">
+        {count.bought
+          ? "The count is AI Ark's own total, which includes them. People pulled for other clients are left out too, so fewer may be new."
+          : "The count is AI Ark's own total, which includes anyone bought before; a pull leaves them out, up to AI Ark's list limits."}
+      </p>
       {count.sample.length > 0 && (
         <table className="mt-2 w-full text-[12px]">
           <thead className="text-left text-muted-foreground">
@@ -894,6 +954,9 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
   const pct = run.size_requested ? Math.min(100, Math.round((run.pulled / run.size_requested) * 100)) : 0;
   const when = new Date(run.created_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const waiting = run.strategy === "export" && run.status === "running" && run.job_state && run.job_state !== "DONE";
+  // A part of a large export pull: "about", as a part that buys fewer than it asked for is the last.
+  const series = run.series ?? null;
+  const partsAbout = series ? Math.max(series.part, Math.ceil(series.total / PART_SIZE)) : 0;
   return (
     <div className="py-3 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center gap-2">
@@ -903,6 +966,7 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
         </span>
         <span className="text-[13px] font-medium">
           {fmt(run.size_requested)} people · {run.strategy === "single" ? "one at a time" : "export job"}
+          {series && ` · Part ${fmt(series.part)} of about ${fmt(partsAbout)}`}
           {run.mode === "demo" && <span className="ml-1 rounded-full bg-muted px-1.5 text-[10.5px] text-muted-foreground">demo</span>}
         </span>
         <span className="text-[12px] text-muted-foreground">
@@ -927,6 +991,7 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
       </div>
       <p className="mt-1.5 text-[12px] tabular-nums text-muted-foreground">
         {fmt(run.pulled)} of {fmt(run.size_requested)} pulled · {fmt(run.with_email)} with an email
+        {series ? ` · ${fmt(series.before + run.pulled)} of ${fmt(series.total)} pulled across the parts so far` : ""}
         {run.skipped_held
           ? ` · ${fmt(run.skipped_held)} bought before, ${run.strategy === "export" ? "bought again by the export" : "skipped"}`
           : ""}
@@ -935,9 +1000,14 @@ function RunRow({ run, onCancel }: { run: AiArkRun; onCancel: () => void }) {
         {run.match_count != null ? ` · ${fmt(run.match_count)} matched at the count` : ""}
         {waiting ? " · AI Ark is preparing the export" : ""}
       </p>
-      {run.finishing && (
+      {run.status === "cancelled" && (run.finishing || (run.mode === "live" && run.pulled > 0)) && (
         <p className="mt-1 text-[12px] text-muted-foreground">
-          Cancelled: nothing new is bought. The export AI Ark was already paid for is still being read in, so nobody paid for is lost.
+          {run.finishing && "Cancelled: nothing new is bought. The export AI Ark was already paid for is still being read in, so nobody paid for is lost. "}
+          {/* The worker adds a finished pull's people by itself, never a cancelled one's (pullsToAdd in add.mjs); a demo pull is never added. */}
+          {run.mode === "live" &&
+            `A cancelled pull isn't added to the database automatically. To add its people marked Ready to add, ${
+              run.finishing ? "wait until it has finished, then " : ""
+            }open its table and press “Add to the database” above it.`}
         </p>
       )}
       {run.outcomes && (
