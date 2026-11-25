@@ -1,18 +1,22 @@
 #!/usr/bin/env node
 // The automatic push of promoted leads into the client's campaigns (migration
-// 140): the switch (promotion.auto_push), the queue at the settle, the wait for
-// places, the push through the worker's route (src/lib/companies/promote-push.ts)
-// with the push route's own checks (src/lib/bison/push-batch-core.ts), the
-// worker's ask (scripts/lib/enrich/promote-push.mjs), the settings sheet and the
-// fit panel.
+// 140): the switch (promotion.auto_push), the queue at the settle, the
+// placement of a round's new leads at once (scripts/lib/lead-places.mjs) and
+// the wait for places, the push through the worker's route
+// (src/lib/companies/promote-push.ts) with the push route's own checks
+// (src/lib/bison/push-batch-core.ts), the worker's ask
+// (scripts/lib/enrich/promote-push.mjs), the settings sheet and the fit panel.
 //
-// LOCAL DATABASE ONLY: made-up clients APTEST_A to APTEST_D with the made-up
+// LOCAL DATABASE ONLY: made-up clients APTEST_A to APTEST_E with the made-up
 // Clay originals as their own variants, made-up contacts and leads under
 // .aptest.example (and made-up aptest-... freemail addresses for the B2C side),
 // a made-up question variable and made-up push batches; all removed at the end
 // (and any left by a run that was cut off). It switches promotion and its push
 // on for its own clients only, question variables on for APTEST_D, and moves
-// the location run's record (cron_runs); each is put back as it was.
+// the location run's record (cron_runs); each is put back as it was. It runs
+// the location backfill (scripts/backfill-lead-locations.mjs) once, which
+// places every lead of the local database still to be placed, as the cron
+// would.
 //
 //   node --env-file=.env.local scripts/test-auto-push.mjs
 //
@@ -28,17 +32,24 @@
 // run for real through a small loader that compiles their TypeScript, with
 // stand-ins only for the session, the audit log helper, the worker's
 // heartbeat, Next's after() (its callbacks run when the test says), the shared
-// pg pool and the mail provider lookup. The Bearer key check is the real one.
+// pg pool, the mail provider lookup, and a switch that makes the promote run's
+// placement fail. The Bearer key check is the real one.
 //
 //   S. the switch: its default, flagOn, the settings sheet
 //   O. switched off: a round queues nothing, the push refuses, nothing later
-//   A. switched on: the queue at the settle, the wait for places (a round's
-//      batches together, the wait limit), one forced batch with the popup's
-//      campaigns for exactly the new leads, the cells and the audit, a second
-//      ask, a second round, a round still importing, the worker's gather
+//   A. switched on: the queue at the settle, the wait for places when the
+//      placement failed (a round's batches together, the wait limit), one
+//      forced batch with the popup's campaigns for exactly the new leads, the
+//      cells and the audit, a second ask, a second round, a round still
+//      importing, the worker's gather
 //   B. no campaign named for the client: every lead held with the reason
 //   C. B2B campaigns only: the B2C lead held, the B2B one pushed
 //   D. the client's question variable: held
+//   L. placed at once: a round's new leads placed by the location job's own
+//      code before the batch's final status, ready and pushed with no location
+//      run, unplaceable leads never holding a round, a lead left for the job
+//      holding it, a failed placement leaving its round to the old rule, and
+//      the location cron writing for the same leads what the promotion wrote
 //   E. errors: no Bison keys, a campaign search error, the route's key and body
 //   W. the worker: the ask, its address, the log line, the wiring
 //   P. the fit panel
@@ -46,10 +57,11 @@
 
 import pg from "pg";
 import dns from "node:dns";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire, register } from "node:module";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { checker, dropPaidKeys, inTx, localDatabaseUrl, seedFixtureVariant } from "./fixtures/test-support.mjs";
 import { ensurePipelineTables, lockPipelineTables, variantName } from "./lib/enrich/templates.mjs";
 import { FLAGS, flagOn, SETTINGS_DEFAULTS, settingsFrom } from "./lib/enrich/settings.mjs";
@@ -58,6 +70,7 @@ import {
   PROMOTE_PUSH_PATH, PROMOTE_PUSH_SOURCE, PROMOTION_PUSH_CAPABILITY, promotePushConfig, PUSH_ASK_EVERY_MS, PUSH_COLUMNS, PUSH_WAIT_MINUTES,
   pushColumnsReady, pushDue, pushLogLine, pushWaiting, readyRows, requestPromotePush, waitingWhy,
 } from "./lib/enrich/promote-push.mjs";
+import { leftToPlaceSql, placeLeads } from "./lib/lead-places.mjs";
 import { CRON_LOCATION_BACKFILL, isSharePush } from "./lib/overlap-topup.mjs";
 import { BISON_GROUPS } from "./lib/bison-groups.mjs";
 
@@ -77,7 +90,8 @@ const A = `${PREFIX}A`; // campaigns on both installs: the happy path
 const B = `${PREFIX}B`; // no campaign named for it (one named for APTEST_BX)
 const C = `${PREFIX}C`; // campaigns on the B2B install only
 const D = `${PREFIX}D`; // sends a question variable on its pushes
-const TAGS = [A, B, C, D];
+const E = `${PREFIX}E`; // campaigns on both installs: the placement at once
+const TAGS = [A, B, C, D, E];
 const VARIANTS = TAGS.map(variantName);
 const RUN = randomUUID().slice(0, 6);
 const HOST = "aptest.example";
@@ -98,9 +112,11 @@ const net = { refused: 0, searches: [], plan: {}, fail: {} };
 const camp = (id, name, status = "active") => ({ id, name, status, created_at: "2026-11-01T00:00:00Z", total_leads: 10 });
 net.plan[B2B] = [
   camp(901, `${A}: Outlook`), camp(902, `${A}: Google + Custom`), camp(903, `${C}: Main`), camp(904, `${PREFIX}BX: Main`),
-  camp(905, `${D}: Google + Custom`), camp(906, `${A}: Old Outlook [Nurture]`),
+  camp(905, `${D}: Google + Custom`), camp(906, `${A}: Old Outlook [Nurture]`), camp(907, `${E}: Google + Custom`),
 ];
-net.plan[B2C] = [camp(911, `${A}: Google + Custom`), camp(915, `${D}: Google + Custom`), camp(916, `${A}: Archived one`, "archived")];
+net.plan[B2C] = [
+  camp(911, `${A}: Google + Custom`), camp(915, `${D}: Google + Custom`), camp(916, `${A}: Archived one`, "archived"), camp(917, `${E}: Google + Custom`),
+];
 globalThis.fetch = async (input, init = {}) => {
   const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
   if ([B2B, B2C].includes(u.hostname) && u.pathname === "/api/campaigns") {
@@ -129,7 +145,17 @@ const pgUrl = pathToFileURL(require.resolve("pg")).href;
 const SRC = new URL("../src/", import.meta.url).href;
 const authTsUrl = new URL("lib/enrich/auth.ts", SRC).href;
 const pushMjsUrl = new URL("./lib/enrich/promote-push.mjs", import.meta.url).href;
+const promoteMjsUrl = new URL("./lib/enrich/promote.mjs", import.meta.url).href;
 const STUBS = {
+  // The promote run's import of promotion (src/lib/companies/): the real one, its placement counted and able to fail.
+  "../../../scripts/lib/enrich/promote.mjs": `export * from "${promoteMjsUrl}";
+import { placeAdded as real } from "${promoteMjsUrl}";
+export async function placeAdded(db, p) {
+  const t = globalThis.__apTest;
+  t.placements.push({ batchId: p.batchId, contacts: p.contacts.length, failed: Boolean(t.placeFails) });
+  if (t.placeFails) throw new Error("made-up placement failure");
+  return real(db, p);
+}`,
   "next/server": `export class NextRequest {}
 export class NextResponse {
   static json(body, init = {}) { return { status: init.status ?? 200, body, headers: init.headers ?? {} }; }
@@ -213,7 +239,16 @@ export async function load(url, context, next) {
 register(`data:text/javascript,${encodeURIComponent(HOOKS)}`, {
   data: { typescript: pathToFileURL(require.resolve("typescript")).href, src: SRC, stubs: STUBS },
 });
-const T = (globalThis.__apTest = { role: null, userId: randomUUID(), audits: [], worker: null, after: [], pools: [] });
+const T = (globalThis.__apTest = {
+  role: null, userId: randomUUID(), audits: [], worker: null, after: [], pools: [], placements: [], placeFails: false, logged: [],
+});
+// The promote run's log line for a failed placement is kept for the checks, not printed.
+const consoleError = console.error;
+console.error = (...args) => {
+  const line = args.map(String).join(" ");
+  if (line.includes("placing the new leads of")) T.logged.push(line);
+  else consoleError(...args);
+};
 const srcModule = (p) => import(new URL(p, SRC).href);
 const route = (p) => srcModule(`app/api/${p}/route.ts`);
 async function call(handler, { body, query, headers } = {}) {
@@ -302,10 +337,13 @@ const personCells = (tag, email, first) => ({
   use_work_email: email, use_first_name: first, use_last_name: "Aptestson", full_name: `${first} Aptestson`, title: "Office Manager", seniority: "manager",
   person_country: "US", ...common(tag), email, reoon_stamp_of_approval: true,
 });
-/** A contact as the worker leaves it: its row and cells, and its enrich_contacts summary (approved, usable, with a question). */
-async function contact(client, kind, email, first = "Pat") {
+/**
+ * A contact as the worker leaves it: its row and cells, and its enrich_contacts summary (approved, usable, with a
+ * question). `place` replaces cells of the place (use_city, use_state, person_country).
+ */
+async function contact(client, kind, email, first = "Pat", place = {}) {
   const table = kind === "general" ? client.tables.inboxes : client.tables.people;
-  const cells = kind === "general" ? inboxCells(client.tag, email) : personCells(client.tag, email, first);
+  const cells = { ...(kind === "general" ? inboxCells(client.tag, email) : personCells(client.tag, email, first)), ...place };
   const row = await addRow(table, `w:${client.companyRow}:${email}`, { ...cells, company_row: String(client.companyRow) });
   await pool.query(
     `INSERT INTO enrich_contacts (row_id, company_row_id, table_id, client_tag, kind, email, verdict, usable, held, has_question, outcome, full_name, title)
@@ -432,12 +470,25 @@ async function partA(ctx) {
     aOld: await contact(ctx.A, "general", oldEmail),
   };
   ctx.a = c;
+  // This round's placement fails (made up), so its leads wait for places as before the placement at once (A2, A6).
+  T.placeFails = true;
+  const logged0 = T.logged.length;
   const r1 = await call(ctx.promoteAuto, { body: { tag: A }, headers: bearer() });
   await drainAfter();
+  T.placeFails = false;
   const st = {};
   for (const [k, row] of Object.entries(c)) st[k] = await stateOf(row);
   check("the round: four new leads, one already in the database", r1.status === 202 && r1.body.adding === 4 && r1.body.settled === 1 && r1.body.batches?.length === 2,
     JSON.stringify(r1.body));
+  const r1Batches = await all(`SELECT id::text AS id, status FROM upload_batches WHERE id = ANY($1::uuid[])`, [(r1.body.batches ?? []).map((x) => x.batchId)]);
+  const r1Logged = T.logged.slice(logged0);
+  check("a placement that fails never fails the round: both batches complete, each failure logged once, saying the location backfill places them",
+    r1Batches.length === 2 && r1Batches.every((x) => x.status === "complete") && r1Logged.length === 2 &&
+      r1Batches.every((x) => r1Logged.some((l) => l.includes(x.id) && l.includes("the location backfill places them") && l.includes("made-up placement failure"))),
+    JSON.stringify({ r1Batches, r1Logged }));
+  const unplaced = await all(`SELECT state, state_code, location_status FROM leads WHERE id = ANY($1::uuid[])`, [["a1", "a2", "a3", "aMime"].map((k) => st[k].lead_id)]);
+  check("... and its leads are as the import left them: no place yet", unplaced.length === 4 && unplaced.every((l) => l.state === "IL" && l.state_code === null && l.location_status === null),
+    JSON.stringify(unplaced));
   check("each lead the round made is queued; the one that was there first is not",
     ["a1", "a2", "a3", "aMime"].every((k) => st[k].promote_state === "added" && st[k].auto_push_state === "queued" && st[k].auto_push_at) &&
       st.aOld.promote_state === "in_database" && st.aOld.auto_push_state === null,
@@ -453,7 +504,7 @@ async function partA(ctx) {
   ctx.lead = {};
   for (const k of ["a1", "a2", "a3", "aMime"]) ctx.lead[k] = st[k].lead_id;
 
-  section("A2. The wait for places");
+  section("A2. The wait for places, when the round's placement failed: a location run since, or the wait limit (A6)");
   const w0 = await pushWaiting(pool, A);
   check("before a location run has passed the round: 4 queued, none ready, all waiting for places",
     w0.queued === 4 && w0.ready === 0 && w0.unplaced === 4 && !w0.round_running && /location backfill/.test(waitingWhy(w0) ?? ""), JSON.stringify(w0));
@@ -623,10 +674,12 @@ async function partA(ctx) {
       same(sorted(after3[0].selected_ids), sorted([ctx.lead.a1, ctx.lead.a2, ctx.lead.a3])) && after3[0].id === ctx.batchA1,
     JSON.stringify({ p3: p3.body, batches: after3.map((x) => x.selected_ids) }));
 
-  section("A6. The wait limit");
+  section("A6. The wait limit, when the round's placement failed");
   c.a5 = await contact(ctx.A, "general", biz("hello"));
+  T.placeFails = true;
   await call(ctx.promoteAuto, { body: { tag: A }, headers: bearer() });
   await drainAfter();
+  T.placeFails = false;
   await ranLongAgo();
   check("a round no location run has passed waits", (await pushWaiting(pool, A)).ready === 0 && (await stateOf(c.a5)).auto_push_state === "queued");
   await pool.query(
@@ -756,6 +809,178 @@ async function partD(ctx) {
       (await stateOf(d1)).auto_push_state === "held" && (await promoteBatches(D)).length === 0,
     JSON.stringify(p.body));
   await setSwitch("question_variables", { enabled: switchesBefore.question_variables.value?.enabled ?? false, tags: switchesBefore.question_variables.value?.tags ?? [] });
+}
+
+// ── L. Placed at once ───────────────────────────────────────────────────────
+
+const PLACE_COLS = "state, state_code, country, country_code, city, location_id::text AS location_id, location_status, location_source";
+/** The place columns of these leads, in the order given. */
+async function placesOf(ids) {
+  const rows = await all(`SELECT id::text AS id, ${PLACE_COLS} FROM leads WHERE id = ANY($1::uuid[])`, [ids]);
+  const byId = new Map(rows.map(({ id, ...place }) => [id, place]));
+  return ids.map((id) => byId.get(id) ?? null);
+}
+/** Which of these leads a run of the location job would still write. */
+const leftToPlace = async (ids) => (await all(`SELECT l.id::text AS id FROM leads l WHERE l.id = ANY($1::uuid[]) AND ${leftToPlaceSql("l")}`, [ids])).map((r) => r.id);
+
+// A round's contacts, by the place their cells give: every pass of the location job, and two leads it can't place.
+const PLACES = [
+  ["springfield", "general", { use_city: "Springfield", use_state: "IL" }], // pass 1, resolved
+  ["seattle", "person", { use_city: "Seattle", use_state: "Washington" }], // the import's code WA, pass 1, resolved
+  ["junk", "general", { use_city: "Reno", use_state: "North America" }], // pass 1b names no state: left as it is
+  ["none", "general", { use_city: "", use_state: "" }], // no place text: nothing to place
+  ["cityonly", "general", { use_city: "Seattle", use_state: "" }], // pass 2, one state holds it: resolved
+  ["badcode", "general", { use_city: "Reno", use_state: "XX" }], // pass 1, no country has XX: unresolved
+  ["citymiss", "general", { use_city: "Nowheresville", use_state: "IL" }], // pass 1, a city the reference lacks: partial
+  ["fullname", "person", { use_city: "Parramatta", use_state: "New South Wales", person_country: "AU" }], // pass 1b, resolved
+];
+const UNPLACEABLE = new Set(["junk", "none"]);
+// Leads put in by hand, as other imports leave them: the passes on odd text, and pass 3 (a review flag).
+const WIDE_SPACE = String.fromCharCode(0x3000); // spaces JavaScript's trim() takes and btrim() doesn't
+const NO_BREAK = String.fromCharCode(0xa0);
+const ODD = [
+  ["springfield ", "il", null, null], [null, "NV", null, null], ["  ", "NV", null, null], ["Manchester", "England", null, null],
+  [null, "\tOntario\n", null, null], ["Leeds", `${WIDE_SPACE}England${NO_BREAK}`, null, null],
+  [null, "Greater London", null, null], ["Springfield", null, null, null], ["Atlantis", null, null, null],
+  [null, null, null, { location_review: true }], ["Reno", "W", null, null], ["Austin", "TX", null, { state_source: "aptest" }],
+  ["Vancouver", "BC", "Canada", null], ["Montréal", "QC", null, null], [null, null, "United States", null],
+];
+async function oddLeads(set) {
+  const ids = [];
+  for (const [i, [city, state, country, raw]] of ODD.entries()) {
+    const r = await one(
+      `INSERT INTO leads (email, city, state, country, raw_data) VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING id::text AS id`,
+      [`${set}${i}-${RUN}@${dom("places")}`, city, state, country, raw ? JSON.stringify(raw) : null]
+    );
+    ids.push(r.id);
+  }
+  return ids;
+}
+
+async function partL(ctx) {
+  section("L1. Placed at once: a round's new leads placed by the location job's own code, before the batch's final status");
+  await ranLongAgo();
+  const cronAt = await one(`SELECT started_at, finished_run_started_at FROM cron_runs WHERE name = $1`, [CRON_LOCATION_BACKFILL]);
+  const e = {};
+  for (const [k, kind, place] of PLACES) e[k] = await contact(ctx.E, kind, biz(`e-${k}`, "eco"), "Lee", place);
+  const placements0 = T.placements.length;
+  const r1 = await call(ctx.promoteAuto, { body: { tag: E }, headers: bearer() });
+  await drainAfter();
+  const eStates = {};
+  for (const [k] of PLACES) eStates[k] = await stateOf(e[k]);
+  check("the round adds and queues all eight", r1.status === 202 && r1.body.adding === 8 &&
+    Object.values(eStates).every((s) => s.promote_state === "added" && s.auto_push_state === "queued" && s.lead_id), JSON.stringify({ r: r1.body, eStates }));
+  const runs = T.placements.slice(placements0);
+  check("the placement ran once for each of its two batches, and nothing failed", runs.length === 2 && runs.every((x) => !x.failed) &&
+    same(sorted(runs.map((x) => x.batchId)), sorted((r1.body.batches ?? []).map((x) => x.batchId))), JSON.stringify(runs));
+  const eIds = PLACES.map(([k]) => eStates[k].lead_id);
+  const ePlaceList = await placesOf(eIds);
+  const ePlaces = Object.fromEntries(PLACES.map(([k], i) => [k, ePlaceList[i]]));
+  const is = (k, want) => Object.entries(want).every(([col, v]) => ePlaces[k]?.[col] === v);
+  check("right after the round, with no location run since, each lead is placed as the location job places it",
+    is("springfield", { state: "Illinois", state_code: "IL", country: "USA", country_code: "US", city: "Springfield", location_status: "resolved", location_source: "source" }) &&
+      ePlaces.springfield.location_id !== null &&
+      is("seattle", { state: "Washington", state_code: "WA", country: "USA", country_code: "US", city: "Seattle", location_status: "resolved" }) &&
+      is("cityonly", { state: "Washington", state_code: "WA", country_code: "US", city: "Seattle", location_status: "resolved" }) &&
+      ePlaces.cityonly.location_id === ePlaces.seattle.location_id &&
+      is("badcode", { state: null, state_code: null, country: null, country_code: null, city: "Reno", location_id: null, location_status: "unresolved" }) &&
+      is("citymiss", { state: "Illinois", state_code: "IL", country: "USA", city: "Nowheresville", location_id: null, location_status: "partial" }) &&
+      is("fullname", { state: "New South Wales", state_code: "NSW", country: "Australia", country_code: "AU", city: "Parramatta", location_status: "resolved" }),
+    JSON.stringify(ePlaces));
+  check("... the two it can't place are left as the import left them",
+    is("junk", { state: "North America", state_code: null, country: null, city: "Reno", location_status: null, location_source: null }) &&
+      is("none", { state: null, state_code: null, country: null, city: null, location_status: null, location_source: null }),
+    JSON.stringify({ junk: ePlaces.junk, none: ePlaces.none }));
+  const order = await all(
+    `SELECT l.updated_at < b.completed_at AS before_final FROM enrich_contacts c JOIN leads l ON l.id = c.lead_id JOIN upload_batches b ON b.id = c.batch_id
+      WHERE c.row_id = ANY($1::bigint[])`,
+    [PLACES.filter(([k]) => !UNPLACEABLE.has(k)).map(([k]) => e[k])]
+  );
+  check("... placed before its batch's final status (each placed lead's last write comes before its batch's completed_at)",
+    order.length === 6 && order.every((x) => x.before_final === true), JSON.stringify(order));
+  const cronNow = await one(`SELECT started_at, finished_run_started_at FROM cron_runs WHERE name = $1`, [CRON_LOCATION_BACKFILL]);
+  check("... and no location run is recorded (the placement is not one)", same(cronNow, cronAt), JSON.stringify({ cronAt, cronNow }));
+  check("nothing is left for the location job to write for any of them", (await leftToPlace(eIds)).length === 0);
+
+  section("L2. Ready at once: no location run needed; an unplaceable lead never holds its round, one left for the job does");
+  const w1 = await pushWaiting(pool, E);
+  check("all eight ready, none waiting for places, though no location run has passed the round",
+    w1.queued === 8 && w1.ready === 8 && w1.unplaced === 0 && waitingWhy(w1) === null, JSON.stringify(w1));
+  check("... and the worker asks for the client", (await pushDue(pool, await settingsNow())).includes(E));
+  // The import's place of the Springfield lead put back: a lead the location job has still to write.
+  await pool.query(
+    `UPDATE leads SET state = 'IL', state_code = NULL, country = NULL, country_code = NULL, location_id = NULL, location_status = NULL, location_source = NULL
+      WHERE id = $1`,
+    [eStates.springfield.lead_id]
+  );
+  const w2 = await pushWaiting(pool, E);
+  check("one lead left for the location job holds its whole round, and the answer says why",
+    w2.ready === 0 && w2.unplaced === 8 && /location backfill/.test(waitingWhy(w2) ?? "") && (await readyRows(pool, { tag: E })).length === 0, JSON.stringify(w2));
+  const again = await placeLeads(pool, [eStates.springfield.lead_id]);
+  check("... until it is placed: then the round is ready again, with the same place as before",
+    again.resolved === 1 && (await pushWaiting(pool, E)).ready === 8 && same((await placesOf([eStates.springfield.lead_id]))[0], ePlaces.springfield),
+    JSON.stringify(again));
+
+  section("L3. A placement that fails leaves its round to the old rule: a location run since (L4), or the wait limit (A6)");
+  const f = {};
+  for (const [k, kind, place] of PLACES) f[k] = await contact(ctx.E, kind, biz(`f-${k}`, "fco"), "Lee", place);
+  T.placeFails = true;
+  const logged0 = T.logged.length;
+  const r2 = await call(ctx.promoteAuto, { body: { tag: E }, headers: bearer() });
+  await drainAfter();
+  T.placeFails = false;
+  const fStates = {};
+  for (const [k] of PLACES) fStates[k] = await stateOf(f[k]);
+  const fIds = PLACES.map(([k]) => fStates[k].lead_id);
+  const r2Batches = await all(`SELECT id::text AS id, status FROM upload_batches WHERE id = ANY($1::uuid[])`, [(r2.body.batches ?? []).map((x) => x.batchId)]);
+  check("the twin round still adds and queues its eight, its batches complete, each failure logged",
+    r2.status === 202 && r2.body.adding === 8 && Object.values(fStates).every((s) => s.promote_state === "added" && s.auto_push_state === "queued") &&
+      r2Batches.length === 2 && r2Batches.every((x) => x.status === "complete") && T.logged.length - logged0 === 2,
+    JSON.stringify({ r: r2.body, r2Batches, logged: T.logged.slice(logged0) }));
+  const left = await leftToPlace(fIds);
+  check("its leads are as the import left them: the six the job can place are left for it, the two it can't are not",
+    same(sorted(left), sorted(PLACES.filter(([k]) => !UNPLACEABLE.has(k)).map(([k]) => fStates[k].lead_id))), JSON.stringify(left));
+  const w3 = await pushWaiting(pool, E);
+  check("the placed round is ready, the twin round waits for places", w3.queued === 16 && w3.ready === 8 && w3.unplaced === 8, JSON.stringify(w3));
+  const p1 = await call(ctx.pushAuto, { body: { tag: E }, headers: bearer() });
+  const [b1] = await promoteBatches(E);
+  check("the push takes exactly the placed round, with no location run: one batch of its eight leads",
+    p1.status === 200 && p1.body.pushed === 8 && p1.body.waiting === 8 && same(sorted(b1?.selected_ids ?? []), sorted(eIds)) &&
+      Object.values(fStates).every((s) => s.auto_push_state === "queued"),
+    JSON.stringify(p1.body));
+  check("... the twin round's contacts stay queued", (await all(`SELECT 1 FROM enrich_contacts WHERE row_id = ANY($1::bigint[]) AND auto_push_state = 'queued'`,
+    [Object.values(f)])).length === 8);
+
+  section("L4. The location cron, run on the same leads, writes what the promotion wrote");
+  // Two sets of the same leads put in by hand: the first placed as a promotion places, the second left to the cron.
+  const byHand = await oddLeads("p");
+  const toCron = await oddLeads("q");
+  const handLeft = await leftToPlace(byHand);
+  const handDone = await placeLeads(pool, byHand);
+  const handPlaced = (await placesOf(byHand)).map((x, i) => (x.location_status ? byHand[i] : null)).filter(Boolean);
+  check("on leads put in by hand too, the leads left for the job are exactly the ones its passes write",
+    handDone.leads === ODD.length && same(sorted(handLeft), sorted(handPlaced)) && (await leftToPlace(byHand)).length === 0,
+    JSON.stringify({ handDone, handLeft, handPlaced }));
+  const eBefore = await placesOf(eIds);
+  const cron = spawnSync(process.execPath, [fileURLToPath(new URL("./backfill-lead-locations.mjs", import.meta.url))], {
+    env: { ...process.env, DATABASE_URL: url }, encoding: "utf8", timeout: 240_000,
+  });
+  check("(the location backfill ran)", cron.status === 0, (cron.stderr || cron.stdout).slice(-400));
+  const fPlaces = await placesOf(fIds);
+  const differ = PLACES.map(([k], i) => ({ k, cron: fPlaces[i], promotion: eBefore[i] })).filter((d) => !same(d.cron, d.promotion));
+  check("the cron's places for the twin round's leads equal the promotion's for the first round's, lead by lead", differ.length === 0, JSON.stringify(differ));
+  check("... and the cron changed nothing the promotion placed or left", same(await placesOf(eIds), eBefore));
+  const handAfter = await placesOf(byHand);
+  const cronAfter = await placesOf(toCron);
+  const odd = ODD.map((x, i) => ({ x, promotion: handAfter[i], cron: cronAfter[i] })).filter((o) => !same(o.promotion, o.cron));
+  check(`the promotion's placement and the cron agree on all ${ODD.length} leads put in by hand, pass 3 and odd spellings among them`,
+    odd.length === 0 && cronAfter.some((x) => x.location_status === "unresolved") && handAfter.some((x) => x.location_source === "aptest"), JSON.stringify(odd));
+  check("nothing is left for the location job for any of these leads", (await leftToPlace([...eIds, ...fIds, ...byHand, ...toCron])).length === 0);
+  const w4 = await pushWaiting(pool, E);
+  const p2 = await call(ctx.pushAuto, { body: { tag: E }, headers: bearer() });
+  const batches = await promoteBatches(E);
+  check("the twin round is ready now and goes in a batch of its own", w4.ready === 8 && p2.status === 200 && p2.body.pushed === 8 && batches.length === 2 &&
+    same(sorted(batches[1].selected_ids), sorted(fIds)), JSON.stringify({ w4, p2: p2.body }));
 }
 
 // ── E. The route's key and body ─────────────────────────────────────────────
@@ -928,6 +1153,7 @@ try {
   await partB(ctx);
   await partC(ctx);
   await partD(ctx);
+  await partL(ctx);
   await partE(ctx);
   await partW();
   await partP();

@@ -64,10 +64,15 @@
 // migration 140), finishPromote also queues each contact it settles 'added'
 // for the push into the client's campaigns (auto_push_state 'queued'), in the
 // same fenced statement; promote-push.mjs takes it from there.
+//
+// Then placeAdded places the leads the batch made at once, with the location
+// job's own code (../lead-places.mjs), as the cron's next run would place
+// them, so the push need not wait for that run (2026-11-26).
 
 import { evaluate, isEmpty, makeContext } from "./formula.mjs";
 import { addAliases } from "./fit-keys.mjs";
 import { inboxVerdict, personVerdict, VERDICT_CELLS, verdictSource } from "./email-verdict.mjs";
+import { placeLeads } from "../lead-places.mjs";
 
 export const PROMOTE_SOURCE = "Companies (AI Ark)";
 export const ADD_COLUMN = "add_to_database";
@@ -709,6 +714,31 @@ export async function finishPromote(db, { batchId, batchAt, contacts, label = PR
     not_added: rows.filter((r) => r.promote_state === "not_added").length,
     queued: rows.filter((r) => r.auto_push_state === "queued").length,
   };
+}
+
+/**
+ * Places the leads a promote batch made, at once, with the location job's own
+ * code (../lead-places.mjs): each lead of a contact the batch settled 'added'
+ * gets what the location cron's next run would write for it, so the
+ * automatic push of the round need not wait for that run (promote-push.mjs
+ * pushes a round once nothing is left for the job to write). Only those
+ * leads: one that was there first is the cron's, as before. The contacts are
+ * read again, so a settle that took a retry is placed all the same. The web
+ * app calls it after the settle and before the batch's final status, in a
+ * transaction of its own; a failure there changes nothing else (the cron
+ * places them, and the push waits for it as before).
+ *
+ * @param {Db} db  the caller's transaction
+ * @param {{ batchId: string, contacts: Array<{ row_id: number }> }} p
+ */
+export async function placeAdded(db, { batchId, contacts }) {
+  if (!contacts?.length) return placeLeads(db, []);
+  const { rows } = await db.query(
+    `SELECT lead_id::text AS lead_id FROM enrich_contacts
+      WHERE row_id = ANY($1::bigint[]) AND batch_id = $2 AND promote_state = 'added' AND lead_id IS NOT NULL`,
+    [contacts.map((c) => c.row_id), batchId]
+  );
+  return placeLeads(db, rows.map((r) => r.lead_id));
 }
 
 // ── The worker's trigger ────────────────────────────────────────────────────
