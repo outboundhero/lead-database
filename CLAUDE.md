@@ -2735,6 +2735,30 @@ Two manager-only tabs, applied to production 2026-10-31. Only "Add to the databa
   of main with `RAILWAY_TOKEN=<project token> railway up --service enrich-worker
   --environment production --detach`, or connect the repo once in the Railway
   dashboard (Source, Connect Repo).
+- **The worker's speed (2026-11-26, no migration, the worker only):** a free slot is
+  claimed for the moment a row finishes (a claim that took rows with slots still free
+  asks again at once; `ENRICH_POLL_MS` only when nothing was claimable; it was a fixed
+  250 ms). The 60-second block (stale sweep, Maps release, uploads' move, pulls' copy,
+  People release, hand-back, in that order) and the 10-second heartbeat run beside the
+  rows, not awaited, each with a busy flag, on a pool of their own (3 connections); a
+  stopping worker waits for both, and a draining one (`ENRICH_ONCE`) exits only after a
+  claim that followed the last block. A rate limit is waited out in place
+  (`scripts/lib/enrich/http.mjs` `paidHttpJson`): a 429 from OpenAI (`ai_web`) or from
+  Findymail, Prospeo, Anymail Finder or Enrichley that is not a billing, quota or credits
+  refusal waits for `retry-after-ms`, `Retry-After`, OpenAI's "try again in 1.5s" or the
+  `x-ratelimit-reset-*` of the limit used up (else 2, 4, 8 s), at most 60 s a wait, 3
+  retries and 2 minutes in all, then sends the same request again; past that the row is
+  tried again later as before. A 429 is not billed and takes no other vendor call of the
+  day's cap; `insufficient_quota`, Prospeo's `INSUFFICIENT_CREDITS` and a 429 that reads
+  as out of credits are never sent again; a send with no answer is never sent again here
+  (the lost-send guard is unchanged). Each AI run record keeps OpenAI's rate-limit
+  headers (`response.rate_limit`) and any waits (`response.rate_limited`, also on the
+  finders' records); the heartbeat's `openai_rate_limits` holds the latest per model
+  (limits and what was left: the account's token limit without OpenAI's dashboard) and
+  `rate_limit_waits` the retries, time waited and calls still limited since start.
+  Promotion rounds are asked every 2 minutes per client (10 before) and waiting rows
+  swept every 5 minutes (hourly before). Tests: `node scripts/test-rate-limit-retry.mjs`
+  (no database, no network).
 - **Env:** `AIARK_API_KEY` on **both** the web service (count, balance) and the
   worker (pulls); `AIARK_WEBHOOK_URL` (export runs only) also on **both** — the
   web service offers Export only when it is set, and the worker posts the jobs
@@ -2853,9 +2877,9 @@ approved emails to `leads`, behind its own switch (no fit score needed since
   daily credits only (the balance read again when over a minute old): nothing is
   checked while the account holds any instant credit or has no daily credits left,
   and the cell waits (the row 'waiting'). Without the key, a final rejection already
-  in `email_validations` is still reused. `ENRICH_REOON_THREADS` (4, at most 5). Once
-  an hour the worker queues waiting template rows again, in pages, each only when what
-  made it wait has cleared (`requeueWaitingTemplateRows()`), and the rows whose finder
+  in `email_validations` is still reused. `ENRICH_REOON_THREADS` (4, at most 5). Every
+  5 minutes (hourly before 2026-11-26) the worker queues waiting template rows again, in
+  pages, each only when what made it wait has cleared (`requeueWaitingTemplateRows()`), and the rows whose finder
   or Enrichley steps were skipped for a key it now holds (`requeueRowsForHeldKeys()`).
   The heartbeat carries `capabilities: ["company_runs", "pipeline_v2", "people_runs",
   "fit_scoring"]` (each route refuses a worker without the one it needs), the last Reoon
@@ -3589,7 +3613,7 @@ score; `promotion.min_fit_score` is kept as stored and not read).
   rounds of two batches (inboxes, then people, at most `batch_max`, 1,000, each), one
   round per client at a time. Started by a manager (`POST /api/companies/promote`) or by
   the worker (`POST /api/companies/promote/auto` with Bearer `AIARK_AUTO_ADD_KEY`; checked
-  every minute, at most one round per client every 10 minutes; the path skips the session
+  every minute, at most one round per client every 2 minutes, 10 before 2026-11-26; the path skips the session
   middleware). When the company has a score, the lead's keys become aliases of it; a
   company with none gets no key, score or alias from promotion.
   Promotion never takes an upload row (130): `projectContact()` writes no contact for
@@ -4010,8 +4034,8 @@ scraper: a URL is pasted on the client's card there like a Clay URL.
   refusal) counts nothing. With no cap set the cell waits, noted "No daily cap is set
   for Findymail yet (Companies settings)" (the same for the other three); with
   today's calls used up, "Today's Findymail calls are used up" (Prospeo, Anymail
-  Finder alike) or "Today's Enrichley checks are used up". The hourly sweep
-  (`requeueWaitingTemplateRows`) knows these notes: it queues such a row again once
+  Finder alike) or "Today's Enrichley checks are used up". The waiting sweep (every 5
+  minutes, `requeueWaitingTemplateRows`) knows these notes: it queues such a row again once
   the vendor's calls have room (the next UTC day, or a higher cap), never while the cap
   is 0. The heartbeat's `spend_today` carries the four counts beside Reoon and OpenAI.
   `test-pipeline-v2`'s `HIGH_CAPS` sets the four caps high, since its section E calls

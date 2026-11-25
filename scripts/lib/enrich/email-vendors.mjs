@@ -15,19 +15,48 @@
 // record. A field name a vendor's docs left unconfirmed is read in one place,
 // so a wrong one is a one-line fix.
 //
+// A rate limit (HTTP 429 that does not read as out of credits) is waited out
+// and the same request sent again in place (http.mjs paidHttpJson: Retry-After
+// or the x-ratelimit-reset headers, at most 60 s a wait, 3 retries, 2 minutes
+// in all), so the row keeps its slot. A 429 is not billed, so the retry takes
+// no other call of the day's cap. An out-of-credits answer (402, Prospeo's
+// INSUFFICIENT_CREDITS, or a 429 that says so) is never sent again. The run
+// record keeps the waits (response.rate_limited).
+//
 // Daily caps (migration 129): right before each request the adapter takes one
 // of the vendor's calls for the day (spend.mjs takeVendorCall, under
 // enrich_settings.spend_caps.vendor_calls_per_day). With no cap set (0, the
 // default) or the day's calls used up, nothing is sent and the cell waits
-// ("needs_key", as when Reoon's share is used up); the hourly sweep queues the
-// row again once the cap allows it. A step that sends nothing (no input, no
-// key, an answer already held) takes no call.
+// ("needs_key", as when Reoon's share is used up); the worker's waiting sweep
+// (every 5 minutes) queues the row again once the cap allows it. A step that
+// sends nothing (no input, no key, an answer already held) takes no call.
 
-import { capped, httpJson } from "./http.mjs";
+import { answerWith, capped, paidHttpJson } from "./http.mjs";
 import { takeVendorCall, vendorWaitNote } from "./spend.mjs";
 
 const text = (v) => (v == null ? "" : String(v).replace(/\s+/g, " ").trim());
 const TIMEOUT_MS = 60_000;
+
+// What a 429 that is really "out of credits" says. Such an answer is never sent
+// again; any other 429 is a rate limit.
+const OUT_OF_CREDITS = /credit|quota|billing|balance|payment|insufficient|subscription/i;
+
+/**
+ * Is this 429 a vendor's rate limit, waited out and sent again in place? Never
+ * when its answer reads as out of credits or a billing limit.
+ *
+ * @param {{ status: number, json: any, error: string | null }} r
+ */
+export function vendorRateLimited(r) {
+  if (r?.status !== 429) return false;
+  let body = "";
+  try {
+    body = JSON.stringify(r.json ?? null);
+  } catch {
+    body = "";
+  }
+  return !OUT_OF_CREDITS.test(`${body} ${r.error ?? ""}`);
+}
 
 /** The key cut out of anything kept. */
 function scrub(v, key) {
@@ -38,12 +67,13 @@ function scrub(v, key) {
   return v;
 }
 
-/** One call, its answer scrubbed of the key, and the run record. */
+/** One call (a rate limit waited out and sent again), its answer scrubbed of the key, and the run record. */
 async function send({ url, method = "POST", headers, body, key, request }) {
-  const r = await httpJson(url, { method, headers, body, timeoutMs: TIMEOUT_MS, tries: 1 });
+  const r = await paidHttpJson(url, { method, headers, body, timeoutMs: TIMEOUT_MS }, { isRateLimit: vendorRateLimited });
   const json = scrub(r.json, key);
   const error = r.ok ? null : scrub(r.error, key);
-  return { ...r, json, error, run: { request, response: capped(json), http_status: r.status || null, error } };
+  const response = capped(answerWith(json, r.rate_limited ? { rate_limited: r.rate_limited } : {}));
+  return { ...r, json, error, run: { request, response, http_status: r.status || null, error } };
 }
 
 /** What an HTTP failure means for the cell. Statuses a vendor documents differently are handled by the caller first. */

@@ -9,7 +9,23 @@
 // or re-queue it with backoff when a call failed for a reason worth retrying.
 //
 // Rows run concurrently and independently: a slow AI call never holds up the
-// others, and a free slot is refilled as soon as a row finishes.
+// others, and a free slot is refilled as soon as a row finishes: the loop
+// claims again at once (a claim that took rows with slots still free asks
+// again at once too), and waits ENRICH_POLL_MS only when nothing was
+// claimable. The 60-second housekeeping block (the stale sweep, the releases,
+// the moves and the hand-back) and the 10-second heartbeat run beside the rows,
+// not awaited, each with a busy flag, on a pool of their own (3 connections),
+// so neither leaves a slot empty or takes a connection a row is waiting for.
+//
+// A rate limit is waited out in place (scripts/lib/enrich/http.mjs
+// paidHttpJson): a 429 from OpenAI (the AI columns) or from Findymail,
+// Prospeo, Anymail Finder or Enrichley that is not a billing, quota or credits
+// refusal waits for its Retry-After or x-ratelimit-reset (at most 60 s a wait,
+// 3 retries, 2 minutes in all) and sends the same request again, so the row
+// keeps its slot instead of going back to the queue. A 429 is not billed; a
+// refusal stops as before, and a send with no answer is never sent again here.
+// The heartbeat carries OpenAI's latest rate-limit headers per model and the
+// waits so far.
 //
 // Rows of AI Ark tab pulls (tables of kind 'ai_ark') are claimed before any
 // other row, then the email checks (General inboxes rows), then the rest,
@@ -44,10 +60,10 @@
 // company's listing. Rows of a retired companies_v1 table are never claimed
 // (D24).
 //
-// Once an hour, template rows waiting on a key or a day's cap are queued again
-// when what kept each one waiting has cleared, and rows whose email finder or
-// Enrichley step was skipped for a key the worker now holds are queued again;
-// answers already held are reused, so only those cells pay.
+// Every 5 minutes, template rows waiting on a key or a day's cap are queued
+// again when what kept each one waiting has cleared, and rows whose email
+// finder or Enrichley step was skipped for a key the worker now holds are
+// queued again; answers already held are reused, so only those cells pay.
 //
 // Google Maps places sent to a client's inbound URL (migration 129) arrive in
 // its Companies (pipeline) table as held rows, which are never claimed. Once a
@@ -84,7 +100,7 @@
 // (fit-backfill.mjs). Every minute, clients whose approved contacts wait are
 // promoted into leads through the web app (POST /api/companies/promote/auto,
 // the AIARK_AUTO_ADD_URL origin and AIARK_AUTO_ADD_KEY), at most one round per
-// client every 10 minutes; promotion ships off and covers no client, and needs
+// client every 2 minutes; promotion ships off and covers no client, and needs
 // no fit score (fit scoring is kept for v2, switched off). On the same minute,
 // not awaited and with a busy flag of its own, clients whose promoted leads
 // are placed and ready are asked to be pushed into their campaigns
@@ -130,8 +146,9 @@
 // finished pull's people with an email go to the database with no button (this
 // app's /api/aiark/add/auto; the same key on the web service). The same pair
 // has the worker ask for uploads' found emails to be added (/api/uploads/found/auto).
-// ENRICH_CONCURRENCY (6), ENRICH_POLL_MS (2000), ENRICH_STALE_MIN (15),
-// ENRICH_WORKER_ID ("enrich-worker"), ENRICH_ONCE=1 (drain the queue, then exit).
+// ENRICH_CONCURRENCY (6), ENRICH_POLL_MS (2000: the wait when nothing is
+// claimable), ENRICH_STALE_MIN (15), ENRICH_WORKER_ID ("enrich-worker"),
+// ENRICH_ONCE=1 (drain the queue, then exit).
 
 import os from "node:os";
 import pg from "pg";
@@ -147,6 +164,8 @@ import { reoonBalanceInfo, requeueRowsForHeldKeys, requeueWaitingTemplateRows } 
 import { absentKeyNote, OPTIONAL_KEYS } from "./lib/enrich/pipeline-actions.mjs";
 import { originalsSummary } from "./lib/enrich/compile-original.mjs";
 import { spentToday } from "./lib/enrich/spend.mjs";
+import { openAiRateLimits } from "./lib/enrich/actions.mjs";
+import { rateLimitWaits } from "./lib/enrich/http.mjs";
 import { PIPELINE_TEMPLATES, RETIRED_TEMPLATES, variantOfNote } from "./lib/enrich/templates.mjs";
 import { advanceOneRun, runDue } from "./lib/aiark/runs.mjs";
 import { advanceOneCompanyRun, companyRunDue } from "./lib/aiark/company-runs.mjs";
@@ -198,7 +217,9 @@ const SEARCH_KEYS = [
 // upload_people (UPLOAD_CAPABILITY): uploads' no-email rows are copied into the People tables and released under
 // people_pipeline (migration 130), and found emails are asked to be added; the Uploads page warns without it.
 const CAPABILITIES = ["company_runs", "pipeline_v2", "people_runs", "linkedin_sources", "held_release", UPLOAD_CAPABILITY];
-const SWEEP_WAITING_MS = 3600_000;
+// Waiting template rows are looked at again every 5 minutes (it was hourly), so a row waiting on a key or a day's cap
+// runs within minutes of it clearing.
+const SWEEP_WAITING_MS = 5 * 60_000;
 
 if (!env.DATABASE_URL) {
   console.error("DATABASE_URL is not set");
@@ -214,6 +235,20 @@ const pool = new pg.Pool({
   query_timeout: 70_000,
 });
 pool.on("error", (e) => log(`pg pool idle-client error: ${e.message}`)); // never crash the loop
+
+// The 60-second housekeeping block and the heartbeat run beside the rows on a
+// pool of their own (see "Housekeeping beside the rows"), so a slow release or
+// a heartbeat never takes a connection a row slot is waiting for. One block
+// and one heartbeat at a time; the heartbeat reads two things at once.
+const housekeepingPool = new pg.Pool({
+  connectionString: env.DATABASE_URL,
+  max: 3,
+  keepAlive: true,
+  connectionTimeoutMillis: 30_000,
+  idleTimeoutMillis: 30_000,
+  query_timeout: 70_000,
+});
+housekeepingPool.on("error", (e) => log(`housekeeping pool idle-client error: ${e.message}`)); // never crash the loop
 
 const log = (m) => console.log(`${new Date().toISOString()} ${m}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -263,14 +298,23 @@ async function claim(n) {
   return claimRows(pool, n, { token: randomUUID(), retired: [...RETIRED_TEMPLATES], log });
 }
 
+/**
+ * Rows stuck in 'running' past STALE_MIN (a worker died with them) are queued
+ * again. Never throws: a failure is logged, the rest of the block still runs,
+ * and the next block tries again.
+ */
 async function reclaimStale() {
-  const { rowCount } = await pool.query(
-    `UPDATE enrich_rows
-        SET run_status = 'queued', claim_token = NULL, claimed_at = NULL, next_run_at = now(), updated_at = now()
-      WHERE run_status = 'running' AND claimed_at < now() - make_interval(mins => $1)`,
-    [STALE_MIN]
-  );
-  if (rowCount) log(`re-queued ${rowCount} row(s) stuck in 'running' for over ${STALE_MIN} min`);
+  try {
+    const { rowCount } = await housekeepingPool.query(
+      `UPDATE enrich_rows
+          SET run_status = 'queued', claim_token = NULL, claimed_at = NULL, next_run_at = now(), updated_at = now()
+        WHERE run_status = 'running' AND claimed_at < now() - make_interval(mins => $1)`,
+      [STALE_MIN]
+    );
+    if (rowCount) log(`re-queued ${rowCount} row(s) stuck in 'running' for over ${STALE_MIN} min`);
+  } catch (e) {
+    log(`re-queuing stale rows: ${e.message}`);
+  }
 }
 
 let heldUnreadyLogged = false;
@@ -282,7 +326,7 @@ let heldUnreadyLogged = false;
  */
 async function releaseHeld() {
   try {
-    const { released, tables, refused } = await releaseHeldRows(pool);
+    const { released, tables, refused } = await releaseHeldRows(housekeepingPool);
     if (released) log(`released ${released} held row(s) in ${tables} Companies (pipeline) table(s): their clients are on the company_pipeline switch`);
     if (refused) log(`${refused} table(s) kept their held rows: the client was switched off before the release`);
   } catch (e) {
@@ -308,8 +352,8 @@ let peopleFullBefore = 0;
  */
 async function moveUploads() {
   try {
-    const settings = await readSettings(pool);
-    const { decided, notSent, moved, batches, waiting } = await moveUploadRows(pool, { settings, log });
+    const settings = await readSettings(housekeepingPool);
+    const { decided, notSent, moved, batches, waiting } = await moveUploadRows(housekeepingPool, { settings, log });
     if (decided || moved || waiting) {
       log(`uploads' no-email rows: ${decided} upload(s) decided (${notSent} not sent), ${moved} row(s) copied held into People tables from ${batches} upload(s)` +
         (waiting ? `, ${waiting} upload(s) waiting for their client's tables` : ""));
@@ -331,7 +375,7 @@ async function moveUploads() {
  */
 async function releaseHeldPeople() {
   try {
-    const { released, tables, refused, full } = await releaseHeldPeopleRows(pool);
+    const { released, tables, refused, full } = await releaseHeldPeopleRows(housekeepingPool);
     if (released || refused || full !== peopleFullBefore) {
       log(`released ${released} held People row(s) in ${tables} table(s): their clients are on the people_pipeline switch` +
         (refused ? `; ${refused} table(s) kept them: the client was switched off before the release` : "") +
@@ -360,8 +404,8 @@ let handBackUnreadyLogged = false;
 /** People with no email from finished AI Ark pulls into their clients' People tables, held. Never throws. */
 async function copyPulls() {
   try {
-    const settings = await readSettings(pool);
-    const { runs, copied, already, waiting } = await copyPullNoEmail(pool, { settings, log });
+    const settings = await readSettings(housekeepingPool);
+    const { runs, copied, already, waiting } = await copyPullNoEmail(housekeepingPool, { settings, log });
     if (runs || waiting) {
       log(`AI Ark pulls' people with no email: ${copied} copied held into People tables, ${already} followed in a row there already, from ${runs} pull(s)` +
         (waiting ? `; ${waiting} pull(s) waiting for their client's tables` : ""));
@@ -379,7 +423,7 @@ async function copyPulls() {
 /** Addresses the People tables found for AI Ark pulls' people, handed back to the pulls' rows. Never throws. */
 async function handBackPulls() {
   try {
-    const { found, closed } = await handBackFound(pool, { log });
+    const { found, closed } = await handBackFound(housekeepingPool, { log });
     if (found || closed) log(`AI Ark pulls: ${found} address(es) found in People tables handed back to their pull rows, ${closed} search(es) closed with none`);
   } catch (e) {
     if (UPLOADS_UNREADY.has(e?.code)) {
@@ -544,7 +588,7 @@ async function safeProcess(r) {
 /** The originals loaded and today's spend, for the heartbeat; null when they can't be read (before migration 125). */
 async function pipelineInfo() {
   try {
-    const [originals, spend] = await Promise.all([originalsSummary(pool), spentToday(pool)]);
+    const [originals, spend] = await Promise.all([originalsSummary(housekeepingPool), spentToday(housekeepingPool)]);
     return { originals, spend };
   } catch {
     return { originals: null, spend: null };
@@ -568,6 +612,12 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
     spend_today: spend,
     // The pipeline's Reoon account as last read (daily credits, instant credits, when): the Companies tab shows the checks left today.
     reoon: reoonBalanceInfo(),
+    // OpenAI's rate-limit headers as the AI columns' calls last read them, per model ({ limit_tokens, remaining_tokens,
+    // limit_requests, remaining_requests, reset_*, at }): the account's limits without OpenAI's dashboard.
+    openai_rate_limits: openAiRateLimits(),
+    // The rate limits waited out in place since the worker started (http.mjs): sends made again, the time waited, and
+    // calls still limited after their waits (those rows went back to the queue).
+    rate_limit_waits: rateLimitWaits(),
     aiark: {
       key: Boolean(env.AIARK_API_KEY),
       demo: env.AIARK_DEMO === "1",
@@ -591,7 +641,7 @@ async function heartbeat({ starting = false, stopping = false } = {}) {
     pid: process.pid,
     stopped: stopping,
   };
-  await pool.query(
+  await housekeepingPool.query(
     `INSERT INTO enrich_worker_state (id, started_at, last_seen, info) VALUES ($1, now(), now(), $2)
      ON CONFLICT (id) DO UPDATE
        SET last_seen = now(), info = EXCLUDED.info,
@@ -723,9 +773,13 @@ async function fitLoop() {
 }
 
 // Approved contacts into leads: the web app runs the import (TypeScript); the
-// worker only asks, at most one round per client every 10 minutes.
+// worker only asks, at most one round per client every 2 minutes (it was 10),
+// so a client's approved emails become leads within minutes. A client's two
+// minutes are timed from the start of the check that asked it: checks come a
+// minute apart, so it is asked every second check, never every third because
+// this check's database read came back a little faster than the last one's.
 const PROMOTE_CHECK_MS = 60_000;
-const PROMOTE_EVERY_MS = 10 * 60_000;
+const PROMOTE_EVERY_MS = 2 * 60_000;
 const promoteAuto = promoteAutoConfig(env);
 const promotedAt = new Map();
 let promoteBusy = false;
@@ -733,11 +787,12 @@ let promoteBusy = false;
 async function promoteWaiting() {
   if (!promoteAuto || promoteBusy) return;
   promoteBusy = true;
+  const checkedAt = Date.now();
   try {
     const settings = await readSettings(pool);
     for (const tag of await promoteDue(pool, settings)) {
-      if (Date.now() - (promotedAt.get(tag) ?? 0) < PROMOTE_EVERY_MS) continue;
-      promotedAt.set(tag, Date.now());
+      if (checkedAt - (promotedAt.get(tag) ?? 0) < PROMOTE_EVERY_MS) continue;
+      promotedAt.set(tag, checkedAt);
       const r = await requestPromote(promoteAuto, tag);
       log(`promotion for ${tag}: ${r.ok ? "started" : `not started, ${r.status ?? "no answer"}: ${r.why}`}`);
     }
@@ -902,6 +957,9 @@ async function questionTick() {
     log(`question jobs: ${e.message}`);
   } finally {
     questionBusy = false;
+    // A job with more to do takes its next step on the loop's next turn. With rows in flight the loop used to look
+    // again every 250 ms, so the loop is woken that long after the step; with none, it looks every POLL_MS, as before.
+    if (!questionState.idle && inFlight > 0) setTimeout(wake, 250).unref();
   }
 }
 
@@ -957,6 +1015,102 @@ async function addFinishedPulls() {
   }
 }
 
+// ── Housekeeping beside the rows: the 60-second block and the heartbeat ─────
+// Neither is awaited by the row loop, so a big release, an upload's move or a
+// slow heartbeat never leaves a slot empty. The loop starts each one whenever
+// it is not running (its busy flag); each looks at its own clock, so the block
+// starts 60 s after the last one ended and the heartbeat 10 s after the last
+// one, as when the loop awaited them. Both run on the housekeeping pool. A
+// stopping worker waits for both before the pools close, and a draining worker
+// (ENRICH_ONCE) exits only after a claim that started once the last block had
+// ended, so rows a release queued are worked before it exits.
+
+let lastSweep = 0;
+let housekeepingBusy = false;
+let housekeepingInFlight = Promise.resolve();
+let housekept = 0; // 60-second blocks ended
+
+/** The 60-second block, when its minute has come. Its steps never throw. */
+async function housekeeping() {
+  housekeepingBusy = true;
+  try {
+    if (Date.now() - lastSweep > 60_000) {
+      await reclaimStale();
+      await releaseHeld();
+      await moveUploads();
+      await copyPulls();
+      await releaseHeldPeople();
+      await handBackPulls();
+      lastSweep = Date.now();
+      housekept++;
+    }
+  } catch (e) {
+    // Not awaited, so nothing may escape: anything a step did not catch is logged and the block runs again in a minute.
+    log(`housekeeping: ${e.message}`);
+    lastSweep = Date.now();
+    housekept++;
+  } finally {
+    housekeepingBusy = false;
+  }
+}
+
+let lastBeat = Date.now();
+let beatBusy = false;
+let beatInFlight = Promise.resolve();
+
+/** The heartbeat, when 10 s have passed since the last one. A failure is logged and tried again 10 s later. */
+async function beat() {
+  beatBusy = true;
+  try {
+    if (Date.now() - lastBeat > 10_000) {
+      try {
+        await heartbeat();
+      } catch (e) {
+        log(`heartbeat: ${e.message}`);
+      }
+      lastBeat = Date.now();
+    }
+  } finally {
+    beatBusy = false;
+  }
+}
+
+// ── Free slots: the loop claims again the moment a row finishes ─────────────
+
+let wakes = 0; // rows finished, and question steps with more to do, so far: each ends the loop's wait
+let wakeLoop = null; // set while the loop waits
+
+/** Ends the loop's wait now, or its next one when it is not waiting. */
+function wake() {
+  wakes++;
+  wakeLoop?.();
+}
+
+/** A row is done: its slot is free, and the loop claims for it at once. */
+function rowFinished() {
+  inFlight--;
+  wake();
+}
+
+/**
+ * Waits for a wake, or `ms` at most. `seen` is the wakes counted when the
+ * loop last looked, so one that came meanwhile (a row that finished during
+ * the claim) ends the wait at once.
+ */
+function untilWoken(seen, ms) {
+  if (wakes !== seen) return Promise.resolve();
+  return new Promise((resolve) => {
+    let timer = null;
+    const done = () => {
+      clearTimeout(timer);
+      wakeLoop = null;
+      resolve();
+    };
+    timer = setTimeout(done, ms);
+    wakeLoop = done;
+  });
+}
+
 // ── Main loop ───────────────────────────────────────────────────────────────
 
 async function main() {
@@ -964,10 +1118,9 @@ async function main() {
     [...PROVIDER_KEYS, "AIARK_API_KEY"].map((k) => `${k} ${env[k] ? "set" : "missing"}`).join(", ") +
     (env.AIARK_DEMO === "1" ? ", AI Ark demo on" : "") + (ONCE ? " (drain and exit)" : ""));
   await heartbeat({ starting: true });
+  lastBeat = Date.now();
   const runs = aiarkLoop();
   const fits = fitLoop();
-  let lastSweep = 0;
-  let lastBeat = Date.now();
   let lastAdd = 0;
   let lastWaitingSweep = 0;
   let lastPromote = 0;
@@ -1003,28 +1156,24 @@ async function main() {
         lastWaitingSweep = Date.now();
         sweepWaitingTemplateRows();
       }
-      if (Date.now() - lastSweep > 60_000) {
-        await reclaimStale();
-        await releaseHeld();
-        await moveUploads();
-        await copyPulls();
-        await releaseHeldPeople();
-        await handBackPulls();
-        lastSweep = Date.now();
-      }
-      if (Date.now() - lastBeat > 10_000) {
-        await heartbeat();
-        lastBeat = Date.now();
-      }
+      // The 60-second block and the heartbeat, beside the rows (not awaited): each starts when its time has come.
+      if (!housekeepingBusy) housekeepingInFlight = housekeeping();
+      if (!beatBusy) beatInFlight = beat();
+      const seen = wakes;
+      const blocksBefore = housekept;
       const free = CONCURRENCY - inFlight;
       const claimed = free > 0 ? await claim(free) : [];
       for (const r of claimed) {
         inFlight++;
-        safeProcess(r).finally(() => { inFlight--; });
+        safeProcess(r).finally(rowFinished);
       }
-      if (ONCE && !claimed.length && inFlight === 0 && aiark.idle && fitState.idle && !questionBusy && questionState.idle &&
+      if (ONCE && !claimed.length && inFlight === 0 && !housekeepingBusy && housekept === blocksBefore &&
+        aiark.idle && fitState.idle && !questionBusy && questionState.idle &&
         !(await runDue(pool)) && !(await companyRunDue(pool)) && !(await peopleRunDue(pool))) break;
-      await sleep(claimed.length ? 50 : inFlight ? 250 : POLL_MS);
+      // Rows taken and slots still free: there may be more, so ask again at once. Otherwise wait for a row to finish
+      // (its slot is claimed for at once) or, at most, POLL_MS: then nothing was claimable and the queue is read again.
+      if (claimed.length && inFlight < CONCURRENCY) continue;
+      await untilWoken(seen, POLL_MS);
     } catch (e) {
       log(`loop error: ${e.message}`);
       await sleep(POLL_MS);
@@ -1047,7 +1196,12 @@ async function main() {
   // And the question step in flight: told to stop, it ends after the lead (or gather page) it is on.
   await questionInFlight;
   await questionPool.end().catch(() => {});
+  // The 60-second block and the heartbeat in flight end first, so the stopping heartbeat is the last one written,
+  // then their pool closes.
+  await housekeepingInFlight;
+  await beatInFlight;
   await heartbeat({ stopping: true }).catch(() => {});
+  await housekeepingPool.end().catch(() => {});
   log(`stopped: ${stats.processed} rows processed, ${stats.calls} provider calls, ${stats.failed} failures`);
   await pool.end();
 }

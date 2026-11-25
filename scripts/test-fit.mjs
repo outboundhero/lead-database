@@ -1648,7 +1648,7 @@ try {
   check("the enrich-worker offers fit_scoring and runs the fit loop beside the AI Ark loop, in the design's order",
     ew.includes(`CAPABILITIES.push("fit_scoring")`) && /advanceScoringBatch[\s\S]*fitLoopOnce[\s\S]*refreshBlockedOnce[\s\S]*advanceBackfill/.test(ew.slice(ew.indexOf("async function fitTick"))) &&
       /const fits = fitLoop\(\);/.test(ew) && /await runs;[\s\S]*await fits;[\s\S]*await pool\.end\(\)/.test(ew));
-  check("its promotion trigger asks the web app, at most one round per client every 10 minutes", /PROMOTE_EVERY_MS = 10 \* 60_000/.test(ew) &&
+  check("its promotion trigger asks the web app, at most one round per client every 2 minutes", /PROMOTE_EVERY_MS = 2 \* 60_000/.test(ew) &&
     /promoteDue\(pool, settings\)/.test(ew) && /requestPromote\(promoteAuto, tag\)/.test(ew));
   check("the worker's promotion route is outside the session middleware, as the AI Ark auto-add is", /api\/aiark\/add\/auto\|api\/companies\/promote\/auto\|/.test(source("src/middleware.ts")));
 
